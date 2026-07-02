@@ -15,16 +15,32 @@ export interface RuleViolation {
   desc: string;
 }
 
-/** 控制图常数（n=5，原型固定值；X̄-S: A3/B3/B4） */
-export const CONTROL_CONSTANTS_N5 = {
-  A2: 0.577,
-  D4: 2.114,
-  D3: 0,
-  d2: 2.326,
-  A3: 1.427,
-  B3: 0,
-  B4: 2.089,
-} as const;
+export interface ControlConstants {
+  A2: number;
+  A3: number;
+  d2: number;
+  D3: number;
+  D4: number;
+  B3: number;
+  B4: number;
+  c4: number;
+}
+
+/** 控制图常数表 n=2..10（ASTM E2587 / Minitab 标准值） */
+export const CONTROL_CONSTANTS: Record<number, ControlConstants> = {
+  2: { A2: 1.880, A3: 2.659, d2: 1.128, D3: 0, D4: 3.267, B3: 0, B4: 3.267, c4: 0.7979 },
+  3: { A2: 1.023, A3: 1.954, d2: 1.693, D3: 0, D4: 2.574, B3: 0, B4: 2.568, c4: 0.8862 },
+  4: { A2: 0.729, A3: 1.628, d2: 2.059, D3: 0, D4: 2.282, B3: 0, B4: 2.266, c4: 0.9213 },
+  5: { A2: 0.577, A3: 1.427, d2: 2.326, D3: 0, D4: 2.114, B3: 0, B4: 2.089, c4: 0.9400 },
+  6: { A2: 0.483, A3: 1.287, d2: 2.534, D3: 0, D4: 2.004, B3: 0.030, B4: 1.970, c4: 0.9515 },
+  7: { A2: 0.419, A3: 1.182, d2: 2.704, D3: 0.076, D4: 1.924, B3: 0.118, B4: 1.882, c4: 0.9594 },
+  8: { A2: 0.373, A3: 1.099, d2: 2.847, D3: 0.136, D4: 1.864, B3: 0.185, B4: 1.815, c4: 0.9650 },
+  9: { A2: 0.337, A3: 1.032, d2: 2.970, D3: 0.184, D4: 1.816, B3: 0.239, B4: 1.761, c4: 0.9693 },
+  10: { A2: 0.308, A3: 0.975, d2: 3.078, D3: 0.223, D4: 1.777, B3: 0.284, B4: 1.716, c4: 0.9727 },
+};
+
+/** n=5 常数（原型固定值，向后兼容） */
+export const CONTROL_CONSTANTS_N5 = CONTROL_CONSTANTS[5];
 
 export function evalRules(
   data: number[],

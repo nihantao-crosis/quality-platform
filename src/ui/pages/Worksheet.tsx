@@ -1,24 +1,41 @@
-/** 数据工作表 — Excel 式表格（双层 sticky 表头）+ 数据来源 + 列统计。 */
+/** 数据工作表 — Excel 式表格（双层 sticky 表头）+ 数据来源 + 列统计。
+ * 演示数据显示原型的 11 列布局；导入数据显示动态测量列 + 均值/极差。 */
 import type { CSSProperties } from 'react';
 import { useApp } from '../../store/appStore';
-import { nf, type DataModel } from '../../core';
+import { useData } from '../../store/dataStore';
+import { nf, evalRules } from '../../core';
 import { Card, KvRows } from '../common';
 import { Icon, type IconName } from '../icons';
 
-const WS_COLS = [
-  { code: 'C1', name: '子组' }, { code: 'C2', name: '直径1' }, { code: 'C3', name: '直径2' },
-  { code: 'C4', name: '直径3' }, { code: 'C5', name: '直径4' }, { code: 'C6', name: '直径5' },
-  { code: 'C7', name: '均值' }, { code: 'C8', name: '极差' }, { code: 'C9-T', name: '操作员' },
-  { code: 'C10-D', name: '日期' }, { code: 'C11-T', name: '班次' },
-];
 const OPS = ['张伟', '李娜', '王强'];
 const SHIFTS = ['早班', '中班', '夜班'];
 
 const numCell: CSSProperties = { border: '1px solid #eef0f3', padding: '5px 12px', textAlign: 'right', color: '#2a333f' };
 const txtCell: CSSProperties = { border: '1px solid #eef0f3', padding: '5px 12px', textAlign: 'left', color: '#5b6472' };
+const thTop: CSSProperties = { position: 'sticky', top: 0, zIndex: 2, background: '#eceff3', border: '1px solid #d7dbe1', color: '#7a828d', fontWeight: 600, padding: '5px 12px', textAlign: 'left', minWidth: 78 };
+const thName: CSSProperties = { position: 'sticky', top: 26, zIndex: 2, background: '#f4f6f8', border: '1px solid #e2e5ea', color: '#2a333f', fontWeight: 600, padding: '5px 12px', textAlign: 'left', fontFamily: 'IBM Plex Sans' };
 
-export function Worksheet({ M }: { M: DataModel }) {
-  const { openModal, setImportTab, showToast } = useApp();
+export function Worksheet() {
+  const { openModal, setImportTab, showToast, spcRules } = useApp();
+  const { model: M } = useData();
+
+  // 均值失控行高亮（与 SPC 主图一致：准则引擎）
+  const means = M.subs.map((s) => s.mean);
+  const sig = (M.uclX - M.xbarbar) / 3;
+  const { viol } = M.hasSubgroups
+    ? evalRules(means, M.xbarbar, sig, spcRules)
+    : { viol: new Set<number>() };
+
+  // 列头：C1 子组 + 测量列 + 均值/极差 +（演示）操作员/日期/班次
+  const cols: { code: string; name: string }[] = [{ code: 'C1', name: '子组' }];
+  M.colNames.forEach((n, i) => cols.push({ code: `C${i + 2}`, name: n }));
+  let ci = M.colNames.length + 2;
+  if (M.hasSubgroups) {
+    cols.push({ code: `C${ci++}`, name: '均值' }, { code: `C${ci++}`, name: '极差' });
+  }
+  if (M.isDemo) {
+    cols.push({ code: `C${ci++}-T`, name: '操作员' }, { code: `C${ci++}-D`, name: '日期' }, { code: `C${ci++}-T`, name: '班次' });
+  }
 
   const sources: Array<{ icon: IconName; iconColor: string; label: string; status: string; statusColor: string; onClick: () => void }> = [
     { icon: 'grid', iconColor: '#2c8a45', label: 'Excel / CSV 导入', status: '已连接', statusColor: '#2c8a45', onClick: () => { setImportTab('csv'); openModal('import'); } },
@@ -34,21 +51,21 @@ export function Worksheet({ M }: { M: DataModel }) {
           <table className="mono" style={{ borderCollapse: 'collapse', fontSize: 12.5, whiteSpace: 'nowrap', minWidth: '100%' }}>
             <thead>
               <tr>
-                <th style={{ position: 'sticky', top: 0, left: 0, zIndex: 3, background: '#eceff3', border: '1px solid #d7dbe1', width: 44 }} />
-                {WS_COLS.map((c) => (
-                  <th key={c.code} style={{ position: 'sticky', top: 0, zIndex: 2, background: '#eceff3', border: '1px solid #d7dbe1', color: '#7a828d', fontWeight: 600, padding: '5px 12px', textAlign: 'left', minWidth: 78 }}>{c.code}</th>
+                <th style={{ ...thTop, left: 0, zIndex: 3, width: 44, minWidth: 44 }} />
+                {cols.map((c) => (
+                  <th key={c.code} style={thTop}>{c.code}</th>
                 ))}
               </tr>
               <tr>
-                <th style={{ position: 'sticky', top: 26, left: 0, zIndex: 3, background: '#f4f6f8', border: '1px solid #d7dbe1' }} />
-                {WS_COLS.map((c) => (
-                  <th key={c.code} style={{ position: 'sticky', top: 26, zIndex: 2, background: '#f4f6f8', border: '1px solid #e2e5ea', color: '#2a333f', fontWeight: 600, padding: '5px 12px', textAlign: 'left', fontFamily: 'IBM Plex Sans' }}>{c.name}</th>
+                <th style={{ ...thName, left: 0, zIndex: 3, border: '1px solid #d7dbe1' }} />
+                {cols.map((c) => (
+                  <th key={c.code} style={thName}>{c.name}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {M.subs.map((s, i) => {
-                const oocMean = M.oocX.includes(s.i);
+                const ooc = viol.has(i);
                 return (
                   <tr key={s.i}>
                     <td style={{ position: 'sticky', left: 0, background: '#f4f6f8', border: '1px solid #e2e5ea', color: '#9aa2ad', textAlign: 'center', padding: '5px 6px', fontWeight: 600 }}>{s.i}</td>
@@ -56,11 +73,19 @@ export function Worksheet({ M }: { M: DataModel }) {
                     {s.vals.map((v, j) => (
                       <td key={j} style={numCell}>{nf(v, 3)}</td>
                     ))}
-                    <td style={{ ...numCell, fontWeight: 600, ...(oocMean ? { background: '#fdecec', color: '#c22f2f' } : { color: '#1f6fb2' }) }}>{nf(s.mean, 3)}</td>
-                    <td style={numCell}>{nf(s.range, 3)}</td>
-                    <td style={txtCell}>{OPS[i % 3]}</td>
-                    <td style={txtCell}>{'2026-06-' + String((i % 28) + 1).padStart(2, '0')}</td>
-                    <td style={txtCell}>{SHIFTS[i % 3]}</td>
+                    {M.hasSubgroups && (
+                      <>
+                        <td style={{ ...numCell, fontWeight: 600, ...(ooc ? { background: '#fdecec', color: '#c22f2f' } : { color: '#1f6fb2' }) }}>{nf(s.mean, 3)}</td>
+                        <td style={numCell}>{nf(s.range, 3)}</td>
+                      </>
+                    )}
+                    {M.isDemo && (
+                      <>
+                        <td style={txtCell}>{OPS[i % 3]}</td>
+                        <td style={txtCell}>{'2026-06-' + String((i % 28) + 1).padStart(2, '0')}</td>
+                        <td style={txtCell}>{SHIFTS[i % 3]}</td>
+                      </>
+                    )}
                   </tr>
                 );
               })}
@@ -81,11 +106,11 @@ export function Worksheet({ M }: { M: DataModel }) {
           ))}
         </Card>
         <Card style={{ padding: '14px 16px' }}>
-          <div style={{ fontWeight: 600, color: '#33404f', marginBottom: 10 }}>列统计 · C2 直径</div>
+          <div style={{ fontWeight: 600, color: '#33404f', marginBottom: 10 }}>列统计 · {M.isDemo ? 'C2 直径' : '全部测量'}</div>
           <KvRows
             valueWeight={500}
             rows={[
-              { k: '样本量 N', v: '125' },
+              { k: '样本量 N', v: String(M.all.length) },
               { k: '均值', v: nf(M.oMean, 4) },
               { k: '标准差', v: nf(M.oSd, 4) },
               { k: '最小值', v: nf(Math.min(...M.all), 3) },

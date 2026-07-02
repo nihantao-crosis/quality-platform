@@ -1,6 +1,9 @@
-/** Gage R&R / ANOVA / 帕累托 — 结构完整的展示页面。 */
+/** Gage R&R / ANOVA / 帕累托 — 全部指标由 /core 引擎实时计算。 */
 import { useMemo } from 'react';
-import { anovaGroups, DEFECTS, GAGE_ROWS } from '../../core';
+import {
+  nf, anovaGroups, DEFECTS, gageStudyData, GAGE_TOLERANCE,
+  computeGageRR, oneWayAnova,
+} from '../../core';
 import type { ChartTokens } from '../tokens';
 import { paretoColors } from '../tokens';
 import { Card, CardHeader } from '../common';
@@ -8,21 +11,36 @@ import { ParetoChart, GroupedBars, BoxPlot } from '../charts/misc';
 
 // ---------- Gage R&R ----------
 export function GageRR({ T }: { T: ChartTokens }) {
+  const g = useMemo(() => computeGageRR(gageStudyData(), GAGE_TOLERANCE), []);
+  const verdictText = { acceptable: '可接受', marginal: '临界', unacceptable: '不可接受' }[g.verdict];
+  const verdictStyle = {
+    acceptable: { background: '#e8f4ea', color: '#2c8a45' },
+    marginal: { background: '#fcf3e3', color: '#d98324' },
+    unacceptable: { background: '#fdecec', color: '#c22f2f' },
+  }[g.verdict];
+  const bigColor = { acceptable: '#2c8a45', marginal: '#d98324', unacceptable: '#c22f2f' }[g.verdict];
+  // 图表取前四个分量（不含合计变异），名称去缩进
+  const cats = g.components.slice(0, 4).map((c) => ({
+    name: c.source.trim(),
+    contrib: c.pctContribution,
+    study: c.pctStudyVar,
+    tol: c.pctTolerance,
+  }));
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 16 }}>
       <Card>
         <CardHeader title="变异分量 · 交叉 Gage R&R (ANOVA 法)" />
         <div style={{ padding: '14px 16px 6px' }}>
-          <GroupedBars T={T} />
+          <GroupedBars T={T} cats={cats} />
         </div>
       </Card>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
         <Card style={{ padding: 16 }}>
           <div style={{ display: 'flex', alignItems: 'baseline', marginBottom: 12 }}>
             <div style={{ fontWeight: 600, color: '#33404f' }}>系统评定</div>
-            <div style={{ marginLeft: 'auto', padding: '2px 10px', borderRadius: 11, fontSize: 12, fontWeight: 700, background: '#e8f4ea', color: '#2c8a45' }}>可接受</div>
+            <div style={{ marginLeft: 'auto', padding: '2px 10px', borderRadius: 11, fontSize: 12, fontWeight: 700, ...verdictStyle }}>{verdictText}</div>
           </div>
-          <div className="mono" style={{ fontSize: 34, fontWeight: 700, color: '#2c8a45' }}>8.4%</div>
+          <div className="mono" style={{ fontSize: 34, fontWeight: 700, color: bigColor }}>{nf(g.totalGageRR, 1)}%</div>
           <div style={{ fontSize: 12, color: '#8a929d', marginTop: 2 }}>合计 Gage R&R (%研究变异)</div>
           <div style={{ fontSize: 11.5, color: '#9aa2ad', marginTop: 10, lineHeight: 1.5 }}>&lt; 10% 优秀 · 10–30% 可接受 · &gt; 30% 不可接受 (AIAG)</div>
         </Card>
@@ -37,11 +55,11 @@ export function GageRR({ T }: { T: ChartTokens }) {
               </tr>
             </thead>
             <tbody>
-              {GAGE_ROWS.map((g) => (
-                <tr key={g.src} style={{ borderTop: '1px solid #f0f2f5' }}>
-                  <td style={{ padding: '7px 16px', color: '#33404f', whiteSpace: 'pre' }}>{g.src}</td>
-                  <td className="mono" style={{ padding: '7px 8px', textAlign: 'right', color: '#5b6472' }}>{g.contrib}</td>
-                  <td className="mono" style={{ padding: '7px 16px', textAlign: 'right', color: '#2a333f', fontWeight: 600 }}>{g.study}</td>
+              {g.components.map((c) => (
+                <tr key={c.source} style={{ borderTop: '1px solid #f0f2f5' }}>
+                  <td style={{ padding: '7px 16px', color: '#33404f', whiteSpace: 'pre' }}>{c.source}</td>
+                  <td className="mono" style={{ padding: '7px 8px', textAlign: 'right', color: '#5b6472' }}>{nf(c.pctContribution, 2)}</td>
+                  <td className="mono" style={{ padding: '7px 16px', textAlign: 'right', color: '#2a333f', fontWeight: 600 }}>{nf(c.pctStudyVar, 2)}</td>
                 </tr>
               ))}
             </tbody>
@@ -53,14 +71,19 @@ export function GageRR({ T }: { T: ChartTokens }) {
 }
 
 // ---------- ANOVA ----------
-const ANOVA_ROWS = [
-  { src: '设备', df: '2', ss: '0.00947', f: '4.82', p: '0.012', pColor: '#c22f2f' },
-  { src: '误差', df: '33', ss: '0.03241', f: '', p: '', pColor: '#5b6472' },
-  { src: '合计', df: '35', ss: '0.04188', f: '', p: '', pColor: '#5b6472' },
-];
-
 export function Anova({ T }: { T: ChartTokens }) {
   const groups = useMemo(() => anovaGroups(), []);
+  const a = useMemo(() => oneWayAnova(groups.map((g) => g.vals)), [groups]);
+  const means = groups.map((g) => g.vals.reduce((x, y) => x + y, 0) / g.vals.length);
+  const hi = groups[means.indexOf(Math.max(...means))].name;
+  const rows = [
+    { src: '设备', df: String(a.factorDf), ss: nf(a.factorSS, 5), f: nf(a.fStat, 2), p: nf(a.pValue, 3), pColor: a.significant ? '#c22f2f' : '#5b6472' },
+    { src: '误差', df: String(a.errorDf), ss: nf(a.errorSS, 5), f: '', p: '', pColor: '#5b6472' },
+    { src: '合计', df: String(a.totalDf), ss: nf(a.totalSS, 5), f: '', p: '', pColor: '#5b6472' },
+  ];
+  const conclusion = a.significant
+    ? `P = ${nf(a.pValue, 3)} < 0.05，在 95% 置信水平下拒绝原假设：三台设备的直径均值存在显著差异。${hi}均值偏高，建议核查其定位与刀具补偿参数。`
+    : `P = ${nf(a.pValue, 3)} ≥ 0.05，无充分证据表明三台设备的直径均值存在显著差异，可视为同一总体。`;
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: 16 }}>
       <Card>
@@ -83,13 +106,13 @@ export function Anova({ T }: { T: ChartTokens }) {
               </tr>
             </thead>
             <tbody>
-              {ANOVA_ROWS.map((a) => (
-                <tr key={a.src} style={{ borderTop: '1px solid #f0f2f5', textAlign: 'right' }}>
-                  <td style={{ padding: '7px 8px 7px 16px', textAlign: 'left', color: '#33404f', fontFamily: 'IBM Plex Sans' }}>{a.src}</td>
-                  <td style={{ padding: '7px 6px', color: '#5b6472' }}>{a.df}</td>
-                  <td style={{ padding: '7px 6px', color: '#5b6472' }}>{a.ss}</td>
-                  <td style={{ padding: '7px 6px', color: '#5b6472' }}>{a.f}</td>
-                  <td style={{ padding: '7px 16px', color: a.pColor, fontWeight: 600 }}>{a.p}</td>
+              {rows.map((r) => (
+                <tr key={r.src} style={{ borderTop: '1px solid #f0f2f5', textAlign: 'right' }}>
+                  <td style={{ padding: '7px 8px 7px 16px', textAlign: 'left', color: '#33404f', fontFamily: 'IBM Plex Sans' }}>{r.src}</td>
+                  <td style={{ padding: '7px 6px', color: '#5b6472' }}>{r.df}</td>
+                  <td style={{ padding: '7px 6px', color: '#5b6472' }}>{r.ss}</td>
+                  <td style={{ padding: '7px 6px', color: '#5b6472' }}>{r.f}</td>
+                  <td style={{ padding: '7px 16px', color: r.pColor, fontWeight: 600 }}>{r.p}</td>
                 </tr>
               ))}
             </tbody>
@@ -97,9 +120,7 @@ export function Anova({ T }: { T: ChartTokens }) {
         </Card>
         <Card style={{ padding: '15px 16px' }}>
           <div style={{ fontWeight: 600, color: '#33404f', marginBottom: 6 }}>结论</div>
-          <div style={{ fontSize: 12.5, color: '#5b6472', lineHeight: 1.6 }}>
-            P = 0.012 &lt; 0.05，在 95% 置信水平下拒绝原假设：三台设备的直径均值存在显著差异。设备 B 均值偏高，建议核查其定位与刀具补偿参数。
-          </div>
+          <div style={{ fontSize: 12.5, color: '#5b6472', lineHeight: 1.6 }}>{conclusion}</div>
         </Card>
       </div>
     </div>

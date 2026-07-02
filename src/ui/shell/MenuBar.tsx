@@ -1,7 +1,15 @@
-/** 菜单栏 — 10 个菜单 + 下拉，行为（导航/弹窗/通知）与原型一致。 */
-import { useApp, type Page, type Modal } from '../../store/appStore';
+/** 菜单栏 — 10 个菜单 + 下拉，行为（导航/弹窗/通知/图表风格）与原型一致。 */
+import { useApp, type Page, type Modal, type ChartStyle } from '../../store/appStore';
+import { useData } from '../../store/dataStore';
 
-type Act = { page?: Page; modal?: Exclude<Modal, null>; toast?: string };
+type Act = {
+  page?: Page;
+  modal?: Exclude<Modal, null>;
+  toast?: string;
+  style?: ChartStyle;
+  grid?: boolean;
+  resetData?: boolean;
+};
 interface Item { label?: string; kbd?: string; act?: Act; sep?: boolean }
 
 const nav = (p: Page): Act => ({ page: p });
@@ -35,6 +43,7 @@ const MENUS: { name: string; items: Item[] }[] = [
     { label: '排序…', act: tst('已排序') },
     { label: '筛选…', act: tst('筛选器已应用') },
     { sep: true },
+    { label: '恢复演示数据集', act: { resetData: true } },
     { label: '查看工作表', act: nav('worksheet') } ] },
   { name: '计算', items: [
     { label: '计算器…', act: mdl('calc') },
@@ -65,6 +74,11 @@ const MENUS: { name: string; items: Item[] }[] = [
     { label: '显示项目管理器', act: tst('项目管理器已显示') },
     { label: '列属性…', act: tst('列属性') } ] },
   { name: '工具', items: [
+    { label: '图表风格：经典', act: { style: '经典' } },
+    { label: '图表风格：现代', act: { style: '现代' } },
+    { label: '图表风格：高对比', act: { style: '高对比' } },
+    { label: '显示 / 隐藏网格线', act: { grid: true } },
+    { sep: true },
     { label: '选项…', act: tst('选项') },
     { label: '自定义工具栏…', act: tst('工具栏自定义') },
     { label: '宏 / 脚本…', act: tst('宏管理器') } ] },
@@ -79,14 +93,24 @@ const MENUS: { name: string; items: Item[] }[] = [
     { label: '关于本软件', act: mdl('about') } ] },
 ];
 
-export function MenuBar() {
-  const { openMenu, setOpenMenu, goTo, openModal, showToast } = useApp();
+export function MenuBar({ wsName }: { wsName: string }) {
+  const { openMenu, setOpenMenu, goTo, openModal, showToast, setChartStyle, toggleGrid } = useApp();
 
   const runCmd = (act?: Act) => {
     if (!act) return setOpenMenu(null);
     if (act.page) goTo(act.page);
     else if (act.modal) openModal(act.modal);
-    else if (act.toast) showToast(act.toast);
+    else if (act.style) {
+      setChartStyle(act.style);
+      showToast('图表风格已切换为「' + act.style + '」');
+    } else if (act.grid) {
+      toggleGrid();
+      showToast(useApp.getState().showGrid ? '网格线已显示' : '网格线已隐藏');
+    } else if (act.resetData) {
+      useData.getState().resetDemo();
+      goTo('worksheet');
+      showToast('已恢复演示数据集 质检数据.mtw');
+    } else if (act.toast) showToast(act.toast);
     else setOpenMenu(null);
   };
 
@@ -124,7 +148,7 @@ export function MenuBar() {
         })}
       </div>
       <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10, color: '#8a929d', fontSize: 12 }}>
-        <span style={{ color: '#3a4350', fontWeight: 600 }}>质检数据.mtw</span>
+        <span style={{ color: '#3a4350', fontWeight: 600 }}>{wsName}</span>
         <span style={{ width: 1, height: 14, background: '#dadee4' }} />
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
           <span style={{ width: 22, height: 22, borderRadius: '50%', background: '#1f6fb2', color: '#fff', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 600 }}>质</span>

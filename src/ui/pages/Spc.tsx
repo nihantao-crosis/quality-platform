@@ -1,6 +1,8 @@
-/** SPC 控制图 ★深度实现 — 五种图型切换 / Nelson 判异开关 / 点选明细。 */
+/** SPC 控制图 ★深度实现 — 五种图型切换 / Nelson 判异开关 / 点选明细。
+ * X̄-R / X̄-S / I-MR 由活动数据集实时计算；P/C 图为计数型演示序列。 */
 import { useApp, type SpcType } from '../../store/appStore';
-import { nf, evalRules, type DataModel } from '../../core';
+import { useData } from '../../store/dataStore';
+import { nf, evalRules } from '../../core';
 import type { ChartTokens } from '../tokens';
 import { Card, KvRows, tabStyle, chipStyle } from '../common';
 import { ControlChart } from '../charts/ControlChart';
@@ -16,47 +18,52 @@ interface ChartSpec {
   dec: number;
 }
 
-export function Spc({ M, T }: { M: DataModel; T: ChartTokens }) {
+export function Spc({ T }: { T: ChartTokens }) {
   const { spcType, setSpcType, spcRules, toggleRule, selSub, setSelSub } = useApp();
+  const { model: M, attr } = useData();
 
-  const specs: Record<SpcType, { sub: string; charts: ChartSpec[] }> = {
+  const specs: Record<SpcType, { sub: string; charts: ChartSpec[]; disabled?: boolean }> = {
     'xbar-r': {
-      sub: '子组大小 n = 5 · 均值-极差',
+      sub: `子组大小 n = ${M.n} · 均值-极差`,
+      disabled: !M.hasSubgroups,
       charts: [
-        { t: '均值控制图 (X̄)', data: M.means, cl: M.xbarbar, ucl: M.uclX, lcl: M.lclX, cll: 'X̄', main: true, dec: 3 },
-        { t: '极差控制图 (R)', data: M.ranges, cl: M.rbar, ucl: M.uclR, lcl: M.lclR, cll: 'R̄', dec: 3 },
+        { t: '均值控制图 (X̄)', data: M.subs.map((s) => s.mean), cl: M.xbarbar, ucl: M.uclX, lcl: M.lclX, cll: 'X̄', main: true, dec: 3 },
+        { t: '极差控制图 (R)', data: M.subs.map((s) => s.range), cl: M.rbar, ucl: M.uclR, lcl: M.lclR, cll: 'R̄', dec: 3 },
       ],
     },
     'xbar-s': {
-      sub: '子组大小 n = 5 · 均值-标准差',
+      sub: `子组大小 n = ${M.n} · 均值-标准差`,
+      disabled: !M.hasSubgroups,
       charts: [
-        { t: '均值控制图 (X̄)', data: M.means, cl: M.xbarbar, ucl: M.uclXs, lcl: M.lclXs, cll: 'X̄', main: true, dec: 3 },
+        { t: '均值控制图 (X̄)', data: M.subs.map((s) => s.mean), cl: M.xbarbar, ucl: M.uclXs, lcl: M.lclXs, cll: 'X̄', main: true, dec: 3 },
         { t: '标准差控制图 (S)', data: M.svals, cl: M.sbar, ucl: M.uclS, lcl: M.lclS, cll: 'S̄', dec: 4 },
       ],
     },
     'i-mr': {
-      sub: '单值 - 移动极差',
+      sub: M.isDemo ? '单值 - 移动极差 · 演示序列' : '单值 - 移动极差 · 全部观测',
       charts: [
         { t: '单值控制图 (I)', data: M.indiv, cl: M.indMean, ucl: M.iUcl, lcl: M.iLcl, cll: 'X̄', main: true, dec: 3 },
         { t: '移动极差图 (MR)', data: M.mr.slice(1) as number[], cl: M.mrbar, ucl: M.mrUcl, lcl: 0, cll: 'MR̄', dec: 3 },
       ],
     },
     p: {
-      sub: '不良率 · 样本量 n = 50',
-      charts: [{ t: '不良率控制图 (P)', data: M.pprop, cl: M.pbar, ucl: M.pUcl, lcl: M.pLcl, cll: 'p̄', main: true, dec: 3 }],
+      sub: `不良率 · 样本量 n = ${attr.pN} · 演示数据`,
+      charts: [{ t: '不良率控制图 (P)', data: attr.pprop, cl: attr.pbar, ucl: attr.pUcl, lcl: attr.pLcl, cll: 'p̄', main: true, dec: 3 }],
     },
     c: {
-      sub: '单位缺陷数',
-      charts: [{ t: '缺陷数控制图 (C)', data: M.cdata, cl: M.cbar, ucl: M.cUcl, lcl: M.cLcl, cll: 'c̄', main: true, dec: 1 }],
+      sub: '单位缺陷数 · 演示数据',
+      charts: [{ t: '缺陷数控制图 (C)', data: attr.cdata, cl: attr.cbar, ucl: attr.cUcl, lcl: attr.cLcl, cll: 'c̄', main: true, dec: 1 }],
     },
   };
 
-  const spec = specs[spcType];
+  // n=1 的导入数据没有子组图，强制落到 I-MR
+  const effType = specs[spcType].disabled ? 'i-mr' : spcType;
+  const spec = specs[effType];
   const main = spec.charts.find((c) => c.main)!;
   const sig = (main.ucl - main.cl) / 3;
   const { viol, list } = evalRules(main.data, main.cl, sig, spcRules);
   const sel = selSub != null && selSub < main.data.length ? selSub : null;
-  const labWord = { 'xbar-r': '子组', 'xbar-s': '子组', 'i-mr': '观测', p: '样本', c: '单位' }[spcType];
+  const labWord = { 'xbar-r': '子组', 'xbar-s': '子组', 'i-mr': '观测', p: '样本', c: '单位' }[effType];
   const ptLab = (i: number) => labWord + ' ' + (i + 1);
 
   const stats: { k: string; v: string }[] = [
@@ -64,29 +71,29 @@ export function Spc({ M, T }: { M: DataModel; T: ChartTokens }) {
     { k: 'UCL', v: nf(main.ucl, main.dec) },
     { k: 'LCL', v: nf(main.lcl, main.dec) },
   ];
-  if (spcType === 'xbar-r') stats.push({ k: 'R̄', v: nf(M.rbar, 3) }, { k: 'σ̂ 组内', v: nf(M.sigmaWithin, 4) }, { k: '子组数', v: '25' });
-  else if (spcType === 'xbar-s') stats.push({ k: 'S̄', v: nf(M.sbar, 4) }, { k: 'σ̂ (S̄/c₄)', v: nf(M.sbar / 0.94, 4) }, { k: '子组数', v: '25' });
-  else if (spcType === 'i-mr') stats.push({ k: 'MR̄', v: nf(M.mrbar, 3) }, { k: 'σ̂ (MR̄/d₂)', v: nf(M.iSig, 4) }, { k: '观测数', v: '25' });
-  else if (spcType === 'p') stats.push({ k: 'p̄', v: nf(M.pbar, 4) }, { k: '样本量 n', v: '50' }, { k: '样本数', v: '25' });
-  else stats.push({ k: 'c̄', v: nf(M.cbar, 3) }, { k: '单位数', v: '25' });
+  if (effType === 'xbar-r') stats.push({ k: 'R̄', v: nf(M.rbar, 3) }, { k: 'σ̂ 组内', v: nf(M.sigmaWithin, 4) }, { k: '子组数', v: String(M.k) });
+  else if (effType === 'xbar-s') stats.push({ k: 'S̄', v: nf(M.sbar, 4) }, { k: 'σ̂ (S̄/c₄)', v: nf(M.sbar / M.c4, 4) }, { k: '子组数', v: String(M.k) });
+  else if (effType === 'i-mr') stats.push({ k: 'MR̄', v: nf(M.mrbar, 3) }, { k: 'σ̂ (MR̄/d₂)', v: nf(M.iSig, 4) }, { k: '观测数', v: String(M.indiv.length) });
+  else if (effType === 'p') stats.push({ k: 'p̄', v: nf(attr.pbar, 4) }, { k: '样本量 n', v: String(attr.pN) }, { k: '样本数', v: String(attr.pprop.length) });
+  else stats.push({ k: 'c̄', v: nf(attr.cbar, 3) }, { k: '单位数', v: String(attr.cdata.length) });
 
   let subRows: { k: string; v: string }[] = [];
   if (sel != null) {
-    if (spcType === 'xbar-r' || spcType === 'xbar-s') {
+    if (effType === 'xbar-r' || effType === 'xbar-s') {
       const sg = M.subs[sel];
       subRows = sg.vals.map((v, j) => ({ k: '测量 ' + (j + 1), v: nf(v, 3) }));
       subRows.push({ k: '均值', v: nf(sg.mean, 3) }, { k: '极差', v: nf(sg.range, 3) }, { k: '标准差', v: nf(M.svals[sel], 4) });
-    } else if (spcType === 'i-mr') {
+    } else if (effType === 'i-mr') {
       subRows = [{ k: '观测值', v: nf(M.indiv[sel], 3) }];
       if (sel > 0) subRows.push({ k: '移动极差', v: nf(M.mr[sel] as number, 3) });
-    } else if (spcType === 'p') {
+    } else if (effType === 'p') {
       subRows = [
-        { k: '不良数', v: String(M.pdef[sel]) },
-        { k: '样本量', v: '50' },
-        { k: '不良率', v: nf(M.pprop[sel], 3) },
+        { k: '不良数', v: String(attr.pdef[sel]) },
+        { k: '样本量', v: String(attr.pN) },
+        { k: '不良率', v: nf(attr.pprop[sel], 3) },
       ];
     } else {
-      subRows = [{ k: '缺陷数', v: String(M.cdata[sel]) }];
+      subRows = [{ k: '缺陷数', v: String(attr.cdata[sel]) }];
     }
   }
   const selBad = sel != null && viol.has(sel);
@@ -99,9 +106,19 @@ export function Spc({ M, T }: { M: DataModel; T: ChartTokens }) {
       <Card style={{ padding: '11px 16px', display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
         <span style={{ fontSize: 12, color: '#8a929d', fontWeight: 600 }}>控制图类型</span>
         <div style={{ display: 'flex', gap: 6 }}>
-          {typeTabs.map(([k, l]) => (
-            <div key={k} style={tabStyle(spcType === k)} onClick={() => setSpcType(k)}>{l}</div>
-          ))}
+          {typeTabs.map(([k, l]) => {
+            const off = specs[k].disabled;
+            return (
+              <div
+                key={k}
+                title={off ? '单列数据无子组，不可用' : undefined}
+                style={{ ...tabStyle(effType === k), ...(off ? { opacity: 0.45, cursor: 'not-allowed' } : {}) }}
+                onClick={() => !off && setSpcType(k)}
+              >
+                {l}
+              </div>
+            );
+          })}
         </div>
         <span style={{ width: 1, height: 22, background: '#e5e9ee' }} />
         <span style={{ fontSize: 12, color: '#8a929d', fontWeight: 600 }}>判异准则</span>

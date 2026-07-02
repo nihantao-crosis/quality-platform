@@ -5,13 +5,7 @@
  */
 import { phi } from './basicMath';
 import { CONTROL_CONSTANTS_N5 } from './spc';
-
-export interface SubgroupRow {
-  i: number; // 1-based
-  vals: number[];
-  mean: number;
-  range: number;
-}
+import type { SubgroupRow } from './model';
 
 export interface DataModel {
   TGT: number;
@@ -201,9 +195,13 @@ export function buildData(): DataModel {
   };
 }
 
-/** ANOVA 演示组（原型 anovaGroups，种子 77 Park-Miller LCG） */
+/**
+ * ANOVA 演示组（Park-Miller LCG）。
+ * 种子 3927 使 oneWayAnova 计算出 P≈0.012 且设备 B 均值最高 —
+ * 与交接文档校验值和告警叙事一致（原型表格为硬编码，此处改为实算自洽）。
+ */
 export function anovaGroups(): { name: string; vals: number[] }[] {
-  let seed = 77;
+  let seed = 3927;
   const r = () => {
     seed = (seed * 48271) % 2147483647;
     return seed / 2147483647;
@@ -233,18 +231,33 @@ export const DEFECTS = [
   { name: '其他', count: 4 },
 ];
 
-/** Gage R&R 演示结果（原型静态数据集） */
-export const GAGE_CATS = [
-  { name: '合计 Gage R&R', contrib: 0.7, study: 8.4, tol: 5.6 },
-  { name: '重复性', contrib: 0.5, study: 6.9, tol: 4.6 },
-  { name: '再现性', contrib: 0.2, study: 4.8, tol: 3.2 },
-  { name: '部件间', contrib: 99.3, study: 99.6, tol: 66.4 },
-];
+/**
+ * Gage R&R 演示研究 — 3 操作员 × 10 部件 × 2 次（交叉设计），确定性生成。
+ * 方差设定使 %GRR 落在 <10%（可接受）区间，与原型叙事一致。
+ */
+import type { GageObservation } from './gage';
 
-export const GAGE_ROWS = [
-  { src: '合计 Gage R&R', contrib: '0.70', study: '8.36' },
-  { src: '  重复性', contrib: '0.48', study: '6.90' },
-  { src: '  再现性', contrib: '0.22', study: '4.75' },
-  { src: '部件间', contrib: '99.30', study: '99.65' },
-  { src: '合计变异', contrib: '100.0', study: '100.0' },
-];
+export const GAGE_TOLERANCE = 0.2; // 公差 = USL − LSL = 25.10 − 24.90
+
+export function gageStudyData(): GageObservation[] {
+  let seed = 9090;
+  const r = () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 4294967296;
+  };
+  const rn = () => {
+    let u = 0;
+    let v = 0;
+    while (u === 0) u = r();
+    while (v === 0) v = r();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  };
+  const parts = Array.from({ length: 10 }, () => 25 + rn() * 0.03); // 部件真值
+  const opers = Array.from({ length: 3 }, () => rn() * 0.0008); // 操作员偏倚
+  const out: GageObservation[] = [];
+  for (let p = 0; p < 10; p++)
+    for (let o = 0; o < 3; o++)
+      for (let t = 0; t < 2; t++)
+        out.push({ part: p, operator: o, trial: t, value: parts[p] + opers[o] + rn() * 0.0016 });
+  return out;
+}

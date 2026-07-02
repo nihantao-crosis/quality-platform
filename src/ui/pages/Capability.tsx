@@ -1,12 +1,14 @@
 /** 过程能力分析 ★深度实现 — 可编辑规格限实时重算 + 直方图 + PPM 性能表。 */
 import { useApp } from '../../store/appStore';
-import { nf, computeCapability, type DataModel } from '../../core';
+import { useData, suggestedSpec } from '../../store/dataStore';
+import { nf, computeCapability } from '../../core';
 import type { ChartTokens } from '../tokens';
 import { Card, CardHeader, KvRows, numInput } from '../common';
 import { Histogram } from '../charts/Histogram';
 
-export function Capability({ M, T }: { M: DataModel; T: ChartTokens }) {
+export function Capability({ T }: { T: ChartTokens }) {
   const { lsl, usl, tgt, setSpec } = useApp();
+  const M = useData((s) => s.model);
   const cap = computeCapability(M.all, M.sigmaWithin, { lsl, tgt, usl });
   const good = cap.verdict === 'sufficient';
   const marginal = cap.verdict === 'marginal';
@@ -61,7 +63,8 @@ export function Capability({ M, T }: { M: DataModel; T: ChartTokens }) {
           </label>
         ))}
         <div
-          onClick={() => setSpec({ lsl: 24.9, tgt: 25.0, usl: 25.1 })}
+          onClick={() => setSpec(suggestedSpec(M))}
+          title={M.isDemo ? '恢复默认规格 24.90 / 25.00 / 25.10' : '按 μ±4σ 重新建议规格限'}
           style={{ padding: '5px 12px', border: '1px solid #cfd5dd', borderRadius: 4, cursor: 'pointer', fontSize: 12, color: '#5b6472', background: '#fff' }}
         >
           复位
@@ -71,7 +74,7 @@ export function Capability({ M, T }: { M: DataModel; T: ChartTokens }) {
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 16 }}>
         <Card>
           <div style={{ display: 'flex', alignItems: 'center', padding: '11px 16px', borderBottom: '1px solid #edf0f3' }}>
-            <div style={{ fontWeight: 600, color: '#33404f' }}>过程能力直方图 · 直径 (mm)</div>
+            <div style={{ fontWeight: 600, color: '#33404f' }}>过程能力直方图 · {M.isDemo ? '直径 (mm)' : M.name}</div>
             <div className="mono" style={{ marginLeft: 'auto', fontSize: 11.5, color: '#8a929d' }}>正态拟合</div>
           </div>
           <div style={{ padding: '12px 16px 6px' }}>
@@ -116,7 +119,7 @@ export function Capability({ M, T }: { M: DataModel; T: ChartTokens }) {
               rows={[
                 { k: '样本均值 X̄', v: nf(cap.mean, 4) },
                 { k: '样本量 N', v: String(cap.n) },
-                { k: 'σ 组内 (R̄/d₂)', v: nf(cap.sigmaWithin, 4) },
+                { k: M.hasSubgroups ? 'σ 组内 (R̄/d₂)' : 'σ 组内 (MR̄/d₂)', v: nf(cap.sigmaWithin, 4) },
                 { k: 'σ 整体', v: nf(cap.sigmaOverall, 4) },
                 { k: '规格 LSL / 目标 / USL', v: nf(lsl, 2) + ' / ' + nf(tgt, 2) + ' / ' + nf(usl, 2) },
               ]}

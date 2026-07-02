@@ -2,17 +2,26 @@
 import { useApp } from '../../store/appStore';
 import { nf } from '../../core';
 
-export function StatusBar({ cpk }: { cpk: number }) {
-  const chartStyle = useApp((s) => s.chartStyle);
+export function StatusBar({ cpk, gageRR, wsName, rows, cols }: {
+  cpk: number; gageRR: number; wsName: string; rows: number; cols: number;
+}) {
+  const { chartStyle, cycleChartStyle } = useApp();
   return (
     <div className="mono" style={{ display: 'flex', alignItems: 'center', height: 26, background: '#f9fafb', borderTop: '1px solid #dadee4', padding: '0 14px', gap: 16, flex: 'none', fontSize: 11.5, color: '#7a828d' }}>
       <span style={{ color: '#2c8a45', fontWeight: 600 }}>● 就绪</span>
-      <span>工作表: 质检数据.mtw</span>
-      <span>行 125</span>
-      <span>列 11</span>
+      <span>工作表: {wsName}</span>
+      <span>行 {rows}</span>
+      <span>列 {cols}</span>
       <span style={{ marginLeft: 'auto' }}>Cpk {nf(cpk, 2)}</span>
-      <span>Gage R&R 8.4%</span>
-      <span>图表风格: {chartStyle}</span>
+      <span>Gage R&R {nf(gageRR, 1)}%</span>
+      <span
+        className="hov-tool"
+        onClick={cycleChartStyle}
+        title="点击切换图表风格"
+        style={{ cursor: 'pointer', borderRadius: 3, padding: '1px 6px' }}
+      >
+        图表风格: {chartStyle} ▸
+      </span>
     </div>
   );
 }

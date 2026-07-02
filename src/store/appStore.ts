@@ -53,8 +53,13 @@ interface AppState {
   setAql(patch: Partial<Pick<AppState, 'aqlLot' | 'aqlLevel' | 'aqlAQL'>>): void;
   setImportTab(t: ImportTab): void;
   setExportFmt(f: ExportFmt): void;
+  setChartStyle(s: ChartStyle): void;
+  cycleChartStyle(): void;
+  toggleGrid(): void;
   pressCalc(k: string): void;
 }
+
+const STYLE_ORDER: ChartStyle[] = ['经典', '现代', '高对比'];
 
 let toastTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -100,5 +105,9 @@ export const useApp = create<AppState>((set, get) => ({
   setAql: (patch) => set(patch),
   setImportTab: (importTab) => set({ importTab }),
   setExportFmt: (exportFmt) => set({ exportFmt }),
+  setChartStyle: (chartStyle) => set({ chartStyle, openMenu: null }),
+  cycleChartStyle: () =>
+    set((s) => ({ chartStyle: STYLE_ORDER[(STYLE_ORDER.indexOf(s.chartStyle) + 1) % STYLE_ORDER.length] })),
+  toggleGrid: () => set((s) => ({ showGrid: !s.showGrid, openMenu: null })),
   pressCalc: (k) => set({ calc: coreCalcKey(get().calc, k) }),
 }));

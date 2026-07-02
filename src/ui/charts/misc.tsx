@@ -2,10 +2,17 @@
  * 帕累托图 / 分组柱状图 (Gage) / 箱线图 — 从原型 pareto/groupedBars/boxplot 迁移。
  */
 import { Fragment } from 'react';
-import { nf, quantile, GAGE_CATS } from '../../core';
+import { nf, quantile } from '../../core';
 import type { ChartTokens } from '../tokens';
 import { paretoColors } from '../tokens';
 import { Svg, Ln, Txt } from './primitives';
+
+export interface GageBarCat {
+  name: string;
+  contrib: number;
+  study: number;
+  tol: number;
+}
 
 // ---------- 帕累托 ----------
 export function ParetoChart(p: {
@@ -70,11 +77,10 @@ export function ParetoChart(p: {
 }
 
 // ---------- Gage 分组柱 ----------
-export function GroupedBars({ T }: { T: ChartTokens }) {
+export function GroupedBars({ T, cats }: { T: ChartTokens; cats: GageBarCat[] }) {
   const W = 960;
   const H = 300;
   const m = { t: 26, r: 24, b: 52, l: 48 };
-  const cats = GAGE_CATS;
   const series = [
     { k: 'contrib' as const, c: T.bar },
     { k: 'study' as const, c: T.bar2 },

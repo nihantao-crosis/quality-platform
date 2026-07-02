@@ -1,8 +1,10 @@
 /** 四个弹窗：导入 / 导出 / 计算器 / 关于 + Toast。 */
+import { useState } from 'react';
 import { useApp, type ImportTab, type ExportFmt } from '../../store/appStore';
+import { useData } from '../../store/dataStore';
+import { parseMatrix, type ParsedMatrix } from '../../core';
 import { platform } from '../../platform/adapter';
 import { buildExportPayload } from '../../platform/report';
-import { DATA } from '../../dataModel';
 
 const tabStyle = (a: boolean): React.CSSProperties =>
   a
@@ -32,15 +34,52 @@ const primaryBtn: React.CSSProperties = { padding: '8px 18px', background: '#1f6
 
 function ImportModal() {
   const { importTab, setImportTab, closeModal, goTo, showToast } = useApp();
+  const importMatrix = useData((s) => s.importMatrix);
+  const [pending, setPending] = useState<{ name: string; parsed: ParsedMatrix } | null>(null);
+  const [clipText, setClipText] = useState('');
   const tabs: Array<[ImportTab, string]> = [['csv', 'CSV 文件'], ['excel', 'Excel 工作簿'], ['clip', '剪贴板粘贴'], ['mes', 'MES 实时采集']];
-  const doImport = () => { goTo('worksheet'); showToast('已导入 125 行 × 11 列 到 质检数据.mtw'); };
+
+  const tryParse = (name: string, text: string) => {
+    const r = parseMatrix(text);
+    if ('error' in r) {
+      showToast('导入失败：' + r.error);
+      return;
+    }
+    setPending({ name, parsed: r });
+  };
+
   const pickFile = async () => {
     const f = await platform.pickImportFile();
     if (!f) return;
-    const lines = f.contents.split(/\r?\n/).filter((l) => l.trim() !== '');
-    const cols = lines[0] ? lines[0].split(/[,\t]/).length : 0;
+    tryParse(f.name, f.contents);
+  };
+
+  const doImport = () => {
+    if (importTab === 'mes') {
+      goTo('worksheet');
+      showToast('MES 实时采集为演示功能 · 数据集未变更');
+      return;
+    }
+    let job = pending;
+    if (!job && importTab === 'clip' && clipText.trim() !== '') {
+      const r = parseMatrix(clipText);
+      if ('error' in r) {
+        showToast('导入失败：' + r.error);
+        return;
+      }
+      job = { name: '剪贴板数据', parsed: r };
+    }
+    if (!job) {
+      showToast(importTab === 'clip' ? '请先粘贴数据' : '请先选择数据文件');
+      return;
+    }
+    const p = job.parsed;
+    importMatrix(job.name, p.colNames, p.rows);
+    setPending(null);
+    setClipText('');
     goTo('worksheet');
-    showToast(`已读取 ${f.name} · ${lines.length} 行 × ${cols} 列（演示版仍使用内置数据集）`);
+    const skipNote = p.skippedRows > 0 ? ` · 跳过 ${p.skippedRows} 行非法值` : '';
+    showToast(`已导入 ${job.name} · ${p.rows.length} 子组 × ${p.colNames.length} 测量列${skipNote}`);
   };
   return (
     <ModalFrame width={560} title="导入数据" onClose={closeModal}
@@ -56,16 +95,36 @@ function ImportModal() {
         </div>
         {(importTab === 'csv' || importTab === 'excel') && (
           <div style={{ border: '2px dashed #cdd6e0', borderRadius: 8, padding: 34, textAlign: 'center', background: '#f9fbfd' }}>
-            <div style={{ fontSize: 13.5, color: '#5b6472', fontWeight: 500 }}>拖拽文件到此处，或点击选择文件</div>
-            <div style={{ fontSize: 12, color: '#9aa2ad', marginTop: 6 }}>
-              {importTab === 'excel' ? '支持 .xlsx / .xls 工作簿，首行作为列名' : '支持 .csv / .txt，自动识别分隔符与列名'}
-            </div>
-            <div onClick={pickFile} style={{ display: 'inline-block', marginTop: 14, padding: '8px 18px', background: '#1f6fb2', color: '#fff', borderRadius: 5, fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}>选择文件</div>
+            {pending ? (
+              <>
+                <div style={{ fontSize: 13.5, color: '#2c8a45', fontWeight: 600 }}>✓ {pending.name}</div>
+                <div className="mono" style={{ fontSize: 12, color: '#5b6472', marginTop: 6 }}>
+                  {pending.parsed.rows.length} 子组 × {pending.parsed.colNames.length} 测量列 · {pending.parsed.colNames.join(' / ')}
+                </div>
+                {(pending.parsed.skippedRows > 0 || pending.parsed.droppedCols > 0) && (
+                  <div style={{ fontSize: 11.5, color: '#d98324', marginTop: 4 }}>
+                    {pending.parsed.skippedRows > 0 ? `跳过 ${pending.parsed.skippedRows} 行非法值 ` : ''}
+                    {pending.parsed.droppedCols > 0 ? `忽略 ${pending.parsed.droppedCols} 个非数值列` : ''}
+                  </div>
+                )}
+                <div onClick={pickFile} style={{ display: 'inline-block', marginTop: 14, padding: '8px 18px', border: '1px solid #cfd5dd', color: '#5b6472', borderRadius: 5, fontSize: 12.5, fontWeight: 600, cursor: 'pointer', background: '#fff' }}>重新选择</div>
+              </>
+            ) : (
+              <>
+                <div style={{ fontSize: 13.5, color: '#5b6472', fontWeight: 500 }}>点击选择数据文件</div>
+                <div style={{ fontSize: 12, color: '#9aa2ad', marginTop: 6 }}>
+                  {importTab === 'excel' ? '支持 CSV 导出的工作簿（.csv / .txt），首行作为列名' : '支持 .csv / .txt，自动识别分隔符与列名'}
+                </div>
+                <div onClick={pickFile} style={{ display: 'inline-block', marginTop: 14, padding: '8px 18px', background: '#1f6fb2', color: '#fff', borderRadius: 5, fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}>选择文件</div>
+              </>
+            )}
           </div>
         )}
         {importTab === 'clip' && (
           <textarea
-            placeholder="将数据粘贴到此处（支持 Tab / 逗号分隔）…"
+            value={clipText}
+            onChange={(e) => setClipText(e.target.value)}
+            placeholder={'将数据粘贴到此处（支持 Tab / 逗号分隔）…\n例：\n直径1,直径2,直径3\n25.01,24.99,25.02\n24.98,25.03,25.00'}
             style={{ width: '100%', height: 150, border: '1px solid #cfd5dd', borderRadius: 6, padding: 12, fontFamily: 'IBM Plex Mono,monospace', fontSize: 12.5, resize: 'none', boxSizing: 'border-box' }}
           />
         )}
@@ -94,7 +153,7 @@ function ExportModal() {
   ];
   const doExport = async () => {
     const { lsl, tgt, usl } = useApp.getState();
-    const payload = buildExportPayload(exportFmt, DATA, { lsl, tgt, usl });
+    const payload = buildExportPayload(exportFmt, useData.getState().model, { lsl, tgt, usl });
     const dest = await platform.exportReport(exportFmt, payload.defaultName, payload.contents);
     if (dest == null) return; // 用户取消
     showToast(platform.isDesktop ? '报表已保存: ' + dest : '报表已导出: ' + dest);
