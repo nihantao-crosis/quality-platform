@@ -1,0 +1,250 @@
+/**
+ * 演示数据集 — 与原型 buildData() 完全一致的确定性伪随机生成
+ * （LCG 种子 20260601 等），保证数值对拍一致。
+ * 生产版本应替换为 PlatformAdapter 加载的真实数据源。
+ */
+import { phi } from './basicMath';
+import { CONTROL_CONSTANTS_N5 } from './spc';
+
+export interface SubgroupRow {
+  i: number; // 1-based
+  vals: number[];
+  mean: number;
+  range: number;
+}
+
+export interface DataModel {
+  TGT: number;
+  LSL: number;
+  USL: number;
+  k: number;
+  n: number;
+  subs: SubgroupRow[];
+  all: number[];
+  xbarbar: number;
+  rbar: number;
+  uclX: number;
+  lclX: number;
+  uclR: number;
+  lclR: number;
+  sigmaWithin: number;
+  oMean: number;
+  oSd: number;
+  Cp: number;
+  Cpk: number;
+  Pp: number;
+  Ppk: number;
+  ppm: number;
+  ppmU: number;
+  ppmL: number;
+  oocX: number[];
+  means: number[];
+  ranges: number[];
+  // X̄-S
+  svals: number[];
+  sbar: number;
+  uclXs: number;
+  lclXs: number;
+  uclS: number;
+  lclS: number;
+  // I-MR
+  indiv: number[];
+  mr: (number | null)[];
+  mrbar: number;
+  indMean: number;
+  iUcl: number;
+  iLcl: number;
+  mrUcl: number;
+  iSig: number;
+  // P 图
+  pN: number;
+  pdef: number[];
+  pprop: number[];
+  pbar: number;
+  pUcl: number;
+  pLcl: number;
+  // C 图
+  cdata: number[];
+  cbar: number;
+  cUcl: number;
+  cLcl: number;
+}
+
+export function buildData(): DataModel {
+  let seed = 20260601;
+  const rnd = () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 4294967296;
+  };
+  const randn = () => {
+    let u = 0;
+    let v = 0;
+    while (u === 0) u = rnd();
+    while (v === 0) v = rnd();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  };
+  const TGT = 25.0;
+  const LSL = 24.9;
+  const USL = 25.1;
+  const sigma = 0.026;
+  const k = 25;
+  const n = 5;
+  const subs: SubgroupRow[] = [];
+  const all: number[] = [];
+  for (let i = 0; i < k; i++) {
+    let shift = 0;
+    if (i >= 15 && i <= 17) shift = 0.05;
+    if (i === 21) shift = -0.048;
+    const vals: number[] = [];
+    for (let j = 0; j < n; j++) {
+      const x = TGT + shift + randn() * sigma;
+      vals.push(x);
+      all.push(x);
+    }
+    const mean = vals.reduce((a, b) => a + b, 0) / n;
+    const range = Math.max(...vals) - Math.min(...vals);
+    subs.push({ i: i + 1, vals, mean, range });
+  }
+  const xbarbar = subs.reduce((a, s) => a + s.mean, 0) / k;
+  const rbar = subs.reduce((a, s) => a + s.range, 0) / k;
+  const { A2, D4, D3, d2, A3, B3, B4 } = CONTROL_CONSTANTS_N5;
+  const uclX = xbarbar + A2 * rbar;
+  const lclX = xbarbar - A2 * rbar;
+  const uclR = D4 * rbar;
+  const lclR = D3 * rbar;
+  const sigmaWithin = rbar / d2;
+  const oMean = all.reduce((a, b) => a + b, 0) / all.length;
+  const oSd = Math.sqrt(all.reduce((a, b) => a + (b - oMean) ** 2, 0) / (all.length - 1));
+  const Cp = (USL - LSL) / (6 * sigmaWithin);
+  const Cpk = Math.min(USL - oMean, oMean - LSL) / (3 * sigmaWithin);
+  const Pp = (USL - LSL) / (6 * oSd);
+  const Ppk = Math.min(USL - oMean, oMean - LSL) / (3 * oSd);
+  const ppmU = (1 - phi((USL - oMean) / oSd)) * 1e6;
+  const ppmL = phi((LSL - oMean) / oSd) * 1e6;
+  const ppm = ppmU + ppmL;
+  const oocX = subs.filter((s) => s.mean > uclX || s.mean < lclX).map((s) => s.i);
+  // X̄-S：子组标准差
+  const svals = subs.map((s) => Math.sqrt(s.vals.reduce((a, b) => a + (b - s.mean) ** 2, 0) / (n - 1)));
+  const sbar = svals.reduce((a, b) => a + b, 0) / svals.length;
+  const uclXs = xbarbar + A3 * sbar;
+  const lclXs = xbarbar - A3 * sbar;
+  const uclS = B4 * sbar;
+  const lclS = B3 * sbar;
+  // I-MR：单值序列（独立种子 424242）
+  let is2 = 424242;
+  const ir = () => {
+    is2 = (is2 * 1664525 + 1013904223) >>> 0;
+    return is2 / 4294967296;
+  };
+  const irn = () => {
+    let u = 0;
+    let v = 0;
+    while (u === 0) u = ir();
+    while (v === 0) v = ir();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  };
+  const indiv: number[] = [];
+  for (let i = 0; i < 25; i++) {
+    const sh = i >= 18 && i <= 19 ? 0.085 : 0;
+    indiv.push(TGT + sh + irn() * sigma * 1.9);
+  }
+  const mr = indiv.map((v, i) => (i === 0 ? null : Math.abs(v - indiv[i - 1])));
+  const mrbar = (mr.slice(1) as number[]).reduce((a, b) => a + b, 0) / (indiv.length - 1);
+  const indMean = indiv.reduce((a, b) => a + b, 0) / indiv.length;
+  const iSig = mrbar / 1.128;
+  const iUcl = indMean + 3 * iSig;
+  const iLcl = indMean - 3 * iSig;
+  const mrUcl = 3.267 * mrbar;
+  // P 图：n=50（独立种子 8181）
+  let ps = 8181;
+  const pr = () => {
+    ps = (ps * 1664525 + 1013904223) >>> 0;
+    return ps / 4294967296;
+  };
+  const pN = 50;
+  const pdef: number[] = [];
+  for (let i = 0; i < 25; i++) {
+    let b = 0.03;
+    if (i >= 10 && i <= 11) b = 0.105;
+    pdef.push(Math.max(0, Math.round((b + (pr() - 0.5) * 0.028) * pN)));
+  }
+  const pprop = pdef.map((d) => d / pN);
+  const pbar = pdef.reduce((a, b) => a + b, 0) / (pN * 25);
+  const pSig = Math.sqrt((pbar * (1 - pbar)) / pN);
+  const pUcl = pbar + 3 * pSig;
+  const pLcl = Math.max(0, pbar - 3 * pSig);
+  // C 图：单位缺陷数（独立种子 6363）
+  let cs = 6363;
+  const cr = () => {
+    cs = (cs * 1664525 + 1013904223) >>> 0;
+    return cs / 4294967296;
+  };
+  const cdata: number[] = [];
+  for (let i = 0; i < 25; i++) {
+    let mu = 4;
+    if (i === 7) mu = 12;
+    cdata.push(Math.max(0, Math.round(mu + (cr() - 0.5) * 4.2)));
+  }
+  const cbar = cdata.reduce((a, b) => a + b, 0) / cdata.length;
+  const cSig = Math.sqrt(cbar);
+  const cUcl = cbar + 3 * cSig;
+  const cLcl = Math.max(0, cbar - 3 * cSig);
+  return {
+    TGT, LSL, USL, k, n, subs, all, xbarbar, rbar, uclX, lclX, uclR, lclR, sigmaWithin,
+    oMean, oSd, Cp, Cpk, Pp, Ppk, ppm, ppmU, ppmL, oocX,
+    means: subs.map((s) => s.mean),
+    ranges: subs.map((s) => s.range),
+    svals, sbar, uclXs, lclXs, uclS, lclS,
+    indiv, mr, mrbar, indMean, iUcl, iLcl, mrUcl, iSig,
+    pN, pdef, pprop, pbar, pUcl, pLcl,
+    cdata, cbar, cUcl, cLcl,
+  };
+}
+
+/** ANOVA 演示组（原型 anovaGroups，种子 77 Park-Miller LCG） */
+export function anovaGroups(): { name: string; vals: number[] }[] {
+  let seed = 77;
+  const r = () => {
+    seed = (seed * 48271) % 2147483647;
+    return seed / 2147483647;
+  };
+  const rn = () => {
+    let u = 0;
+    let v = 0;
+    while (u === 0) u = r();
+    while (v === 0) v = r();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  };
+  const mk = (mu: number) => Array.from({ length: 12 }, () => mu + rn() * 0.03);
+  return [
+    { name: '设备 A', vals: mk(25.0) },
+    { name: '设备 B', vals: mk(25.035) },
+    { name: '设备 C', vals: mk(24.995) },
+  ];
+}
+
+/** 缺陷帕累托演示数据（颜色由图表主题注入） */
+export const DEFECTS = [
+  { name: '尺寸超差', count: 46 },
+  { name: '表面划伤', count: 29 },
+  { name: '毛刺', count: 18 },
+  { name: '装配不良', count: 11 },
+  { name: '材料缺陷', count: 6 },
+  { name: '其他', count: 4 },
+];
+
+/** Gage R&R 演示结果（原型静态数据集） */
+export const GAGE_CATS = [
+  { name: '合计 Gage R&R', contrib: 0.7, study: 8.4, tol: 5.6 },
+  { name: '重复性', contrib: 0.5, study: 6.9, tol: 4.6 },
+  { name: '再现性', contrib: 0.2, study: 4.8, tol: 3.2 },
+  { name: '部件间', contrib: 99.3, study: 99.6, tol: 66.4 },
+];
+
+export const GAGE_ROWS = [
+  { src: '合计 Gage R&R', contrib: '0.70', study: '8.36' },
+  { src: '  重复性', contrib: '0.48', study: '6.90' },
+  { src: '  再现性', contrib: '0.22', study: '4.75' },
+  { src: '部件间', contrib: '99.30', study: '99.65' },
+  { src: '合计变异', contrib: '100.0', study: '100.0' },
+];

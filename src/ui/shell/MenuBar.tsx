@@ -1,0 +1,136 @@
+/** 菜单栏 — 10 个菜单 + 下拉，行为（导航/弹窗/通知）与原型一致。 */
+import { useApp, type Page, type Modal } from '../../store/appStore';
+
+type Act = { page?: Page; modal?: Exclude<Modal, null>; toast?: string };
+interface Item { label?: string; kbd?: string; act?: Act; sep?: boolean }
+
+const nav = (p: Page): Act => ({ page: p });
+const tst = (m: string): Act => ({ toast: m });
+const mdl = (m: Exclude<Modal, null>): Act => ({ modal: m });
+
+const MENUS: { name: string; items: Item[] }[] = [
+  { name: '文件', items: [
+    { label: '新建工作表', kbd: 'Ctrl+N', act: tst('已新建空白工作表') },
+    { label: '打开…', kbd: 'Ctrl+O', act: mdl('import') },
+    { label: '导入 CSV / Excel…', act: mdl('import') },
+    { sep: true },
+    { label: '保存', kbd: 'Ctrl+S', act: tst('项目已保存') },
+    { label: '另存为…', act: tst('已另存副本') },
+    { sep: true },
+    { label: '导出报表…', act: mdl('export') },
+    { label: '打印…', kbd: 'Ctrl+P', act: tst('正在准备打印…') } ] },
+  { name: '编辑', items: [
+    { label: '撤销', kbd: 'Ctrl+Z', act: tst('已撤销') },
+    { label: '重做', kbd: 'Ctrl+Y', act: tst('已重做') },
+    { sep: true },
+    { label: '剪切', kbd: 'Ctrl+X', act: tst('已剪切') },
+    { label: '复制', kbd: 'Ctrl+C', act: tst('已复制') },
+    { label: '粘贴', kbd: 'Ctrl+V', act: tst('已粘贴') },
+    { sep: true },
+    { label: '查找 / 替换…', kbd: 'Ctrl+F', act: tst('查找 / 替换') } ] },
+  { name: '数据', items: [
+    { label: '导入数据…', act: mdl('import') },
+    { label: '堆叠 / 拆分列', act: tst('数据重构') },
+    { label: '转置列', act: tst('列已转置') },
+    { label: '排序…', act: tst('已排序') },
+    { label: '筛选…', act: tst('筛选器已应用') },
+    { sep: true },
+    { label: '查看工作表', act: nav('worksheet') } ] },
+  { name: '计算', items: [
+    { label: '计算器…', act: mdl('calc') },
+    { label: '列统计…', act: tst('列统计') },
+    { label: '行统计…', act: tst('行统计') },
+    { sep: true },
+    { label: '标准化', act: tst('已标准化选定列') },
+    { label: '生成随机数据…', act: tst('已生成随机数据') } ] },
+  { name: '统计', items: [
+    { label: '控制图 (SPC)', act: nav('spc') },
+    { label: '过程能力分析', act: nav('capability') },
+    { label: '测量系统分析 Gage R&R', act: nav('gagerr') },
+    { label: '方差分析 / 假设检验', act: nav('anova') },
+    { label: '实验设计 (DOE)', act: nav('doe') },
+    { label: '抽样检验 (AQL)', act: nav('aql') },
+    { sep: true },
+    { label: '基本统计量', act: nav('worksheet') } ] },
+  { name: '图形', items: [
+    { label: '直方图', act: nav('capability') },
+    { label: '箱线图', act: nav('anova') },
+    { label: '控制图', act: nav('spc') },
+    { label: '帕累托图', act: nav('pareto') },
+    { label: '时间序列图', act: nav('spc') },
+    { label: '散点图', act: tst('散点图') },
+    { label: '概率图', act: nav('capability') } ] },
+  { name: '编辑器', items: [
+    { label: '显示会话窗口', act: tst('会话窗口已显示') },
+    { label: '显示项目管理器', act: tst('项目管理器已显示') },
+    { label: '列属性…', act: tst('列属性') } ] },
+  { name: '工具', items: [
+    { label: '选项…', act: tst('选项') },
+    { label: '自定义工具栏…', act: tst('工具栏自定义') },
+    { label: '宏 / 脚本…', act: tst('宏管理器') } ] },
+  { name: '窗口', items: [
+    { label: '质量总览', act: nav('dashboard') },
+    { label: '数据工作表', act: nav('worksheet') },
+    { label: '层叠窗口', act: tst('窗口已层叠') } ] },
+  { name: '帮助', items: [
+    { label: '帮助主题', kbd: 'F1', act: tst('帮助中心') },
+    { label: '统计指南', act: tst('统计指南') },
+    { sep: true },
+    { label: '关于本软件', act: mdl('about') } ] },
+];
+
+export function MenuBar() {
+  const { openMenu, setOpenMenu, goTo, openModal, showToast } = useApp();
+
+  const runCmd = (act?: Act) => {
+    if (!act) return setOpenMenu(null);
+    if (act.page) goTo(act.page);
+    else if (act.modal) openModal(act.modal);
+    else if (act.toast) showToast(act.toast);
+    else setOpenMenu(null);
+  };
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', height: 30, background: 'linear-gradient(#ffffff,#f6f7f9)', borderBottom: '1px solid #dadee4', padding: '0 10px', flex: 'none', userSelect: 'none', position: 'relative', zIndex: 60 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 2, fontSize: 12.5 }}>
+        {MENUS.map((mu) => {
+          const open = openMenu === mu.name;
+          return (
+            <div key={mu.name} style={{ position: 'relative' }}>
+              <div
+                className={open ? undefined : 'hov-menu-title'}
+                onClick={() => setOpenMenu(open ? null : mu.name)}
+                onMouseEnter={() => { if (openMenu && openMenu !== mu.name) setOpenMenu(mu.name); }}
+                style={{ padding: '4px 9px', borderRadius: 3, cursor: 'pointer', ...(open ? { background: '#e7f0f9', color: '#1f6fb2' } : { color: '#3a4350' }) }}
+              >
+                {mu.name}
+              </div>
+              {open && (
+                <div style={{ position: 'absolute', top: 'calc(100% + 3px)', left: 0, minWidth: 236, background: '#fff', border: '1px solid #d7dbe1', borderRadius: 6, boxShadow: '0 12px 32px rgba(20,30,50,0.17)', padding: 5, zIndex: 200 }}>
+                  {mu.items.map((it, i) =>
+                    it.sep ? (
+                      <div key={i} style={{ height: 1, background: '#eef0f3', margin: '5px 8px' }} />
+                    ) : (
+                      <div key={i} className="hov-menu-item" onClick={() => runCmd(it.act)} style={{ display: 'flex', alignItems: 'center', gap: 20, padding: '7px 12px', borderRadius: 4, cursor: 'pointer', fontSize: 12.5, color: '#3a4350' }}>
+                        <span style={{ flex: 1 }}>{it.label}</span>
+                        <span className="mono" style={{ fontSize: 11, color: '#a3abb5' }}>{it.kbd || ''}</span>
+                      </div>
+                    ),
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10, color: '#8a929d', fontSize: 12 }}>
+        <span style={{ color: '#3a4350', fontWeight: 600 }}>质检数据.mtw</span>
+        <span style={{ width: 1, height: 14, background: '#dadee4' }} />
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+          <span style={{ width: 22, height: 22, borderRadius: '50%', background: '#1f6fb2', color: '#fff', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 600 }}>质</span>
+          质量工程部
+        </span>
+      </div>
+    </div>
+  );
+}
