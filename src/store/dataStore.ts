@@ -72,6 +72,10 @@ interface DataState {
   importCounts(kind: 'p' | 'c', name: string, counts: number[], sampleSize?: number): void;
   loadRecent(name: string): void;
   resetDemo(): void;
+  /** 手工录入：编辑单元格 / 添加子组（复制末行） / 删除行。编辑演示集自动转「副本」。 */
+  updateCell(row: number, col: number, value: number): void;
+  addSubgroupRow(): void;
+  deleteRow(row: number): void;
   /** MES 模拟：追加一个子组（首次调用前需 startMesDataset） */
   startMesDataset(n: number): void;
   appendSubgroup(vals: number[]): void;
@@ -134,6 +138,24 @@ function persistAttr(p: PChartModel, c: CChartModel) {
   });
 }
 
+type SetFn = (partial: Partial<DataState>) => void;
+type GetFn = () => DataState;
+
+/** 编辑落库：演示集首次编辑转「质检数据 (副本)」,导入集原名持久化并同步最近列表 */
+function applyEdit(set: SetFn, get: GetFn, rows: number[][], textCols: TextColumn[]) {
+  const m = get().model;
+  const name = m.isDemo ? '质检数据 (副本)' : m.name;
+  const model = computeVarModel(name, m.colNames, rows);
+  const data: StoredDataset = { name, colNames: m.colNames, rows, textCols, savedAt: new Date().toISOString() };
+  const recents = [
+    { name, savedAt: data.savedAt, data },
+    ...get().recents.filter((r) => r.name !== name),
+  ].slice(0, MAX_RECENTS);
+  set({ model, textCols, recents });
+  saveJson(LS_DATASET, data);
+  saveJson(LS_RECENTS, recents);
+}
+
 export const useData = create<DataState>((set, get) => ({
   model: initModel,
   textCols: initText,
@@ -180,9 +202,43 @@ export const useData = create<DataState>((set, get) => ({
   resetDemo: () => {
     const d = demoInit();
     set({ model: d.model, textCols: [], pModel: d.p, cModel: d.c, mesRunning: false });
-    localStorage.removeItem(LS_DATASET);
-    localStorage.removeItem(LS_ATTR);
+    try {
+      localStorage.removeItem(LS_DATASET);
+      localStorage.removeItem(LS_ATTR);
+    } catch { /* 非浏览器环境忽略 */ }
     suggestSpec(d.model);
+  },
+
+  updateCell: (row, col, value) => {
+    if (!Number.isFinite(value)) return;
+    const m = get().model;
+    const rows = m.subs.map((s) => [...s.vals]);
+    if (row < 0 || row >= rows.length || col < 0 || col >= m.n) return;
+    rows[row][col] = value;
+    applyEdit(set, get, rows, get().textCols);
+  },
+
+  addSubgroupRow: () => {
+    const m = get().model;
+    const rows = m.subs.map((s) => [...s.vals]);
+    rows.push([...rows[rows.length - 1]]); // 复制末行,便于就地修改
+    const textCols = get().textCols.map((c) => ({ ...c, values: [...c.values, c.values[c.values.length - 1] ?? ''] }));
+    applyEdit(set, get, rows, textCols);
+  },
+
+  deleteRow: (row) => {
+    const m = get().model;
+    if (m.k <= 2) return; // 模型至少 2 行
+    const rows = m.subs.map((s) => [...s.vals]);
+    if (row < 0 || row >= rows.length) return;
+    rows.splice(row, 1);
+    const textCols = get().textCols.map((c) => {
+      const values = [...c.values];
+      values.splice(row, 1);
+      return { ...c, values };
+    });
+    applyEdit(set, get, rows, textCols);
+    useApp.setState({ selSub: null });
   },
 
   startMesDataset: (n) => {

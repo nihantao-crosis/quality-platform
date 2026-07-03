@@ -78,6 +78,7 @@ export function textReport(M: VarModel, spec: ReportSpec): string {
 
 import type { ExportJob } from './adapter';
 import { buildXlsx } from './xlsxExport';
+import { buildHtmlReport } from './htmlReport';
 
 export function buildExportJob(fmt: ExportFmt, M: VarModel, spec: ReportSpec): ExportJob {
   const stamp = new Date().toISOString().slice(0, 10);
@@ -90,10 +91,19 @@ export function buildExportJob(fmt: ExportFmt, M: VarModel, spec: ReportSpec): E
       bytes: buildXlsx(M, spec),
     };
   }
+  if (fmt === 'pdf') {
+    // 图文报告：自包含 HTML(内嵌 SVG 图表),浏览器打开后打印即得 PDF
+    return {
+      defaultName: `质量分析报告_${stamp}`,
+      ext: 'html',
+      filterLabel: '图文报告 (打开后打印为 PDF)',
+      text: buildHtmlReport(M, spec),
+    };
+  }
   return {
     defaultName: `质量分析报告_${stamp}`,
     ext: 'txt',
-    filterLabel: '文本报告 (生产版接 ' + { pdf: 'PDF', ppt: 'PPT', word: 'Word' }[fmt as 'pdf' | 'ppt' | 'word'] + ' 渲染器)',
+    filterLabel: '文本报告 (生产版接 ' + { ppt: 'PPT', word: 'Word' }[fmt as 'ppt' | 'word'] + ' 渲染器)',
     text: textReport(M, spec),
   };
 }

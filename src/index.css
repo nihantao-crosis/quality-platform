@@ -15,6 +15,11 @@ body {
 
 @keyframes qmPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
 
+/* 工作表行号：悬停时行号切换为删除按钮 */
+.ws-row .ws-del { display: none; }
+.ws-row:hover .ws-num { display: none; }
+.ws-row:hover .ws-del { display: inline; }
+
 /* 打印：只输出主内容区 */
 @media print {
   aside, .no-print { display: none !important; }

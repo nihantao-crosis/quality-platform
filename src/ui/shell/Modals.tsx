@@ -230,10 +230,10 @@ function ImportModal() {
 function ExportModal() {
   const { exportFmt, setExportFmt, closeModal, showToast } = useApp();
   const fmts: Array<[ExportFmt, string, string]> = [
-    ['pdf', 'PDF 报告', '便携文档 · 打印存档'],
-    ['excel', 'Excel', '数据 + 统计表'],
-    ['ppt', 'PowerPoint', '图表演示'],
-    ['word', 'Word', '图文报告'],
+    ['pdf', 'PDF 报告', '图文 HTML · 打开后打印即 PDF'],
+    ['excel', 'Excel', '真 .xlsx · 数据 + 统计 + 失控点'],
+    ['ppt', 'PowerPoint', '文本报告 (真渲染待接)'],
+    ['word', 'Word', '文本报告 (真渲染待接)'],
   ];
   const doExport = async () => {
     const { lsl, tgt, usl } = useApp.getState();
