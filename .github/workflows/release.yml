@@ -16,9 +16,9 @@ jobs:
       matrix:
         include:
           - platform: windows-latest
-            args: '--bundles msi,nsis,updater'
+            args: '--bundles msi,nsis'
           - platform: macos-latest
-            args: '--bundles app,dmg,updater'
+            args: '--bundles app,dmg'
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
@@ -43,5 +43,40 @@ jobs:
           releaseBody: '安装包见 Assets。Windows: .msi / -setup.exe；macOS: .dmg。'
           releaseDraft: false
           prerelease: false
-          includeUpdaterJson: true
           args: ${{ matrix.args }}
+
+  # tauri-action 对 Tauri v2 的 latest.json 生成不可靠（Signature not found），自行构建
+  updater-json:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build and upload latest.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" -R "$REPO" --json assets \
+            --jq '.assets[] | .name + "\t" + .url' > assets.tsv
+          gh release download "$TAG" -R "$REPO" --pattern '*.sig' -D sigs
+          WIN_URL=$(grep -m1 -P '\t.*setup\.exe$' assets.tsv | cut -f2 || true)
+          MAC_URL=$(grep -m1 -P '\t.*app\.tar\.gz$' assets.tsv | cut -f2 || true)
+          WIN_SIG=$(cat sigs/*setup.exe.sig 2>/dev/null || echo "")
+          MAC_SIG=$(cat sigs/*app.tar.gz.sig 2>/dev/null || echo "")
+          VERSION="${TAG#v}"
+          python3 - "$VERSION" "$WIN_URL" "$WIN_SIG" "$MAC_URL" "$MAC_SIG" <<'PY'
+          import json, sys, datetime
+          v, wu, ws, mu, ms = sys.argv[1:6]
+          platforms = {}
+          if wu: platforms["windows-x86_64"] = {"signature": ws, "url": wu}
+          if mu: platforms["darwin-aarch64"] = {"signature": ms, "url": mu}
+          json.dump({
+            "version": v,
+            "notes": "见 GitHub Release 页面",
+            "pub_date": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "platforms": platforms,
+          }, open("latest.json", "w"), ensure_ascii=False, indent=2)
+          PY
+          cat latest.json
+          gh release upload "$TAG" latest.json -R "$REPO" --clobber
