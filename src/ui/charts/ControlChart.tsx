@@ -2,7 +2,7 @@
  * 控制图（交互点选）— 从原型 controlChart() 迁移。
  * 中心线/UCL/LCL/σ 分区/失控点高亮/选中描边圈/点击回调。
  */
-import { Fragment } from 'react';
+import { memo, Fragment } from 'react';
 import { nf } from '../../core';
 import type { ChartTokens } from '../tokens';
 import { Svg, Ln, Txt } from './primitives';
@@ -21,9 +21,15 @@ export interface ControlChartProps {
   sel?: number | null;
   onPoint?: (i: number) => void;
   ptLabel?: (i: number) => string;
+  /** 时变控制限（EWMA）：提供时覆盖水平 UCL/LCL 直线 */
+  uclSeries?: number[];
+  lclSeries?: number[];
+  /** 第二序列（CUSUM 的 C⁻，用 curve2 色绘制） */
+  series2?: number[];
+  series2Label?: string;
 }
 
-export function ControlChart(cfg: ControlChartProps) {
+function ControlChartImpl(cfg: ControlChartProps) {
   const T = cfg.T;
   const W = 960;
   const H = cfg.h ?? 260;
@@ -33,7 +39,10 @@ export function ControlChart(cfg: ControlChartProps) {
   const data = cfg.data;
   const dec = cfg.dec ?? 3;
   const sigma = (cfg.ucl - cfg.cl) / 3;
-  const ys = [...data, cfg.ucl, cfg.lcl, cfg.cl];
+  const ys = [
+    ...data, cfg.ucl, cfg.lcl, cfg.cl,
+    ...(cfg.uclSeries ?? []), ...(cfg.lclSeries ?? []), ...(cfg.series2 ?? []),
+  ];
   let ymin = Math.min(...ys);
   let ymax = Math.max(...ys);
   const pad = (ymax - ymin) * 0.18 || 1;
@@ -69,12 +78,36 @@ export function ControlChart(cfg: ControlChartProps) {
             )}
           </Fragment>
         ))}
-      <Ln x1={m.l} y1={Y(cfg.ucl)} x2={m.l + pw} y2={Y(cfg.ucl)} stroke={T.limit} sw={T.sw} dash={T.dash} />
-      <Ln x1={m.l} y1={Y(cfg.lcl)} x2={m.l + pw} y2={Y(cfg.lcl)} stroke={T.limit} sw={T.sw} dash={T.dash} />
+      {cfg.uclSeries ? (
+        <>
+          <polyline points={cfg.uclSeries.map((v, i) => `${X(i)},${Y(v)}`).join(' ')} fill="none" stroke={T.limit} strokeWidth={T.sw} strokeDasharray={T.dash} />
+          <polyline points={(cfg.lclSeries ?? []).map((v, i) => `${X(i)},${Y(v)}`).join(' ')} fill="none" stroke={T.limit} strokeWidth={T.sw} strokeDasharray={T.dash} />
+          <Txt x={m.l + pw + 8} y={Y(cfg.uclSeries[cfg.uclSeries.length - 1])} s={'UCL ' + nf(cfg.uclSeries[cfg.uclSeries.length - 1], dec)} fill={T.limit} size={10} weight={600} />
+          {cfg.lclSeries && (
+            <Txt x={m.l + pw + 8} y={Y(cfg.lclSeries[cfg.lclSeries.length - 1])} s={'LCL ' + nf(cfg.lclSeries[cfg.lclSeries.length - 1], dec)} fill={T.limit} size={10} weight={600} />
+          )}
+        </>
+      ) : (
+        <>
+          <Ln x1={m.l} y1={Y(cfg.ucl)} x2={m.l + pw} y2={Y(cfg.ucl)} stroke={T.limit} sw={T.sw} dash={T.dash} />
+          <Ln x1={m.l} y1={Y(cfg.lcl)} x2={m.l + pw} y2={Y(cfg.lcl)} stroke={T.limit} sw={T.sw} dash={T.dash} />
+          <Txt x={m.l + pw + 8} y={Y(cfg.ucl)} s={'UCL ' + nf(cfg.ucl, dec)} fill={T.limit} size={10} weight={600} />
+          <Txt x={m.l + pw + 8} y={Y(cfg.lcl)} s={'LCL ' + nf(cfg.lcl, dec)} fill={T.limit} size={10} weight={600} />
+        </>
+      )}
       <Ln x1={m.l} y1={Y(cfg.cl)} x2={m.l + pw} y2={Y(cfg.cl)} stroke={T.center} sw={T.sw} />
-      <Txt x={m.l + pw + 8} y={Y(cfg.ucl)} s={'UCL ' + nf(cfg.ucl, dec)} fill={T.limit} size={10} weight={600} />
       <Txt x={m.l + pw + 8} y={Y(cfg.cl)} s={(cfg.clLabel || 'CL') + ' ' + nf(cfg.cl, dec)} fill={T.center} size={10} weight={600} />
-      <Txt x={m.l + pw + 8} y={Y(cfg.lcl)} s={'LCL ' + nf(cfg.lcl, dec)} fill={T.limit} size={10} weight={600} />
+      {cfg.series2 && (
+        <>
+          <polyline points={cfg.series2.map((v, i) => `${X(i)},${Y(v)}`).join(' ')} fill="none" stroke={T.curve2} strokeWidth={T.sw} />
+          {cfg.series2.map((v, i) => (
+            <circle key={'s2' + i} cx={X(i)} cy={Y(v)} r={T.r - 0.8} fill={T.curve2} stroke={T.bg} strokeWidth={1} />
+          ))}
+          {cfg.series2Label && (
+            <Txt x={m.l + pw + 8} y={Y(cfg.series2[cfg.series2.length - 1])} s={cfg.series2Label} fill={T.curve2} size={10} weight={600} />
+          )}
+        </>
+      )}
       <polyline points={data.map((v, i) => `${X(i)},${Y(v)}`).join(' ')} fill="none" stroke={T.line} strokeWidth={T.sw} />
       {data.map((v, i) => {
         const bad = viol.has(i);
@@ -102,3 +135,5 @@ export function ControlChart(cfg: ControlChartProps) {
     </Svg>
   );
 }
+
+export const ControlChart = memo(ControlChartImpl);

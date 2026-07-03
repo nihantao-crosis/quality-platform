@@ -2,7 +2,7 @@
  * 过程能力直方图 — 13 柱 + 组内正态曲线（实线）+ 整体正态曲线（虚线）+ 规格线。
  * 从原型 histogram() 迁移。
  */
-import { Fragment } from 'react';
+import { memo, Fragment } from 'react';
 import { nf } from '../../core';
 import type { ChartTokens } from '../tokens';
 import { Svg, Ln, Txt } from './primitives';
@@ -19,7 +19,7 @@ export interface HistogramProps {
   h?: number;
 }
 
-export function Histogram(p: HistogramProps) {
+function HistogramImpl(p: HistogramProps) {
   const T = p.T;
   const W = 960;
   const H = p.h ?? 320;
@@ -90,3 +90,5 @@ export function Histogram(p: HistogramProps) {
     </Svg>
   );
 }
+
+export const Histogram = memo(HistogramImpl);

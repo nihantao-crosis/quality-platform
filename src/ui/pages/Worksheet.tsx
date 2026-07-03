@@ -29,13 +29,13 @@ export function Worksheet() {
   // 列头：C1 子组 + 测量列 + 均值/极差 +（演示）操作员/日期/班次
   const cols: { code: string; name: string }[] = [{ code: 'C1', name: '子组' }];
   M.colNames.forEach((n, i) => cols.push({ code: `C${i + 2}`, name: n }));
-  let ci = M.colNames.length + 2;
-  if (M.hasSubgroups) {
-    cols.push({ code: `C${ci++}`, name: '均值' }, { code: `C${ci++}`, name: '极差' });
-  }
-  if (M.isDemo) {
-    cols.push({ code: `C${ci++}-T`, name: '操作员' }, { code: `C${ci++}-D`, name: '日期' }, { code: `C${ci++}-T`, name: '班次' });
-  }
+  const extra: Array<[string, string]> = [
+    ...(M.hasSubgroups ? ([['', '均值'], ['', '极差']] as Array<[string, string]>) : []),
+    ...(M.isDemo ? ([['-T', '操作员'], ['-D', '日期'], ['-T', '班次']] as Array<[string, string]>) : []),
+  ];
+  extra.forEach(([suffix, name], i) =>
+    cols.push({ code: `C${M.colNames.length + 2 + i}${suffix}`, name }),
+  );
 
   const sources: Array<{ icon: IconName; iconColor: string; label: string; status: string; statusColor: string; onClick: () => void }> = [
     { icon: 'grid', iconColor: '#2c8a45', label: 'Excel / CSV 导入', status: '已连接', statusColor: '#2c8a45', onClick: () => { setImportTab('csv'); openModal('import'); } },
@@ -66,8 +66,9 @@ export function Worksheet() {
             <tbody>
               {M.subs.map((s, i) => {
                 const ooc = viol.has(i);
+                // content-visibility: 大数据集时浏览器跳过屏外行渲染（低成本虚拟化）
                 return (
-                  <tr key={s.i}>
+                  <tr key={s.i} style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 30px' } as React.CSSProperties}>
                     <td style={{ position: 'sticky', left: 0, background: '#f4f6f8', border: '1px solid #e2e5ea', color: '#9aa2ad', textAlign: 'center', padding: '5px 6px', fontWeight: 600 }}>{s.i}</td>
                     <td style={{ ...numCell, color: '#9aa2ad' }}>{s.i}</td>
                     {s.vals.map((v, j) => (

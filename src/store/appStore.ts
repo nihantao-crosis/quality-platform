@@ -2,13 +2,14 @@
  * UI 全局状态（交接文档 §6）。派生数据一律由 /core 纯函数实时计算，不入 store。
  */
 import { create } from 'zustand';
+import { persist } from 'zustand/middleware';
 import type { NelsonRules, InspectionLevel, CalcState } from '../core';
 import { calcKey as coreCalcKey, CALC_INIT } from '../core';
 
 export type Page =
   | 'dashboard' | 'worksheet' | 'spc' | 'capability' | 'gagerr'
   | 'anova' | 'pareto' | 'doe' | 'aql';
-export type SpcType = 'xbar-r' | 'xbar-s' | 'i-mr' | 'p' | 'c';
+export type SpcType = 'xbar-r' | 'xbar-s' | 'i-mr' | 'ewma' | 'cusum' | 'p' | 'c';
 export type Modal = 'import' | 'export' | 'calc' | 'about' | null;
 export type ImportTab = 'csv' | 'excel' | 'clip' | 'mes';
 export type ExportFmt = 'pdf' | 'excel' | 'ppt' | 'word';
@@ -63,7 +64,7 @@ const STYLE_ORDER: ChartStyle[] = ['经典', '现代', '高对比'];
 
 let toastTimer: ReturnType<typeof setTimeout> | undefined;
 
-export const useApp = create<AppState>((set, get) => ({
+export const useApp = create<AppState>()(persist((set, get) => ({
   page: 'dashboard',
   spcType: 'xbar-r',
   spcRules: { r1: true, r2: true, r3: true, r4: true },
@@ -110,4 +111,18 @@ export const useApp = create<AppState>((set, get) => ({
     set((s) => ({ chartStyle: STYLE_ORDER[(STYLE_ORDER.indexOf(s.chartStyle) + 1) % STYLE_ORDER.length] })),
   toggleGrid: () => set((s) => ({ showGrid: !s.showGrid, openMenu: null })),
   pressCalc: (k) => set({ calc: coreCalcKey(get().calc, k) }),
+}), {
+  name: 'qp-prefs-v1',
+  // 仅持久化用户偏好；导航/弹窗等瞬态不落盘
+  partialize: (s) => ({
+    chartStyle: s.chartStyle,
+    showGrid: s.showGrid,
+    lsl: s.lsl,
+    usl: s.usl,
+    tgt: s.tgt,
+    aqlLot: s.aqlLot,
+    aqlLevel: s.aqlLevel,
+    aqlAQL: s.aqlAQL,
+    spcRules: s.spcRules,
+  }) as Partial<AppState>,
 }));

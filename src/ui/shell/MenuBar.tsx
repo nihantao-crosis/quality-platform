@@ -1,6 +1,24 @@
 /** 菜单栏 — 10 个菜单 + 下拉，行为（导航/弹窗/通知/图表风格）与原型一致。 */
 import { useApp, type Page, type Modal, type ChartStyle } from '../../store/appStore';
 import { useData } from '../../store/dataStore';
+import { platform } from '../../platform/adapter';
+
+/** 桌面端经 tauri-plugin-updater 检查 GitHub Releases；Web 端不适用。 */
+async function checkForUpdate(toast: (m: string) => void) {
+  if (!platform.isDesktop) {
+    toast('Web 端始终为最新版本 · 桌面端可在应用内检查更新');
+    return;
+  }
+  toast('正在检查更新…');
+  try {
+    const { check } = await import('@tauri-apps/plugin-updater');
+    const update = await check();
+    if (update) toast(`发现新版本 ${update.version} · 请从 GitHub Releases 下载安装`);
+    else toast('当前已是最新版本');
+  } catch {
+    toast('检查更新失败（更新服务未发布或网络不可用）');
+  }
+}
 
 type Act = {
   page?: Page;
@@ -9,6 +27,8 @@ type Act = {
   style?: ChartStyle;
   grid?: boolean;
   resetData?: boolean;
+  print?: boolean;
+  checkUpdate?: boolean;
 };
 interface Item { label?: string; kbd?: string; act?: Act; sep?: boolean }
 
@@ -26,7 +46,7 @@ const MENUS: { name: string; items: Item[] }[] = [
     { label: '另存为…', act: tst('已另存副本') },
     { sep: true },
     { label: '导出报表…', act: mdl('export') },
-    { label: '打印…', kbd: 'Ctrl+P', act: tst('正在准备打印…') } ] },
+    { label: '打印…', kbd: 'Ctrl+P', act: { print: true } } ] },
   { name: '编辑', items: [
     { label: '撤销', kbd: 'Ctrl+Z', act: tst('已撤销') },
     { label: '重做', kbd: 'Ctrl+Y', act: tst('已重做') },
@@ -90,6 +110,7 @@ const MENUS: { name: string; items: Item[] }[] = [
     { label: '帮助主题', kbd: 'F1', act: tst('帮助中心') },
     { label: '统计指南', act: tst('统计指南') },
     { sep: true },
+    { label: '检查更新…', act: { checkUpdate: true } },
     { label: '关于本软件', act: mdl('about') } ] },
 ];
 
@@ -107,9 +128,17 @@ export function MenuBar({ wsName }: { wsName: string }) {
       toggleGrid();
       showToast(useApp.getState().showGrid ? '网格线已显示' : '网格线已隐藏');
     } else if (act.resetData) {
+      import('../../platform/mes').then((m) => m.mesStop());
       useData.getState().resetDemo();
       goTo('worksheet');
       showToast('已恢复演示数据集 质检数据.mtw');
+    } else if (act.print) {
+      setOpenMenu(null);
+      if (platform.isDesktop) showToast('桌面端请使用「导出报表」生成文件后打印');
+      else setTimeout(() => window.print(), 80);
+    } else if (act.checkUpdate) {
+      setOpenMenu(null);
+      checkForUpdate(showToast);
     } else if (act.toast) showToast(act.toast);
     else setOpenMenu(null);
   };

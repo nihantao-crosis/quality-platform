@@ -2,13 +2,13 @@
  * DOE 四视图 — 主效应图 / 交互作用图 / 效应帕累托 / 立方图。
  * 从原型 mainEffects/interactionPlot/effectsBar/cubePlot 迁移。
  */
-import { Fragment } from 'react';
+import { memo, Fragment } from 'react';
 import { nf } from '../../core';
 import type { ChartTokens } from '../tokens';
 import { Svg, Ln, Txt } from './primitives';
 
 // ---------- 主效应图 ----------
-export function MainEffects({ T, factors }: { T: ChartTokens; factors: { name: string; lo: number; hi: number }[] }) {
+function MainEffectsImpl({ T, factors }: { T: ChartTokens; factors: { name: string; lo: number; hi: number }[] }) {
   const W = 960;
   const H = 230;
   const pn = factors.length;
@@ -51,7 +51,7 @@ export function MainEffects({ T, factors }: { T: ChartTokens; factors: { name: s
 }
 
 // ---------- 交互作用图 ----------
-export function InteractionPlot({ T, c00, c10, c01, c11 }: { T: ChartTokens; c00: number; c10: number; c01: number; c11: number }) {
+function InteractionPlotImpl({ T, c00, c10, c01, c11 }: { T: ChartTokens; c00: number; c10: number; c01: number; c11: number }) {
   const W = 960;
   const H = 250;
   const m = { t: 24, r: 120, b: 42, l: 58 };
@@ -96,7 +96,7 @@ export function InteractionPlot({ T, c00, c10, c01, c11 }: { T: ChartTokens; c00
 }
 
 // ---------- 效应帕累托（Lenth 显著界限） ----------
-export function EffectsBar({ T, terms, refLine }: { T: ChartTokens; terms: { name: string; abs: number }[]; refLine: number }) {
+function EffectsBarImpl({ T, terms, refLine }: { T: ChartTokens; terms: { name: string; abs: number }[]; refLine: number }) {
   const W = 960;
   const H = 290;
   const m = { t: 26, r: 40, b: 26, l: 88 };
@@ -127,7 +127,7 @@ export function EffectsBar({ T, terms, refLine }: { T: ChartTokens; terms: { nam
 }
 
 // ---------- 立方图 ----------
-export function CubePlot({ T, y }: { T: ChartTokens; y: (a: number, b: number, c: number) => number }) {
+function CubePlotImpl({ T, y }: { T: ChartTokens; y: (a: number, b: number, c: number) => number }) {
   const W = 960;
   const H = 360;
   const s = 210;
@@ -170,3 +170,11 @@ export function CubePlot({ T, y }: { T: ChartTokens; y: (a: number, b: number, c
     </Svg>
   );
 }
+
+export const MainEffects = memo(MainEffectsImpl);
+
+export const InteractionPlot = memo(InteractionPlotImpl);
+
+export const EffectsBar = memo(EffectsBarImpl);
+
+export const CubePlot = memo(CubePlotImpl);

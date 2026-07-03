@@ -20,6 +20,7 @@ export interface CapabilityResult {
   ppk: number;
   cpu: number;
   cpl: number;
+  cpm: number; // 望目能力 (USL−LSL)/(6τ)，τ² = Σ(x−T)²/n
   zBench: number;
   sigmaLevel: number;
   ppm: {
@@ -45,6 +46,8 @@ export function computeCapability(
   const ppk = Math.min(usl - mu, mu - lsl) / (3 * so);
   const cpu = (usl - mu) / (3 * sw);
   const cpl = (mu - lsl) / (3 * sw);
+  const tau = Math.sqrt(allValues.reduce((a, b) => a + (b - spec.tgt) ** 2, 0) / allValues.length);
+  const cpm = (usl - lsl) / (6 * tau);
   const ppmUw = (1 - phi((usl - mu) / sw)) * 1e6;
   const ppmLw = phi((lsl - mu) / sw) * 1e6;
   const ppmUo = (1 - phi((usl - mu) / so)) * 1e6;
@@ -64,6 +67,7 @@ export function computeCapability(
     ppk,
     cpu,
     cpl,
+    cpm,
     zBench,
     sigmaLevel,
     ppm: {

@@ -13,6 +13,14 @@ body {
 
 .mono { font-family: "IBM Plex Mono", monospace; }
 
+@keyframes qmPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+
+/* 打印：只输出主内容区 */
+@media print {
+  aside, .no-print { display: none !important; }
+  main { overflow: visible !important; }
+}
+
 /* 悬停态（原型 style-hover 的等价 class） */
 .hov-menu-title:hover { background: #e9edf2; }
 .hov-menu-item:hover { background: #eef4fa; color: #1f6fb2; }

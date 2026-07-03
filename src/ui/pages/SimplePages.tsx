@@ -1,17 +1,73 @@
-/** Gage R&R / ANOVA / 帕累托 — 全部指标由 /core 引擎实时计算。 */
-import { useMemo } from 'react';
+/** Gage R&R / ANOVA / 帕累托 — 全部指标由 /core 引擎实时计算。
+ * 活动数据集含分组列时对真实数据实算,否则回落到演示研究。 */
+import { useMemo, useState } from 'react';
+import type { CSSProperties } from 'react';
 import {
   nf, anovaGroups, DEFECTS, gageStudyData, GAGE_TOLERANCE,
-  computeGageRR, oneWayAnova,
+  computeGageRR, oneWayAnova, type GageObservation,
 } from '../../core';
+import { useApp } from '../../store/appStore';
+import { useData } from '../../store/dataStore';
 import type { ChartTokens } from '../tokens';
 import { paretoColors } from '../tokens';
-import { Card, CardHeader } from '../common';
+import { Card, CardHeader, Badge } from '../common';
 import { ParetoChart, GroupedBars, BoxPlot } from '../charts/misc';
+
+const selStyle: CSSProperties = {
+  padding: '4px 8px', border: '1px solid #cfd5dd', borderRadius: 4,
+  fontSize: 12, color: '#2a333f', background: '#fff', fontFamily: 'IBM Plex Mono,monospace',
+};
+
+function SourceBadge({ real }: { real: boolean }) {
+  return (
+    <Badge bg={real ? '#e7f0f9' : '#f4f6f8'} color={real ? '#1f6fb2' : '#9aa2ad'}>
+      {real ? '导入数据' : '演示研究'}
+    </Badge>
+  );
+}
 
 // ---------- Gage R&R ----------
 export function GageRR({ T }: { T: ChartTokens }) {
-  const g = useMemo(() => computeGageRR(gageStudyData(), GAGE_TOLERANCE), []);
+  const name = useData((s) => s.model.name);
+  return <GageRRInner key={name} T={T} />;
+}
+
+function GageRRInner({ T }: { T: ChartTokens }) {
+  const { model, textCols } = useData();
+  const { lsl, usl } = useApp();
+  // 真实研究需要：≥1 测量列 + ≥2 文本列（部件 / 操作员）
+  const canReal = textCols.length >= 2 && model.colNames.length >= 1;
+  const [useReal, setUseReal] = useState(canReal);
+  const [valCol, setValCol] = useState(0);
+  const [partCol, setPartCol] = useState(0);
+  const [operCol, setOperCol] = useState(1);
+
+  const real = useMemo(() => {
+    if (!canReal || !useReal) return null;
+    const parts = textCols[partCol].values;
+    const opers = textCols[operCol].values;
+    const vals = model.subs.map((s) => s.vals[valCol]);
+    const partIds = [...new Set(parts)];
+    const operIds = [...new Set(opers)];
+    if (partIds.length < 2 || operIds.length < 2) return null;
+    const trialCount = new Map<string, number>();
+    const obs: GageObservation[] = vals.map((v, i) => {
+      const key = parts[i] + '¦' + opers[i];
+      const t = trialCount.get(key) ?? 0;
+      trialCount.set(key, t + 1);
+      return { part: partIds.indexOf(parts[i]), operator: operIds.indexOf(opers[i]), trial: t, value: v };
+    });
+    // 每个 部件×操作员 至少 2 次重复才能分离重复性
+    if (Math.min(...trialCount.values()) < 2) return null;
+    try {
+      return computeGageRR(obs, Math.abs(usl - lsl));
+    } catch {
+      return null;
+    }
+  }, [canReal, useReal, model, textCols, valCol, partCol, operCol, lsl, usl]);
+
+  const g = useMemo(() => real ?? computeGageRR(gageStudyData(), GAGE_TOLERANCE), [real]);
+  const isReal = real != null;
   const verdictText = { acceptable: '可接受', marginal: '临界', unacceptable: '不可接受' }[g.verdict];
   const verdictStyle = {
     acceptable: { background: '#e8f4ea', color: '#2c8a45' },
@@ -29,7 +85,35 @@ export function GageRR({ T }: { T: ChartTokens }) {
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 16 }}>
       <Card>
-        <CardHeader title="变异分量 · 交叉 Gage R&R (ANOVA 法)" />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 16px', borderBottom: '1px solid #edf0f3', flexWrap: 'wrap' }}>
+          <div style={{ fontWeight: 600, color: '#33404f' }}>变异分量 · 交叉 Gage R&R (ANOVA 法)</div>
+          <SourceBadge real={isReal} />
+          {canReal && (
+            <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#5b6472' }}>
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
+                <input type="checkbox" checked={useReal} onChange={(e) => setUseReal(e.target.checked)} />
+                用导入数据
+              </label>
+              测量
+              <select style={selStyle} value={valCol} onChange={(e) => setValCol(+e.target.value)}>
+                {model.colNames.map((n, i) => <option key={n} value={i}>{n}</option>)}
+              </select>
+              部件
+              <select style={selStyle} value={partCol} onChange={(e) => setPartCol(+e.target.value)}>
+                {textCols.map((c, i) => <option key={c.name} value={i}>{c.name}</option>)}
+              </select>
+              操作员
+              <select style={selStyle} value={operCol} onChange={(e) => setOperCol(+e.target.value)}>
+                {textCols.map((c, i) => <option key={c.name} value={i}>{c.name}</option>)}
+              </select>
+            </div>
+          )}
+        </div>
+        {canReal && useReal && !isReal && (
+          <div style={{ margin: '10px 16px 0', padding: '8px 12px', background: '#fcf3e3', border: '1px solid #f0e0c8', borderRadius: 4, fontSize: 12, color: '#d98324' }}>
+            所选列不构成有效交叉研究（需 ≥2 部件 × ≥2 操作员，且每组合 ≥2 次重复）— 已回落到演示研究。
+          </div>
+        )}
         <div style={{ padding: '14px 16px 6px' }}>
           <GroupedBars T={T} cats={cats} />
         </div>
@@ -72,22 +156,76 @@ export function GageRR({ T }: { T: ChartTokens }) {
 
 // ---------- ANOVA ----------
 export function Anova({ T }: { T: ChartTokens }) {
-  const groups = useMemo(() => anovaGroups(), []);
+  const name = useData((s) => s.model.name);
+  return <AnovaInner key={name} T={T} />;
+}
+
+function AnovaInner({ T }: { T: ChartTokens }) {
+  const { model, textCols } = useData();
+  const canReal = textCols.length >= 1 && model.colNames.length >= 1;
+  const [useReal, setUseReal] = useState(canReal);
+  const [respCol, setRespCol] = useState(0);
+  const [grpCol, setGrpCol] = useState(0);
+
+  const realGroups = useMemo(() => {
+    if (!canReal || !useReal) return null;
+    const labels = textCols[grpCol].values;
+    const vals = model.subs.map((s) => s.vals[respCol]);
+    const byLabel = new Map<string, number[]>();
+    labels.forEach((l, i) => {
+      if (!byLabel.has(l)) byLabel.set(l, []);
+      byLabel.get(l)!.push(vals[i]);
+    });
+    const groups = [...byLabel.entries()].map(([name, vals]) => ({ name, vals }));
+    // 每组 ≥2 观测、≥2 组
+    if (groups.length < 2 || groups.some((g) => g.vals.length < 2)) return null;
+    return groups;
+  }, [canReal, useReal, model, textCols, respCol, grpCol]);
+
+  const isReal = realGroups != null;
+  const groups = useMemo(() => realGroups ?? anovaGroups(), [realGroups]);
   const a = useMemo(() => oneWayAnova(groups.map((g) => g.vals)), [groups]);
   const means = groups.map((g) => g.vals.reduce((x, y) => x + y, 0) / g.vals.length);
   const hi = groups[means.indexOf(Math.max(...means))].name;
+  const factorName = isReal ? textCols[grpCol].name : '设备';
   const rows = [
-    { src: '设备', df: String(a.factorDf), ss: nf(a.factorSS, 5), f: nf(a.fStat, 2), p: nf(a.pValue, 3), pColor: a.significant ? '#c22f2f' : '#5b6472' },
+    { src: factorName, df: String(a.factorDf), ss: nf(a.factorSS, 5), f: nf(a.fStat, 2), p: nf(a.pValue, 3), pColor: a.significant ? '#c22f2f' : '#5b6472' },
     { src: '误差', df: String(a.errorDf), ss: nf(a.errorSS, 5), f: '', p: '', pColor: '#5b6472' },
     { src: '合计', df: String(a.totalDf), ss: nf(a.totalSS, 5), f: '', p: '', pColor: '#5b6472' },
   ];
   const conclusion = a.significant
-    ? `P = ${nf(a.pValue, 3)} < 0.05，在 95% 置信水平下拒绝原假设：三台设备的直径均值存在显著差异。${hi}均值偏高，建议核查其定位与刀具补偿参数。`
-    : `P = ${nf(a.pValue, 3)} ≥ 0.05，无充分证据表明三台设备的直径均值存在显著差异，可视为同一总体。`;
+    ? `P = ${nf(a.pValue, 3)} < 0.05，在 95% 置信水平下拒绝原假设：各「${factorName}」组均值存在显著差异。「${hi}」组均值最高，建议优先排查。`
+    : `P = ${nf(a.pValue, 3)} ≥ 0.05，无充分证据表明各「${factorName}」组均值存在显著差异，可视为同一总体。`;
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: 16 }}>
       <Card>
-        <CardHeader title="单因子方差分析 · 直径 vs 设备" />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 16px', borderBottom: '1px solid #edf0f3', flexWrap: 'wrap' }}>
+          <div style={{ fontWeight: 600, color: '#33404f' }}>
+            单因子方差分析 · {isReal ? `${model.colNames[respCol]} vs ${factorName}` : '直径 vs 设备'}
+          </div>
+          <SourceBadge real={isReal} />
+          {canReal && (
+            <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#5b6472' }}>
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
+                <input type="checkbox" checked={useReal} onChange={(e) => setUseReal(e.target.checked)} />
+                用导入数据
+              </label>
+              响应
+              <select style={selStyle} value={respCol} onChange={(e) => setRespCol(+e.target.value)}>
+                {model.colNames.map((n, i) => <option key={n} value={i}>{n}</option>)}
+              </select>
+              分组
+              <select style={selStyle} value={grpCol} onChange={(e) => setGrpCol(+e.target.value)}>
+                {textCols.map((c, i) => <option key={c.name} value={i}>{c.name}</option>)}
+              </select>
+            </div>
+          )}
+        </div>
+        {canReal && useReal && !isReal && (
+          <div style={{ margin: '10px 16px 0', padding: '8px 12px', background: '#fcf3e3', border: '1px solid #f0e0c8', borderRadius: 4, fontSize: 12, color: '#d98324' }}>
+            所选分组列不满足要求（需 ≥2 组且每组 ≥2 观测）— 已回落到演示研究。
+          </div>
+        )}
         <div style={{ padding: '14px 16px 6px' }}>
           <BoxPlot T={T} groups={groups} />
         </div>
@@ -131,11 +269,12 @@ export function Anova({ T }: { T: ChartTokens }) {
 export function Pareto({ T }: { T: ChartTokens }) {
   const colors = paretoColors(T);
   const total = DEFECTS.reduce((a, d) => a + d.count, 0);
-  let cum = 0;
-  const rows = DEFECTS.map((d, i) => {
-    cum += d.count;
-    return { ...d, cum: Math.round((cum / total) * 100) + '%', color: colors[i % colors.length] };
-  });
+  const cums = DEFECTS.reduce<number[]>((acc, d) => [...acc, (acc[acc.length - 1] ?? 0) + d.count], []);
+  const rows = DEFECTS.map((d, i) => ({
+    ...d,
+    cum: Math.round((cums[i] / total) * 100) + '%',
+    color: colors[i % colors.length],
+  }));
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '1fr 300px', gap: 16 }}>
       <Card>

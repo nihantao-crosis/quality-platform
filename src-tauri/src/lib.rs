@@ -17,6 +17,19 @@ fn read_text_file(path: String) -> Result<String, String> {
     fs::read_to_string(&path).map_err(|e| e.to_string())
 }
 
+/// 二进制文件写入（.xlsx 导出用，前端传 base64）。
+#[tauri::command]
+fn save_binary_file(path: String, data_b64: String) -> Result<(), String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&data_b64)
+        .map_err(|e| e.to_string())?;
+    if let Some(parent) = Path::new(&path).parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    fs::write(&path, bytes).map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -40,7 +53,12 @@ mod tests {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![save_text_file, read_text_file])
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .invoke_handler(tauri::generate_handler![
+            save_text_file,
+            read_text_file,
+            save_binary_file
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -76,9 +76,24 @@ export function textReport(M: VarModel, spec: ReportSpec): string {
   return L.join('\n');
 }
 
-export function buildExportPayload(fmt: ExportFmt, M: VarModel, spec: ReportSpec): { defaultName: string; contents: string } {
+import type { ExportJob } from './adapter';
+import { buildXlsx } from './xlsxExport';
+
+export function buildExportJob(fmt: ExportFmt, M: VarModel, spec: ReportSpec): ExportJob {
   const stamp = new Date().toISOString().slice(0, 10);
   const base = M.name.replace(/\.[^.]+$/, '');
-  if (fmt === 'excel') return { defaultName: `${base}_${stamp}`, contents: worksheetCsv(M) };
-  return { defaultName: `质量分析报告_${stamp}`, contents: textReport(M, spec) };
+  if (fmt === 'excel') {
+    return {
+      defaultName: `${base}_${stamp}`,
+      ext: 'xlsx',
+      filterLabel: 'Excel 工作簿',
+      bytes: buildXlsx(M, spec),
+    };
+  }
+  return {
+    defaultName: `质量分析报告_${stamp}`,
+    ext: 'txt',
+    filterLabel: '文本报告 (生产版接 ' + { pdf: 'PDF', ppt: 'PPT', word: 'Word' }[fmt as 'pdf' | 'ppt' | 'word'] + ' 渲染器)',
+    text: textReport(M, spec),
+  };
 }

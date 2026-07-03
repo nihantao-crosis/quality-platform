@@ -1,7 +1,7 @@
 /**
  * 帕累托图 / 分组柱状图 (Gage) / 箱线图 — 从原型 pareto/groupedBars/boxplot 迁移。
  */
-import { Fragment } from 'react';
+import { memo, Fragment } from 'react';
 import { nf, quantile } from '../../core';
 import type { ChartTokens } from '../tokens';
 import { paretoColors } from '../tokens';
@@ -15,7 +15,7 @@ export interface GageBarCat {
 }
 
 // ---------- 帕累托 ----------
-export function ParetoChart(p: {
+function ParetoChartImpl(p: {
   T: ChartTokens;
   rows: { name: string; count: number }[];
   w?: number;
@@ -77,7 +77,7 @@ export function ParetoChart(p: {
 }
 
 // ---------- Gage 分组柱 ----------
-export function GroupedBars({ T, cats }: { T: ChartTokens; cats: GageBarCat[] }) {
+function GroupedBarsImpl({ T, cats }: { T: ChartTokens; cats: GageBarCat[] }) {
   const W = 960;
   const H = 300;
   const m = { t: 26, r: 24, b: 52, l: 48 };
@@ -133,7 +133,7 @@ export function GroupedBars({ T, cats }: { T: ChartTokens; cats: GageBarCat[] })
 }
 
 // ---------- 箱线图 ----------
-export function BoxPlot({ T, groups }: { T: ChartTokens; groups: { name: string; vals: number[] }[] }) {
+function BoxPlotImpl({ T, groups }: { T: ChartTokens; groups: { name: string; vals: number[] }[] }) {
   const W = 960;
   const H = 320;
   const m = { t: 24, r: 30, b: 44, l: 52 };
@@ -184,3 +184,9 @@ export function BoxPlot({ T, groups }: { T: ChartTokens; groups: { name: string;
     </Svg>
   );
 }
+
+export const ParetoChart = memo(ParetoChartImpl);
+
+export const GroupedBars = memo(GroupedBarsImpl);
+
+export const BoxPlot = memo(BoxPlotImpl);

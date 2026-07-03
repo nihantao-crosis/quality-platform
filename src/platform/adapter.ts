@@ -2,42 +2,45 @@
  * PlatformAdapter — 平台能力抽象（交接文档 §4.2）。
  * Web 与桌面（Tauri）各自实现导入/导出，UI 与 core 不感知运行端。
  */
-import type { ExportFmt } from '../store/appStore';
+
+export interface ExportJob {
+  defaultName: string; // 不含扩展名
+  ext: string; // 'xlsx' | 'csv' | 'txt'
+  filterLabel: string;
+  text?: string; // 文本载荷（与 bytes 二选一）
+  bytes?: Uint8Array; // 二进制载荷（.xlsx）
+}
 
 export interface PlatformAdapter {
   /** 是否为桌面端（Tauri 壳） */
   isDesktop: boolean;
-  /**
-   * 导出报表。返回落盘路径（桌面）或下载文件名（Web）；用户取消返回 null。
-   */
-  exportReport(fmt: ExportFmt, defaultName: string, contents: string): Promise<string | null>;
-  /**
-   * 打开数据文件选择对话框。返回选中文件名与文本内容；取消返回 null。
-   */
+  /** 导出文件。返回落盘路径（桌面）或下载文件名（Web）；用户取消返回 null。 */
+  exportFile(job: ExportJob): Promise<string | null>;
+  /** 打开数据文件选择对话框。返回选中文件名与文本内容；取消返回 null。 */
   pickImportFile(): Promise<{ name: string; contents: string } | null>;
-}
-
-const EXT: Record<ExportFmt, { ext: string; label: string }> = {
-  pdf: { ext: 'txt', label: '文本报告 (生产版接 PDF 渲染器)' },
-  excel: { ext: 'csv', label: 'CSV 数据表' },
-  ppt: { ext: 'txt', label: '文本报告 (生产版接 PPT 生成器)' },
-  word: { ext: 'txt', label: '文本报告 (生产版接 Word 生成器)' },
-};
-
-export function exportExt(fmt: ExportFmt): string {
-  return EXT[fmt].ext;
 }
 
 function isTauri(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 }
 
+function toBase64(bytes: Uint8Array): string {
+  let bin = '';
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(bin);
+}
+
 // ---------- Web 实现：blob 下载 ----------
 const webAdapter: PlatformAdapter = {
   isDesktop: false,
-  async exportReport(fmt, defaultName, contents) {
-    const name = `${defaultName}.${EXT[fmt].ext}`;
-    const blob = new Blob(['﻿' + contents], { type: 'text/plain;charset=utf-8' });
+  async exportFile(job) {
+    const name = `${job.defaultName}.${job.ext}`;
+    const blob = job.bytes
+      ? new Blob([job.bytes.slice().buffer as ArrayBuffer], { type: 'application/octet-stream' })
+      : new Blob(['﻿' + (job.text ?? '')], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -56,7 +59,6 @@ const webAdapter: PlatformAdapter = {
         if (!f) return resolve(null);
         resolve({ name: f.name, contents: await f.text() });
       };
-      // 取消事件（部分浏览器支持）
       inp.oncancel = () => resolve(null);
       inp.click();
     });
@@ -66,17 +68,17 @@ const webAdapter: PlatformAdapter = {
 // ---------- 桌面实现：原生对话框 + Rust 命令落盘 ----------
 const desktopAdapter: PlatformAdapter = {
   isDesktop: true,
-  async exportReport(fmt, defaultName, contents) {
+  async exportFile(job) {
     const { save } = await import('@tauri-apps/plugin-dialog');
     const { invoke } = await import('@tauri-apps/api/core');
-    const ext = EXT[fmt].ext;
     const path = await save({
       title: '导出报表',
-      defaultPath: `${defaultName}.${ext}`,
-      filters: [{ name: EXT[fmt].label, extensions: [ext] }],
+      defaultPath: `${job.defaultName}.${job.ext}`,
+      filters: [{ name: job.filterLabel, extensions: [job.ext] }],
     });
     if (!path) return null;
-    await invoke('save_text_file', { path, contents: '﻿' + contents });
+    if (job.bytes) await invoke('save_binary_file', { path, dataB64: toBase64(job.bytes) });
+    else await invoke('save_text_file', { path, contents: '﻿' + (job.text ?? '') });
     return path;
   },
   async pickImportFile() {

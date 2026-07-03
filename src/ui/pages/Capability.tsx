@@ -1,10 +1,11 @@
 /** 过程能力分析 ★深度实现 — 可编辑规格限实时重算 + 直方图 + PPM 性能表。 */
 import { useApp } from '../../store/appStore';
 import { useData, suggestedSpec } from '../../store/dataStore';
-import { nf, computeCapability } from '../../core';
+import { nf, computeCapability, andersonDarling, bestLambda, transformWithSpec, stdev } from '../../core';
 import type { ChartTokens } from '../tokens';
-import { Card, CardHeader, KvRows, numInput } from '../common';
+import { Card, CardHeader, KvRows, numInput, Badge } from '../common';
 import { Histogram } from '../charts/Histogram';
+import { NormalProbPlot } from '../charts/NormalProbPlot';
 
 export function Capability({ T }: { T: ChartTokens }) {
   const { lsl, usl, tgt, setSpec } = useApp();
@@ -34,9 +35,25 @@ export function Capability({ T }: { T: ChartTokens }) {
   const big2 = [
     { k: 'CPU', v: nf(cap.cpu, 2) },
     { k: 'CPL', v: nf(cap.cpl, 2) },
+    { k: 'Cpm (望目)', v: nf(cap.cpm, 2) },
     { k: 'Z.bench', v: nf(cap.zBench, 2) },
     { k: '西格玛水平', v: nf(cap.sigmaLevel, 2) + 'σ' },
   ];
+
+  // 正态性检验 + 非正态时的 Box-Cox 备选
+  const ad = M.all.length >= 8 ? andersonDarling(M.all) : null;
+  let boxcox: { lambda: number; ppk: number; adAfter: number } | null = null;
+  if (ad && !ad.normal) {
+    const bl = bestLambda(M.all);
+    if (!('error' in bl)) {
+      const tr = transformWithSpec(M.all, lsl, usl, bl.lambda);
+      if (!('error' in tr)) {
+        const tSd = stdev(tr.data, true);
+        const tCap = computeCapability(tr.data, tSd, { lsl: tr.lsl, usl: tr.usl, tgt: (tr.lsl + tr.usl) / 2 });
+        boxcox = { lambda: bl.lambda, ppk: tCap.ppk, adAfter: andersonDarling(tr.data).p };
+      }
+    }
+  }
   const perf = [
     { k: '实测 (观测)', lsl: '—', usl: '—', ppm: Math.round(cap.ppm.observed).toLocaleString() },
     { k: '组内 (潜在)', lsl: Math.round(cap.ppm.within.belowLsl).toLocaleString(), usl: Math.round(cap.ppm.within.aboveUsl).toLocaleString(), ppm: Math.round(cap.ppm.within.total).toLocaleString() },
@@ -125,6 +142,65 @@ export function Capability({ T }: { T: ChartTokens }) {
               ]}
             />
           </Card>
+        </div>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 16 }}>
+        <Card>
+          <div style={{ display: 'flex', alignItems: 'center', padding: '11px 16px', borderBottom: '1px solid #edf0f3' }}>
+            <div style={{ fontWeight: 600, color: '#33404f' }}>正态概率图</div>
+            <div className="mono" style={{ marginLeft: 'auto', fontSize: 11.5, color: '#8a929d' }}>中位秩</div>
+          </div>
+          <div style={{ padding: '12px 16px 6px' }}>
+            <NormalProbPlot T={T} data={M.all} h={300} />
+          </div>
+        </Card>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <Card style={{ padding: 16 }}>
+            <div style={{ display: 'flex', alignItems: 'baseline', marginBottom: 12 }}>
+              <div style={{ fontWeight: 600, color: '#33404f' }}>正态性检验 (Anderson-Darling)</div>
+              {ad && (
+                <div style={{ marginLeft: 'auto' }}>
+                  <Badge bg={ad.normal ? '#e8f4ea' : '#fdecec'} color={ad.normal ? '#2c8a45' : '#c22f2f'}>
+                    {ad.normal ? '正态' : '非正态'}
+                  </Badge>
+                </div>
+              )}
+            </div>
+            {ad ? (
+              <>
+                <KvRows
+                  rows={[
+                    { k: 'A²* 统计量', v: nf(ad.a2star, 3) },
+                    { k: 'P 值', v: ad.p < 0.005 ? '< 0.005' : nf(ad.p, 3) },
+                    { k: '样本量 N', v: String(ad.n) },
+                  ]}
+                />
+                <div style={{ marginTop: 10, fontSize: 11.5, color: '#9aa2ad', lineHeight: 1.55 }}>
+                  {ad.normal
+                    ? 'P ≥ 0.05，无法拒绝正态假设，Cp/Cpk 等指标可直接使用。'
+                    : 'P < 0.05，数据显著偏离正态，建议使用下方 Box-Cox 变换后的能力指标。'}
+                </div>
+              </>
+            ) : (
+              <div style={{ fontSize: 12.5, color: '#9aa2ad' }}>样本量不足（N &lt; 8），无法检验。</div>
+            )}
+          </Card>
+          {boxcox && (
+            <Card style={{ padding: 16, border: '1px solid #f0e0c8' }}>
+              <div style={{ fontWeight: 600, color: '#d98324', marginBottom: 8 }}>非正态能力 · Box-Cox 变换</div>
+              <KvRows
+                rows={[
+                  { k: '最优 λ', v: nf(boxcox.lambda, 1) },
+                  { k: '变换后 AD P 值', v: boxcox.adAfter < 0.005 ? '< 0.005' : nf(boxcox.adAfter, 3) },
+                  { k: '变换后 Ppk', v: nf(boxcox.ppk, 2) },
+                ]}
+              />
+              <div style={{ marginTop: 10, fontSize: 11.5, color: '#9aa2ad', lineHeight: 1.55 }}>
+                数据与规格限经 y = (x^λ − 1)/λ 变换后按整体标准差计算长期能力。
+              </div>
+            </Card>
+          )}
         </div>
       </div>
 

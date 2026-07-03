@@ -2,12 +2,12 @@
  * OC 特性曲线 — 接收概率 Pa vs 批不良率 p，标注 AQL / RQL 点。
  * 从原型 ocCurve() 迁移。
  */
-import { Fragment } from 'react';
+import { memo, Fragment } from 'react';
 import { binomCdf } from '../../core';
 import type { ChartTokens } from '../tokens';
 import { Svg, Ln, Txt } from './primitives';
 
-export function OcCurveChart(cfg: {
+function OcCurveChartImpl(cfg: {
   T: ChartTokens;
   n: number;
   ac: number;
@@ -67,3 +67,5 @@ export function OcCurveChart(cfg: {
     </Svg>
   );
 }
+
+export const OcCurveChart = memo(OcCurveChartImpl);

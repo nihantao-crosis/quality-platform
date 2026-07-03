@@ -4,7 +4,10 @@ import { useApp, type ImportTab, type ExportFmt } from '../../store/appStore';
 import { useData } from '../../store/dataStore';
 import { parseMatrix, type ParsedMatrix } from '../../core';
 import { platform } from '../../platform/adapter';
-import { buildExportPayload } from '../../platform/report';
+import { buildExportJob } from '../../platform/report';
+import { mesStart, mesStop } from '../../platform/mes';
+
+type DataKind = 'var' | 'p' | 'c';
 
 const tabStyle = (a: boolean): React.CSSProperties =>
   a
@@ -34,9 +37,11 @@ const primaryBtn: React.CSSProperties = { padding: '8px 18px', background: '#1f6
 
 function ImportModal() {
   const { importTab, setImportTab, closeModal, goTo, showToast } = useApp();
-  const importMatrix = useData((s) => s.importMatrix);
+  const { importMatrix, importCounts, mesRunning, model } = useData();
   const [pending, setPending] = useState<{ name: string; parsed: ParsedMatrix } | null>(null);
   const [clipText, setClipText] = useState('');
+  const [dataKind, setDataKind] = useState<DataKind>('var');
+  const [pSampleSize, setPSampleSize] = useState(50);
   const tabs: Array<[ImportTab, string]> = [['csv', 'CSV 文件'], ['excel', 'Excel 工作簿'], ['clip', '剪贴板粘贴'], ['mes', 'MES 实时采集']];
 
   const tryParse = (name: string, text: string) => {
@@ -54,12 +59,36 @@ function ImportModal() {
     tryParse(f.name, f.contents);
   };
 
-  const doImport = () => {
-    if (importTab === 'mes') {
+  const applyJob = (name: string, p: ParsedMatrix) => {
+    mesStop(); // 导入新数据前停掉模拟采集
+    if (dataKind === 'var') {
+      importMatrix(name, p.colNames, p.rows, p.textCols);
       goTo('worksheet');
-      showToast('MES 实时采集为演示功能 · 数据集未变更');
-      return;
+      const notes: string[] = [];
+      if (p.skippedRows > 0) notes.push(`跳过 ${p.skippedRows} 行非法值`);
+      if (p.textCols.length > 0) notes.push(`含 ${p.textCols.length} 个分组列（可用于 ANOVA / Gage）`);
+      showToast(`已导入 ${name} · ${p.rows.length} 子组 × ${p.colNames.length} 测量列${notes.length ? ' · ' + notes.join(' · ') : ''}`);
+      return true;
     }
+    // 计数数据：取第一个数值列
+    const counts = p.rows.map((r) => r[0]);
+    if (counts.some((c) => c < 0 || !Number.isInteger(c))) {
+      showToast('导入失败：计数必须为非负整数');
+      return false;
+    }
+    try {
+      importCounts(dataKind, name, counts, pSampleSize);
+    } catch (e) {
+      showToast('导入失败：' + (e as Error).message);
+      return false;
+    }
+    goTo('spc');
+    showToast(`已导入 ${name} · ${counts.length} 个${dataKind === 'p' ? '样本不良数（P 图）' : '单位缺陷数（C 图）'}`);
+    return true;
+  };
+
+  const doImport = () => {
+    if (importTab === 'mes') return; // MES tab 有自己的控制按钮
     let job = pending;
     if (!job && importTab === 'clip' && clipText.trim() !== '') {
       const r = parseMatrix(clipText);
@@ -73,14 +102,39 @@ function ImportModal() {
       showToast(importTab === 'clip' ? '请先粘贴数据' : '请先选择数据文件');
       return;
     }
-    const p = job.parsed;
-    importMatrix(job.name, p.colNames, p.rows);
-    setPending(null);
-    setClipText('');
-    goTo('worksheet');
-    const skipNote = p.skippedRows > 0 ? ` · 跳过 ${p.skippedRows} 行非法值` : '';
-    showToast(`已导入 ${job.name} · ${p.rows.length} 子组 × ${p.colNames.length} 测量列${skipNote}`);
+    if (applyJob(job.name, job.parsed)) {
+      setPending(null);
+      setClipText('');
+    }
   };
+
+  const kindSelector = (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12, fontSize: 12.5, flexWrap: 'wrap' }}>
+      <span style={{ color: '#8a929d', fontWeight: 600, fontSize: 12 }}>数据类型</span>
+      {([['var', '变量数据（子组矩阵）'], ['p', '不良数（P 图）'], ['c', '缺陷数（C 图）']] as Array<[DataKind, string]>).map(([k, l]) => (
+        <label key={k} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, cursor: 'pointer', color: '#3a4350' }}>
+          <input type="radio" checked={dataKind === k} onChange={() => setDataKind(k)} />
+          {l}
+        </label>
+      ))}
+      {dataKind === 'p' && (
+        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: '#5b6472' }}>
+          样本量 n
+          <input
+            type="number"
+            min={1}
+            value={pSampleSize}
+            onChange={(e) => {
+              const v = parseInt(e.target.value);
+              if (!isNaN(v) && v >= 1) setPSampleSize(v);
+            }}
+            className="mono"
+            style={{ width: 64, padding: '3px 6px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12 }}
+          />
+        </label>
+      )}
+    </div>
+  );
   return (
     <ModalFrame width={560} title="导入数据" onClose={closeModal}
       footer={<>
@@ -93,6 +147,7 @@ function ImportModal() {
             <div key={k} style={tabStyle(importTab === k)} onClick={() => setImportTab(k)}>{l}</div>
           ))}
         </div>
+        {(importTab === 'csv' || importTab === 'excel' || importTab === 'clip') && kindSelector}
         {(importTab === 'csv' || importTab === 'excel') && (
           <div style={{ border: '2px dashed #cdd6e0', borderRadius: 8, padding: 34, textAlign: 'center', background: '#f9fbfd' }}>
             {pending ? (
@@ -129,14 +184,43 @@ function ImportModal() {
           />
         )}
         {importTab === 'mes' && (
-          <div style={{ border: '1px solid #eaeef2', borderRadius: 6, overflow: 'hidden' }}>
-            {[['产线 A · CNC-01', '● 在线', '#2c8a45'], ['产线 A · CNC-02', '● 在线', '#2c8a45'], ['产线 B · 三坐标 CMM', '● 采集中', '#e0902a']].map(([n, s, c], i, arr) => (
-              <div key={n} style={{ display: 'flex', justifyContent: 'space-between', padding: '11px 14px', borderBottom: i < arr.length - 1 ? '1px solid #f2f4f6' : undefined, fontSize: 12.5 }}>
-                <span style={{ color: '#3a4350' }}>{n}</span>
-                <span style={{ color: c, fontWeight: 600 }}>{s}</span>
-              </div>
-            ))}
-          </div>
+          <>
+            <div style={{ border: '1px solid #eaeef2', borderRadius: 6, overflow: 'hidden', marginBottom: 14 }}>
+              {[
+                ['产线 A · CNC-01', mesRunning ? '● 采集中' : '● 在线', mesRunning ? '#e0902a' : '#2c8a45'],
+                ['产线 A · CNC-02', '● 在线', '#2c8a45'],
+                ['产线 B · 三坐标 CMM', '● 待机', '#8a929d'],
+              ].map(([n, s, c], i, arr) => (
+                <div key={n} style={{ display: 'flex', justifyContent: 'space-between', padding: '11px 14px', borderBottom: i < arr.length - 1 ? '1px solid #f2f4f6' : undefined, fontSize: 12.5 }}>
+                  <span style={{ color: '#3a4350' }}>{n}</span>
+                  <span style={{ color: c as string, fontWeight: 600 }}>{s}</span>
+                </div>
+              ))}
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              {mesRunning ? (
+                <>
+                  <div
+                    onClick={() => { mesStop(); showToast('MES 采集已停止 · 共 ' + model.k + ' 子组'); }}
+                    style={{ padding: '8px 18px', background: '#c22f2f', color: '#fff', borderRadius: 5, fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}
+                  >
+                    ■ 停止采集
+                  </div>
+                  <span className="mono" style={{ fontSize: 12, color: '#1f6fb2' }}>已采集 {model.k} 子组 · SPC 页实时更新</span>
+                </>
+              ) : (
+                <>
+                  <div
+                    onClick={() => { mesStart(); goTo('spc'); showToast('MES 模拟采集已启动 · 控制图实时更新'); closeModal(); }}
+                    style={{ padding: '8px 18px', background: '#1f6fb2', color: '#fff', borderRadius: 5, fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}
+                  >
+                    ▶ 开始模拟采集
+                  </div>
+                  <span style={{ fontSize: 11.5, color: '#9aa2ad' }}>模拟 CNC-01 每 0.8s 产出一个 n=5 子组（偶发过程漂移），生产版接串口/OPC-UA</span>
+                </>
+              )}
+            </div>
+          </>
         )}
       </div>
     </ModalFrame>
@@ -153,8 +237,8 @@ function ExportModal() {
   ];
   const doExport = async () => {
     const { lsl, tgt, usl } = useApp.getState();
-    const payload = buildExportPayload(exportFmt, useData.getState().model, { lsl, tgt, usl });
-    const dest = await platform.exportReport(exportFmt, payload.defaultName, payload.contents);
+    const job = buildExportJob(exportFmt, useData.getState().model, { lsl, tgt, usl });
+    const dest = await platform.exportFile(job);
     if (dest == null) return; // 用户取消
     showToast(platform.isDesktop ? '报表已保存: ' + dest : '报表已导出: ' + dest);
     closeModal();

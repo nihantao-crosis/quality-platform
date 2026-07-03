@@ -1,12 +1,14 @@
-/** 左侧导航 — 分组导航 + 徽标 + 项目管理器树。 */
+/** 左侧导航 — 分组导航 + 徽标 + 项目管理器（最近数据集可点击加载）。 */
 import { useApp } from '../../store/appStore';
+import { useData } from '../../store/dataStore';
 import { PAGES } from '../pagesMeta';
 import { Icon } from '../icons';
 
 const GROUPS = ['仪表盘', '数据', '分析模块'] as const;
 
 export function SideNav() {
-  const { page, goTo } = useApp();
+  const { page, goTo, showToast } = useApp();
+  const { model, recents, loadRecent } = useData();
 
   return (
     <aside style={{ width: 242, flex: 'none', background: '#fbfcfd', borderRight: '1px solid #dadee4', overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
@@ -44,8 +46,27 @@ export function SideNav() {
         <div style={{ fontSize: 11, letterSpacing: '0.06em', color: '#98a1ac', fontWeight: 600, marginBottom: 8 }}>项目管理器</div>
         <div style={{ fontSize: 12, color: '#5b6472', lineHeight: 1.9 }}>
           <div>📁 质检项目 2026-Q2</div>
-          <div style={{ paddingLeft: 16, color: '#7a828d' }}>工作表 · 质检数据.mtw</div>
-          <div style={{ paddingLeft: 16, color: '#7a828d' }}>分析 · 4 项已保存</div>
+          <div style={{ paddingLeft: 16, color: '#1f6fb2', fontWeight: 500 }}>工作表 · {model.name}</div>
+          {recents.length > 0 && (
+            <>
+              <div style={{ paddingLeft: 16, color: '#98a1ac', fontSize: 11, marginTop: 4 }}>最近数据集</div>
+              {recents.map((r) => (
+                <div
+                  key={r.name}
+                  className="hov-nav"
+                  title={'导入于 ' + new Date(r.savedAt).toLocaleString('zh-CN')}
+                  onClick={() => {
+                    loadRecent(r.name);
+                    goTo('worksheet');
+                    showToast('已加载数据集 ' + r.name);
+                  }}
+                  style={{ paddingLeft: 16, color: r.name === model.name ? '#1f6fb2' : '#7a828d', cursor: 'pointer', borderRadius: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                >
+                  ↻ {r.name}
+                </div>
+              ))}
+            </>
+          )}
         </div>
       </div>
     </aside>
