@@ -4,13 +4,13 @@ import { useMemo, useState } from 'react';
 import type { CSSProperties } from 'react';
 import {
   nf, anovaGroups, DEFECTS, gageStudyData, GAGE_TOLERANCE,
-  computeGageRR, oneWayAnova, type GageObservation,
+  computeGageRR, oneWayAnova, oneSampleT, twoSampleT, type GageObservation, type TTestResult,
 } from '../../core';
 import { useApp } from '../../store/appStore';
 import { useData } from '../../store/dataStore';
 import type { ChartTokens } from '../tokens';
 import { paretoColors } from '../tokens';
-import { Card, CardHeader, Badge } from '../common';
+import { Card, CardHeader, KvRows, Badge, tabStyle, numInput } from '../common';
 import { ParetoChart, GroupedBars, BoxPlot } from '../charts/misc';
 
 const selStyle: CSSProperties = {
@@ -154,10 +154,147 @@ function GageRRInner({ T }: { T: ChartTokens }) {
   );
 }
 
-// ---------- ANOVA ----------
+// ---------- 假设检验（ANOVA / t 检验） ----------
+type HypoTab = 'anova' | 't1' | 't2';
+
 export function Anova({ T }: { T: ChartTokens }) {
   const name = useData((s) => s.model.name);
-  return <AnovaInner key={name} T={T} />;
+  const [tab, setTab] = useState<HypoTab>('anova');
+  const tabs: Array<[HypoTab, string]> = [['anova', '单因子 ANOVA'], ['t1', '单样本 t'], ['t2', '双样本 t']];
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <Card style={{ padding: '11px 16px', display: 'flex', alignItems: 'center', gap: 14 }}>
+        <span style={{ fontSize: 12, color: '#8a929d', fontWeight: 600 }}>检验方法</span>
+        <div style={{ display: 'flex', gap: 6 }}>
+          {tabs.map(([k, l]) => (
+            <div key={k} style={tabStyle(tab === k)} onClick={() => setTab(k)}>{l}</div>
+          ))}
+        </div>
+      </Card>
+      {tab === 'anova' && <AnovaInner key={name} T={T} />}
+      {tab === 't1' && <OneSampleTPanel key={name} T={T} />}
+      {tab === 't2' && <TwoSampleTPanel key={name} T={T} />}
+    </div>
+  );
+}
+
+/** t 检验结果卡（单/双样本共用） */
+function TTestResultCards({ r, estimateLabel, conclusion }: { r: TTestResult; estimateLabel: string; conclusion: string }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <Card style={{ padding: 16 }}>
+        <div style={{ display: 'flex', alignItems: 'baseline', marginBottom: 10 }}>
+          <div style={{ fontWeight: 600, color: '#33404f' }}>检验结果</div>
+          <div style={{ marginLeft: 'auto' }}>
+            <Badge bg={r.significant ? '#fdecec' : '#e8f4ea'} color={r.significant ? '#c22f2f' : '#2c8a45'}>
+              {r.significant ? '差异显著' : '无显著差异'}
+            </Badge>
+          </div>
+        </div>
+        <KvRows
+          rows={[
+            { k: estimateLabel, v: nf(r.estimate, 4) },
+            { k: 't 统计量', v: nf(r.t, 3) },
+            { k: '自由度 df', v: nf(r.df, 1) },
+            { k: 'P 值（双侧）', v: r.p < 0.001 ? '< 0.001' : nf(r.p, 3) },
+            { k: '95% 置信区间', v: `[${nf(r.ciLow, 4)}, ${nf(r.ciHigh, 4)}]` },
+            { k: '标准误 SE', v: nf(r.se, 5) },
+          ]}
+        />
+      </Card>
+      <Card style={{ padding: '15px 16px' }}>
+        <div style={{ fontWeight: 600, color: '#33404f', marginBottom: 6 }}>结论</div>
+        <div style={{ fontSize: 12.5, color: '#5b6472', lineHeight: 1.6 }}>{conclusion}</div>
+      </Card>
+    </div>
+  );
+}
+
+function OneSampleTPanel({ T }: { T: ChartTokens }) {
+  const { model } = useData();
+  const { tgt } = useApp();
+  const [col, setCol] = useState(0);
+  const [mu0, setMu0] = useState(tgt);
+  const xs = model.subs.map((s) => s.vals[col]);
+  const r = oneSampleT(xs, mu0);
+  const conclusion = r.significant
+    ? `P ${r.p < 0.001 ? '< 0.001' : '= ' + nf(r.p, 3)} < 0.05，「${model.colNames[col]}」的均值 ${nf(r.estimate, 4)} 与目标 ${nf(mu0, 4)} 存在显著差异,过程中心可能偏移,建议调整。`
+    : `P = ${nf(r.p, 3)} ≥ 0.05，无充分证据表明「${model.colNames[col]}」的均值偏离目标 ${nf(mu0, 4)},过程中心可视为对准目标。`;
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: 16 }}>
+      <Card>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '11px 16px', borderBottom: '1px solid #edf0f3', flexWrap: 'wrap' }}>
+          <div style={{ fontWeight: 600, color: '#33404f' }}>单样本 t 检验 · 均值 vs 目标 μ₀</div>
+          <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#5b6472' }}>
+            测量列
+            <select style={selStyle} value={col} onChange={(e) => setCol(+e.target.value)}>
+              {model.colNames.map((n, i) => <option key={n} value={i}>{n}</option>)}
+            </select>
+            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              μ₀
+              <input
+                type="number" step="0.01" value={mu0} style={numInput}
+                onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) setMu0(v); }}
+              />
+            </label>
+          </div>
+        </div>
+        <div style={{ padding: '14px 16px 6px' }}>
+          <BoxPlot T={T} groups={[{ name: model.colNames[col], vals: xs }]} />
+        </div>
+        <div style={{ padding: '0 16px 12px', fontSize: 11.5, color: '#9aa2ad' }}>
+          红点为样本均值 {nf(r.estimate, 4)} · N = {xs.length} · H₀: μ = {nf(mu0, 4)}
+        </div>
+      </Card>
+      <TTestResultCards r={r} estimateLabel="样本均值" conclusion={conclusion} />
+    </div>
+  );
+}
+
+function TwoSampleTPanel({ T }: { T: ChartTokens }) {
+  const { model } = useData();
+  const multi = model.colNames.length >= 2;
+  // 单列数据集时退回演示两组（设备 A vs B）
+  const demo = useMemo(() => anovaGroups(), []);
+  const [colA, setColA] = useState(0);
+  const [colB, setColB] = useState(multi ? 1 : 0);
+  const groups = multi
+    ? [
+        { name: model.colNames[colA], vals: model.subs.map((s) => s.vals[colA]) },
+        { name: model.colNames[colB], vals: model.subs.map((s) => s.vals[colB]) },
+      ]
+    : [demo[0], demo[1]];
+  const r = twoSampleT(groups[0].vals, groups[1].vals);
+  const conclusion = r.significant
+    ? `P ${r.p < 0.001 ? '< 0.001' : '= ' + nf(r.p, 3)} < 0.05，「${groups[0].name}」与「${groups[1].name}」均值差 ${nf(r.estimate, 4)} 显著（Welch 校正）,两组不可视为同一总体。`
+    : `P = ${nf(r.p, 3)} ≥ 0.05，「${groups[0].name}」与「${groups[1].name}」均值无显著差异（Welch 校正）。`;
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: 16 }}>
+      <Card>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '11px 16px', borderBottom: '1px solid #edf0f3', flexWrap: 'wrap' }}>
+          <div style={{ fontWeight: 600, color: '#33404f' }}>双样本 t 检验（Welch,不等方差）</div>
+          {multi ? (
+            <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#5b6472' }}>
+              样本 1
+              <select style={selStyle} value={colA} onChange={(e) => setColA(+e.target.value)}>
+                {model.colNames.map((n, i) => <option key={n} value={i}>{n}</option>)}
+              </select>
+              样本 2
+              <select style={selStyle} value={colB} onChange={(e) => setColB(+e.target.value)}>
+                {model.colNames.map((n, i) => <option key={n} value={i}>{n}</option>)}
+              </select>
+            </div>
+          ) : (
+            <div style={{ marginLeft: 'auto' }}><SourceBadge real={false} /></div>
+          )}
+        </div>
+        <div style={{ padding: '14px 16px 6px' }}>
+          <BoxPlot T={T} groups={groups} />
+        </div>
+      </Card>
+      <TTestResultCards r={r} estimateLabel="均值差 (1−2)" conclusion={conclusion} />
+    </div>
+  );
 }
 
 function AnovaInner({ T }: { T: ChartTokens }) {

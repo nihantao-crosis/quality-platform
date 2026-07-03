@@ -79,8 +79,9 @@ export function textReport(M: VarModel, spec: ReportSpec): string {
 import type { ExportJob } from './adapter';
 import { buildXlsx } from './xlsxExport';
 import { buildHtmlReport } from './htmlReport';
+import { buildDocx, buildPptx, renderReportImages, type ReportImages } from './officeExport';
 
-export function buildExportJob(fmt: ExportFmt, M: VarModel, spec: ReportSpec): ExportJob {
+export async function buildExportJob(fmt: ExportFmt, M: VarModel, spec: ReportSpec): Promise<ExportJob> {
   const stamp = new Date().toISOString().slice(0, 10);
   const base = M.name.replace(/\.[^.]+$/, '');
   if (fmt === 'excel') {
@@ -100,10 +101,23 @@ export function buildExportJob(fmt: ExportFmt, M: VarModel, spec: ReportSpec): E
       text: buildHtmlReport(M, spec),
     };
   }
+  // Office 真渲染：图表位图化失败(无 canvas 环境)时降级为纯表格文档
+  let images: ReportImages = {};
+  try {
+    images = await renderReportImages(M, spec);
+  } catch { /* 降级 */ }
+  if (fmt === 'ppt') {
+    return {
+      defaultName: `质量分析报告_${stamp}`,
+      ext: 'pptx',
+      filterLabel: 'PowerPoint 演示文稿',
+      bytes: await buildPptx(M, spec, images),
+    };
+  }
   return {
     defaultName: `质量分析报告_${stamp}`,
-    ext: 'txt',
-    filterLabel: '文本报告 (生产版接 ' + { ppt: 'PPT', word: 'Word' }[fmt as 'ppt' | 'word'] + ' 渲染器)',
-    text: textReport(M, spec),
+    ext: 'docx',
+    filterLabel: 'Word 文档',
+    bytes: await buildDocx(M, spec, images),
   };
 }

@@ -232,12 +232,12 @@ function ExportModal() {
   const fmts: Array<[ExportFmt, string, string]> = [
     ['pdf', 'PDF 报告', '图文 HTML · 打开后打印即 PDF'],
     ['excel', 'Excel', '真 .xlsx · 数据 + 统计 + 失控点'],
-    ['ppt', 'PowerPoint', '文本报告 (真渲染待接)'],
-    ['word', 'Word', '文本报告 (真渲染待接)'],
+    ['ppt', 'PowerPoint', '真 .pptx · 封面 + 指标 + 图表'],
+    ['word', 'Word', '真 .docx · 图文四节报告'],
   ];
   const doExport = async () => {
     const { lsl, tgt, usl } = useApp.getState();
-    const job = buildExportJob(exportFmt, useData.getState().model, { lsl, tgt, usl });
+    const job = await buildExportJob(exportFmt, useData.getState().model, { lsl, tgt, usl });
     const dest = await platform.exportFile(job);
     if (dest == null) return; // 用户取消
     showToast(platform.isDesktop ? '报表已保存: ' + dest : '报表已导出: ' + dest);

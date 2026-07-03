@@ -29,7 +29,31 @@ type Act = {
   resetData?: boolean;
   print?: boolean;
   checkUpdate?: boolean;
+  downloadCharts?: boolean;
 };
+
+/** 当前页所有 SVG 图表逐张转 PNG 下载 */
+async function downloadPageCharts(toast: (m: string) => void, pageTitle: string) {
+  const { svgElementToPng } = await import('../../platform/svgToPng');
+  const svgs = [...document.querySelectorAll<SVGSVGElement>('main svg')].filter((s) => (s.viewBox.baseVal?.width ?? 0) >= 300);
+  if (svgs.length === 0) {
+    toast('本页没有可下载的图表');
+    return;
+  }
+  toast(`正在导出 ${svgs.length} 张图表…`);
+  for (let i = 0; i < svgs.length; i++) {
+    try {
+      const png = await svgElementToPng(svgs[i], 2);
+      const url = URL.createObjectURL(new Blob([png.slice().buffer as ArrayBuffer], { type: 'image/png' }));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${pageTitle}_图${i + 1}.png`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch { /* 单张失败不阻断 */ }
+  }
+  toast(`已下载 ${svgs.length} 张图表 PNG`);
+}
 interface Item { label?: string; kbd?: string; act?: Act; sep?: boolean }
 
 const nav = (p: Page): Act => ({ page: p });
@@ -88,7 +112,9 @@ const MENUS: { name: string; items: Item[] }[] = [
     { label: '帕累托图', act: nav('pareto') },
     { label: '时间序列图', act: nav('spc') },
     { label: '散点图', act: tst('散点图') },
-    { label: '概率图', act: nav('capability') } ] },
+    { label: '概率图', act: nav('capability') },
+    { sep: true },
+    { label: '下载本页图表 PNG', act: { downloadCharts: true } } ] },
   { name: '编辑器', items: [
     { label: '显示会话窗口', act: tst('会话窗口已显示') },
     { label: '显示项目管理器', act: tst('项目管理器已显示') },
@@ -139,6 +165,10 @@ export function MenuBar({ wsName }: { wsName: string }) {
     } else if (act.checkUpdate) {
       setOpenMenu(null);
       checkForUpdate(showToast);
+    } else if (act.downloadCharts) {
+      setOpenMenu(null);
+      const page = useApp.getState().page;
+      downloadPageCharts(showToast, page);
     } else if (act.toast) showToast(act.toast);
     else setOpenMenu(null);
   };

@@ -1,8 +1,9 @@
-/** 应用外壳 — 菜单栏 → 工具栏 → (左导航 + 主内容) → 状态栏 + 弹窗/Toast。 */
-import { useMemo } from 'react';
+/** 应用外壳 — 菜单栏 → 工具栏 → (左导航 + 主内容) → 状态栏 + 弹窗/Toast + 全局快捷键。 */
+import { useEffect, useMemo } from 'react';
 import { useApp } from './store/appStore';
 import { useData } from './store/dataStore';
 import { computeCapability, computeGageRR, gageStudyData, GAGE_TOLERANCE, nf } from './core';
+import { platform } from './platform/adapter';
 import { chartTokens } from './ui/tokens';
 import { PAGES } from './ui/pagesMeta';
 import { MenuBar } from './ui/shell/MenuBar';
@@ -25,6 +26,33 @@ export default function App() {
   const cur = PAGES.find((p) => p.key === page) ?? PAGES[0];
   const cap = computeCapability(M.all, M.sigmaWithin, { lsl, tgt, usl });
   const gage = useMemo(() => computeGageRR(gageStudyData(), GAGE_TOLERANCE), []);
+
+  // 全局快捷键（菜单栏标注的 Ctrl+S/O/P/N;输入控件聚焦时不劫持）
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey)) return;
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      const s = useApp.getState();
+      const k = e.key.toLowerCase();
+      if (k === 's') {
+        e.preventDefault();
+        s.showToast('项目已保存至 质检项目 2026-Q2');
+      } else if (k === 'o') {
+        e.preventDefault();
+        s.openModal('import');
+      } else if (k === 'p') {
+        e.preventDefault();
+        if (platform.isDesktop) s.showToast('桌面端请使用「导出报表」生成文件后打印');
+        else setTimeout(() => window.print(), 80);
+      } else if (k === 'n') {
+        e.preventDefault();
+        s.showToast('已新建空白工作表');
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
   // 数据相关页面的副标题跟随活动数据集
   const dynSub: Partial<Record<typeof page, string>> = {
