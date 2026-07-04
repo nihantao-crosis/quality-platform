@@ -17,6 +17,14 @@ fn read_text_file(path: String) -> Result<String, String> {
     fs::read_to_string(&path).map_err(|e| e.to_string())
 }
 
+/// 二进制文件读取（.xlsx 导入用，返回 base64）。
+#[tauri::command]
+fn read_binary_file(path: String) -> Result<String, String> {
+    use base64::Engine;
+    let bytes = fs::read(&path).map_err(|e| e.to_string())?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
 /// 二进制文件写入（.xlsx 导出用，前端传 base64）。
 #[tauri::command]
 fn save_binary_file(path: String, data_b64: String) -> Result<(), String> {
@@ -57,6 +65,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             save_text_file,
             read_text_file,
+            read_binary_file,
             save_binary_file
         ])
         .run(tauri::generate_context!())

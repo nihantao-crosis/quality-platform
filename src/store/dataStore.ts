@@ -99,8 +99,20 @@ export function suggestedSpec(model: VarModel): { lsl: number; tgt: number; usl:
   };
 }
 
+const LS_SPECS = 'qp-specs-v1';
+type SpecMap = Record<string, { lsl: number; tgt: number; usl: number }>;
+
+/** 记住某数据集的规格限（Capability 页编辑时写入） */
+export function rememberSpecFor(name: string, spec: { lsl: number; tgt: number; usl: number }) {
+  const map = loadJson<SpecMap>(LS_SPECS) ?? {};
+  map[name] = spec;
+  saveJson(LS_SPECS, map);
+}
+
+/** 切换数据集时恢复其规格限;没有记忆则按 μ±4σ 建议 */
 function suggestSpec(model: VarModel) {
-  useApp.setState({ ...suggestedSpec(model), selSub: null });
+  const saved = (loadJson<SpecMap>(LS_SPECS) ?? {})[model.name];
+  useApp.setState({ ...(saved ?? suggestedSpec(model)), selSub: null });
 }
 
 // ---------- 启动恢复 ----------

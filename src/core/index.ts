@@ -5,6 +5,7 @@ export * from './doe';
 export * from './aql';
 export * from './anova';
 export * from './ttest';
+export * from './regression';
 export * from './gage';
 export * from './model';
 export * from './attr';

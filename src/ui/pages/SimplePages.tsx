@@ -4,8 +4,11 @@ import { useMemo, useState } from 'react';
 import type { CSSProperties } from 'react';
 import {
   nf, anovaGroups, DEFECTS, gageStudyData, GAGE_TOLERANCE,
-  computeGageRR, oneWayAnova, oneSampleT, twoSampleT, type GageObservation, type TTestResult,
+  computeGageRR, oneWayAnova, oneSampleT, twoSampleT, linearRegression,
+  type GageObservation, type TTestResult,
 } from '../../core';
+import { ScatterPlot } from '../charts/ScatterPlot';
+import { Fishbone } from './Fishbone';
 import { useApp } from '../../store/appStore';
 import { useData } from '../../store/dataStore';
 import type { ChartTokens } from '../tokens';
@@ -154,13 +157,12 @@ function GageRRInner({ T }: { T: ChartTokens }) {
   );
 }
 
-// ---------- 假设检验（ANOVA / t 检验） ----------
-type HypoTab = 'anova' | 't1' | 't2';
+// ---------- 假设检验（ANOVA / t 检验 / 回归） ----------
 
 export function Anova({ T }: { T: ChartTokens }) {
   const name = useData((s) => s.model.name);
-  const [tab, setTab] = useState<HypoTab>('anova');
-  const tabs: Array<[HypoTab, string]> = [['anova', '单因子 ANOVA'], ['t1', '单样本 t'], ['t2', '双样本 t']];
+  const { hypoTab: tab, setHypoTab: setTab } = useApp();
+  const tabs: Array<[typeof tab, string]> = [['anova', '单因子 ANOVA'], ['t1', '单样本 t'], ['t2', '双样本 t'], ['reg', '相关与回归']];
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <Card style={{ padding: '11px 16px', display: 'flex', alignItems: 'center', gap: 14 }}>
@@ -174,6 +176,98 @@ export function Anova({ T }: { T: ChartTokens }) {
       {tab === 'anova' && <AnovaInner key={name} T={T} />}
       {tab === 't1' && <OneSampleTPanel key={name} T={T} />}
       {tab === 't2' && <TwoSampleTPanel key={name} T={T} />}
+      {tab === 'reg' && <RegressionPanel key={name} T={T} />}
+    </div>
+  );
+}
+
+function RegressionPanel({ T }: { T: ChartTokens }) {
+  const { model } = useData();
+  const multi = model.colNames.length >= 2;
+  const [colX, setColX] = useState(0);
+  const [colY, setColY] = useState(multi ? 1 : 0);
+  if (!multi) {
+    return (
+      <Card style={{ padding: 20 }}>
+        <div style={{ fontSize: 12.5, color: '#8a929d' }}>
+          当前数据集只有 1 个测量列。相关与回归需要 2 个及以上数值列（X 与 Y）——请导入多列数据或恢复演示数据集。
+        </div>
+      </Card>
+    );
+  }
+  const xs = model.subs.map((s) => s.vals[colX]);
+  const ys = model.subs.map((s) => s.vals[colY]);
+  let reg: ReturnType<typeof linearRegression> | null = null;
+  let err = '';
+  try {
+    reg = colX === colY ? null : linearRegression(xs, ys);
+    if (colX === colY) err = 'X 与 Y 不能是同一列';
+  } catch (e) {
+    err = (e as Error).message;
+  }
+  const sign = reg && reg.intercept >= 0 ? '+' : '−';
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: 16 }}>
+      <Card>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '11px 16px', borderBottom: '1px solid #edf0f3', flexWrap: 'wrap' }}>
+          <div style={{ fontWeight: 600, color: '#33404f' }}>散点图与最小二乘回归</div>
+          <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#5b6472' }}>
+            X
+            <select style={selStyle} value={colX} onChange={(e) => setColX(+e.target.value)}>
+              {model.colNames.map((n, i) => <option key={n} value={i}>{n}</option>)}
+            </select>
+            Y
+            <select style={selStyle} value={colY} onChange={(e) => setColY(+e.target.value)}>
+              {model.colNames.map((n, i) => <option key={n} value={i}>{n}</option>)}
+            </select>
+          </div>
+        </div>
+        {reg ? (
+          <>
+            <div style={{ padding: '14px 16px 6px' }}>
+              <ScatterPlot T={T} xs={xs} ys={ys} slope={reg.slope} intercept={reg.intercept} xLabel={model.colNames[colX]} yLabel={model.colNames[colY]} />
+            </div>
+            <div className="mono" style={{ padding: '0 16px 14px', fontSize: 12.5, color: '#1f6fb2', fontWeight: 600 }}>
+              {model.colNames[colY]} = {nf(reg.intercept, 4)} {sign} {nf(Math.abs(reg.slope), 4)} × {model.colNames[colX]}
+            </div>
+          </>
+        ) : (
+          <div style={{ padding: 20, fontSize: 12.5, color: '#d98324' }}>{err}</div>
+        )}
+      </Card>
+      {reg && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <Card style={{ padding: 16 }}>
+            <div style={{ display: 'flex', alignItems: 'baseline', marginBottom: 10 }}>
+              <div style={{ fontWeight: 600, color: '#33404f' }}>回归统计</div>
+              <div style={{ marginLeft: 'auto' }}>
+                <Badge bg={reg.significant ? '#e7f0f9' : '#f4f6f8'} color={reg.significant ? '#1f6fb2' : '#9aa2ad'}>
+                  {reg.significant ? '斜率显著' : '斜率不显著'}
+                </Badge>
+              </div>
+            </div>
+            <KvRows
+              rows={[
+                { k: '相关系数 r', v: nf(reg.r, 3) },
+                { k: '决定系数 R²', v: nf(reg.r2, 3) },
+                { k: '斜率 b', v: nf(reg.slope, 4) },
+                { k: '截距 a', v: nf(reg.intercept, 4) },
+                { k: '斜率 t / df', v: `${nf(reg.t, 2)} / ${reg.df}` },
+                { k: 'P 值', v: reg.p < 0.001 ? '< 0.001' : nf(reg.p, 3) },
+                { k: '观测数 N', v: String(reg.n) },
+              ]}
+            />
+          </Card>
+          <Card style={{ padding: '15px 16px' }}>
+            <div style={{ fontWeight: 600, color: '#33404f', marginBottom: 6 }}>结论</div>
+            <div style={{ fontSize: 12.5, color: '#5b6472', lineHeight: 1.6 }}>
+              {reg.significant
+                ? `P ${reg.p < 0.001 ? '< 0.001' : '= ' + nf(reg.p, 3)} < 0.05,「${model.colNames[colX]}」对「${model.colNames[colY]}」存在显著线性关系,R² = ${nf(reg.r2, 3)} 表示约 ${Math.round(reg.r2 * 100)}% 的变异可由回归解释。`
+                : `P = ${nf(reg.p, 3)} ≥ 0.05,无充分证据表明「${model.colNames[colX]}」与「${model.colNames[colY]}」存在线性关系（同一过程的重复测量列间通常独立,属预期结果）。`}
+            </div>
+          </Card>
+        </div>
+      )}
     </div>
   );
 }
@@ -404,6 +498,25 @@ function AnovaInner({ T }: { T: ChartTokens }) {
 
 // ---------- 帕累托 ----------
 export function Pareto({ T }: { T: ChartTokens }) {
+  const { paretoView, setParetoView } = useApp();
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <Card style={{ padding: '11px 16px', display: 'flex', alignItems: 'center', gap: 14 }}>
+        <span style={{ fontSize: 12, color: '#8a929d', fontWeight: 600 }}>分析视图</span>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <div style={tabStyle(paretoView === 'pareto')} onClick={() => setParetoView('pareto')}>帕累托图</div>
+          <div style={tabStyle(paretoView === 'fishbone')} onClick={() => setParetoView('fishbone')}>鱼骨图（因果分析）</div>
+        </div>
+        {paretoView === 'fishbone' && (
+          <span style={{ marginLeft: 'auto', fontSize: 11.5, color: '#8a929d' }}>针对帕累托 Top 缺陷做根因分析</span>
+        )}
+      </Card>
+      {paretoView === 'pareto' ? <ParetoInner T={T} /> : <Fishbone T={T} />}
+    </div>
+  );
+}
+
+function ParetoInner({ T }: { T: ChartTokens }) {
   const colors = paretoColors(T);
   const total = DEFECTS.reduce((a, d) => a + d.count, 0);
   const cums = DEFECTS.reduce<number[]>((acc, d) => [...acc, (acc[acc.length - 1] ?? 0) + d.count], []);

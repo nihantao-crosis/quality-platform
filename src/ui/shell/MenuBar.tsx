@@ -30,6 +30,7 @@ type Act = {
   print?: boolean;
   checkUpdate?: boolean;
   downloadCharts?: boolean;
+  hypo?: import('../../store/appStore').HypoTab;
 };
 
 /** 当前页所有 SVG 图表逐张转 PNG 下载 */
@@ -111,7 +112,7 @@ const MENUS: { name: string; items: Item[] }[] = [
     { label: '控制图', act: nav('spc') },
     { label: '帕累托图', act: nav('pareto') },
     { label: '时间序列图', act: nav('spc') },
-    { label: '散点图', act: tst('散点图') },
+    { label: '散点图 / 回归', act: { page: 'anova', hypo: 'reg' } },
     { label: '概率图', act: nav('capability') },
     { sep: true },
     { label: '下载本页图表 PNG', act: { downloadCharts: true } } ] },
@@ -145,6 +146,7 @@ export function MenuBar({ wsName }: { wsName: string }) {
 
   const runCmd = (act?: Act) => {
     if (!act) return setOpenMenu(null);
+    if (act.hypo) useApp.getState().setHypoTab(act.hypo);
     if (act.page) goTo(act.page);
     else if (act.modal) openModal(act.modal);
     else if (act.style) {

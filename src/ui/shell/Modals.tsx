@@ -56,7 +56,18 @@ function ImportModal() {
   const pickFile = async () => {
     const f = await platform.pickImportFile();
     if (!f) return;
-    tryParse(f.name, f.contents);
+    if (f.bytes) {
+      // 真 Excel 工作簿：SheetJS 解析首个 sheet 转 CSV
+      const { xlsxBytesToCsv } = await import('../../platform/xlsxImport');
+      const r = xlsxBytesToCsv(f.bytes);
+      if ('error' in r) {
+        showToast('导入失败：' + r.error);
+        return;
+      }
+      tryParse(`${f.name} · ${r.sheetName}`, r.csv);
+      return;
+    }
+    tryParse(f.name, f.contents ?? '');
   };
 
   const applyJob = (name: string, p: ParsedMatrix) => {
@@ -168,7 +179,7 @@ function ImportModal() {
               <>
                 <div style={{ fontSize: 13.5, color: '#5b6472', fontWeight: 500 }}>点击选择数据文件</div>
                 <div style={{ fontSize: 12, color: '#9aa2ad', marginTop: 6 }}>
-                  {importTab === 'excel' ? '支持 CSV 导出的工作簿（.csv / .txt），首行作为列名' : '支持 .csv / .txt，自动识别分隔符与列名'}
+                  {importTab === 'excel' ? '支持 .xlsx / .xls 工作簿（读取首个工作表，首行作为列名）' : '支持 .csv / .txt，自动识别分隔符与列名'}
                 </div>
                 <div onClick={pickFile} style={{ display: 'inline-block', marginTop: 14, padding: '8px 18px', background: '#1f6fb2', color: '#fff', borderRadius: 5, fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}>选择文件</div>
               </>

@@ -1,6 +1,6 @@
 /** 过程能力分析 ★深度实现 — 可编辑规格限实时重算 + 直方图 + PPM 性能表。 */
 import { useApp } from '../../store/appStore';
-import { useData, suggestedSpec } from '../../store/dataStore';
+import { useData, suggestedSpec, rememberSpecFor } from '../../store/dataStore';
 import { nf, computeCapability, andersonDarling, bestLambda, transformWithSpec, stdev } from '../../core';
 import type { ChartTokens } from '../tokens';
 import { Card, CardHeader, KvRows, numInput, Badge } from '../common';
@@ -8,7 +8,13 @@ import { Histogram } from '../charts/Histogram';
 import { NormalProbPlot } from '../charts/NormalProbPlot';
 
 export function Capability({ T }: { T: ChartTokens }) {
-  const { lsl, usl, tgt, setSpec } = useApp();
+  const { lsl, usl, tgt, setSpec: setSpecRaw } = useApp();
+  // 写规格限时同步记忆到当前数据集（切换数据集/重启后恢复）
+  const setSpec = (patch: Partial<{ lsl: number; usl: number; tgt: number }>) => {
+    setSpecRaw(patch);
+    const s = useApp.getState();
+    rememberSpecFor(M.name, { lsl: s.lsl, tgt: s.tgt, usl: s.usl });
+  };
   const M = useData((s) => s.model);
   const cap = computeCapability(M.all, M.sigmaWithin, { lsl, tgt, usl });
   const good = cap.verdict === 'sufficient';

@@ -14,6 +14,8 @@ export type Modal = 'import' | 'export' | 'calc' | 'about' | null;
 export type ImportTab = 'csv' | 'excel' | 'clip' | 'mes';
 export type ExportFmt = 'pdf' | 'excel' | 'ppt' | 'word';
 export type DoeView = 'main' | 'interact' | 'pareto' | 'cube';
+export type HypoTab = 'anova' | 't1' | 't2' | 'reg';
+export type ParetoView = 'pareto' | 'fishbone';
 export type ChartStyle = '经典' | '现代' | '高对比';
 
 interface AppState {
@@ -25,6 +27,8 @@ interface AppState {
   usl: number;
   tgt: number;
   doeView: DoeView;
+  hypoTab: HypoTab;
+  paretoView: ParetoView;
   aqlLot: number;
   aqlLevel: InspectionLevel;
   aqlAQL: number;
@@ -51,6 +55,8 @@ interface AppState {
   setSelSub(i: number | null): void;
   setSpec(patch: Partial<Pick<AppState, 'lsl' | 'usl' | 'tgt'>>): void;
   setDoeView(v: DoeView): void;
+  setHypoTab(v: HypoTab): void;
+  setParetoView(v: ParetoView): void;
   setAql(patch: Partial<Pick<AppState, 'aqlLot' | 'aqlLevel' | 'aqlAQL'>>): void;
   setImportTab(t: ImportTab): void;
   setExportFmt(f: ExportFmt): void;
@@ -73,6 +79,8 @@ export const useApp = create<AppState>()(persist((set, get) => ({
   usl: 25.1,
   tgt: 25.0,
   doeView: 'main',
+  hypoTab: 'anova',
+  paretoView: 'pareto',
   aqlLot: 120,
   aqlLevel: 'II',
   aqlAQL: 1.0,
@@ -103,6 +111,8 @@ export const useApp = create<AppState>()(persist((set, get) => ({
   setSelSub: (selSub) => set({ selSub }),
   setSpec: (patch) => set(patch),
   setDoeView: (doeView) => set({ doeView }),
+  setHypoTab: (hypoTab) => set({ hypoTab }),
+  setParetoView: (paretoView) => set({ paretoView }),
   setAql: (patch) => set(patch),
   setImportTab: (importTab) => set({ importTab }),
   setExportFmt: (exportFmt) => set({ exportFmt }),
