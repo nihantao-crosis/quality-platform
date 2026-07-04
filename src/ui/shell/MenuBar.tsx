@@ -31,6 +31,7 @@ type Act = {
   checkUpdate?: boolean;
   downloadCharts?: boolean;
   hypo?: import('../../store/appStore').HypoTab;
+  session?: boolean;
 };
 
 /** 当前页所有 SVG 图表逐张转 PNG 下载 */
@@ -117,7 +118,7 @@ const MENUS: { name: string; items: Item[] }[] = [
     { sep: true },
     { label: '下载本页图表 PNG', act: { downloadCharts: true } } ] },
   { name: '编辑器', items: [
-    { label: '显示会话窗口', act: tst('会话窗口已显示') },
+    { label: '显示会话窗口', act: { session: true } },
     { label: '显示项目管理器', act: tst('项目管理器已显示') },
     { label: '列属性…', act: tst('列属性') } ] },
   { name: '工具', items: [
@@ -167,6 +168,9 @@ export function MenuBar({ wsName }: { wsName: string }) {
     } else if (act.checkUpdate) {
       setOpenMenu(null);
       checkForUpdate(showToast);
+    } else if (act.session) {
+      setOpenMenu(null);
+      import('../../store/sessionLog').then((m) => m.useSessionLog.getState().toggle());
     } else if (act.downloadCharts) {
       setOpenMenu(null);
       const page = useApp.getState().page;

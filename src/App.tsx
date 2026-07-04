@@ -11,6 +11,8 @@ import { Toolbar } from './ui/shell/Toolbar';
 import { SideNav } from './ui/shell/SideNav';
 import { StatusBar } from './ui/shell/StatusBar';
 import { Modals, Toast } from './ui/shell/Modals';
+import { SessionPanel } from './ui/shell/SessionPanel';
+import { ErrorBoundary } from './ui/ErrorBoundary';
 import { Dashboard } from './ui/pages/Dashboard';
 import { Worksheet } from './ui/pages/Worksheet';
 import { Spc } from './ui/pages/Spc';
@@ -84,15 +86,17 @@ export default function App() {
           </div>
 
           <div style={{ flex: 1, overflowY: 'auto', padding: '20px 22px 40px' }}>
-            {page === 'dashboard' && <Dashboard T={T} />}
-            {page === 'worksheet' && <Worksheet />}
-            {page === 'spc' && <Spc T={T} />}
-            {page === 'capability' && <Capability T={T} />}
-            {page === 'gagerr' && <GageRR T={T} />}
-            {page === 'anova' && <Anova T={T} />}
-            {page === 'pareto' && <Pareto T={T} />}
-            {page === 'doe' && <Doe T={T} />}
-            {page === 'aql' && <Aql T={T} />}
+            <ErrorBoundary resetKey={page + '|' + M.name}>
+              {page === 'dashboard' && <Dashboard T={T} />}
+              {page === 'worksheet' && <Worksheet />}
+              {page === 'spc' && <Spc T={T} />}
+              {page === 'capability' && <Capability T={T} />}
+              {page === 'gagerr' && <GageRR T={T} />}
+              {page === 'anova' && <Anova T={T} />}
+              {page === 'pareto' && <Pareto T={T} />}
+              {page === 'doe' && <Doe T={T} />}
+              {page === 'aql' && <Aql T={T} />}
+            </ErrorBoundary>
           </div>
         </main>
       </div>
@@ -102,6 +106,7 @@ export default function App() {
 
       <Modals />
       <Toast />
+      <SessionPanel />
       <StatusBar cpk={cap.cpk} gageRR={gage.totalGageRR} wsName={M.name} rows={M.k} cols={wsCols} />
     </div>
   );

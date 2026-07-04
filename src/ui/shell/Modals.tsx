@@ -6,6 +6,7 @@ import { parseMatrix, type ParsedMatrix } from '../../core';
 import { platform } from '../../platform/adapter';
 import { buildExportJob } from '../../platform/report';
 import { mesStart, mesStop } from '../../platform/mes';
+import { sessionLog } from '../../store/sessionLog';
 
 type DataKind = 'var' | 'p' | 'c';
 
@@ -251,6 +252,7 @@ function ExportModal() {
     const job = await buildExportJob(exportFmt, useData.getState().model, { lsl, tgt, usl });
     const dest = await platform.exportFile(job);
     if (dest == null) return; // 用户取消
+    sessionLog(`导出报表 ${dest}`);
     showToast(platform.isDesktop ? '报表已保存: ' + dest : '报表已导出: ' + dest);
     closeModal();
   };

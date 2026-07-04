@@ -264,6 +264,14 @@ export function Spc({ T }: { T: ChartTokens }) {
                 </div>
               </div>
               <KvRows rows={subRows} />
+              {(effType === 'xbar-r' || effType === 'xbar-s' || effType === 'i-mr') && (
+                <div
+                  onClick={() => useApp.getState().goTo('worksheet')}
+                  style={{ marginTop: 10, padding: '6px 0', textAlign: 'center', border: '1px solid #bcd6ee', color: '#1f6fb2', borderRadius: 5, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}
+                >
+                  在工作表中查看此行 →
+                </div>
+              )}
             </div>
           )}
           <Card style={{ padding: '15px 16px' }}>

@@ -13,8 +13,8 @@ export interface HistogramProps {
   mu: number;
   sigmaWithin: number;
   sigmaOverall: number;
-  lsl: number;
-  usl: number;
+  lsl: number | null;
+  usl: number | null;
   tgt: number;
   h?: number;
 }
@@ -27,8 +27,8 @@ function HistogramImpl(p: HistogramProps) {
   const pw = W - m.l - m.r;
   const ph = H - m.t - m.b;
   const data = p.data;
-  let lo = Math.min(p.lsl, ...data);
-  let hi = Math.max(p.usl, ...data);
+  let lo = Math.min(p.lsl ?? Infinity, ...data);
+  let hi = Math.max(p.usl ?? -Infinity, ...data);
   const sp = (hi - lo) * 0.08;
   lo -= sp;
   hi += sp;
@@ -56,7 +56,11 @@ function HistogramImpl(p: HistogramProps) {
     }
     return a.join(' ');
   };
-  const specs: Array<[string, number]> = [['LSL', p.lsl], ['目标', p.tgt], ['USL', p.usl]];
+  const specs: Array<[string, number]> = [
+    ...(p.lsl != null ? ([['LSL', p.lsl]] as Array<[string, number]>) : []),
+    ['目标', p.tgt],
+    ...(p.usl != null ? ([['USL', p.usl]] as Array<[string, number]>) : []),
+  ];
   return (
     <Svg w={W} h={H}>
       <rect x={0} y={0} width={W} height={H} fill={T.bg} />

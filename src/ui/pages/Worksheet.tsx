@@ -1,7 +1,7 @@
 /** 数据工作表 — Excel 式表格（双层 sticky 表头）+ 手工录入编辑 + 数据来源 + 列统计。
  * 演示数据显示原型的 11 列布局；导入数据显示动态测量列 + 均值/极差。
  * 测量单元格双击可编辑（编辑演示集自动转「副本」），支持添加子组与删行。 */
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import type { CSSProperties } from 'react';
 import { useApp } from '../../store/appStore';
 import { useData } from '../../store/dataStore';
@@ -61,8 +61,15 @@ function EditableCell({ value, onCommit }: { value: number; onCommit: (v: number
 }
 
 export function Worksheet() {
-  const { openModal, setImportTab, showToast, spcRules } = useApp();
+  const { openModal, setImportTab, showToast, spcRules, selSub } = useApp();
   const { model: M, updateCell, addSubgroupRow, deleteRow } = useData();
+
+  // SPC 点选联动：进入工作表时滚动到选中子组
+  useEffect(() => {
+    if (selSub != null) {
+      document.getElementById(`ws-row-${selSub}`)?.scrollIntoView({ block: 'center' });
+    }
+  }, [selSub]);
 
   // 均值失控行高亮（与 SPC 主图一致：准则引擎）
   const means = M.subs.map((s) => s.mean);
@@ -113,7 +120,16 @@ export function Worksheet() {
                 const ooc = viol.has(i);
                 // content-visibility: 大数据集时浏览器跳过屏外行渲染（低成本虚拟化）
                 return (
-                  <tr key={s.i} className="ws-row" style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 30px' } as React.CSSProperties}>
+                  <tr
+                    key={s.i}
+                    id={`ws-row-${i}`}
+                    className="ws-row"
+                    style={{
+                      contentVisibility: 'auto',
+                      containIntrinsicSize: 'auto 30px',
+                      ...(selSub === i ? { outline: '2px solid #1f6fb2', outlineOffset: -2 } : {}),
+                    } as React.CSSProperties}
+                  >
                     <td
                       className="ws-rownum"
                       title={M.k > 2 ? '点击 × 删除此行' : undefined}

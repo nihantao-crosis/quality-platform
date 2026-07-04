@@ -1,14 +1,14 @@
 /** 过程能力分析 ★深度实现 — 可编辑规格限实时重算 + 直方图 + PPM 性能表。 */
 import { useApp } from '../../store/appStore';
 import { useData, suggestedSpec, rememberSpecFor } from '../../store/dataStore';
-import { nf, computeCapability, andersonDarling, bestLambda, transformWithSpec, stdev } from '../../core';
+import { nf, fmtCap, computeCapability, andersonDarling, bestLambda, transformWithSpec, stdev } from '../../core';
 import type { ChartTokens } from '../tokens';
 import { Card, CardHeader, KvRows, numInput, Badge } from '../common';
 import { Histogram } from '../charts/Histogram';
 import { NormalProbPlot } from '../charts/NormalProbPlot';
 
 export function Capability({ T }: { T: ChartTokens }) {
-  const { lsl, usl, tgt, setSpec: setSpecRaw } = useApp();
+  const { lsl, usl, tgt, lslOn, uslOn, toggleSide, setSpec: setSpecRaw } = useApp();
   // 写规格限时同步记忆到当前数据集（切换数据集/重启后恢复）
   const setSpec = (patch: Partial<{ lsl: number; usl: number; tgt: number }>) => {
     setSpecRaw(patch);
@@ -16,7 +16,10 @@ export function Capability({ T }: { T: ChartTokens }) {
     rememberSpecFor(M.name, { lsl: s.lsl, tgt: s.tgt, usl: s.usl });
   };
   const M = useData((s) => s.model);
-  const cap = computeCapability(M.all, M.sigmaWithin, { lsl, tgt, usl });
+  // 单侧规格：关闭的一侧传 null
+  const effLsl = lslOn ? lsl : null;
+  const effUsl = uslOn ? usl : null;
+  const cap = computeCapability(M.all, M.sigmaWithin, { lsl: effLsl, tgt, usl: effUsl });
   const good = cap.verdict === 'sufficient';
   const marginal = cap.verdict === 'marginal';
 
@@ -26,30 +29,30 @@ export function Capability({ T }: { T: ChartTokens }) {
       ? { background: '#fcf3e3', color: '#d98324' }
       : { background: '#fdecec', color: '#c22f2f' };
 
-  const inputs: Array<{ label: string; value: number; key: 'lsl' | 'tgt' | 'usl' }> = [
-    { label: 'LSL 下限', value: lsl, key: 'lsl' },
-    { label: '目标 Target', value: tgt, key: 'tgt' },
-    { label: 'USL 上限', value: usl, key: 'usl' },
+  const inputs: Array<{ label: string; value: number; key: 'lsl' | 'tgt' | 'usl'; on: boolean; side?: 'lslOn' | 'uslOn' }> = [
+    { label: 'LSL 下限', value: lsl, key: 'lsl', on: lslOn, side: 'lslOn' },
+    { label: '目标 Target', value: tgt, key: 'tgt', on: true },
+    { label: 'USL 上限', value: usl, key: 'usl', on: uslOn, side: 'uslOn' },
   ];
 
   const big = [
-    { k: 'Cp', v: nf(cap.cp, 2), color: '#1f6fb2' },
+    { k: 'Cp', v: fmtCap(cap.cp), color: '#1f6fb2' },
     { k: 'Cpk', v: nf(cap.cpk, 2), color: good ? '#2c8a45' : marginal ? '#d98324' : '#c22f2f' },
-    { k: 'Pp', v: nf(cap.pp, 2), color: '#1f6fb2' },
+    { k: 'Pp', v: fmtCap(cap.pp), color: '#1f6fb2' },
     { k: 'Ppk', v: nf(cap.ppk, 2), color: '#5b6472' },
   ];
   const big2 = [
-    { k: 'CPU', v: nf(cap.cpu, 2) },
-    { k: 'CPL', v: nf(cap.cpl, 2) },
-    { k: 'Cpm (望目)', v: nf(cap.cpm, 2) },
+    { k: 'CPU', v: fmtCap(cap.cpu) },
+    { k: 'CPL', v: fmtCap(cap.cpl) },
+    { k: 'Cpm (望目)', v: fmtCap(cap.cpm) },
     { k: 'Z.bench', v: nf(cap.zBench, 2) },
     { k: '西格玛水平', v: nf(cap.sigmaLevel, 2) + 'σ' },
   ];
 
-  // 正态性检验 + 非正态时的 Box-Cox 备选
+  // 正态性检验 + 非正态时的 Box-Cox 备选（需双侧规格）
   const ad = M.all.length >= 8 ? andersonDarling(M.all) : null;
   let boxcox: { lambda: number; ppk: number; adAfter: number } | null = null;
-  if (ad && !ad.normal) {
+  if (ad && !ad.normal && lslOn && uslOn) {
     const bl = bestLambda(M.all);
     if (!('error' in bl)) {
       const tr = transformWithSpec(M.all, lsl, usl, bl.lambda);
@@ -62,8 +65,8 @@ export function Capability({ T }: { T: ChartTokens }) {
   }
   const perf = [
     { k: '实测 (观测)', lsl: '—', usl: '—', ppm: Math.round(cap.ppm.observed).toLocaleString() },
-    { k: '组内 (潜在)', lsl: Math.round(cap.ppm.within.belowLsl).toLocaleString(), usl: Math.round(cap.ppm.within.aboveUsl).toLocaleString(), ppm: Math.round(cap.ppm.within.total).toLocaleString() },
-    { k: '整体 (实际)', lsl: Math.round(cap.ppm.overall.belowLsl).toLocaleString(), usl: Math.round(cap.ppm.overall.aboveUsl).toLocaleString(), ppm: Math.round(cap.ppm.overall.total).toLocaleString() },
+    { k: '组内 (潜在)', lsl: cap.ppm.within.belowLsl == null ? '—' : Math.round(cap.ppm.within.belowLsl).toLocaleString(), usl: cap.ppm.within.aboveUsl == null ? '—' : Math.round(cap.ppm.within.aboveUsl).toLocaleString(), ppm: Math.round(cap.ppm.within.total).toLocaleString() },
+    { k: '整体 (实际)', lsl: cap.ppm.overall.belowLsl == null ? '—' : Math.round(cap.ppm.overall.belowLsl).toLocaleString(), usl: cap.ppm.overall.aboveUsl == null ? '—' : Math.round(cap.ppm.overall.aboveUsl).toLocaleString(), ppm: Math.round(cap.ppm.overall.total).toLocaleString() },
   ];
 
   return (
@@ -71,20 +74,34 @@ export function Capability({ T }: { T: ChartTokens }) {
       <Card style={{ padding: '11px 16px', display: 'flex', alignItems: 'center', gap: 18, flexWrap: 'wrap' }}>
         <span style={{ fontSize: 12, color: '#8a929d', fontWeight: 600 }}>规格限 (可编辑，实时重算)</span>
         {inputs.map((i) => (
-          <label key={i.key} style={{ display: 'inline-flex', alignItems: 'center', gap: 7, fontSize: 12.5, color: '#5b6472' }}>
+          <label key={i.key} style={{ display: 'inline-flex', alignItems: 'center', gap: 7, fontSize: 12.5, color: i.on ? '#5b6472' : '#b6bdc6' }}>
+            {i.side && (
+              <input
+                type="checkbox"
+                checked={i.on}
+                title={i.on ? '取消勾选 → 单侧规格（忽略此限）' : '启用此侧规格限'}
+                onChange={() => toggleSide(i.side!)}
+              />
+            )}
             {i.label}
             <input
               type="number"
               step="0.01"
               value={i.value}
+              disabled={!i.on}
               onChange={(e) => {
                 const v = parseFloat(e.target.value);
                 if (!isNaN(v)) setSpec({ [i.key]: v });
               }}
-              style={numInput}
+              style={{ ...numInput, ...(i.on ? {} : { background: '#f4f6f8', color: '#b6bdc6' }) }}
             />
           </label>
         ))}
+        {!(lslOn && uslOn) && (
+          <span style={{ fontSize: 11.5, color: '#d98324', fontWeight: 600 }}>
+            单侧规格：Cpk = {lslOn ? 'CPL' : 'CPU'},双侧指标（Cp/Pp/Cpm）不适用
+          </span>
+        )}
         <div
           onClick={() => setSpec(suggestedSpec(M))}
           title={M.isDemo ? '恢复默认规格 24.90 / 25.00 / 25.10' : '按 μ±4σ 重新建议规格限'}
@@ -101,7 +118,7 @@ export function Capability({ T }: { T: ChartTokens }) {
             <div className="mono" style={{ marginLeft: 'auto', fontSize: 11.5, color: '#8a929d' }}>正态拟合</div>
           </div>
           <div style={{ padding: '12px 16px 6px' }}>
-            <Histogram T={T} data={M.all} mu={M.oMean} sigmaWithin={M.sigmaWithin} sigmaOverall={M.oSd} lsl={lsl} usl={usl} tgt={tgt} h={320} />
+            <Histogram T={T} data={M.all} mu={M.oMean} sigmaWithin={M.sigmaWithin} sigmaOverall={M.oSd} lsl={effLsl} usl={effUsl} tgt={tgt} h={320} />
           </div>
           <div style={{ display: 'flex', gap: 22, padding: '6px 20px 16px', fontSize: 12, color: '#7a828d' }}>
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}><span style={{ width: 22, height: 0, borderTop: `2px solid ${T.curve}` }} />组内</span>
@@ -144,7 +161,7 @@ export function Capability({ T }: { T: ChartTokens }) {
                 { k: '样本量 N', v: String(cap.n) },
                 { k: M.hasSubgroups ? 'σ 组内 (R̄/d₂)' : 'σ 组内 (MR̄/d₂)', v: nf(cap.sigmaWithin, 4) },
                 { k: 'σ 整体', v: nf(cap.sigmaOverall, 4) },
-                { k: '规格 LSL / 目标 / USL', v: nf(lsl, 2) + ' / ' + nf(tgt, 2) + ' / ' + nf(usl, 2) },
+                { k: '规格 LSL / 目标 / USL', v: (lslOn ? nf(lsl, 2) : '—') + ' / ' + nf(tgt, 2) + ' / ' + (uslOn ? nf(usl, 2) : '—') },
               ]}
             />
           </Card>

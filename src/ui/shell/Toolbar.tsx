@@ -1,6 +1,7 @@
 /** 工具栏 — 图标按钮 + 活动变量下拉 + 运行分析。 */
 import { useApp } from '../../store/appStore';
 import { Icon, type IconName } from '../icons';
+import { sessionLog } from '../../store/sessionLog';
 
 const VAR_LIST = ['C1 子组', 'C2 直径 (mm)', 'C7 均值', 'C8 极差'];
 
@@ -48,7 +49,7 @@ export function Toolbar() {
         </div>
       </div>
       <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6 }}>
-        <div className="hov-run" onClick={() => showToast('分析已运行 · 结果已更新')} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '5px 12px', background: '#1f6fb2', color: '#fff', borderRadius: 4, cursor: 'pointer', fontWeight: 600, fontSize: 12.5 }}>
+        <div className="hov-run" onClick={() => { sessionLog('运行分析 · 全部模块重算'); showToast('分析已运行 · 结果已更新'); }} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '5px 12px', background: '#1f6fb2', color: '#fff', borderRadius: 4, cursor: 'pointer', fontWeight: 600, fontSize: 12.5 }}>
           运行分析
         </div>
       </div>

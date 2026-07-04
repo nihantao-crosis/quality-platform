@@ -8,6 +8,7 @@ import {
   type VarModel, type PChartModel, type CChartModel, type TextColumn,
 } from '../core';
 import { useApp } from './appStore';
+import { sessionLog } from './sessionLog';
 
 const LS_DATASET = 'qp-dataset-v1';
 const LS_RECENTS = 'qp-recents-v1';
@@ -187,6 +188,7 @@ export const useData = create<DataState>((set, get) => ({
     saveJson(LS_DATASET, data);
     saveJson(LS_RECENTS, recents);
     suggestSpec(model);
+    sessionLog(`导入变量数据 ${name} · ${rows.length} 子组 × ${colNames.length} 列`);
   },
 
   importCounts: (kind, name, counts, sampleSize = 50) => {
@@ -200,6 +202,7 @@ export const useData = create<DataState>((set, get) => ({
       persistAttr(get().pModel, cModel);
     }
     useApp.setState({ selSub: null, spcType: kind });
+    sessionLog(`导入计数数据 ${name} · ${counts.length} 个${kind === 'p' ? '样本(P图)' : '单位(C图)'}`);
   },
 
   loadRecent: (name) => {
@@ -209,6 +212,7 @@ export const useData = create<DataState>((set, get) => ({
     set({ model, textCols: r.data.textCols ?? [] });
     saveJson(LS_DATASET, r.data);
     suggestSpec(model);
+    sessionLog(`加载最近数据集 ${name}`);
   },
 
   resetDemo: () => {
@@ -219,6 +223,7 @@ export const useData = create<DataState>((set, get) => ({
       localStorage.removeItem(LS_ATTR);
     } catch { /* 非浏览器环境忽略 */ }
     suggestSpec(d.model);
+    sessionLog('恢复演示数据集 质检数据.mtw');
   },
 
   updateCell: (row, col, value) => {

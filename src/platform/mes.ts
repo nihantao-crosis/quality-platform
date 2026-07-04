@@ -3,6 +3,7 @@
  * 生产版本：桌面端换 Rust 串口/OPC-UA 事件流,本模块接口不变。
  */
 import { useData } from '../store/dataStore';
+import { sessionLog } from '../store/sessionLog';
 
 let timer: ReturnType<typeof setInterval> | null = null;
 
@@ -28,6 +29,7 @@ export function mesStart(): void {
   const store = useData.getState();
   store.startMesDataset(N);
   store.setMesRunning(true);
+  sessionLog('MES 模拟采集启动 · n=5,周期 0.8s');
   let shiftLeft = 0; // 漂移剩余子组数
   timer = setInterval(() => {
     const s = useData.getState();
@@ -45,7 +47,12 @@ export function mesStart(): void {
 }
 
 export function mesStop(): void {
-  if (timer) clearInterval(timer);
+  if (!timer) {
+    useData.getState().setMesRunning(false);
+    return;
+  }
+  clearInterval(timer);
   timer = null;
   useData.getState().setMesRunning(false);
+  sessionLog(`MES 采集停止 · 共 ${useData.getState().model.k} 子组`);
 }

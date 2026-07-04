@@ -4,7 +4,7 @@
  */
 import type { ExportFmt } from '../store/appStore';
 import {
-  nf, computeCapability, evalRules, oneWayAnova, computeGageRR,
+  nf, fmtCap, computeCapability, evalRules, oneWayAnova, computeGageRR,
   anovaGroups, gageStudyData, GAGE_TOLERANCE, type VarModel,
 } from '../core';
 
@@ -62,8 +62,8 @@ export function textReport(M: VarModel, spec: ReportSpec): string {
   }
   L.push('');
   L.push('【过程能力】规格 ' + nf(spec.lsl, 2) + ' / ' + nf(spec.tgt, 2) + ' / ' + nf(spec.usl, 2));
-  L.push(`  Cp ${nf(cap.cp, 2)} · Cpk ${nf(cap.cpk, 2)} · Pp ${nf(cap.pp, 2)} · Ppk ${nf(cap.ppk, 2)}`);
-  L.push(`  CPU ${nf(cap.cpu, 2)} · CPL ${nf(cap.cpl, 2)} · Z.bench ${nf(cap.zBench, 2)} · 西格玛水平 ${nf(cap.sigmaLevel, 2)}σ`);
+  L.push(`  Cp ${fmtCap(cap.cp)} · Cpk ${nf(cap.cpk, 2)} · Pp ${fmtCap(cap.pp)} · Ppk ${nf(cap.ppk, 2)}`);
+  L.push(`  CPU ${fmtCap(cap.cpu)} · CPL ${fmtCap(cap.cpl)} · Z.bench ${nf(cap.zBench, 2)} · 西格玛水平 ${nf(cap.sigmaLevel, 2)}σ`);
   L.push(`  PPM 合计（整体）${Math.round(cap.ppm.overall.total).toLocaleString()}`);
   L.push(`  判定: ${cap.verdict === 'sufficient' ? '能力充足 (Cpk ≥ 1.33)' : cap.verdict === 'marginal' ? '能力临界 (1.0 ≤ Cpk < 1.33)' : '能力不足 (Cpk < 1.0)'}`);
   L.push('');

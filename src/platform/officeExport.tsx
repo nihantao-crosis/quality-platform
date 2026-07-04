@@ -8,7 +8,7 @@ import {
 } from 'docx';
 import PptxGenJS from 'pptxgenjs';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { nf, computeCapability, evalRules, andersonDarling, type VarModel } from '../core';
+import { nf, fmtCap, computeCapability, evalRules, andersonDarling, type VarModel } from '../core';
 import { chartTokens } from '../ui/tokens';
 import { ControlChart } from '../ui/charts/ControlChart';
 import { Histogram } from '../ui/charts/Histogram';
@@ -63,8 +63,8 @@ export async function renderReportImages(M: VarModel, spec: ReportSpec): Promise
 }
 
 const capPairs = (cap: ReportStats['cap']): Array<[string, string]> => [
-  ['Cp', nf(cap.cp, 2)], ['Cpk', nf(cap.cpk, 2)], ['Pp', nf(cap.pp, 2)], ['Ppk', nf(cap.ppk, 2)],
-  ['Cpm', nf(cap.cpm, 2)], ['CPU', nf(cap.cpu, 2)], ['CPL', nf(cap.cpl, 2)],
+  ['Cp', fmtCap(cap.cp)], ['Cpk', nf(cap.cpk, 2)], ['Pp', fmtCap(cap.pp)], ['Ppk', nf(cap.ppk, 2)],
+  ['Cpm', fmtCap(cap.cpm)], ['CPU', fmtCap(cap.cpu)], ['CPL', fmtCap(cap.cpl)],
   ['Z.bench', nf(cap.zBench, 2)], ['σ 水平', nf(cap.sigmaLevel, 2)],
   ['PPM(整体)', String(Math.round(cap.ppm.overall.total))],
 ];

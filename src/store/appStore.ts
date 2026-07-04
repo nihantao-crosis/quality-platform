@@ -26,6 +26,8 @@ interface AppState {
   lsl: number;
   usl: number;
   tgt: number;
+  lslOn: boolean; // 单侧规格开关（至少一侧开启）
+  uslOn: boolean;
   doeView: DoeView;
   hypoTab: HypoTab;
   paretoView: ParetoView;
@@ -54,6 +56,7 @@ interface AppState {
   toggleRule(r: keyof NelsonRules): void;
   setSelSub(i: number | null): void;
   setSpec(patch: Partial<Pick<AppState, 'lsl' | 'usl' | 'tgt'>>): void;
+  toggleSide(side: 'lslOn' | 'uslOn'): void;
   setDoeView(v: DoeView): void;
   setHypoTab(v: HypoTab): void;
   setParetoView(v: ParetoView): void;
@@ -78,6 +81,8 @@ export const useApp = create<AppState>()(persist((set, get) => ({
   lsl: 24.9,
   usl: 25.1,
   tgt: 25.0,
+  lslOn: true,
+  uslOn: true,
   doeView: 'main',
   hypoTab: 'anova',
   paretoView: 'pareto',
@@ -110,6 +115,12 @@ export const useApp = create<AppState>()(persist((set, get) => ({
   toggleRule: (r) => set((s) => ({ spcRules: { ...s.spcRules, [r]: !s.spcRules[r] } })),
   setSelSub: (selSub) => set({ selSub }),
   setSpec: (patch) => set(patch),
+  toggleSide: (side) => set((s) => {
+    const next = { ...s, [side]: !s[side] };
+    // 至少保留一侧
+    if (!next.lslOn && !next.uslOn) return s;
+    return { [side]: next[side] } as Partial<AppState>;
+  }),
   setDoeView: (doeView) => set({ doeView }),
   setHypoTab: (hypoTab) => set({ hypoTab }),
   setParetoView: (paretoView) => set({ paretoView }),
@@ -130,6 +141,8 @@ export const useApp = create<AppState>()(persist((set, get) => ({
     lsl: s.lsl,
     usl: s.usl,
     tgt: s.tgt,
+    lslOn: s.lslOn,
+    uslOn: s.uslOn,
     aqlLot: s.aqlLot,
     aqlLevel: s.aqlLevel,
     aqlAQL: s.aqlAQL,

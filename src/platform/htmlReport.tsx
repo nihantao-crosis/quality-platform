@@ -4,7 +4,7 @@
  */
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
-  nf, computeCapability, evalRules, andersonDarling, type VarModel,
+  nf, fmtCap, computeCapability, evalRules, andersonDarling, type VarModel,
 } from '../core';
 import { chartTokens } from '../ui/tokens';
 import { ControlChart } from '../ui/charts/ControlChart';
@@ -51,8 +51,8 @@ export function buildHtmlReport(M: VarModel, spec: ReportSpec): string {
   const verdictTxt = cap.verdict === 'sufficient' ? '能力充足' : cap.verdict === 'marginal' ? '能力临界' : '能力不足';
 
   const capRows: Array<[string, string]> = [
-    ['Cp', nf(cap.cp, 2)], ['Cpk', nf(cap.cpk, 2)], ['Pp', nf(cap.pp, 2)], ['Ppk', nf(cap.ppk, 2)],
-    ['Cpm (望目)', nf(cap.cpm, 2)], ['CPU', nf(cap.cpu, 2)], ['CPL', nf(cap.cpl, 2)],
+    ['Cp', fmtCap(cap.cp)], ['Cpk', nf(cap.cpk, 2)], ['Pp', fmtCap(cap.pp)], ['Ppk', nf(cap.ppk, 2)],
+    ['Cpm (望目)', fmtCap(cap.cpm)], ['CPU', fmtCap(cap.cpu)], ['CPL', fmtCap(cap.cpl)],
     ['Z.bench', nf(cap.zBench, 2)], ['西格玛水平', nf(cap.sigmaLevel, 2) + 'σ'],
     ['PPM 合计（整体）', Math.round(cap.ppm.overall.total).toLocaleString()],
   ];
