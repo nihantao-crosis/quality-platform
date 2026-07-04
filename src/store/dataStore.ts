@@ -69,6 +69,9 @@ interface DataState {
   cModel: CChartModel;
   recents: RecentEntry[];
   mesRunning: boolean;
+  /** 编辑历史（撤销/重做,仅覆盖手工编辑） */
+  undoStack: EditSnapshot[];
+  redoStack: EditSnapshot[];
   importMatrix(name: string, colNames: string[], rows: number[][], textCols?: TextColumn[]): void;
   importCounts(kind: 'p' | 'c', name: string, counts: number[], sampleSize?: number): void;
   loadRecent(name: string): void;
@@ -77,6 +80,18 @@ interface DataState {
   updateCell(row: number, col: number, value: number): void;
   addSubgroupRow(): void;
   deleteRow(row: number): void;
+  undoEdit(): boolean;
+  redoEdit(): boolean;
+  /** 新建空白工作表（5 列 × 3 行种子值,手工录入起点） */
+  newWorksheet(): void;
+  /** 当前数据集另存为「xxx (副本)」并激活 */
+  saveAsCopy(): string;
+  /** 列 z-score 标准化 → 新数据集 */
+  standardize(): string | null;
+  /** 生成正态随机数据集 */
+  generateRandom(mu: number, sigma: number, k: number, n: number): string;
+  /** 按测量列排序（文本列同步重排） */
+  sortBy(col: number, asc: boolean): void;
   /** MES 模拟：追加一个子组（首次调用前需 startMesDataset） */
   startMesDataset(n: number): void;
   appendSubgroup(vals: number[]): void;
@@ -154,9 +169,38 @@ function persistAttr(p: PChartModel, c: CChartModel) {
 type SetFn = (partial: Partial<DataState>) => void;
 type GetFn = () => DataState;
 
+interface EditSnapshot {
+  name: string;
+  rows: number[][];
+  textCols: TextColumn[];
+}
+
+const MAX_UNDO = 20;
+
+function snapshotOf(st: DataState): EditSnapshot {
+  return {
+    name: st.model.name,
+    rows: st.model.subs.map((s) => [...s.vals]),
+    textCols: st.textCols.map((c) => ({ ...c, values: [...c.values] })),
+  };
+}
+
+function restoreSnapshot(set: SetFn, snap: EditSnapshot, m: { colNames: string[] }) {
+  const model = computeVarModel(snap.name, m.colNames, snap.rows);
+  set({ model, textCols: snap.textCols });
+  const data: StoredDataset = { name: snap.name, colNames: m.colNames, rows: snap.rows, textCols: snap.textCols, savedAt: new Date().toISOString() };
+  saveJson(LS_DATASET, data);
+}
+
 /** 编辑落库：演示集首次编辑转「质检数据 (副本)」,导入集原名持久化并同步最近列表 */
 function applyEdit(set: SetFn, get: GetFn, rows: number[][], textCols: TextColumn[]) {
-  const m = get().model;
+  const st = get();
+  const m = st.model;
+  // 编辑前快照入撤销栈,清空重做栈
+  set({
+    undoStack: [...st.undoStack.slice(-(MAX_UNDO - 1)), snapshotOf(st)],
+    redoStack: [],
+  });
   const name = m.isDemo ? '质检数据 (副本)' : m.name;
   const model = computeVarModel(name, m.colNames, rows);
   const data: StoredDataset = { name, colNames: m.colNames, rows, textCols, savedAt: new Date().toISOString() };
@@ -176,6 +220,8 @@ export const useData = create<DataState>((set, get) => ({
   cModel: initC,
   recents: loadJson<RecentEntry[]>(LS_RECENTS) ?? [],
   mesRunning: false,
+  undoStack: [],
+  redoStack: [],
 
   importMatrix: (name, colNames, rows, textCols = []) => {
     const model = computeVarModel(name, colNames, rows);
@@ -256,6 +302,96 @@ export const useData = create<DataState>((set, get) => ({
     });
     applyEdit(set, get, rows, textCols);
     useApp.setState({ selSub: null });
+  },
+
+  undoEdit: () => {
+    const st = get();
+    const snap = st.undoStack[st.undoStack.length - 1];
+    if (!snap) return false;
+    set({
+      undoStack: st.undoStack.slice(0, -1),
+      redoStack: [...st.redoStack.slice(-(MAX_UNDO - 1)), snapshotOf(st)],
+    });
+    restoreSnapshot(set, snap, st.model);
+    sessionLog('撤销编辑');
+    return true;
+  },
+
+  redoEdit: () => {
+    const st = get();
+    const snap = st.redoStack[st.redoStack.length - 1];
+    if (!snap) return false;
+    set({
+      redoStack: st.redoStack.slice(0, -1),
+      undoStack: [...st.undoStack.slice(-(MAX_UNDO - 1)), snapshotOf(st)],
+    });
+    restoreSnapshot(set, snap, st.model);
+    sessionLog('重做编辑');
+    return true;
+  },
+
+  newWorksheet: () => {
+    const stamp = new Date().toLocaleTimeString('zh-CN', { hour12: false }).replace(/:/g, '');
+    const name = `新建工作表_${stamp}`;
+    const colNames = ['测量1', '测量2', '测量3', '测量4', '测量5'];
+    const rows = Array.from({ length: 3 }, () =>
+      Array.from({ length: 5 }, () => Number((10 + (Math.random() - 0.5) * 0.2).toFixed(3))),
+    );
+    get().importMatrix(name, colNames, rows);
+    set({ undoStack: [], redoStack: [] });
+  },
+
+  saveAsCopy: () => {
+    const m = get().model;
+    const base = m.name.replace(/ \(副本\d*\)$/, '');
+    const existing = get().recents.filter((r) => r.name.startsWith(base + ' (副本')).length;
+    const name = `${base} (副本${existing > 0 ? existing + 1 : ''})`;
+    get().importMatrix(name, m.colNames, m.subs.map((s) => [...s.vals]), get().textCols);
+    return name;
+  },
+
+  standardize: () => {
+    const m = get().model;
+    // 各列 z = (x − x̄ⱼ)/sⱼ;列内无变异则拒绝
+    const cols = m.colNames.map((_, j) => m.subs.map((s) => s.vals[j]));
+    const stats = cols.map((v) => {
+      const mu = v.reduce((a, b) => a + b, 0) / v.length;
+      const sd = Math.sqrt(v.reduce((a, b) => a + (b - mu) ** 2, 0) / (v.length - 1));
+      return { mu, sd };
+    });
+    if (stats.some((x) => x.sd === 0)) return null;
+    const rows = m.subs.map((s) => s.vals.map((v, j) => Number(((v - stats[j].mu) / stats[j].sd).toFixed(4))));
+    const name = m.name.replace(/\.[^.]+$/, '') + ' (标准化)';
+    get().importMatrix(name, m.colNames.map((c) => c + '_z'), rows, get().textCols);
+    return name;
+  },
+
+  generateRandom: (mu, sigma, k, n) => {
+    const randn = () => {
+      let u = 0, v = 0;
+      while (u === 0) u = Math.random();
+      while (v === 0) v = Math.random();
+      return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+    };
+    const digits = Math.max(0, Math.min(6, 3 - Math.floor(Math.log10(Math.max(sigma, 1e-9)))));
+    const rows = Array.from({ length: k }, () =>
+      Array.from({ length: n }, () => Number((mu + randn() * sigma).toFixed(digits))),
+    );
+    const name = `随机数据 N(${mu},${sigma})`;
+    get().importMatrix(name, Array.from({ length: n }, (_, i) => `X${i + 1}`), rows);
+    return name;
+  },
+
+  sortBy: (col, asc) => {
+    const m = get().model;
+    if (col < 0 || col >= m.n) return;
+    const idx = m.subs.map((_, i) => i).sort((a, b) =>
+      asc ? m.subs[a].vals[col] - m.subs[b].vals[col] : m.subs[b].vals[col] - m.subs[a].vals[col],
+    );
+    const rows = idx.map((i) => [...m.subs[i].vals]);
+    const textCols = get().textCols.map((c) => ({ ...c, values: idx.map((i) => c.values[i]) }));
+    applyEdit(set, get, rows, textCols);
+    sessionLog(`按「${m.colNames[col]}」${asc ? '升序' : '降序'}排序`);
   },
 
   startMesDataset: (n) => {

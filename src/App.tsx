@@ -49,7 +49,15 @@ export default function App() {
         else setTimeout(() => window.print(), 80);
       } else if (k === 'n') {
         e.preventDefault();
-        s.showToast('已新建空白工作表');
+        useData.getState().newWorksheet();
+        s.goTo('worksheet');
+        s.showToast('已新建空白工作表（双击单元格录入数据）');
+      } else if (k === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        s.showToast(useData.getState().undoEdit() ? '已撤销上一次数据编辑' : '没有可撤销的编辑');
+      } else if (k === 'y' || (k === 'z' && e.shiftKey)) {
+        e.preventDefault();
+        s.showToast(useData.getState().redoEdit() ? '已重做数据编辑' : '没有可重做的编辑');
       }
     };
     window.addEventListener('keydown', onKey);

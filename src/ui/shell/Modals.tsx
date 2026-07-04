@@ -331,6 +331,141 @@ function AboutModal() {
   );
 }
 
+// ---------- 排序 ----------
+function SortModal() {
+  const { closeModal, goTo, showToast } = useApp();
+  const { model, sortBy } = useData();
+  const [col, setCol] = useState(0);
+  const [asc, setAsc] = useState(true);
+  const apply = () => {
+    sortBy(col, asc);
+    closeModal();
+    goTo('worksheet');
+    showToast(`已按「${model.colNames[col]}」${asc ? '升序' : '降序'}排序（可 Ctrl+Z 撤销）`);
+  };
+  const sel: React.CSSProperties = { padding: '6px 9px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12.5, fontFamily: 'IBM Plex Mono,monospace' };
+  return (
+    <ModalFrame width={380} title="按列排序" onClose={closeModal}
+      footer={<>
+        <div onClick={closeModal} style={cancelBtn}>取消</div>
+        <div onClick={apply} style={primaryBtn}>排序</div>
+      </>}>
+      <div style={{ padding: '18px 20px', display: 'flex', flexDirection: 'column', gap: 14, fontSize: 12.5, color: '#5b6472' }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          排序列
+          <select style={sel} value={col} onChange={(e) => setCol(+e.target.value)}>
+            {model.colNames.map((n, i) => <option key={n} value={i}>{n}</option>)}
+          </select>
+        </label>
+        <div style={{ display: 'flex', gap: 16 }}>
+          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 5, cursor: 'pointer' }}>
+            <input type="radio" checked={asc} onChange={() => setAsc(true)} /> 升序
+          </label>
+          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 5, cursor: 'pointer' }}>
+            <input type="radio" checked={!asc} onChange={() => setAsc(false)} /> 降序
+          </label>
+        </div>
+        <div style={{ fontSize: 11.5, color: '#9aa2ad' }}>行整体重排,分组文本列同步;时间序列类分析(SPC)将失去原始顺序,可撤销。</div>
+      </div>
+    </ModalFrame>
+  );
+}
+
+// ---------- 列统计 ----------
+function ColStatsModal() {
+  const { closeModal } = useApp();
+  const { model } = useData();
+  const rows = model.colNames.map((name, j) => {
+    const v = model.subs.map((s) => s.vals[j]);
+    const mu = v.reduce((a, b) => a + b, 0) / v.length;
+    const sd = Math.sqrt(v.reduce((a, b) => a + (b - mu) ** 2, 0) / Math.max(1, v.length - 1));
+    const mn = Math.min(...v);
+    const mx = Math.max(...v);
+    return { name, n: v.length, mu, sd, mn, mx, range: mx - mn };
+  });
+  const td: React.CSSProperties = { padding: '7px 10px', borderTop: '1px solid #f0f2f5', textAlign: 'right', fontFamily: 'IBM Plex Mono,monospace', color: '#2a333f' };
+  return (
+    <ModalFrame width={560} title={`列统计 · ${model.name}`} onClose={closeModal}
+      footer={<div onClick={closeModal} style={primaryBtn}>关闭</div>}>
+      <div style={{ padding: '10px 8px', maxHeight: 320, overflowY: 'auto' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+          <thead>
+            <tr style={{ color: '#98a1ac', textAlign: 'right' }}>
+              <th style={{ padding: '6px 10px', textAlign: 'left', fontWeight: 600 }}>列</th>
+              <th style={{ padding: '6px 10px', fontWeight: 600 }}>N</th>
+              <th style={{ padding: '6px 10px', fontWeight: 600 }}>均值</th>
+              <th style={{ padding: '6px 10px', fontWeight: 600 }}>标准差</th>
+              <th style={{ padding: '6px 10px', fontWeight: 600 }}>最小</th>
+              <th style={{ padding: '6px 10px', fontWeight: 600 }}>最大</th>
+              <th style={{ padding: '6px 10px', fontWeight: 600 }}>极差</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.name}>
+                <td style={{ ...td, textAlign: 'left', fontFamily: 'IBM Plex Sans', color: '#33404f', fontWeight: 500 }}>{r.name}</td>
+                <td style={td}>{r.n}</td>
+                <td style={td}>{r.mu.toFixed(4)}</td>
+                <td style={td}>{r.sd.toFixed(4)}</td>
+                <td style={td}>{r.mn.toFixed(3)}</td>
+                <td style={td}>{r.mx.toFixed(3)}</td>
+                <td style={td}>{r.range.toFixed(3)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </ModalFrame>
+  );
+}
+
+// ---------- 生成随机数据 ----------
+function RandomModal() {
+  const { closeModal, goTo, showToast } = useApp();
+  const generateRandom = useData((s) => s.generateRandom);
+  const [mu, setMu] = useState(25);
+  const [sigma, setSigma] = useState(0.03);
+  const [k, setK] = useState(25);
+  const [n, setN] = useState(5);
+  const apply = () => {
+    if (sigma <= 0 || k < 2 || k > 500 || n < 1 || n > 10) {
+      showToast('参数无效：σ>0,子组数 2–500,子组大小 1–10');
+      return;
+    }
+    const name = generateRandom(mu, sigma, k, n);
+    closeModal();
+    goTo('worksheet');
+    showToast(`已生成 ${name} · ${k} 子组 × ${n}`);
+  };
+  const inp: React.CSSProperties = { width: 90, padding: '6px 9px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12.5, fontFamily: 'IBM Plex Mono,monospace', textAlign: 'right' };
+  const fields: Array<[string, number, (v: number) => void, number]> = [
+    ['均值 μ', mu, setMu, 0.001],
+    ['标准差 σ', sigma, setSigma, 0.001],
+    ['子组数 k', k, setK, 1],
+    ['子组大小 n', n, setN, 1],
+  ];
+  return (
+    <ModalFrame width={380} title="生成正态随机数据" onClose={closeModal}
+      footer={<>
+        <div onClick={closeModal} style={cancelBtn}>取消</div>
+        <div onClick={apply} style={primaryBtn}>生成</div>
+      </>}>
+      <div style={{ padding: '18px 20px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, fontSize: 12.5, color: '#5b6472' }}>
+        {fields.map(([label, val, set, step]) => (
+          <label key={label} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+            {label}
+            <input type="number" step={step} value={val} style={inp}
+              onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) set(v); }} />
+          </label>
+        ))}
+        <div style={{ gridColumn: '1 / -1', fontSize: 11.5, color: '#9aa2ad' }}>
+          生成 X ~ N(μ, σ²) 的 k×n 子组矩阵并设为活动数据集,适合练习控制图与能力分析。
+        </div>
+      </div>
+    </ModalFrame>
+  );
+}
+
 export function Modals() {
   const { modal, closeModal } = useApp();
   if (!modal) return null;
@@ -341,6 +476,9 @@ export function Modals() {
       {modal === 'export' && <ExportModal />}
       {modal === 'calc' && <CalcModal />}
       {modal === 'about' && <AboutModal />}
+      {modal === 'sort' && <SortModal />}
+      {modal === 'colstats' && <ColStatsModal />}
+      {modal === 'random' && <RandomModal />}
     </div>
   );
 }

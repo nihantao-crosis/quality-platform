@@ -1,6 +1,6 @@
 [package]
 name = "quality-platform"
-version = "1.5.0"
+version = "1.6.0"
 description = "质量分析平台 — 类 Minitab 质量管理工具"
 authors = ["Quality Engineering"]
 edition = "2021"

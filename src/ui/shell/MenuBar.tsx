@@ -32,6 +32,11 @@ type Act = {
   downloadCharts?: boolean;
   hypo?: import('../../store/appStore').HypoTab;
   session?: boolean;
+  undo?: boolean;
+  redo?: boolean;
+  newSheet?: boolean;
+  saveAs?: boolean;
+  standardize?: boolean;
 };
 
 /** 当前页所有 SVG 图表逐张转 PNG 下载 */
@@ -64,18 +69,18 @@ const mdl = (m: Exclude<Modal, null>): Act => ({ modal: m });
 
 const MENUS: { name: string; items: Item[] }[] = [
   { name: '文件', items: [
-    { label: '新建工作表', kbd: 'Ctrl+N', act: tst('已新建空白工作表') },
+    { label: '新建工作表', kbd: 'Ctrl+N', act: { newSheet: true } },
     { label: '打开…', kbd: 'Ctrl+O', act: mdl('import') },
     { label: '导入 CSV / Excel…', act: mdl('import') },
     { sep: true },
     { label: '保存', kbd: 'Ctrl+S', act: tst('项目已保存') },
-    { label: '另存为…', act: tst('已另存副本') },
+    { label: '另存为副本', act: { saveAs: true } },
     { sep: true },
     { label: '导出报表…', act: mdl('export') },
     { label: '打印…', kbd: 'Ctrl+P', act: { print: true } } ] },
   { name: '编辑', items: [
-    { label: '撤销', kbd: 'Ctrl+Z', act: tst('已撤销') },
-    { label: '重做', kbd: 'Ctrl+Y', act: tst('已重做') },
+    { label: '撤销编辑', kbd: 'Ctrl+Z', act: { undo: true } },
+    { label: '重做编辑', kbd: 'Ctrl+Y', act: { redo: true } },
     { sep: true },
     { label: '剪切', kbd: 'Ctrl+X', act: tst('已剪切') },
     { label: '复制', kbd: 'Ctrl+C', act: tst('已复制') },
@@ -86,18 +91,18 @@ const MENUS: { name: string; items: Item[] }[] = [
     { label: '导入数据…', act: mdl('import') },
     { label: '堆叠 / 拆分列', act: tst('数据重构') },
     { label: '转置列', act: tst('列已转置') },
-    { label: '排序…', act: tst('已排序') },
+    { label: '排序…', act: mdl('sort') },
     { label: '筛选…', act: tst('筛选器已应用') },
     { sep: true },
     { label: '恢复演示数据集', act: { resetData: true } },
     { label: '查看工作表', act: nav('worksheet') } ] },
   { name: '计算', items: [
     { label: '计算器…', act: mdl('calc') },
-    { label: '列统计…', act: tst('列统计') },
-    { label: '行统计…', act: tst('行统计') },
+    { label: '列统计…', act: mdl('colstats') },
+    { label: '行统计（工作表内展示）', act: { page: 'worksheet', toast: '每行的均值 / 极差已在工作表末列展示' } },
     { sep: true },
-    { label: '标准化', act: tst('已标准化选定列') },
-    { label: '生成随机数据…', act: tst('已生成随机数据') } ] },
+    { label: '标准化（列 z-score）', act: { standardize: true } },
+    { label: '生成随机数据…', act: mdl('random') } ] },
   { name: '统计', items: [
     { label: '控制图 (SPC)', act: nav('spc') },
     { label: '过程能力分析', act: nav('capability') },
@@ -148,7 +153,34 @@ export function MenuBar({ wsName }: { wsName: string }) {
   const runCmd = (act?: Act) => {
     if (!act) return setOpenMenu(null);
     if (act.hypo) useApp.getState().setHypoTab(act.hypo);
-    if (act.page) goTo(act.page);
+    if (act.undo || act.redo) {
+      const ok = act.undo ? useData.getState().undoEdit() : useData.getState().redoEdit();
+      showToast(ok ? (act.undo ? '已撤销上一次数据编辑' : '已重做数据编辑') : (act.undo ? '没有可撤销的编辑' : '没有可重做的编辑'));
+      return;
+    }
+    if (act.newSheet) {
+      useData.getState().newWorksheet();
+      goTo('worksheet');
+      showToast('已新建空白工作表（双击单元格录入数据）');
+      return;
+    }
+    if (act.saveAs) {
+      const name = useData.getState().saveAsCopy();
+      showToast('已另存为 ' + name);
+      return;
+    }
+    if (act.standardize) {
+      const name = useData.getState().standardize();
+      if (name) {
+        goTo('worksheet');
+        showToast('已标准化为新数据集 ' + name);
+      } else showToast('存在无变异列,无法标准化');
+      return;
+    }
+    if (act.page) {
+      goTo(act.page);
+      if (act.toast) showToast(act.toast);
+    }
     else if (act.modal) openModal(act.modal);
     else if (act.style) {
       setChartStyle(act.style);
