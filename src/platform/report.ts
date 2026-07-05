@@ -77,14 +77,16 @@ export function textReport(M: VarModel, spec: ReportSpec): string {
 }
 
 import type { ExportJob } from './adapter';
-import { buildXlsx } from './xlsxExport';
-import { buildHtmlReport } from './htmlReport';
-import { buildDocx, buildPptx, renderReportImages, type ReportImages } from './officeExport';
 
+/**
+ * 导出任务构建。重量级依赖（SheetJS/docx/pptxgenjs/react-dom-server）
+ * 全部动态加载：导出发生时才拉取对应 chunk,主包保持轻量。
+ */
 export async function buildExportJob(fmt: ExportFmt, M: VarModel, spec: ReportSpec): Promise<ExportJob> {
   const stamp = new Date().toISOString().slice(0, 10);
   const base = M.name.replace(/\.[^.]+$/, '');
   if (fmt === 'excel') {
+    const { buildXlsx } = await import('./xlsxExport');
     return {
       defaultName: `${base}_${stamp}`,
       ext: 'xlsx',
@@ -94,6 +96,7 @@ export async function buildExportJob(fmt: ExportFmt, M: VarModel, spec: ReportSp
   }
   if (fmt === 'pdf') {
     // 图文报告：自包含 HTML(内嵌 SVG 图表),浏览器打开后打印即得 PDF
+    const { buildHtmlReport } = await import('./htmlReport');
     return {
       defaultName: `质量分析报告_${stamp}`,
       ext: 'html',
@@ -102,22 +105,23 @@ export async function buildExportJob(fmt: ExportFmt, M: VarModel, spec: ReportSp
     };
   }
   // Office 真渲染：图表位图化失败(无 canvas 环境)时降级为纯表格文档
-  let images: ReportImages = {};
+  const office = await import('./officeExport');
+  let images: Awaited<ReturnType<typeof office.renderReportImages>> = {};
   try {
-    images = await renderReportImages(M, spec);
+    images = await office.renderReportImages(M, spec);
   } catch { /* 降级 */ }
   if (fmt === 'ppt') {
     return {
       defaultName: `质量分析报告_${stamp}`,
       ext: 'pptx',
       filterLabel: 'PowerPoint 演示文稿',
-      bytes: await buildPptx(M, spec, images),
+      bytes: await office.buildPptx(M, spec, images),
     };
   }
   return {
     defaultName: `质量分析报告_${stamp}`,
     ext: 'docx',
     filterLabel: 'Word 文档',
-    bytes: await buildDocx(M, spec, images),
+    bytes: await office.buildDocx(M, spec, images),
   };
 }

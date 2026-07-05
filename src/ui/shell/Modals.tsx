@@ -54,21 +54,38 @@ function ImportModal() {
     setPending({ name, parsed: r });
   };
 
-  const pickFile = async () => {
-    const f = await platform.pickImportFile();
-    if (!f) return;
-    if (f.bytes) {
+  const handlePicked = async (name: string, contents?: string, bytes?: Uint8Array) => {
+    if (bytes) {
       // 真 Excel 工作簿：SheetJS 解析首个 sheet 转 CSV
       const { xlsxBytesToCsv } = await import('../../platform/xlsxImport');
-      const r = xlsxBytesToCsv(f.bytes);
+      const r = xlsxBytesToCsv(bytes);
       if ('error' in r) {
         showToast('导入失败：' + r.error);
         return;
       }
-      tryParse(`${f.name} · ${r.sheetName}`, r.csv);
+      tryParse(`${name} · ${r.sheetName}`, r.csv);
       return;
     }
-    tryParse(f.name, f.contents ?? '');
+    tryParse(name, contents ?? '');
+  };
+
+  const pickFile = async () => {
+    const f = await platform.pickImportFile();
+    if (!f) return;
+    handlePicked(f.name, f.contents, f.bytes);
+  };
+
+  const [dragOver, setDragOver] = useState(false);
+  const onDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    setDragOver(false);
+    const file = e.dataTransfer.files?.[0];
+    if (!file) return;
+    if (/\.(xlsx|xls)$/i.test(file.name)) {
+      handlePicked(file.name, undefined, new Uint8Array(await file.arrayBuffer()));
+    } else {
+      handlePicked(file.name, await file.text());
+    }
   };
 
   const applyJob = (name: string, p: ParsedMatrix) => {
@@ -161,7 +178,17 @@ function ImportModal() {
         </div>
         {(importTab === 'csv' || importTab === 'excel' || importTab === 'clip') && kindSelector}
         {(importTab === 'csv' || importTab === 'excel') && (
-          <div style={{ border: '2px dashed #cdd6e0', borderRadius: 8, padding: 34, textAlign: 'center', background: '#f9fbfd' }}>
+          <div
+            onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={onDrop}
+            style={{
+              border: `2px dashed ${dragOver ? '#1f6fb2' : '#cdd6e0'}`,
+              borderRadius: 8, padding: 34, textAlign: 'center',
+              background: dragOver ? '#eef4fa' : '#f9fbfd',
+              transition: 'background 0.15s, border-color 0.15s',
+            }}
+          >
             {pending ? (
               <>
                 <div style={{ fontSize: 13.5, color: '#2c8a45', fontWeight: 600 }}>✓ {pending.name}</div>
@@ -178,7 +205,7 @@ function ImportModal() {
               </>
             ) : (
               <>
-                <div style={{ fontSize: 13.5, color: '#5b6472', fontWeight: 500 }}>点击选择数据文件</div>
+                <div style={{ fontSize: 13.5, color: '#5b6472', fontWeight: 500 }}>拖拽文件到此处，或点击选择文件</div>
                 <div style={{ fontSize: 12, color: '#9aa2ad', marginTop: 6 }}>
                   {importTab === 'excel' ? '支持 .xlsx / .xls 工作簿（读取首个工作表，首行作为列名）' : '支持 .csv / .txt，自动识别分隔符与列名'}
                 </div>

@@ -1,4 +1,5 @@
 /** 过程能力分析 ★深度实现 — 可编辑规格限实时重算 + 直方图 + PPM 性能表。 */
+import { useState } from 'react';
 import { useApp } from '../../store/appStore';
 import { useData, suggestedSpec, rememberSpecFor } from '../../store/dataStore';
 import { nf, fmtCap, computeCapability, andersonDarling, bestLambda, transformWithSpec, stdev } from '../../core';
@@ -16,6 +17,7 @@ export function Capability({ T }: { T: ChartTokens }) {
     rememberSpecFor(M.name, { lsl: s.lsl, tgt: s.tgt, usl: s.usl });
   };
   const M = useData((s) => s.model);
+  const [bins, setBins] = useState(13);
   // 单侧规格：关闭的一侧传 null
   const effLsl = lslOn ? lsl : null;
   const effUsl = uslOn ? usl : null;
@@ -115,10 +117,17 @@ export function Capability({ T }: { T: ChartTokens }) {
         <Card>
           <div style={{ display: 'flex', alignItems: 'center', padding: '11px 16px', borderBottom: '1px solid #edf0f3' }}>
             <div style={{ fontWeight: 600, color: '#33404f' }}>过程能力直方图 · {M.isDemo ? '直径 (mm)' : M.name}</div>
-            <div className="mono" style={{ marginLeft: 'auto', fontSize: 11.5, color: '#8a929d' }}>正态拟合</div>
+            <label className="mono" style={{ marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 11.5, color: '#8a929d' }}>
+              组数 {bins}
+              <input
+                type="range" min={5} max={40} value={bins}
+                onChange={(e) => setBins(+e.target.value)}
+                style={{ width: 110, accentColor: '#1f6fb2' }}
+              />
+            </label>
           </div>
           <div style={{ padding: '12px 16px 6px' }}>
-            <Histogram T={T} data={M.all} mu={M.oMean} sigmaWithin={M.sigmaWithin} sigmaOverall={M.oSd} lsl={effLsl} usl={effUsl} tgt={tgt} h={320} />
+            <Histogram T={T} data={M.all} mu={M.oMean} sigmaWithin={M.sigmaWithin} sigmaOverall={M.oSd} lsl={effLsl} usl={effUsl} tgt={tgt} h={320} bins={bins} />
           </div>
           <div style={{ display: 'flex', gap: 22, padding: '6px 20px 16px', fontSize: 12, color: '#7a828d' }}>
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}><span style={{ width: 22, height: 0, borderTop: `2px solid ${T.curve}` }} />组内</span>

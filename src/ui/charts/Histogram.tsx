@@ -17,6 +17,7 @@ export interface HistogramProps {
   usl: number | null;
   tgt: number;
   h?: number;
+  bins?: number; // 组数,默认 13(原型值)
 }
 
 function HistogramImpl(p: HistogramProps) {
@@ -32,7 +33,7 @@ function HistogramImpl(p: HistogramProps) {
   const sp = (hi - lo) * 0.08;
   lo -= sp;
   hi += sp;
-  const nb = 13;
+  const nb = Math.max(5, Math.min(40, p.bins ?? 13));
   const bw = (hi - lo) / nb;
   const counts = new Array(nb).fill(0);
   data.forEach((v) => {
