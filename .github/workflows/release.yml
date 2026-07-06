@@ -80,3 +80,22 @@ jobs:
           PY
           cat latest.json
           gh release upload "$TAG" latest.json -R "$REPO" --clobber
+
+  # 单文件便携版:一个 HTML,任意机器浏览器打开即用(零安装零网络)
+  portable:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build:portable
+      - name: Upload portable html
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mv dist-portable/index.html "quality-platform-portable-${GITHUB_REF_NAME#v}.html"
+          gh release upload "$GITHUB_REF_NAME" quality-platform-portable-*.html -R "$GITHUB_REPOSITORY" --clobber

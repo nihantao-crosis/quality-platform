@@ -41,6 +41,7 @@ type Act = {
   stack?: boolean;
   help?: boolean;
   options?: boolean;
+  saveProject?: boolean;
 };
 
 /** 当前页所有 SVG 图表逐张转 PNG 下载 */
@@ -77,7 +78,7 @@ const MENUS: { name: string; items: Item[] }[] = [
     { label: '打开…', kbd: 'Ctrl+O', act: mdl('import') },
     { label: '导入 CSV / Excel…', act: mdl('import') },
     { sep: true },
-    { label: '保存', kbd: 'Ctrl+S', act: tst('项目已保存') },
+    { label: '保存项目文件…', kbd: 'Ctrl+S', act: { saveProject: true } },
     { label: '另存为副本', act: { saveAs: true } },
     { sep: true },
     { label: '导出报表…', act: mdl('export') },
@@ -165,6 +166,15 @@ export function MenuBar({ wsName }: { wsName: string }) {
       useData.getState().newWorksheet();
       goTo('worksheet');
       showToast('已新建空白工作表（双击单元格录入数据）');
+      return;
+    }
+    if (act.saveProject) {
+      setOpenMenu(null);
+      import('../../platform/project').then((m) =>
+        m.exportProject(__APP_VERSION__).then((dest) => {
+          if (dest) showToast('项目已保存: ' + dest);
+        }),
+      );
       return;
     }
     if (act.saveAs) {

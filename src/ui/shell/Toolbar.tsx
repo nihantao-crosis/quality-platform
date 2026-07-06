@@ -11,7 +11,7 @@ export function Toolbar() {
   const btns: Array<{ label: string; icon: IconName; onClick: () => void }> = [
     { label: '打开', icon: 'table', onClick: () => openModal('import') },
     { label: '导入 CSV/Excel', icon: 'grid', onClick: () => openModal('import') },
-    { label: '保存', icon: 'check', onClick: () => showToast('项目已保存至 质检项目 2026-Q2') },
+    { label: '保存', icon: 'check', onClick: () => { import('../../platform/project').then((m) => m.exportProject(__APP_VERSION__).then((dest) => { if (dest) showToast('项目已保存: ' + dest); })); } },
     { label: '图形', icon: 'chart', onClick: () => setOpenMenu('图形') },
     { label: '计算器', icon: 'bars', onClick: () => openModal('calc') },
   ];

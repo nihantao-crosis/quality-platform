@@ -7,6 +7,7 @@ import { platform } from '../../platform/adapter';
 import { buildExportJob } from '../../platform/report';
 import { mesStart, mesStop } from '../../platform/mes';
 import { sessionLog } from '../../store/sessionLog';
+import { isProjectFile, applyProjectJson } from '../../platform/project';
 import { HelpModal } from './HelpModal';
 import { OptionsModal } from './OptionsModal';
 
@@ -74,6 +75,17 @@ function ImportModal() {
   const pickFile = async () => {
     const f = await platform.pickImportFile();
     if (!f) return;
+    if (isProjectFile(f.name)) {
+      const err = applyProjectJson(f.contents ?? '');
+      if (err) {
+        showToast('打开项目失败：' + err);
+        return;
+      }
+      sessionLog('打开项目文件 ' + f.name + ' · 即将重载');
+      showToast('项目已恢复,正在重载…');
+      setTimeout(() => location.reload(), 700);
+      return;
+    }
     handlePicked(f.name, f.contents, f.bytes);
   };
 

@@ -4,6 +4,7 @@ import { useApp } from './store/appStore';
 import { useData } from './store/dataStore';
 import { computeCapability, computeGageRR, gageStudyData, GAGE_TOLERANCE, nf } from './core';
 import { platform } from './platform/adapter';
+import { exportProject } from './platform/project';
 import { chartTokens } from './ui/tokens';
 import { PAGES } from './ui/pagesMeta';
 import { MenuBar } from './ui/shell/MenuBar';
@@ -44,7 +45,9 @@ export default function App() {
       const k = e.key.toLowerCase();
       if (k === 's') {
         e.preventDefault();
-        s.showToast('项目已保存至 质检项目 2026-Q2');
+        exportProject(__APP_VERSION__).then((dest) => {
+          if (dest) s.showToast('项目已保存: ' + dest);
+        });
       } else if (k === 'o') {
         e.preventDefault();
         s.openModal('import');
@@ -94,7 +97,7 @@ export default function App() {
             </div>
             <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
               <div className="hov-act" onClick={() => openModal('export')} style={{ padding: '7px 14px', border: '1px solid #cfd5dd', borderRadius: 5, cursor: 'pointer', fontSize: 12.5, color: '#3a4350', background: '#fff', fontWeight: 500 }}>导出报表</div>
-              <div className="hov-act-primary" onClick={() => showToast('已保存到项目 · 质检项目 2026-Q2')} style={{ padding: '7px 14px', border: '1px solid #1f6fb2', borderRadius: 5, cursor: 'pointer', fontSize: 12.5, color: '#fff', background: '#1f6fb2', fontWeight: 600 }}>保存到项目</div>
+              <div className="hov-act-primary" onClick={() => exportProject(__APP_VERSION__).then((dest) => { if (dest) showToast('项目已保存: ' + dest); })} style={{ padding: '7px 14px', border: '1px solid #1f6fb2', borderRadius: 5, cursor: 'pointer', fontSize: 12.5, color: '#fff', background: '#1f6fb2', fontWeight: 600 }}>保存到项目</div>
             </div>
           </div>
 

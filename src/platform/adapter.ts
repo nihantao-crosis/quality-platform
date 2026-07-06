@@ -61,7 +61,7 @@ const webAdapter: PlatformAdapter = {
     return new Promise((resolve) => {
       const inp = document.createElement('input');
       inp.type = 'file';
-      inp.accept = '.csv,.txt,.xlsx,.xls';
+      inp.accept = '.csv,.txt,.xlsx,.xls,.qproj';
       inp.onchange = async () => {
         const f = inp.files?.[0];
         if (!f) return resolve(null);
@@ -103,7 +103,7 @@ const desktopAdapter: PlatformAdapter = {
     const path = await open({
       title: '导入数据',
       multiple: false,
-      filters: [{ name: '数据文件', extensions: ['csv', 'txt', 'xlsx', 'xls'] }],
+      filters: [{ name: '数据 / 项目文件', extensions: ['csv', 'txt', 'xlsx', 'xls', 'qproj'] }],
     });
     if (!path || Array.isArray(path)) return null;
     const name = path.split(/[\\/]/).pop() ?? path;
