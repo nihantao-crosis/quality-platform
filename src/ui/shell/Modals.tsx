@@ -95,6 +95,17 @@ function ImportModal() {
     setDragOver(false);
     const file = e.dataTransfer.files?.[0];
     if (!file) return;
+    if (isProjectFile(file.name)) {
+      const err = applyProjectJson(await file.text());
+      if (err) {
+        showToast('打开项目失败：' + err);
+        return;
+      }
+      sessionLog('打开项目文件 ' + file.name + ' · 即将重载');
+      showToast('项目已恢复,正在重载…');
+      setTimeout(() => location.reload(), 700);
+      return;
+    }
     if (/\.(xlsx|xls)$/i.test(file.name)) {
       handlePicked(file.name, undefined, new Uint8Array(await file.arrayBuffer()));
     } else {
