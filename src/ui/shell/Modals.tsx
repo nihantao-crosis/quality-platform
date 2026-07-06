@@ -7,6 +7,8 @@ import { platform } from '../../platform/adapter';
 import { buildExportJob } from '../../platform/report';
 import { mesStart, mesStop } from '../../platform/mes';
 import { sessionLog } from '../../store/sessionLog';
+import { HelpModal } from './HelpModal';
+import { OptionsModal } from './OptionsModal';
 
 type DataKind = 'var' | 'p' | 'c';
 
@@ -503,6 +505,8 @@ export function Modals() {
       {modal === 'export' && <ExportModal />}
       {modal === 'calc' && <CalcModal />}
       {modal === 'about' && <AboutModal />}
+      {modal === 'help' && <HelpModal onClose={closeModal} />}
+      {modal === 'options' && <OptionsModal onClose={closeModal} />}
       {modal === 'sort' && <SortModal />}
       {modal === 'colstats' && <ColStatsModal />}
       {modal === 'random' && <RandomModal />}

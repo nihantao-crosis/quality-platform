@@ -13,6 +13,7 @@ export * from './csv';
 export * from './normality';
 export * from './boxcox';
 export * from './advancedSpc';
+export * from './stages';
 export * from './aqlSwitch';
 export * from './sampleData';
 export * from './calculator';

@@ -92,6 +92,12 @@ interface DataState {
   generateRandom(mu: number, sigma: number, k: number, n: number): string;
   /** 按测量列排序（文本列同步重排） */
   sortBy(col: number, asc: boolean): void;
+  /** 从最近列表移除（不影响当前数据集） */
+  removeRecent(name: string): void;
+  /** 转置：k×n → n×k,生成新数据集「xxx (转置)」 */
+  transposeDataset(): void;
+  /** 堆叠：多测量列堆成单列 + 「来源列」分组标签,生成新数据集「xxx (堆叠)」 */
+  stackColumns(): void;
   /** MES 模拟：追加一个子组（首次调用前需 startMesDataset） */
   startMesDataset(n: number): void;
   appendSubgroup(vals: number[]): void;
@@ -392,6 +398,40 @@ export const useData = create<DataState>((set, get) => ({
     const textCols = get().textCols.map((c) => ({ ...c, values: idx.map((i) => c.values[i]) }));
     applyEdit(set, get, rows, textCols);
     sessionLog(`按「${m.colNames[col]}」${asc ? '升序' : '降序'}排序`);
+  },
+
+  removeRecent: (name) => {
+    const recents = get().recents.filter((r) => r.name !== name);
+    set({ recents });
+    saveJson(LS_RECENTS, recents);
+  },
+
+  transposeDataset: () => {
+    const m = get().model;
+    const rows = m.subs.map((s) => s.vals);
+    if (rows.length > 10) {
+      throw new Error(`转置后子组大小为 ${rows.length},超出控制图常数表上限 10`);
+    }
+    const t: number[][] = Array.from({ length: m.n }, (_, j) => rows.map((r) => r[j]));
+    const colNames = rows.map((_, i) => `子组${i + 1}`);
+    const base = m.name.replace(/ \(转置\)$/, '');
+    get().importMatrix(`${base} (转置)`, colNames, t);
+  },
+
+  stackColumns: () => {
+    const m = get().model;
+    if (m.n < 2) throw new Error('单列数据无需堆叠');
+    const rows: number[][] = [];
+    const source: string[] = [];
+    // 按列堆叠：列内行序保持（Minitab Stack 语义）
+    m.colNames.forEach((cn, j) => {
+      m.subs.forEach((s) => {
+        rows.push([s.vals[j]]);
+        source.push(cn);
+      });
+    });
+    const base = m.name.replace(/ \(堆叠\)$/, '');
+    get().importMatrix(`${base} (堆叠)`, ['测量值'], rows, [{ name: '来源列', values: source }]);
   },
 
   startMesDataset: (n) => {

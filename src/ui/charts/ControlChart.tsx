@@ -21,9 +21,15 @@ export interface ControlChartProps {
   sel?: number | null;
   onPoint?: (i: number) => void;
   ptLabel?: (i: number) => string;
-  /** 时变控制限（EWMA）：提供时覆盖水平 UCL/LCL 直线 */
+  /** 时变控制限（EWMA/分阶段）：提供时覆盖水平 UCL/LCL 直线 */
   uclSeries?: number[];
   lclSeries?: number[];
+  /** 分段中心线（分阶段）与段边界(索引)、段标签 */
+  clSeries?: number[];
+  /** series 以阶梯(step)方式渲染——分阶段限值用;EWMA 等连续限值保持平滑 */
+  stepSeries?: boolean;
+  stageBoundaries?: number[];
+  stageLabels?: { at: number; label: string }[];
   /** 第二序列（CUSUM 的 C⁻，用 curve2 色绘制） */
   series2?: number[];
   series2Label?: string;
@@ -41,7 +47,7 @@ function ControlChartImpl(cfg: ControlChartProps) {
   const sigma = (cfg.ucl - cfg.cl) / 3;
   const ys = [
     ...data, cfg.ucl, cfg.lcl, cfg.cl,
-    ...(cfg.uclSeries ?? []), ...(cfg.lclSeries ?? []), ...(cfg.series2 ?? []),
+    ...(cfg.uclSeries ?? []), ...(cfg.lclSeries ?? []), ...(cfg.clSeries ?? []), ...(cfg.series2 ?? []),
   ];
   let ymin = Math.min(...ys);
   let ymax = Math.max(...ys);
@@ -54,6 +60,19 @@ function ControlChartImpl(cfg: ControlChartProps) {
     cfg.violations ??
     new Set(data.map((v, i) => (v > cfg.ucl || v < cfg.lcl ? i : -1)).filter((i) => i >= 0));
   const label = (i: number) => (cfg.ptLabel ? cfg.ptLabel(i) : `点 ${i + 1}`);
+  // 序列折线:step 模式在值跳变处插入垂直拐点(段边界中点)
+  const seriesPts = (series: number[]) => {
+    if (!cfg.stepSeries) return series.map((v, i) => `${X(i)},${Y(v)}`).join(' ');
+    const pts: string[] = [];
+    for (let i = 0; i < series.length; i++) {
+      if (i > 0 && series[i] !== series[i - 1]) {
+        const mid = (X(i) + X(i - 1)) / 2;
+        pts.push(`${mid},${Y(series[i - 1])}`, `${mid},${Y(series[i])}`);
+      }
+      pts.push(`${X(i)},${Y(series[i])}`);
+    }
+    return pts.join(' ');
+  };
 
   return (
     <Svg w={W} h={H}>
@@ -80,8 +99,8 @@ function ControlChartImpl(cfg: ControlChartProps) {
         ))}
       {cfg.uclSeries ? (
         <>
-          <polyline points={cfg.uclSeries.map((v, i) => `${X(i)},${Y(v)}`).join(' ')} fill="none" stroke={T.limit} strokeWidth={T.sw} strokeDasharray={T.dash} />
-          <polyline points={(cfg.lclSeries ?? []).map((v, i) => `${X(i)},${Y(v)}`).join(' ')} fill="none" stroke={T.limit} strokeWidth={T.sw} strokeDasharray={T.dash} />
+          <polyline points={seriesPts(cfg.uclSeries)} fill="none" stroke={T.limit} strokeWidth={T.sw} strokeDasharray={T.dash} />
+          <polyline points={seriesPts(cfg.lclSeries ?? [])} fill="none" stroke={T.limit} strokeWidth={T.sw} strokeDasharray={T.dash} />
           <Txt x={m.l + pw + 8} y={Y(cfg.uclSeries[cfg.uclSeries.length - 1])} s={'UCL ' + nf(cfg.uclSeries[cfg.uclSeries.length - 1], dec)} fill={T.limit} size={10} weight={600} />
           {cfg.lclSeries && (
             <Txt x={m.l + pw + 8} y={Y(cfg.lclSeries[cfg.lclSeries.length - 1])} s={'LCL ' + nf(cfg.lclSeries[cfg.lclSeries.length - 1], dec)} fill={T.limit} size={10} weight={600} />
@@ -95,8 +114,23 @@ function ControlChartImpl(cfg: ControlChartProps) {
           <Txt x={m.l + pw + 8} y={Y(cfg.lcl)} s={'LCL ' + nf(cfg.lcl, dec)} fill={T.limit} size={10} weight={600} />
         </>
       )}
-      <Ln x1={m.l} y1={Y(cfg.cl)} x2={m.l + pw} y2={Y(cfg.cl)} stroke={T.center} sw={T.sw} />
-      <Txt x={m.l + pw + 8} y={Y(cfg.cl)} s={(cfg.clLabel || 'CL') + ' ' + nf(cfg.cl, dec)} fill={T.center} size={10} weight={600} />
+      {cfg.clSeries ? (
+        <>
+          <polyline points={seriesPts(cfg.clSeries)} fill="none" stroke={T.center} strokeWidth={T.sw} />
+          <Txt x={m.l + pw + 8} y={Y(cfg.clSeries[cfg.clSeries.length - 1])} s={(cfg.clLabel || 'CL') + ' ' + nf(cfg.clSeries[cfg.clSeries.length - 1], dec)} fill={T.center} size={10} weight={600} />
+        </>
+      ) : (
+        <>
+          <Ln x1={m.l} y1={Y(cfg.cl)} x2={m.l + pw} y2={Y(cfg.cl)} stroke={T.center} sw={T.sw} />
+          <Txt x={m.l + pw + 8} y={Y(cfg.cl)} s={(cfg.clLabel || 'CL') + ' ' + nf(cfg.cl, dec)} fill={T.center} size={10} weight={600} />
+        </>
+      )}
+      {cfg.stageBoundaries?.map((b) => (
+        <Ln key={'sb' + b} x1={(X(b) + X(b - 1)) / 2} y1={m.t} x2={(X(b) + X(b - 1)) / 2} y2={m.t + ph} stroke={T.axis} sw={1.2} dash="6 4" />
+      ))}
+      {cfg.stageLabels?.map((sl) => (
+        <Txt key={'sl' + sl.at} x={X(sl.at)} y={m.t - 12} s={sl.label} fill={T.text} size={10} anchor="middle" weight={700} />
+      ))}
       {cfg.series2 && (
         <>
           <polyline points={cfg.series2.map((v, i) => `${X(i)},${Y(v)}`).join(' ')} fill="none" stroke={T.curve2} strokeWidth={T.sw} />

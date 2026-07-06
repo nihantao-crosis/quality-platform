@@ -37,6 +37,10 @@ type Act = {
   newSheet?: boolean;
   saveAs?: boolean;
   standardize?: boolean;
+  transpose?: boolean;
+  stack?: boolean;
+  help?: boolean;
+  options?: boolean;
 };
 
 /** 当前页所有 SVG 图表逐张转 PNG 下载 */
@@ -89,8 +93,8 @@ const MENUS: { name: string; items: Item[] }[] = [
     { label: '查找 / 替换…', kbd: 'Ctrl+F', act: tst('查找 / 替换') } ] },
   { name: '数据', items: [
     { label: '导入数据…', act: mdl('import') },
-    { label: '堆叠 / 拆分列', act: tst('数据重构') },
-    { label: '转置列', act: tst('列已转置') },
+    { label: '堆叠列（多列 → 单列+来源）', act: { stack: true } },
+    { label: '转置列（行列互换）', act: { transpose: true } },
     { label: '排序…', act: mdl('sort') },
     { label: '筛选…', act: tst('筛选器已应用') },
     { sep: true },
@@ -132,7 +136,7 @@ const MENUS: { name: string; items: Item[] }[] = [
     { label: '图表风格：高对比', act: { style: '高对比' } },
     { label: '显示 / 隐藏网格线', act: { grid: true } },
     { sep: true },
-    { label: '选项…', act: tst('选项') },
+    { label: '选项 / 本地数据…', act: mdl('options') },
     { label: '自定义工具栏…', act: tst('工具栏自定义') },
     { label: '宏 / 脚本…', act: tst('宏管理器') } ] },
   { name: '窗口', items: [
@@ -140,8 +144,7 @@ const MENUS: { name: string; items: Item[] }[] = [
     { label: '数据工作表', act: nav('worksheet') },
     { label: '层叠窗口', act: tst('窗口已层叠') } ] },
   { name: '帮助', items: [
-    { label: '帮助主题', kbd: 'F1', act: tst('帮助中心') },
-    { label: '统计指南', act: tst('统计指南') },
+    { label: '帮助主题 / 统计指南', kbd: 'F1', act: mdl('help') },
     { sep: true },
     { label: '检查更新…', act: { checkUpdate: true } },
     { label: '关于本软件', act: mdl('about') } ] },
@@ -200,6 +203,16 @@ export function MenuBar({ wsName }: { wsName: string }) {
     } else if (act.checkUpdate) {
       setOpenMenu(null);
       checkForUpdate(showToast);
+    } else if (act.transpose || act.stack) {
+      setOpenMenu(null);
+      try {
+        if (act.transpose) useData.getState().transposeDataset();
+        else useData.getState().stackColumns();
+        goTo('worksheet');
+        showToast(act.transpose ? '已生成转置数据集' : '已生成堆叠数据集（含「来源列」分组,可直接做 ANOVA）');
+      } catch (e) {
+        showToast('操作失败：' + (e as Error).message);
+      }
     } else if (act.session) {
       setOpenMenu(null);
       import('../../store/sessionLog').then((m) => m.useSessionLog.getState().toggle());

@@ -8,7 +8,7 @@ const GROUPS = ['仪表盘', '数据', '分析模块'] as const;
 
 export function SideNav() {
   const { page, goTo, showToast } = useApp();
-  const { model, recents, loadRecent } = useData();
+  const { model, recents, loadRecent, removeRecent } = useData();
 
   return (
     <aside style={{ width: 242, flex: 'none', background: '#fbfcfd', borderRight: '1px solid #dadee4', overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
@@ -60,9 +60,21 @@ export function SideNav() {
                     goTo('worksheet');
                     showToast('已加载数据集 ' + r.name);
                   }}
-                  style={{ paddingLeft: 16, color: r.name === model.name ? '#1f6fb2' : '#7a828d', cursor: 'pointer', borderRadius: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                  style={{ paddingLeft: 16, color: r.name === model.name ? '#1f6fb2' : '#7a828d', cursor: 'pointer', borderRadius: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center' }}
                 >
-                  ↻ {r.name}
+                  <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis' }}>↻ {r.name}</span>
+                  <span
+                    className="rc-del"
+                    title="从最近列表移除"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      removeRecent(r.name);
+                      showToast('已从最近列表移除 ' + r.name);
+                    }}
+                    style={{ color: '#c22f2f', fontWeight: 700, padding: '0 6px' }}
+                  >
+                    ×
+                  </span>
                 </div>
               ))}
             </>

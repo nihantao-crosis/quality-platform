@@ -10,7 +10,7 @@ export type Page =
   | 'dashboard' | 'worksheet' | 'spc' | 'capability' | 'gagerr'
   | 'anova' | 'pareto' | 'doe' | 'aql';
 export type SpcType = 'xbar-r' | 'xbar-s' | 'i-mr' | 'ewma' | 'cusum' | 'p' | 'c';
-export type Modal = 'import' | 'export' | 'calc' | 'about' | 'sort' | 'colstats' | 'random' | null;
+export type Modal = 'import' | 'export' | 'calc' | 'about' | 'sort' | 'colstats' | 'random' | 'help' | 'options' | null;
 export type ImportTab = 'csv' | 'excel' | 'clip' | 'mes';
 export type ExportFmt = 'pdf' | 'excel' | 'ppt' | 'word';
 export type DoeView = 'main' | 'interact' | 'pareto' | 'cube';

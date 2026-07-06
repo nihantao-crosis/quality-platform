@@ -32,6 +32,11 @@ export default function App() {
   // 全局快捷键（菜单栏标注的 Ctrl+S/O/P/N;输入控件聚焦时不劫持）
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'F1') {
+        e.preventDefault();
+        useApp.getState().openModal('help');
+        return;
+      }
       if (!(e.metaKey || e.ctrlKey)) return;
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;

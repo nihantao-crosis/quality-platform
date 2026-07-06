@@ -1,11 +1,19 @@
 /** SPC 控制图 ★深度实现 — 七种图型（X̄-R/X̄-S/I-MR/EWMA/CUSUM/P/C），
- * Nelson 判异（Shewhart 图）/ 限值判异（EWMA/CUSUM）/ 点选明细。 */
+ * Nelson 判异（Shewhart 图）/ 限值判异（EWMA/CUSUM）/ 点选明细 /
+ * 分阶段控制限（按分组列分段,Minitab Stages 语义）。 */
+import { useState } from 'react';
+import type { CSSProperties } from 'react';
 import { useApp, type SpcType } from '../../store/appStore';
 import { useData } from '../../store/dataStore';
-import { nf, evalRules, ewmaSeries, cusumSeries } from '../../core';
+import { nf, evalRules, ewmaSeries, cusumSeries, stagedXbar, stagedRange, splitStages } from '../../core';
 import type { ChartTokens } from '../tokens';
 import { Card, KvRows, tabStyle, chipStyle } from '../common';
 import { ControlChart, type ControlChartProps } from '../charts/ControlChart';
+
+const stageSelStyle: CSSProperties = {
+  padding: '4px 8px', border: '1px solid #cfd5dd', borderRadius: 4,
+  fontSize: 12, color: '#2a333f', background: '#fff', fontFamily: 'IBM Plex Mono,monospace',
+};
 
 interface ChartSpec {
   t: string;
@@ -16,9 +24,21 @@ interface ChartSpec {
 
 export function Spc({ T }: { T: ChartTokens }) {
   const { spcType, setSpcType, spcRules, toggleRule, selSub, setSelSub } = useApp();
-  const { model: M, pModel, cModel, mesRunning } = useData();
+  const { model: M, textCols, pModel, cModel, mesRunning } = useData();
 
   const means = M.subs.map((s) => s.mean);
+
+  // 分阶段：选择一个文本列作为阶段变量（仅 X̄-R,需 ≥2 段）
+  const [stageCol, setStageCol] = useState(-1); // -1 = 不分阶段
+  const stageLabels = stageCol >= 0 && stageCol < textCols.length ? textCols[stageCol].values : null;
+  const canStage = M.hasSubgroups && textCols.length > 0;
+  const staged =
+    stageLabels && stageLabels.length === M.k && splitStages(stageLabels).length >= 2 && M.hasSubgroups
+      ? {
+          x: stagedXbar(M.subs.map((s) => s.vals), stageLabels, spcRules),
+          r: stagedRange(M.subs.map((s) => s.vals), stageLabels, spcRules),
+        }
+      : null;
   // EWMA/CUSUM 数据源：子组均值（σ/√n）或单值序列
   const advData = M.hasSubgroups ? means : M.indiv;
   const advMu = M.hasSubgroups ? M.xbarbar : M.indMean;
@@ -31,18 +51,43 @@ export function Spc({ T }: { T: ChartTokens }) {
     charts: ChartSpec[];
     disabled?: boolean;
     shewhart: boolean; // Nelson 准则是否适用
-    coreViol?: Set<number>; // 非 Shewhart 图由 core 直接给出
+    coreViol?: Set<number>; // 由 core 直接给出（EWMA/CUSUM/分阶段）
+    coreList?: { i: number; rule: number; desc: string }[];
   };
 
   const specs: Record<SpcType, SpecDef> = {
     'xbar-r': {
-      sub: `子组大小 n = ${M.n} · 均值-极差`,
+      sub: staged
+        ? `分阶段 · ${staged.x.segments.length} 段（按「${textCols[stageCol]?.name}」）· n = ${M.n}`
+        : `子组大小 n = ${M.n} · 均值-极差`,
       disabled: !M.hasSubgroups,
       shewhart: true,
-      charts: [
-        { t: '均值控制图 (X̄)', main: true, dec: 3, props: { data: means, cl: M.xbarbar, ucl: M.uclX, lcl: M.lclX, clLabel: 'X̄', zones: true, h: 250 } },
-        { t: '极差控制图 (R)', dec: 3, props: { data: M.subs.map((s) => s.range), cl: M.rbar, ucl: M.uclR, lcl: M.lclR, clLabel: 'R̄', h: 210 } },
-      ],
+      coreViol: staged ? staged.x.viol : undefined,
+      coreList: staged ? staged.x.list : undefined,
+      charts: staged
+        ? [
+            {
+              t: `均值控制图 (X̄) · 分阶段`, main: true, dec: 3,
+              props: {
+                data: means, cl: M.xbarbar, ucl: M.uclX, lcl: M.lclX, clLabel: 'X̄', h: 250,
+                clSeries: staged.x.clSeries, uclSeries: staged.x.uclSeries, lclSeries: staged.x.lclSeries,
+                stepSeries: true, stageBoundaries: staged.x.boundaries,
+                stageLabels: staged.x.segments.map((sg) => ({ at: Math.round((sg.start + sg.end) / 2), label: sg.label })),
+              },
+            },
+            {
+              t: '极差控制图 (R) · 分阶段', dec: 3,
+              props: {
+                data: M.subs.map((s) => s.range), cl: M.rbar, ucl: M.uclR, lcl: M.lclR, clLabel: 'R̄', h: 210,
+                clSeries: staged.r.clSeries, uclSeries: staged.r.uclSeries, lclSeries: staged.r.lclSeries,
+                stepSeries: true, stageBoundaries: staged.r.boundaries,
+              },
+            },
+          ]
+        : [
+            { t: '均值控制图 (X̄)', main: true, dec: 3, props: { data: means, cl: M.xbarbar, ucl: M.uclX, lcl: M.lclX, clLabel: 'X̄', zones: true, h: 250 } },
+            { t: '极差控制图 (R)', dec: 3, props: { data: M.subs.map((s) => s.range), cl: M.rbar, ucl: M.uclR, lcl: M.lclR, clLabel: 'R̄', h: 210 } },
+          ],
     },
     'xbar-s': {
       sub: `子组大小 n = ${M.n} · 均值-标准差`,
@@ -99,7 +144,11 @@ export function Spc({ T }: { T: ChartTokens }) {
 
   let viol: Set<number>;
   let violList: { i: number; rule: number; desc: string }[];
-  if (spec.shewhart) {
+  if (spec.coreViol && spec.coreList) {
+    // 分阶段：判异已在段内完成
+    viol = spec.coreViol;
+    violList = spec.coreList;
+  } else if (spec.shewhart) {
     const sig = (main.props.ucl - main.props.cl) / 3;
     const r = evalRules(main.props.data, main.props.cl, sig, spcRules);
     viol = r.viol;
@@ -140,7 +189,13 @@ export function Spc({ T }: { T: ChartTokens }) {
       { k: 'UCL', v: nf(main.props.ucl, main.dec) },
       { k: 'LCL', v: nf(main.props.lcl, main.dec) },
     );
-    if (effType === 'xbar-r') stats.push({ k: 'R̄', v: nf(M.rbar, 3) }, { k: 'σ̂ 组内', v: nf(M.sigmaWithin, 4) }, { k: '子组数', v: String(M.k) });
+    if (effType === 'xbar-r' && staged) {
+      stats.length = 0;
+      staged.x.segments.forEach((sg) => {
+        stats.push({ k: `「${sg.label}」CL·UCL·LCL`, v: `${nf(sg.cl, 3)} / ${nf(sg.ucl, 3)} / ${nf(sg.lcl, 3)}` });
+      });
+      stats.push({ k: '段数', v: String(staged.x.segments.length) }, { k: '子组数', v: String(M.k) });
+    } else if (effType === 'xbar-r') stats.push({ k: 'R̄', v: nf(M.rbar, 3) }, { k: 'σ̂ 组内', v: nf(M.sigmaWithin, 4) }, { k: '子组数', v: String(M.k) });
     else if (effType === 'xbar-s') stats.push({ k: 'S̄', v: nf(M.sbar, 4) }, { k: 'σ̂ (S̄/c₄)', v: nf(M.sbar / M.c4, 4) }, { k: '子组数', v: String(M.k) });
     else if (effType === 'i-mr') stats.push({ k: 'MR̄', v: nf(M.mrbar, 3) }, { k: 'σ̂ (MR̄/d₂)', v: nf(M.iSig, 4) }, { k: '观测数', v: String(M.indiv.length) });
     else if (effType === 'p') stats.push({ k: 'p̄', v: nf(pModel.pbar, 4) }, { k: '样本量 n', v: String(pModel.pN) }, { k: '样本数', v: String(pModel.pprop.length) });
@@ -221,6 +276,19 @@ export function Spc({ T }: { T: ChartTokens }) {
           </>
         ) : (
           <span style={{ fontSize: 12, color: '#9aa2ad' }}>判异：超出控制限（Nelson 准则不适用）</span>
+        )}
+        {canStage && effType === 'xbar-r' && (
+          <>
+            <span style={{ width: 1, height: 22, background: '#e5e9ee' }} />
+            <span style={{ fontSize: 12, color: '#8a929d', fontWeight: 600 }}>分阶段</span>
+            <select style={stageSelStyle} value={stageCol} onChange={(e) => { setStageCol(+e.target.value); setSelSub(null); }}>
+              <option value={-1}>不分阶段</option>
+              {textCols.map((c, i) => <option key={c.name} value={i}>按 {c.name}</option>)}
+            </select>
+            {stageCol >= 0 && !staged && (
+              <span style={{ fontSize: 11.5, color: '#d98324' }}>该列只有 1 个连续段,无法分阶段</span>
+            )}
+          </>
         )}
         {mesRunning && (
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#1f6fb2', fontWeight: 600 }}>
