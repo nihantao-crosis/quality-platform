@@ -2,6 +2,7 @@
 import { useMemo } from 'react';
 import { useApp } from '../../store/appStore';
 import { useData } from '../../store/dataStore';
+import { useAnalyses } from '../../store/analyses';
 import { KvRows } from '../common';
 
 const QP_KEYS: Array<[string, string]> = [
@@ -10,6 +11,7 @@ const QP_KEYS: Array<[string, string]> = [
   ['qp-attr-v1', '计数图数据'],
   ['qp-specs-v1', '规格限记忆'],
   ['qp-fishbone-v1', '鱼骨图'],
+  ['qp-analyses-v1', '已保存分析'],
   ['qp-prefs-v1', '界面偏好'],
 ];
 
@@ -36,6 +38,7 @@ export function OptionsModal({ onClose }: { onClose: () => void }) {
     try {
       QP_KEYS.forEach(([k]) => k !== 'qp-prefs-v1' && localStorage.removeItem(k));
     } catch { /* 忽略 */ }
+    useAnalyses.setState({ saved: [] });
     resetDemo();
     closeModal();
     showToast('本地数据已清除,已恢复演示数据集(界面偏好保留)');

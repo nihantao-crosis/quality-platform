@@ -12,6 +12,7 @@ export const PROJECT_KEYS = [
   'qp-attr-v1',
   'qp-specs-v1',
   'qp-fishbone-v1',
+  'qp-analyses-v1',
   'qp-prefs-v1',
 ] as const;
 

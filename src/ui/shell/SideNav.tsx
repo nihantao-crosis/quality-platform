@@ -1,6 +1,7 @@
 /** 左侧导航 — 分组导航 + 徽标 + 项目管理器（最近数据集可点击加载）。 */
 import { useApp } from '../../store/appStore';
 import { useData } from '../../store/dataStore';
+import { useAnalyses } from '../../store/analyses';
 import { PAGES } from '../pagesMeta';
 import { Icon } from '../icons';
 
@@ -9,6 +10,9 @@ const GROUPS = ['仪表盘', '数据', '分析模块'] as const;
 export function SideNav() {
   const { page, goTo, showToast } = useApp();
   const { model, recents, loadRecent, removeRecent } = useData();
+  const saved = useAnalyses((s) => s.saved);
+  const restore = useAnalyses((s) => s.restore);
+  const removeAnalysis = useAnalyses((s) => s.remove);
 
   return (
     <aside style={{ width: 242, flex: 'none', background: '#fbfcfd', borderRight: '1px solid #dadee4', overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
@@ -79,6 +83,29 @@ export function SideNav() {
               ))}
             </>
           )}
+          <div style={{ paddingLeft: 16, color: '#98a1ac', fontSize: 11, marginTop: 6 }}>
+            分析 · {saved.length} 项已保存
+          </div>
+          {saved.slice(0, 6).map((a) => (
+            <div
+              key={a.id}
+              className="hov-nav rc-row"
+              title={`${a.title} · ${a.metric} · ${a.datasetName}\n点击回看此分析`}
+              onClick={() => restore(a.id)}
+              style={{ paddingLeft: 16, color: '#7a828d', cursor: 'pointer', borderRadius: 4, overflow: 'hidden', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center' }}
+            >
+              <span style={{ width: 6, height: 6, borderRadius: '50%', background: a.statusColor, flex: 'none', marginRight: 6 }} />
+              <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis' }}>{a.title}</span>
+              <span
+                className="rc-del"
+                title="删除此分析记录"
+                onClick={(e) => { e.stopPropagation(); removeAnalysis(a.id); showToast('已删除分析记录 ' + a.title); }}
+                style={{ color: '#c22f2f', fontWeight: 700, padding: '0 6px' }}
+              >
+                ×
+              </span>
+            </div>
+          ))}
         </div>
       </div>
     </aside>

@@ -3,20 +3,19 @@ import { useMemo } from 'react';
 import { useApp } from '../../store/appStore';
 import { useData } from '../../store/dataStore';
 import {
-  nf, DEFECTS, evalRules, computeCapability, oneWayAnova, computeGageRR,
-  anovaGroups, gageStudyData, GAGE_TOLERANCE,
+  nf, DEFECTS, evalRules, computeCapability, oneWayAnova, anovaGroups,
 } from '../../core';
 import type { ChartTokens } from '../tokens';
 import { Card, Badge } from '../common';
 import { ControlChart } from '../charts/ControlChart';
 import { ParetoChart } from '../charts/misc';
+import { useAnalyses } from '../../store/analyses';
 
 export function Dashboard({ T }: { T: ChartTokens }) {
   const { goTo, lsl, usl, tgt } = useApp();
   const M = useData((s) => s.model);
   const cap = computeCapability(M.all, M.sigmaWithin, { lsl, tgt, usl });
   const anova = useMemo(() => oneWayAnova(anovaGroups().map((g) => g.vals)), []);
-  const gage = useMemo(() => computeGageRR(gageStudyData(), GAGE_TOLERANCE), []);
 
   // 告警由 X̄ 图判异实时派生（全部准则开启）
   const means = M.subs.map((s) => s.mean);
@@ -43,14 +42,16 @@ export function Dashboard({ T }: { T: ChartTokens }) {
     { label: '未处理告警', value: String(alerts.length), tag: '', color: alerts.length > 0 ? '#e0902a' : '#2c8a45', sub: alerts.length > 0 ? `${spcAlerts.length} SPC · ${alerts.length - spcAlerts.length} ANOVA` : '过程受控' },
   ];
 
-  const gageOk = gage.verdict === 'acceptable';
-  const recentRuns = [
-    { name: 'X̄-R 控制图', v: M.isDemo ? 'C2 直径' : M.name, metric: `${violations.length} 失控点`, status: violations.length > 0 ? '需关注' : '受控', bg: violations.length > 0 ? '#fdecec' : '#e8f4ea', c: violations.length > 0 ? '#c22f2f' : '#2c8a45', time: '10:24', page: 'spc' as const },
-    { name: '过程能力', v: M.isDemo ? 'C2 直径' : M.name, metric: 'Cpk ' + nf(cap.cpk, 2), status: cpkGood ? '合格' : '预警', bg: cpkGood ? '#e8f4ea' : '#fcf3e3', c: cpkGood ? '#2c8a45' : '#e0902a', time: '10:18', page: 'capability' as const },
-    { name: 'Gage R&R', v: 'C2 直径', metric: nf(gage.totalGageRR, 1) + '%', status: gageOk ? '合格' : '临界', bg: gageOk ? '#e8f4ea' : '#fcf3e3', c: gageOk ? '#2c8a45' : '#e0902a', time: '09:52', page: 'gagerr' as const },
-    { name: '单因子 ANOVA', v: '直径~设备', metric: 'P ' + nf(anova.pValue, 3), status: anova.significant ? '显著' : '不显著', bg: '#e7f0f9', c: '#1f6fb2', time: '09:30', page: 'anova' as const },
-    { name: '帕累托', v: '缺陷类别', metric: 'Top2 = 68%', status: '合格', bg: '#e8f4ea', c: '#2c8a45', time: '昨日', page: 'pareto' as const },
-  ];
+  const saved = useAnalyses((s) => s.saved);
+  const restore = useAnalyses((s) => s.restore);
+  const fmtTime = (t: number) => {
+    const d = new Date(t);
+    const today = new Date();
+    const sameDay = d.toDateString() === today.toDateString();
+    return sameDay
+      ? d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
+      : `${d.getMonth() + 1}/${d.getDate()}`;
+  };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -89,29 +90,40 @@ export function Dashboard({ T }: { T: ChartTokens }) {
 
       <div style={{ display: 'grid', gridTemplateColumns: '1.55fr 1fr', gap: 16 }}>
         <Card>
-          <div style={{ padding: '12px 16px', borderBottom: '1px solid #edf0f3', fontWeight: 600, color: '#33404f', fontSize: 13.5 }}>近期分析记录</div>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
-            <thead>
-              <tr style={{ color: '#98a1ac', textAlign: 'left' }}>
-                <th style={{ padding: '9px 16px', fontWeight: 600 }}>分析</th>
-                <th style={{ padding: '9px 8px', fontWeight: 600 }}>变量</th>
-                <th style={{ padding: '9px 8px', fontWeight: 600 }}>关键指标</th>
-                <th style={{ padding: '9px 8px', fontWeight: 600 }}>状态</th>
-                <th style={{ padding: '9px 16px', fontWeight: 600 }}>时间</th>
-              </tr>
-            </thead>
-            <tbody>
-              {recentRuns.map((r) => (
-                <tr key={r.name} className="hov-row" onClick={() => goTo(r.page)} style={{ borderTop: '1px solid #f0f2f5', cursor: 'pointer' }}>
-                  <td style={{ padding: '9px 16px', color: '#33404f', fontWeight: 500 }}>{r.name}</td>
-                  <td className="mono" style={{ padding: '9px 8px', color: '#5b6472' }}>{r.v}</td>
-                  <td className="mono" style={{ padding: '9px 8px', color: '#5b6472' }}>{r.metric}</td>
-                  <td style={{ padding: '9px 8px' }}><Badge bg={r.bg} color={r.c}>{r.status}</Badge></td>
-                  <td className="mono" style={{ padding: '9px 16px', color: '#9aa2ad' }}>{r.time}</td>
+          <div style={{ padding: '12px 16px', borderBottom: '1px solid #edf0f3', fontWeight: 600, color: '#33404f', fontSize: 13.5, display: 'flex', alignItems: 'center' }}>
+            近期分析记录
+            {saved.length > 0 && <span className="mono" style={{ marginLeft: 8, fontSize: 11, color: '#9aa2ad' }}>{saved.length} 项</span>}
+          </div>
+          {saved.length === 0 ? (
+            <div style={{ padding: '22px 16px', fontSize: 12.5, color: '#9aa2ad', lineHeight: 1.7 }}>
+              暂无已保存的分析。打开任一分析模块（SPC / 过程能力 / ANOVA…）后,点右上角
+              <b style={{ color: '#1f6fb2' }}> 保存到项目 </b>
+              即把该次分析记录在此,点击可随时回看当时的数据集与参数。
+            </div>
+          ) : (
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
+              <thead>
+                <tr style={{ color: '#98a1ac', textAlign: 'left' }}>
+                  <th style={{ padding: '9px 16px', fontWeight: 600 }}>分析</th>
+                  <th style={{ padding: '9px 8px', fontWeight: 600 }}>数据集</th>
+                  <th style={{ padding: '9px 8px', fontWeight: 600 }}>关键指标</th>
+                  <th style={{ padding: '9px 8px', fontWeight: 600 }}>状态</th>
+                  <th style={{ padding: '9px 16px', fontWeight: 600 }}>时间</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {saved.slice(0, 6).map((r) => (
+                  <tr key={r.id} className="hov-row" title="点击回看此分析" onClick={() => restore(r.id)} style={{ borderTop: '1px solid #f0f2f5', cursor: 'pointer' }}>
+                    <td style={{ padding: '9px 16px', color: '#33404f', fontWeight: 500 }}>{r.title}</td>
+                    <td className="mono" style={{ padding: '9px 8px', color: '#5b6472', maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.datasetName}</td>
+                    <td className="mono" style={{ padding: '9px 8px', color: '#5b6472' }}>{r.metric}</td>
+                    <td style={{ padding: '9px 8px' }}><Badge bg={r.statusBg} color={r.statusColor}>{r.status}</Badge></td>
+                    <td className="mono" style={{ padding: '9px 16px', color: '#9aa2ad' }}>{fmtTime(r.createdAt)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </Card>
         <Card>
           <div style={{ padding: '12px 16px', borderBottom: '1px solid #edf0f3', fontWeight: 600, color: '#33404f', fontSize: 13.5, display: 'flex', alignItems: 'center' }}>

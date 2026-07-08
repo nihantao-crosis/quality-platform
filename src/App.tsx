@@ -5,6 +5,7 @@ import { useData } from './store/dataStore';
 import { computeCapability, computeGageRR, gageStudyData, GAGE_TOLERANCE, nf } from './core';
 import { platform } from './platform/adapter';
 import { exportProject } from './platform/project';
+import { useAnalyses } from './store/analyses';
 import { chartTokens } from './ui/tokens';
 import { PAGES } from './ui/pagesMeta';
 import { MenuBar } from './ui/shell/MenuBar';
@@ -97,7 +98,18 @@ export default function App() {
             </div>
             <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
               <div className="hov-act" onClick={() => openModal('export')} style={{ padding: '7px 14px', border: '1px solid #cfd5dd', borderRadius: 5, cursor: 'pointer', fontSize: 12.5, color: '#3a4350', background: '#fff', fontWeight: 500 }}>导出报表</div>
-              <div className="hov-act-primary" onClick={() => exportProject(__APP_VERSION__).then((dest) => { if (dest) showToast('项目已保存: ' + dest); })} style={{ padding: '7px 14px', border: '1px solid #1f6fb2', borderRadius: 5, cursor: 'pointer', fontSize: 12.5, color: '#fff', background: '#1f6fb2', fontWeight: 600 }}>保存到项目</div>
+              <div
+                className="hov-act-primary"
+                title="把当前分析保存为项目中的一条记录（可在仪表盘 / 项目管理器回看）"
+                onClick={() => {
+                  const saved = useAnalyses.getState().saveCurrent();
+                  if (saved) showToast(`已保存分析「${saved.title}」到项目 · ${saved.metric}`);
+                  else showToast('当前页无可保存的分析,请先打开一个分析模块（SPC / 能力 / ANOVA…）');
+                }}
+                style={{ padding: '7px 14px', border: '1px solid #1f6fb2', borderRadius: 5, cursor: 'pointer', fontSize: 12.5, color: '#fff', background: '#1f6fb2', fontWeight: 600 }}
+              >
+                保存到项目
+              </div>
             </div>
           </div>
 
