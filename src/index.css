@@ -24,6 +24,10 @@ body {
 .rc-del { display: none; }
 div:hover > .rc-del { display: inline; }
 
+/* 测量列删除按钮:悬停列头时显示 */
+.col-del { display: none; }
+.col-head:hover .col-del { display: inline; }
+
 /* 打印：只输出主内容区 */
 @media print {
   aside, .no-print { display: none !important; }

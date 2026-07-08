@@ -5,7 +5,7 @@ import { useState, useEffect } from 'react';
 import type { CSSProperties } from 'react';
 import { useApp } from '../../store/appStore';
 import { useData } from '../../store/dataStore';
-import { nf, evalRules } from '../../core';
+import { nf, evalRules, parseMatrix } from '../../core';
 import { Card, KvRows } from '../common';
 import { Icon, type IconName } from '../icons';
 
@@ -60,9 +60,55 @@ function EditableCell({ value, onCommit }: { value: number; onCommit: (v: number
   );
 }
 
+/** 双击测量列名进入编辑;悬停显示删除按钮 */
+function HeaderCell({ name, canDelete, onRename, onDelete }: {
+  name: string; canDelete: boolean; onRename: (v: string) => void; onDelete: () => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState('');
+  if (editing) {
+    const commit = () => { onRename(draft); setEditing(false); };
+    return (
+      <th style={{ ...thName, padding: 0 }}>
+        <input
+          autoFocus value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') setEditing(false); }}
+          style={{ width: 78, border: '2px solid #1f6fb2', borderRadius: 2, padding: '3px 8px', fontSize: 12.5, fontFamily: 'IBM Plex Sans', outline: 'none', boxSizing: 'border-box' }}
+        />
+      </th>
+    );
+  }
+  return (
+    <th
+      className="col-head"
+      style={{ ...thName, cursor: 'cell' }}
+      title="双击重命名此列"
+      onDoubleClick={() => { setDraft(name); setEditing(true); }}
+    >
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+        <span>{name}</span>
+        {canDelete && (
+          <span
+            className="col-del"
+            title="删除此测量列"
+            onClick={(e) => { e.stopPropagation(); onDelete(); }}
+            style={{ color: '#c22f2f', fontWeight: 700, cursor: 'pointer' }}
+          >
+            ×
+          </span>
+        )}
+      </span>
+    </th>
+  );
+}
+
 export function Worksheet() {
   const { openModal, setImportTab, showToast, spcRules, selSub } = useApp();
-  const { model: M, updateCell, addSubgroupRow, deleteRow } = useData();
+  const { model: M, updateCell, addSubgroupRow, deleteRow, renameColumn, deleteColumn, insertColumn } = useData();
+
+  const importMatrix = useData((s) => s.importMatrix);
 
   // SPC 点选联动：进入工作表时滚动到选中子组
   useEffect(() => {
@@ -70,6 +116,27 @@ export function Worksheet() {
       document.getElementById(`ws-row-${selSub}`)?.scrollIntoView({ block: 'center' });
     }
   }, [selSub]);
+
+  // 在工作表页直接 Ctrl/Cmd+V 粘贴表格 → 导入为新数据集（编辑单元格时不劫持）
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      const text = e.clipboardData?.getData('text') ?? '';
+      if (text.trim() === '') return;
+      const r = parseMatrix(text);
+      if ('error' in r) {
+        showToast('粘贴导入失败：' + r.error);
+        return;
+      }
+      e.preventDefault();
+      importMatrix('剪贴板数据', r.colNames, r.rows, r.textCols);
+      const note = r.textCols.length > 0 ? ` · 含 ${r.textCols.length} 个分组列` : '';
+      showToast(`已粘贴导入 · ${r.rows.length} 子组 × ${r.colNames.length} 测量列${note}`);
+    };
+    window.addEventListener('paste', onPaste);
+    return () => window.removeEventListener('paste', onPaste);
+  }, [importMatrix, showToast]);
 
   // 均值失控行高亮（与 SPC 主图一致：准则引擎）
   const means = M.subs.map((s) => s.mean);
@@ -110,9 +177,22 @@ export function Worksheet() {
               </tr>
               <tr>
                 <th style={{ ...thName, left: 0, zIndex: 3, border: '1px solid #d7dbe1' }} />
-                {cols.map((c) => (
-                  <th key={c.code} style={thName}>{c.name}</th>
-                ))}
+                {cols.map((c, ci) => {
+                  // cols[0]=子组;cols[1..M.n]=测量列(可重命名/删除)
+                  const measIdx = ci - 1;
+                  const isMeasure = measIdx >= 0 && measIdx < M.colNames.length;
+                  return isMeasure ? (
+                    <HeaderCell
+                      key={c.code}
+                      name={c.name}
+                      canDelete={M.n > 1}
+                      onRename={(v) => renameColumn(measIdx, v)}
+                      onDelete={() => { deleteColumn(measIdx); showToast(`已删除测量列「${c.name}」`); }}
+                    />
+                  ) : (
+                    <th key={c.code} style={thName}>{c.name}</th>
+                  );
+                })}
               </tr>
             </thead>
             <tbody>
@@ -174,14 +254,27 @@ export function Worksheet() {
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
         <Card style={{ padding: '14px 16px' }}>
           <div style={{ fontWeight: 600, color: '#33404f', marginBottom: 10 }}>手工录入</div>
-          <div
-            onClick={() => { addSubgroupRow(); showToast('已添加子组（复制末行,双击单元格修改）'); }}
-            style={{ padding: '7px 0', textAlign: 'center', background: '#1f6fb2', color: '#fff', borderRadius: 5, fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}
-          >
-            ＋ 添加子组
+          <div style={{ display: 'flex', gap: 8 }}>
+            <div
+              onClick={() => { addSubgroupRow(); showToast('已添加子组（复制末行,双击单元格修改）'); }}
+              style={{ flex: 1, padding: '7px 0', textAlign: 'center', background: '#1f6fb2', color: '#fff', borderRadius: 5, fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}
+            >
+              ＋ 子组
+            </div>
+            <div
+              onClick={() => {
+                if (M.n >= 10) { showToast('测量列已达上限 10'); return; }
+                insertColumn();
+                showToast('已插入测量列（双击列名可重命名）');
+              }}
+              title={M.n >= 10 ? '控制图常数表上限为 10' : '在末尾插入一个测量列'}
+              style={{ flex: 1, padding: '7px 0', textAlign: 'center', border: '1px solid #cfd5dd', color: '#3a4350', background: '#fff', borderRadius: 5, fontSize: 12.5, fontWeight: 600, cursor: 'pointer', ...(M.n >= 10 ? { opacity: 0.5 } : {}) }}
+            >
+              ＋ 测量列
+            </div>
           </div>
           <div style={{ fontSize: 11.5, color: '#9aa2ad', marginTop: 8, lineHeight: 1.5 }}>
-            双击测量单元格编辑,悬停行号可删行。{M.isDemo ? '编辑演示集将另存为「质检数据 (副本)」。' : '修改即时保存。'}
+            双击测量单元格编辑值、双击列名重命名;悬停行号删行、悬停列名删列。{M.isDemo ? '编辑演示集将另存为「质检数据 (副本)」。' : '修改即时保存。'}
           </div>
         </Card>
         <Card style={{ padding: '14px 16px' }}>

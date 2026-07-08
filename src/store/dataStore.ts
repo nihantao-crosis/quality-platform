@@ -54,11 +54,21 @@ function loadJson<T>(key: string): T | null {
   }
 }
 
+let storageWarned = false;
 function saveJson(key: string, v: unknown) {
   try {
     localStorage.setItem(key, JSON.stringify(v));
+    storageWarned = false;
   } catch {
-    /* 存储满时静默失败 */
+    // 存储超限(浏览器 localStorage 通常约 5MB)：应用继续在内存工作,
+    // 但不再静默——提示用户数据本次未持久化,建议「保存到项目」导出为文件。
+    if (!storageWarned) {
+      storageWarned = true;
+      sessionLog('本地存储写入失败(可能超限)· 数据仍在内存,建议 保存到项目 导出文件');
+      try {
+        useApp.getState().showToast('本地存储已满,本次未自动保存;请用「保存到项目」导出为文件');
+      } catch { /* 非浏览器环境忽略 */ }
+    }
   }
 }
 
@@ -94,6 +104,12 @@ interface DataState {
   sortBy(col: number, asc: boolean): void;
   /** 从最近列表移除（不影响当前数据集） */
   removeRecent(name: string): void;
+  /** 重命名测量列（col 为测量列索引 0-based） */
+  renameColumn(col: number, name: string): void;
+  /** 删除测量列（至少保留 1 列） */
+  deleteColumn(col: number): void;
+  /** 在末尾插入测量列（值默认取各行首列的副本,便于随后编辑） */
+  insertColumn(): void;
   /** 转置：k×n → n×k,生成新数据集「xxx (转置)」 */
   transposeDataset(): void;
   /** 堆叠：多测量列堆成单列 + 「来源列」分组标签,生成新数据集「xxx (堆叠)」 */
@@ -177,6 +193,7 @@ type GetFn = () => DataState;
 
 interface EditSnapshot {
   name: string;
+  colNames: string[];
   rows: number[][];
   textCols: TextColumn[];
 }
@@ -186,20 +203,22 @@ const MAX_UNDO = 20;
 function snapshotOf(st: DataState): EditSnapshot {
   return {
     name: st.model.name,
+    colNames: [...st.model.colNames],
     rows: st.model.subs.map((s) => [...s.vals]),
     textCols: st.textCols.map((c) => ({ ...c, values: [...c.values] })),
   };
 }
 
-function restoreSnapshot(set: SetFn, snap: EditSnapshot, m: { colNames: string[] }) {
-  const model = computeVarModel(snap.name, m.colNames, snap.rows);
+function restoreSnapshot(set: SetFn, snap: EditSnapshot) {
+  const model = computeVarModel(snap.name, snap.colNames, snap.rows);
   set({ model, textCols: snap.textCols });
-  const data: StoredDataset = { name: snap.name, colNames: m.colNames, rows: snap.rows, textCols: snap.textCols, savedAt: new Date().toISOString() };
+  const data: StoredDataset = { name: snap.name, colNames: snap.colNames, rows: snap.rows, textCols: snap.textCols, savedAt: new Date().toISOString() };
   saveJson(LS_DATASET, data);
 }
 
-/** 编辑落库：演示集首次编辑转「质检数据 (副本)」,导入集原名持久化并同步最近列表 */
-function applyEdit(set: SetFn, get: GetFn, rows: number[][], textCols: TextColumn[]) {
+/** 编辑落库：演示集首次编辑转「质检数据 (副本)」,导入集原名持久化并同步最近列表。
+ * colNames 省略时沿用当前列名（值编辑）;传入时用于列结构变化（重命名/增删列）。 */
+function applyEdit(set: SetFn, get: GetFn, rows: number[][], textCols: TextColumn[], colNames?: string[]) {
   const st = get();
   const m = st.model;
   // 编辑前快照入撤销栈,清空重做栈
@@ -207,9 +226,10 @@ function applyEdit(set: SetFn, get: GetFn, rows: number[][], textCols: TextColum
     undoStack: [...st.undoStack.slice(-(MAX_UNDO - 1)), snapshotOf(st)],
     redoStack: [],
   });
+  const cols = colNames ?? m.colNames;
   const name = m.isDemo ? '质检数据 (副本)' : m.name;
-  const model = computeVarModel(name, m.colNames, rows);
-  const data: StoredDataset = { name, colNames: m.colNames, rows, textCols, savedAt: new Date().toISOString() };
+  const model = computeVarModel(name, cols, rows);
+  const data: StoredDataset = { name, colNames: cols, rows, textCols, savedAt: new Date().toISOString() };
   const recents = [
     { name, savedAt: data.savedAt, data },
     ...get().recents.filter((r) => r.name !== name),
@@ -318,7 +338,7 @@ export const useData = create<DataState>((set, get) => ({
       undoStack: st.undoStack.slice(0, -1),
       redoStack: [...st.redoStack.slice(-(MAX_UNDO - 1)), snapshotOf(st)],
     });
-    restoreSnapshot(set, snap, st.model);
+    restoreSnapshot(set, snap);
     sessionLog('撤销编辑');
     return true;
   },
@@ -331,7 +351,7 @@ export const useData = create<DataState>((set, get) => ({
       redoStack: st.redoStack.slice(0, -1),
       undoStack: [...st.undoStack.slice(-(MAX_UNDO - 1)), snapshotOf(st)],
     });
-    restoreSnapshot(set, snap, st.model);
+    restoreSnapshot(set, snap);
     sessionLog('重做编辑');
     return true;
   },
@@ -404,6 +424,32 @@ export const useData = create<DataState>((set, get) => ({
     const recents = get().recents.filter((r) => r.name !== name);
     set({ recents });
     saveJson(LS_RECENTS, recents);
+  },
+
+  renameColumn: (col, name) => {
+    const m = get().model;
+    const clean = name.trim();
+    if (col < 0 || col >= m.n || clean === '' || clean === m.colNames[col]) return;
+    const colNames = m.colNames.map((c, i) => (i === col ? clean : c));
+    applyEdit(set, get, m.subs.map((s) => [...s.vals]), get().textCols, colNames);
+  },
+
+  deleteColumn: (col) => {
+    const m = get().model;
+    if (m.n <= 1) return; // 至少保留 1 个测量列
+    if (col < 0 || col >= m.n) return;
+    const colNames = m.colNames.filter((_, i) => i !== col);
+    const rows = m.subs.map((s) => s.vals.filter((_, i) => i !== col));
+    applyEdit(set, get, rows, get().textCols, colNames);
+    useApp.setState({ selSub: null });
+  },
+
+  insertColumn: () => {
+    const m = get().model;
+    if (m.n >= 10) return; // 控制图常数表上限
+    const colNames = [...m.colNames, `测量${m.n + 1}`];
+    const rows = m.subs.map((s) => [...s.vals, s.vals[s.vals.length - 1]]);
+    applyEdit(set, get, rows, get().textCols, colNames);
   },
 
   transposeDataset: () => {
