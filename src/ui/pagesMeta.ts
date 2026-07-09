@@ -14,6 +14,7 @@ export const PAGES: PageMeta[] = [
   { key: 'dashboard', label: '质量总览', group: '仪表盘', icon: 'grid', title: '质量总览', sub: '关键指标 · 趋势 · 告警' },
   { key: 'assistant', label: '助手 · 选分析', group: '仪表盘', icon: 'wand', title: '分析助手', sub: '回答几个问题,助手为你推荐并打开合适的分析模块' },
   { key: 'worksheet', label: '数据工作表', group: '数据', icon: 'table', title: '数据工作表 · 质检数据.mtw', sub: '25 子组 × 5 测量值 · 直径 (mm)' },
+  { key: 'summary', label: '描述性统计', group: '分析模块', icon: 'bell', title: '描述性统计 · 图形化摘要', sub: '直方图 + 箱线图 + 完整统计表 · Anderson-Darling 正态检验' },
   { key: 'spc', label: '控制图 (SPC)', group: '分析模块', icon: 'chart', title: 'SPC 控制图 · X̄-R', sub: '均值-极差控制图 · 子组大小 n = 5' },
   { key: 'capability', label: '过程能力分析', group: '分析模块', icon: 'bell', title: '过程能力分析 · Cpk / Ppk', sub: '正态能力 · 规格 24.90–25.10 mm' },
   { key: 'gagerr', label: '测量系统分析', group: '分析模块', icon: 'gauge', title: '测量系统分析 · Gage R&R', sub: '交叉设计 · ANOVA 法 · 3 操作员 × 10 部件 × 2 次' },

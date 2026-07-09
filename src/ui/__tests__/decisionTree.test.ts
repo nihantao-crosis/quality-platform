@@ -98,6 +98,11 @@ describe('关键路径路由', () => {
     expect(r.page).toBe('capability');
   });
 
+  it('了解一列分布 → 描述性统计', () => {
+    const r = walk(['先总体了解一列数据的分布与统计量']);
+    expect(r.page).toBe('summary');
+  });
+
   it('两变量关系 → 回归', () => {
     const r = walk(['研究两个变量之间的关系']);
     expect(r.setup?.hypoTab).toBe('reg');

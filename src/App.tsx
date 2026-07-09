@@ -17,6 +17,7 @@ import { SessionPanel } from './ui/shell/SessionPanel';
 import { ErrorBoundary } from './ui/ErrorBoundary';
 import { Dashboard } from './ui/pages/Dashboard';
 import { Assistant } from './ui/pages/Assistant';
+import { Summary } from './ui/pages/Summary';
 import { Worksheet } from './ui/pages/Worksheet';
 import { Spc } from './ui/pages/Spc';
 import { Capability } from './ui/pages/Capability';
@@ -118,6 +119,7 @@ export default function App() {
             <ErrorBoundary resetKey={page + '|' + M.name}>
               {page === 'dashboard' && <Dashboard T={T} />}
               {page === 'assistant' && <Assistant />}
+              {page === 'summary' && <Summary T={T} />}
               {page === 'worksheet' && <Worksheet />}
               {page === 'spc' && <Spc T={T} />}
               {page === 'capability' && <Capability T={T} />}

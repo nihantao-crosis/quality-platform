@@ -53,6 +53,7 @@ export const TREE: Record<string, TreeNode> = {
     id: 'root',
     prompt: '你现在想解决什么问题?',
     choices: [
+      { label: '先总体了解一列数据的分布与统计量', hint: '均值、标准差、偏度、直方图、正态性', to: 'rec_summary' },
       { label: '监控过程随时间是否稳定', hint: '判断有没有异常波动、是否受控', to: 'spc_type' },
       { label: '评估过程是否满足规格要求', hint: '算合格率、Cp/Cpk/Ppk', to: 'rec_capability' },
       { label: '比较不同组或条件之间有无差异', hint: '两台设备、三条产线的均值是否不同', to: 'hyp_groups' },
@@ -104,6 +105,15 @@ export const TREE: Record<string, TreeNode> = {
     ],
   },
 
+  rec_summary: {
+    kind: 'rec',
+    id: 'rec_summary',
+    module: '描述性统计 · 图形化摘要',
+    page: 'summary',
+    what: '一屏给出直方图+正态曲线、箱线图,以及均值/标准差/偏度/峰度/四分位与置信区间、Anderson-Darling 正态检验。',
+    needs: '一列连续测量值(样本量越大结论越稳)。',
+    why: '任何深入分析之前,先用图形化摘要看清数据的中心、离散、形状与正态性,是最稳妥的第一步。',
+  },
   rec_capability: {
     kind: 'rec',
     id: 'rec_capability',

@@ -18,3 +18,4 @@ export * from './aqlSwitch';
 export * from './sampleData';
 export * from './calculator';
 export * from './formula';
+export * from './descriptive';

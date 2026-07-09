@@ -112,6 +112,7 @@ const MENUS: { name: string; items: Item[] }[] = [
     { label: '标准化（列 z-score）', act: { standardize: true } },
     { label: '生成随机数据…', act: mdl('random') } ] },
   { name: '统计', items: [
+    { label: '描述性统计 / 图形化摘要', act: nav('summary') },
     { label: '控制图 (SPC)', act: nav('spc') },
     { label: '过程能力分析', act: nav('capability') },
     { label: '测量系统分析 Gage R&R', act: nav('gagerr') },

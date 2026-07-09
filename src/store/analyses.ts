@@ -6,13 +6,13 @@
 import { create } from 'zustand';
 import {
   nf, computeCapability, evalRules, computeGageRR, gageStudyData, GAGE_TOLERANCE,
-  oneWayAnova, anovaGroups, analyzeDoe, aqlPlan, type InspectionLevel,
+  oneWayAnova, anovaGroups, analyzeDoe, aqlPlan, computeDescriptive, type InspectionLevel,
 } from '../core';
 import { useApp, type SpcType, type DoeView, type HypoTab, type ParetoView } from './appStore';
 import { useData } from './dataStore';
 import { sessionLog } from './sessionLog';
 
-export type AnalysisKind = 'spc' | 'capability' | 'gagerr' | 'anova' | 'pareto' | 'doe' | 'aql';
+export type AnalysisKind = 'spc' | 'capability' | 'gagerr' | 'anova' | 'pareto' | 'doe' | 'aql' | 'summary';
 
 export interface AnalysisSnapshot {
   spcType?: SpcType;
@@ -124,6 +124,15 @@ function buildSummary(kind: AnalysisKind): Omit<SavedAnalysis, 'id' | 'createdAt
         status: '已生成', ...pick(INFO),
       };
     }
+    case 'summary': {
+      const d = computeDescriptive(M.all);
+      return {
+        kind, title: '描述性统计 · 图形化摘要',
+        metric: `x̄ ${nf(d.mean, 3)} · s ${nf(d.stdev, 3)}`,
+        status: !d.adAvailable ? '已汇总' : d.ad.normal ? '正态' : '非正态',
+        ...pick(!d.adAvailable ? INFO : d.ad.normal ? OK : WARN),
+      };
+    }
     default:
       return null;
   }
@@ -160,7 +169,7 @@ function persist(saved: SavedAnalysis[]) {
   } catch { /* 超限由 dataStore.saveJson 已统一提示 */ }
 }
 
-const ANALYSIS_PAGES: AnalysisKind[] = ['spc', 'capability', 'gagerr', 'anova', 'pareto', 'doe', 'aql'];
+const ANALYSIS_PAGES: AnalysisKind[] = ['spc', 'capability', 'gagerr', 'anova', 'pareto', 'doe', 'aql', 'summary'];
 
 interface AnalysesState {
   saved: SavedAnalysis[];
