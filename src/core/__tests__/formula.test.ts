@@ -85,6 +85,42 @@ describe('聚合函数(广播为常量)', () => {
   });
 });
 
+describe('比较与逻辑', () => {
+  it('大于返回 1/0', () => {
+    expect(ev('C1 > 2')).toEqual([0, 0, 1, 1]);
+  });
+  it('>= 与 <=', () => {
+    expect(ev('C1 >= 2')).toEqual([0, 1, 1, 1]);
+    expect(ev('C1 <= 2')).toEqual([1, 1, 0, 0]);
+  });
+  it('等于 == 与 单 = 同义', () => {
+    expect(ev('C1 == 3')).toEqual([0, 0, 1, 0]);
+    expect(ev('C1 = 3')).toEqual([0, 0, 1, 0]);
+  });
+  it('不等 <> 与 !=', () => {
+    expect(ev('C1 <> 3')).toEqual([1, 1, 0, 1]);
+    expect(ev('C1 != 3')).toEqual([1, 1, 0, 1]);
+  });
+  it('and 短路为交集', () => {
+    // C1>=2 and C1<=3 → 行2,3
+    expect(ev('C1 >= 2 and C1 <= 3')).toEqual([0, 1, 1, 0]);
+  });
+  it('or 为并集', () => {
+    expect(ev('C1 < 2 or C1 > 3')).toEqual([1, 0, 0, 1]);
+  });
+  it('not 取反', () => {
+    expect(ev('not (C1 > 2)')).toEqual([1, 1, 0, 0]);
+  });
+  it('比较优先级低于算术', () => {
+    // C1 + 1 > 3 → (C1+1)>3 → C1>2
+    expect(ev('C1 + 1 > 3')).toEqual([0, 0, 1, 1]);
+  });
+  it('and 优先级低于比较,or 低于 and', () => {
+    // C1>1 or C1>2 and C1<2 → C1>1 or (C1>2 and C1<2) → C1>1
+    expect(ev('C1 > 1 or C1 > 2 and C1 < 2')).toEqual([0, 1, 1, 1]);
+  });
+});
+
 describe('错误处理', () => {
   const bad = (expr: string) => {
     try { evalFormula(expr, ctx()); return null; }

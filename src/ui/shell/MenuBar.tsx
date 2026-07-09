@@ -99,7 +99,7 @@ const MENUS: { name: string; items: Item[] }[] = [
     { label: '堆叠列（多列 → 单列+来源）', act: { stack: true } },
     { label: '转置列（行列互换）', act: { transpose: true } },
     { label: '排序…', act: mdl('sort') },
-    { label: '筛选…', act: tst('筛选器已应用') },
+    { label: '子集 / 条件筛选…', act: mdl('subset') },
     { sep: true },
     { label: '恢复演示数据集', act: { resetData: true } },
     { label: '查看工作表', act: nav('worksheet') } ] },

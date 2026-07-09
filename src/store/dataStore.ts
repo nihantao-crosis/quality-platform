@@ -4,7 +4,7 @@
  */
 import { create } from 'zustand';
 import {
-  buildData, computeVarModel, computePChart, computeCChart, evalFormula, FormulaError,
+  buildData, computeVarModel, computePChart, computeCChart, evalFormula, truthy, FormulaError,
   type VarModel, type PChartModel, type CChartModel, type TextColumn,
 } from '../core';
 import { useApp } from './appStore';
@@ -112,6 +112,8 @@ interface DataState {
   insertColumn(): void;
   /** 用公式(引用 C1../列名)算出一列并追加;成功返回 null,失败返回错误信息 */
   addFormulaColumn(name: string, expr: string): string | null;
+  /** 按条件表达式(如 C1>25 and C2<=25.1)筛出子集为新数据集 */
+  subsetByCondition(cond: string): { ok: true; name: string; kept: number; total: number } | { ok: false; error: string };
   /** 转置：k×n → n×k,生成新数据集「xxx (转置)」 */
   transposeDataset(): void;
   /** 堆叠：多测量列堆成单列 + 「来源列」分组标签,生成新数据集「xxx (堆叠)」 */
@@ -473,6 +475,28 @@ export const useData = create<DataState>((set, get) => ({
     applyEdit(set, get, rows, get().textCols, colNames);
     sessionLog(`新增公式列「${clean}」= ${expr.trim()}`);
     return null;
+  },
+
+  subsetByCondition: (cond) => {
+    const m = get().model;
+    const columns = m.colNames.map((_, j) => m.subs.map((s) => s.vals[j]));
+    let flags: number[];
+    try {
+      flags = evalFormula(cond, { columns, colNames: m.colNames, rowCount: m.k }).values;
+    } catch (e) {
+      return { ok: false, error: e instanceof FormulaError ? e.message : '条件计算失败：' + (e as Error).message };
+    }
+    const keep = flags.map((v) => truthy(v));
+    const kept = keep.filter(Boolean).length;
+    if (kept === m.k) return { ok: false, error: `条件对全部 ${m.k} 行都成立,未筛除任何行` };
+    if (kept < 2) return { ok: false, error: `仅 ${kept} 行满足条件,不足 2 行无法构成数据集` };
+    const rows = m.subs.filter((_, i) => keep[i]).map((s) => [...s.vals]);
+    const textCols = get().textCols.map((c) => ({ ...c, values: c.values.filter((_, i) => keep[i]) }));
+    const base = m.name.replace(/\.[^.]+$/, '');
+    const name = `${base} (子集)`;
+    get().importMatrix(name, [...m.colNames], rows, textCols);
+    sessionLog(`条件筛选「${cond.trim()}」→ ${name} · 保留 ${kept}/${m.k} 行`);
+    return { ok: true, name, kept, total: m.k };
   },
 
   transposeDataset: () => {

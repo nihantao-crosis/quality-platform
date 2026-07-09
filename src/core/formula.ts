@@ -53,6 +53,14 @@ function tokenize(src: string, colNames: string[]): Tok[] {
     if (c === '(') { toks.push({ t: 'lp' }); i++; continue; }
     if (c === ')') { toks.push({ t: 'rp' }); i++; continue; }
     if (c === ',') { toks.push({ t: 'comma' }); i++; continue; }
+    // 比较运算符(可能是双字符)
+    if (c === '<' || c === '>' || c === '=' || c === '!') {
+      const two = norm.slice(i, i + 2);
+      if (two === '>=' || two === '<=' || two === '==' || two === '!=' || two === '<>') { toks.push({ t: 'op', s: two }); i += 2; continue; }
+      if (c === '=') { toks.push({ t: 'op', s: '==' }); i++; continue; }
+      if (c === '<' || c === '>') { toks.push({ t: 'op', s: c }); i++; continue; }
+      throw new FormulaError(`无法识别的字符「${c}」(不等号请用 <> 或 !=)`);
+    }
     if (OPS.has(c)) { toks.push({ t: 'op', s: c }); i++; continue; }
     if (c === "'") {
       // 引号列名
@@ -82,6 +90,8 @@ function tokenize(src: string, colNames: string[]): Tok[] {
       let j = i;
       while (j < norm.length && /[A-Za-z0-9_一-龥]/.test(norm[j])) j++;
       const word = norm.slice(i, j);
+      // 逻辑词运算符
+      if (['and', 'or', 'not'].includes(lower(word))) { toks.push({ t: 'op', s: lower(word) }); i = j; continue; }
       // C<n> 列引用(仅当形如 C 后跟数字,且不是紧跟 '(' 的函数名)
       const m = /^[Cc](\d+)$/.exec(word);
       if (m) {
@@ -105,6 +115,7 @@ type Node =
   | { k: 'col'; i: number }
   | { k: 'const'; v: number }
   | { k: 'neg'; a: Node }
+  | { k: 'not'; a: Node }
   | { k: 'bin'; op: string; a: Node; b: Node }
   | { k: 'elem'; fn: string; a: Node }
   | { k: 'agg'; fn: string; a: Node };
@@ -120,36 +131,67 @@ const ELEM: Record<string, (x: number) => number> = {
 };
 const AGG_NAMES = new Set(['mean', 'avg', 'std', 'sd', 'var', 'min', 'max', 'sum', 'median', 'range', 'n', 'count']);
 
+const CMP = new Set(['>', '<', '>=', '<=', '==', '!=', '<>']);
+
 class Parser {
   private p = 0;
   constructor(private toks: Tok[]) {}
   private peek(): Tok | undefined { return this.toks[this.p]; }
   private next(): Tok | undefined { return this.toks[this.p++]; }
   parse(): Node {
-    const n = this.expr();
+    const n = this.orE();
     if (this.p < this.toks.length) throw new FormulaError('表达式有多余的内容');
     return n;
   }
-  private expr(): Node { // + −
-    let a = this.term();
+  private orE(): Node { // or
+    let a = this.andE();
     for (;;) {
       const t = this.peek();
-      if (t?.t === 'op' && (t.s === '+' || t.s === '-')) { this.next(); a = { k: 'bin', op: t.s, a, b: this.term() }; }
+      if (t?.t === 'op' && t.s === 'or') { this.next(); a = { k: 'bin', op: 'or', a, b: this.andE() }; }
       else return a;
     }
   }
-  private term(): Node { // * /
-    let a = this.power();
+  private andE(): Node { // and
+    let a = this.notE();
     for (;;) {
       const t = this.peek();
-      if (t?.t === 'op' && (t.s === '*' || t.s === '/')) { this.next(); a = { k: 'bin', op: t.s, a, b: this.power() }; }
+      if (t?.t === 'op' && t.s === 'and') { this.next(); a = { k: 'bin', op: 'and', a, b: this.notE() }; }
       else return a;
     }
   }
-  private power(): Node { // ^ 右结合
+  private notE(): Node { // not(一元)
+    const t = this.peek();
+    if (t?.t === 'op' && t.s === 'not') { this.next(); return { k: 'not', a: this.notE() }; }
+    return this.cmp();
+  }
+  private cmp(): Node { // 比较(左结合)
+    let a = this.add();
+    for (;;) {
+      const t = this.peek();
+      if (t?.t === 'op' && CMP.has(t.s)) { this.next(); a = { k: 'bin', op: t.s, a, b: this.add() }; }
+      else return a;
+    }
+  }
+  private add(): Node { // + −
+    let a = this.mul();
+    for (;;) {
+      const t = this.peek();
+      if (t?.t === 'op' && (t.s === '+' || t.s === '-')) { this.next(); a = { k: 'bin', op: t.s, a, b: this.mul() }; }
+      else return a;
+    }
+  }
+  private mul(): Node { // * /
+    let a = this.pow();
+    for (;;) {
+      const t = this.peek();
+      if (t?.t === 'op' && (t.s === '*' || t.s === '/')) { this.next(); a = { k: 'bin', op: t.s, a, b: this.pow() }; }
+      else return a;
+    }
+  }
+  private pow(): Node { // ^ 右结合
     const a = this.unary();
     const t = this.peek();
-    if (t?.t === 'op' && t.s === '^') { this.next(); return { k: 'bin', op: '^', a, b: this.power() }; }
+    if (t?.t === 'op' && t.s === '^') { this.next(); return { k: 'bin', op: '^', a, b: this.pow() }; }
     return a;
   }
   private unary(): Node {
@@ -162,12 +204,12 @@ class Parser {
     if (!t) throw new FormulaError('表达式不完整');
     if (t.t === 'num') return { k: 'num', v: t.v };
     if (t.t === 'col') return { k: 'col', i: t.i };
-    if (t.t === 'lp') { const n = this.expr(); const r = this.next(); if (r?.t !== 'rp') throw new FormulaError('括号不匹配'); return n; }
+    if (t.t === 'lp') { const n = this.orE(); const r = this.next(); if (r?.t !== 'rp') throw new FormulaError('括号不匹配'); return n; }
     if (t.t === 'name') {
       const nx = this.peek();
       if (nx?.t === 'lp') {
         this.next(); // (
-        const arg = this.expr();
+        const arg = this.orE();
         const r = this.next();
         if (r?.t !== 'rp') throw new FormulaError(`函数 ${t.s}(…) 括号不匹配`);
         if (t.s in ELEM) return { k: 'elem', fn: t.s, a: arg };
@@ -179,6 +221,11 @@ class Parser {
     }
     throw new FormulaError('表达式语法错误');
   }
+}
+
+/** 真值判定:有限且非 0 为真(NaN/±∞ 视为假)。用于逻辑运算与条件筛选。 */
+export function truthy(x: number): boolean {
+  return Number.isFinite(x) && x !== 0;
 }
 
 function aggregate(fn: string, xs: number[]): number {
@@ -222,6 +269,7 @@ export function compileFormula(expr: string, ctx: FormulaCtx): { evalRow: (row: 
         return ctx.columns[n.i][row];
       }
       case 'neg': return -evalNode(n.a, row);
+      case 'not': return truthy(evalNode(n.a, row)) ? 0 : 1;
       case 'bin': {
         const a = evalNode(n.a, row), b = evalNode(n.b, row);
         switch (n.op) {
@@ -230,6 +278,14 @@ export function compileFormula(expr: string, ctx: FormulaCtx): { evalRow: (row: 
           case '*': return a * b;
           case '/': return a / b;
           case '^': return Math.pow(a, b);
+          case '>': return a > b ? 1 : 0;
+          case '<': return a < b ? 1 : 0;
+          case '>=': return a >= b ? 1 : 0;
+          case '<=': return a <= b ? 1 : 0;
+          case '==': return a === b ? 1 : 0;
+          case '!=': case '<>': return a !== b ? 1 : 0;
+          case 'and': return truthy(a) && truthy(b) ? 1 : 0;
+          case 'or': return truthy(a) || truthy(b) ? 1 : 0;
           default: throw new FormulaError(`未知运算符 ${n.op}`);
         }
       }
