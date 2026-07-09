@@ -42,6 +42,7 @@ type Act = {
   help?: boolean;
   options?: boolean;
   saveProject?: boolean;
+  summary?: boolean;
 };
 
 /** 当前页所有 SVG 图表逐张转 PNG 下载 */
@@ -82,6 +83,7 @@ const MENUS: { name: string; items: Item[] }[] = [
     { label: '另存为副本', act: { saveAs: true } },
     { sep: true },
     { label: '导出报表…', act: mdl('export') },
+    { label: '导出项目汇总…', act: { summary: true } },
     { label: '打印…', kbd: 'Ctrl+P', act: { print: true } } ] },
   { name: '编辑', items: [
     { label: '撤销编辑', kbd: 'Ctrl+Z', act: { undo: true } },
@@ -168,10 +170,23 @@ export function MenuBar({ wsName }: { wsName: string }) {
       showToast('已新建空白工作表（双击单元格录入数据）');
       return;
     }
+    if (act.summary) {
+      setOpenMenu(null);
+      Promise.all([import('../../platform/projectSummary'), import('../../platform/adapter'), import('../../store/analyses')]).then(([sum, ad, an]) => {
+        const app = useApp.getState();
+        const html = sum.buildProjectSummary(app.projectName, an.useAnalyses.getState().saved);
+        const stamp = new Date().toISOString().slice(0, 10);
+        const safe = app.projectName.replace(/[\\/:*?"<>|]/g, '_').trim() || '项目';
+        ad.platform.exportFile({ defaultName: `${safe}_汇总_${stamp}`, ext: 'html', filterLabel: '项目汇总报告 (打开后打印为 PDF)', text: html }).then((dest) => {
+          if (dest) showToast('项目汇总已导出: ' + dest);
+        });
+      });
+      return;
+    }
     if (act.saveProject) {
       setOpenMenu(null);
       import('../../platform/project').then((m) =>
-        m.exportProject(__APP_VERSION__).then((dest) => {
+        m.exportProject(__APP_VERSION__, useApp.getState().projectName).then((dest) => {
           if (dest) showToast('项目已保存: ' + dest);
         }),
       );

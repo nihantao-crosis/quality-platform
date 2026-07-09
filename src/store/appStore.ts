@@ -23,6 +23,7 @@ interface AppState {
   spcType: SpcType;
   spcRules: NelsonRules;
   selSub: number | null;
+  projectName: string;
   lsl: number;
   usl: number;
   tgt: number;
@@ -56,6 +57,7 @@ interface AppState {
   toggleRule(r: keyof NelsonRules): void;
   setSelSub(i: number | null): void;
   setSpec(patch: Partial<Pick<AppState, 'lsl' | 'usl' | 'tgt'>>): void;
+  setProjectName(name: string): void;
   toggleSide(side: 'lslOn' | 'uslOn'): void;
   setDoeView(v: DoeView): void;
   setHypoTab(v: HypoTab): void;
@@ -78,6 +80,7 @@ export const useApp = create<AppState>()(persist((set, get) => ({
   spcType: 'xbar-r',
   spcRules: { r1: true, r2: true, r3: true, r4: true },
   selSub: null,
+  projectName: '质检项目 2026-Q2',
   lsl: 24.9,
   usl: 25.1,
   tgt: 25.0,
@@ -115,6 +118,7 @@ export const useApp = create<AppState>()(persist((set, get) => ({
   toggleRule: (r) => set((s) => ({ spcRules: { ...s.spcRules, [r]: !s.spcRules[r] } })),
   setSelSub: (selSub) => set({ selSub }),
   setSpec: (patch) => set(patch),
+  setProjectName: (projectName) => set({ projectName: projectName.trim() || '未命名项目' }),
   toggleSide: (side) => set((s) => {
     const next = { ...s, [side]: !s[side] };
     // 至少保留一侧
@@ -138,6 +142,7 @@ export const useApp = create<AppState>()(persist((set, get) => ({
   partialize: (s) => ({
     chartStyle: s.chartStyle,
     showGrid: s.showGrid,
+    projectName: s.projectName,
     lsl: s.lsl,
     usl: s.usl,
     tgt: s.tgt,

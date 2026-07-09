@@ -45,11 +45,12 @@ export function buildProjectJson(appVersion: string): string {
   return JSON.stringify(file, null, 2);
 }
 
-/** 导出项目文件（原生保存对话框 / 浏览器下载） */
-export async function exportProject(appVersion: string): Promise<string | null> {
+/** 导出项目文件（原生保存对话框 / 浏览器下载）。projectName 用作默认文件名。 */
+export async function exportProject(appVersion: string, projectName = '质检项目'): Promise<string | null> {
   const stamp = new Date().toISOString().slice(0, 10);
+  const safe = projectName.replace(/[\\/:*?"<>|]/g, '_').trim() || '质检项目';
   return platform.exportFile({
-    defaultName: `质检项目_${stamp}`,
+    defaultName: `${safe}_${stamp}`,
     ext: 'qproj',
     filterLabel: '质量分析平台项目',
     text: buildProjectJson(appVersion),

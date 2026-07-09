@@ -46,7 +46,7 @@ export default function App() {
       const k = e.key.toLowerCase();
       if (k === 's') {
         e.preventDefault();
-        exportProject(__APP_VERSION__).then((dest) => {
+        exportProject(__APP_VERSION__, useApp.getState().projectName).then((dest) => {
           if (dest) s.showToast('项目已保存: ' + dest);
         });
       } else if (k === 'o') {

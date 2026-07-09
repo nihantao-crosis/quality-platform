@@ -1,4 +1,5 @@
-/** 左侧导航 — 分组导航 + 徽标 + 项目管理器（最近数据集可点击加载）。 */
+/** 左侧导航 — 分组导航 + 徽标 + 项目管理器（可命名项目 + 最近数据集 + 已保存分析）。 */
+import { useState } from 'react';
 import { useApp } from '../../store/appStore';
 import { useData } from '../../store/dataStore';
 import { useAnalyses } from '../../store/analyses';
@@ -8,11 +9,13 @@ import { Icon } from '../icons';
 const GROUPS = ['仪表盘', '数据', '分析模块'] as const;
 
 export function SideNav() {
-  const { page, goTo, showToast } = useApp();
+  const { page, goTo, showToast, projectName, setProjectName } = useApp();
   const { model, recents, loadRecent, removeRecent } = useData();
   const saved = useAnalyses((s) => s.saved);
   const restore = useAnalyses((s) => s.restore);
   const removeAnalysis = useAnalyses((s) => s.remove);
+  const [editingName, setEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState('');
 
   return (
     <aside style={{ width: 242, flex: 'none', background: '#fbfcfd', borderRight: '1px solid #dadee4', overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
@@ -49,7 +52,20 @@ export function SideNav() {
       <div style={{ marginTop: 'auto', borderTop: '1px solid #e6e9ee', padding: '12px 16px' }}>
         <div style={{ fontSize: 11, letterSpacing: '0.06em', color: '#98a1ac', fontWeight: 600, marginBottom: 8 }}>项目管理器</div>
         <div style={{ fontSize: 12, color: '#5b6472', lineHeight: 1.9 }}>
-          <div>📁 质检项目 2026-Q2</div>
+          {editingName ? (
+            <input
+              autoFocus
+              value={nameDraft}
+              onChange={(e) => setNameDraft(e.target.value)}
+              onBlur={() => { setProjectName(nameDraft); setEditingName(false); }}
+              onKeyDown={(e) => { if (e.key === 'Enter') { setProjectName(nameDraft); setEditingName(false); } if (e.key === 'Escape') setEditingName(false); }}
+              style={{ width: '100%', border: '2px solid #1f6fb2', borderRadius: 3, padding: '2px 6px', fontSize: 12, boxSizing: 'border-box' }}
+            />
+          ) : (
+            <div title="双击重命名项目" style={{ cursor: 'cell' }} onDoubleClick={() => { setNameDraft(projectName); setEditingName(true); }}>
+              📁 {projectName}
+            </div>
+          )}
           <div style={{ paddingLeft: 16, color: '#1f6fb2', fontWeight: 500 }}>工作表 · {model.name}</div>
           {recents.length > 0 && (
             <>
