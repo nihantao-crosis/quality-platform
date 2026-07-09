@@ -2,7 +2,7 @@
 import { useState } from 'react';
 import { useApp, type ImportTab, type ExportFmt } from '../../store/appStore';
 import { useData } from '../../store/dataStore';
-import { parseMatrix, type ParsedMatrix } from '../../core';
+import { parseMatrix, evalFormula, FormulaError, type ParsedMatrix } from '../../core';
 import { platform } from '../../platform/adapter';
 import { buildExportJob } from '../../platform/report';
 import { mesStart, mesStop } from '../../platform/mes';
@@ -362,6 +362,93 @@ function CalcModal() {
   );
 }
 
+// ---------- 公式计算列 ----------
+function FormulaModal() {
+  const { closeModal, goTo, showToast } = useApp();
+  const { model, addFormulaColumn } = useData();
+  const [name, setName] = useState('公式列');
+  const [expr, setExpr] = useState('');
+
+  const columns = model.colNames.map((_, j) => model.subs.map((s) => s.vals[j]));
+  // 实时预览:算前几行 + 捕获错误
+  let previewVals: number[] | null = null;
+  let error: string | null = null;
+  if (expr.trim() !== '') {
+    try {
+      previewVals = evalFormula(expr, { columns, colNames: model.colNames, rowCount: model.k }).values;
+    } catch (e) {
+      error = e instanceof FormulaError ? e.message : (e as Error).message;
+    }
+  }
+
+  const insert = (token: string) => setExpr((s) => (s + (s && !s.endsWith(' ') ? ' ' : '') + token));
+
+  const apply = () => {
+    if (expr.trim() === '') { showToast('请先输入公式'); return; }
+    const err = addFormulaColumn(name, expr);
+    if (err) { showToast('无法添加：' + err); return; }
+    closeModal();
+    goTo('worksheet');
+    showToast(`已添加公式列「${name.trim() || '公式列'}」（可 Ctrl+Z 撤销）`);
+  };
+
+  const chip: React.CSSProperties = { padding: '3px 8px', borderRadius: 4, background: '#eef1f4', color: '#3a4350', cursor: 'pointer', fontSize: 11.5, fontFamily: 'IBM Plex Mono,monospace' };
+  const fnChip: React.CSSProperties = { ...chip, background: '#f0f2f5', color: '#5b6472' };
+
+  return (
+    <ModalFrame width={540} title="公式计算列 · Calculator" onClose={closeModal}
+      footer={<>
+        <div onClick={closeModal} style={cancelBtn}>取消</div>
+        <div onClick={apply} style={{ ...primaryBtn, ...(error ? { opacity: 0.5, pointerEvents: 'none' } : {}) }}>添加列</div>
+      </>}>
+      <div style={{ padding: '18px 20px', display: 'flex', flexDirection: 'column', gap: 12, fontSize: 12.5, color: '#5b6472' }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ width: 56, color: '#8a929d' }}>新列名</span>
+          <input value={name} onChange={(e) => setName(e.target.value)}
+            style={{ flex: 1, padding: '6px 9px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12.5 }} />
+        </label>
+        <label style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+          <span style={{ width: 56, color: '#8a929d', paddingTop: 7 }}>公式</span>
+          <textarea value={expr} onChange={(e) => setExpr(e.target.value)} autoFocus
+            placeholder={"例:(C1 + C2) / 2    或    (C1 - mean(C1)) / std(C1)    或    sqrt(C1)"}
+            style={{ flex: 1, height: 60, border: `1px solid ${error ? '#d98324' : '#cfd5dd'}`, borderRadius: 6, padding: '8px 10px', fontFamily: 'IBM Plex Mono,monospace', fontSize: 13, resize: 'none', boxSizing: 'border-box' }} />
+        </label>
+
+        <div>
+          <div style={{ fontSize: 11, color: '#98a1ac', marginBottom: 5 }}>点击插入列引用</div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            {model.colNames.map((n, i) => (
+              <span key={i} style={chip} title={n} onClick={() => insert(`C${i + 1}`)}>C{i + 1} · {n}</span>
+            ))}
+          </div>
+        </div>
+        <div>
+          <div style={{ fontSize: 11, color: '#98a1ac', marginBottom: 5 }}>函数(逐元素 / 聚合)</div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            {['abs()', 'sqrt()', 'ln()', 'log10()', 'exp()', 'round()', 'sq()', 'mean()', 'std()', 'min()', 'max()', 'sum()', 'median()'].map((f) => (
+              <span key={f} style={fnChip} onClick={() => insert(f)}>{f}</span>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ borderTop: '1px solid #eef0f3', paddingTop: 10 }}>
+          <div style={{ fontSize: 11, color: '#98a1ac', marginBottom: 5 }}>预览(前 {Math.min(6, model.k)} 行 / 共 {model.k} 行)</div>
+          {error ? (
+            <div style={{ color: '#c22f2f', fontSize: 12.5 }}>⚠ {error}</div>
+          ) : previewVals ? (
+            <div className="mono" style={{ fontSize: 12.5, color: '#1c4e7a' }}>
+              {previewVals.slice(0, 6).map((v) => (Number.isFinite(v) ? Number(v.toFixed(4)) : '—')).join('   ')}
+              {model.k > 6 ? '   …' : ''}
+            </div>
+          ) : (
+            <div style={{ color: '#9aa2ad', fontSize: 12.5 }}>输入公式后在此实时预览计算结果。支持 + − × ÷ ^、括号、C1…C{model.n} 列引用与列名。</div>
+          )}
+        </div>
+      </div>
+    </ModalFrame>
+  );
+}
+
 function AboutModal() {
   const { closeModal } = useApp();
   return (
@@ -527,6 +614,7 @@ export function Modals() {
       {modal === 'import' && <ImportModal />}
       {modal === 'export' && <ExportModal />}
       {modal === 'calc' && <CalcModal />}
+      {modal === 'formula' && <FormulaModal />}
       {modal === 'about' && <AboutModal />}
       {modal === 'help' && <HelpModal onClose={closeModal} />}
       {modal === 'options' && <OptionsModal onClose={closeModal} />}

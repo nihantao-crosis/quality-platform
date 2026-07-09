@@ -4,7 +4,7 @@
  */
 import { create } from 'zustand';
 import {
-  buildData, computeVarModel, computePChart, computeCChart,
+  buildData, computeVarModel, computePChart, computeCChart, evalFormula, FormulaError,
   type VarModel, type PChartModel, type CChartModel, type TextColumn,
 } from '../core';
 import { useApp } from './appStore';
@@ -110,6 +110,8 @@ interface DataState {
   deleteColumn(col: number): void;
   /** 在末尾插入测量列（值默认取各行首列的副本,便于随后编辑） */
   insertColumn(): void;
+  /** 用公式(引用 C1../列名)算出一列并追加;成功返回 null,失败返回错误信息 */
+  addFormulaColumn(name: string, expr: string): string | null;
   /** 转置：k×n → n×k,生成新数据集「xxx (转置)」 */
   transposeDataset(): void;
   /** 堆叠：多测量列堆成单列 + 「来源列」分组标签,生成新数据集「xxx (堆叠)」 */
@@ -450,6 +452,27 @@ export const useData = create<DataState>((set, get) => ({
     const colNames = [...m.colNames, `测量${m.n + 1}`];
     const rows = m.subs.map((s) => [...s.vals, s.vals[s.vals.length - 1]]);
     applyEdit(set, get, rows, get().textCols, colNames);
+  },
+
+  addFormulaColumn: (name, expr) => {
+    const m = get().model;
+    if (m.n >= 10) return '测量列已达上限（10 列），无法再添加';
+    const clean = name.trim() || `公式${m.n + 1}`;
+    const columns = m.colNames.map((_, j) => m.subs.map((s) => s.vals[j]));
+    let values: number[];
+    try {
+      values = evalFormula(expr, { columns, colNames: m.colNames, rowCount: m.k }).values;
+    } catch (e) {
+      return e instanceof FormulaError ? e.message : '公式计算失败：' + (e as Error).message;
+    }
+    if (values.every((v) => !Number.isFinite(v))) return '公式在所有行上都算不出有限值,请检查表达式';
+    // 保留精度但落成有限值(除零等 → 0),模型要求有限数
+    const safe = values.map((v) => (Number.isFinite(v) ? Number(v.toFixed(6)) : 0));
+    const colNames = [...m.colNames, clean];
+    const rows = m.subs.map((s, i) => [...s.vals, safe[i]]);
+    applyEdit(set, get, rows, get().textCols, colNames);
+    sessionLog(`新增公式列「${clean}」= ${expr.trim()}`);
+    return null;
   },
 
   transposeDataset: () => {

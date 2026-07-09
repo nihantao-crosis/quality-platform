@@ -104,6 +104,7 @@ const MENUS: { name: string; items: Item[] }[] = [
     { label: '恢复演示数据集', act: { resetData: true } },
     { label: '查看工作表', act: nav('worksheet') } ] },
   { name: '计算', items: [
+    { label: '公式计算列…', act: mdl('formula') },
     { label: '计算器…', act: mdl('calc') },
     { label: '列统计…', act: mdl('colstats') },
     { label: '行统计（工作表内展示）', act: { page: 'worksheet', toast: '每行的均值 / 极差已在工作表末列展示' } },

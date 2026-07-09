@@ -17,3 +17,4 @@ export * from './stages';
 export * from './aqlSwitch';
 export * from './sampleData';
 export * from './calculator';
+export * from './formula';
