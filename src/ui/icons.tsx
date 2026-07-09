@@ -1,6 +1,6 @@
 /** 内联线性图标（1.5px 线宽）— 从原型 icon() 迁移。 */
 
-export type IconName = 'grid' | 'table' | 'chart' | 'bell' | 'gauge' | 'box' | 'bars' | 'flask' | 'check';
+export type IconName = 'grid' | 'table' | 'chart' | 'bell' | 'gauge' | 'box' | 'bars' | 'flask' | 'check' | 'wand';
 
 export function Icon({ name, color }: { name: IconName; color?: string }) {
   const col = color || '#5b6472';
@@ -75,6 +75,14 @@ export function Icon({ name, color }: { name: IconName; color?: string }) {
         <svg {...p}>
           <circle cx={8} cy={8} r={6} />
           <path d="M5.5 8 L7.2 9.8 L10.5 6" />
+        </svg>
+      );
+    case 'wand':
+      return (
+        <svg {...p}>
+          <line x1={9.5} y1={6.5} x2={3} y2={13} />
+          <path d="M11 2 L11.6 3.6 L13.2 4.2 L11.6 4.8 L11 6.4 L10.4 4.8 L8.8 4.2 L10.4 3.6 Z" />
+          <path d="M4 3 L4.4 4 L5.4 4.4 L4.4 4.8 L4 5.8 L3.6 4.8 L2.6 4.4 L3.6 4 Z" />
         </svg>
       );
     default:

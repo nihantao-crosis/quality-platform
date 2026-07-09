@@ -16,6 +16,7 @@ import { Modals, Toast } from './ui/shell/Modals';
 import { SessionPanel } from './ui/shell/SessionPanel';
 import { ErrorBoundary } from './ui/ErrorBoundary';
 import { Dashboard } from './ui/pages/Dashboard';
+import { Assistant } from './ui/pages/Assistant';
 import { Worksheet } from './ui/pages/Worksheet';
 import { Spc } from './ui/pages/Spc';
 import { Capability } from './ui/pages/Capability';
@@ -116,6 +117,7 @@ export default function App() {
           <div style={{ flex: 1, overflowY: 'auto', padding: '20px 22px 40px' }}>
             <ErrorBoundary resetKey={page + '|' + M.name}>
               {page === 'dashboard' && <Dashboard T={T} />}
+              {page === 'assistant' && <Assistant />}
               {page === 'worksheet' && <Worksheet />}
               {page === 'spc' && <Spc T={T} />}
               {page === 'capability' && <Capability T={T} />}

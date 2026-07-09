@@ -48,3 +48,5 @@ div:hover > .rc-del { display: inline; }
 .hov-source:hover { background: #f4f7fa; }
 .hov-act:hover { background: #f2f5f8; }
 .hov-act-primary:hover { background: #1a5f9c !important; }
+.hov-card { transition: border-color .12s, box-shadow .12s, background .12s; }
+.hov-card:hover { border-color: #1f6fb2 !important; background: #f8fbfe; box-shadow: 0 1px 6px rgba(31,111,178,.12); }

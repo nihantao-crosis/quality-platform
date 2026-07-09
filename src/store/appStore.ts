@@ -7,7 +7,7 @@ import type { NelsonRules, InspectionLevel, CalcState } from '../core';
 import { calcKey as coreCalcKey, CALC_INIT } from '../core';
 
 export type Page =
-  | 'dashboard' | 'worksheet' | 'spc' | 'capability' | 'gagerr'
+  | 'dashboard' | 'assistant' | 'worksheet' | 'spc' | 'capability' | 'gagerr'
   | 'anova' | 'pareto' | 'doe' | 'aql';
 export type SpcType = 'xbar-r' | 'xbar-s' | 'i-mr' | 'ewma' | 'cusum' | 'p' | 'c';
 export type Modal = 'import' | 'export' | 'calc' | 'about' | 'sort' | 'colstats' | 'random' | 'help' | 'options' | null;
