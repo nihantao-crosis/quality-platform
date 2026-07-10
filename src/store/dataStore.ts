@@ -9,6 +9,7 @@ import {
 } from '../core';
 import { useApp } from './appStore';
 import { sessionLog } from './sessionLog';
+import { platform } from '../platform/adapter';
 
 const LS_DATASET = 'qp-dataset-v1';
 const LS_RECENTS = 'qp-recents-v1';
@@ -220,6 +221,20 @@ function restoreSnapshot(set: SetFn, snap: EditSnapshot) {
   saveJson(LS_DATASET, data);
 }
 
+/** 桌面端把数据集镜像归档到本机 SQLite 数据集库(不受 localStorage 配额限制)。
+ * 400ms 尾随防抖,连续编辑只落一次;Web 端 datasetDb 为 null,静默跳过。 */
+const vaultTimers = new Map<string, ReturnType<typeof setTimeout>>();
+export function archiveToVault(data: StoredDataset) {
+  const db = platform.datasetDb;
+  if (!db) return;
+  const prev = vaultTimers.get(data.name);
+  if (prev) clearTimeout(prev);
+  vaultTimers.set(data.name, setTimeout(() => {
+    vaultTimers.delete(data.name);
+    db.put(data.name, JSON.stringify(data)).catch(() => { /* 归档失败不打断编辑 */ });
+  }, 400));
+}
+
 /** 编辑落库：演示集首次编辑转「质检数据 (副本)」,导入集原名持久化并同步最近列表。
  * colNames 省略时沿用当前列名（值编辑）;传入时用于列结构变化（重命名/增删列）。 */
 function applyEdit(set: SetFn, get: GetFn, rows: number[][], textCols: TextColumn[], colNames?: string[]) {
@@ -241,6 +256,7 @@ function applyEdit(set: SetFn, get: GetFn, rows: number[][], textCols: TextColum
   set({ model, textCols, recents });
   saveJson(LS_DATASET, data);
   saveJson(LS_RECENTS, recents);
+  archiveToVault(data);
 }
 
 export const useData = create<DataState>((set, get) => ({
@@ -263,6 +279,7 @@ export const useData = create<DataState>((set, get) => ({
     set({ model, textCols, recents });
     saveJson(LS_DATASET, data);
     saveJson(LS_RECENTS, recents);
+    archiveToVault(data);
     suggestSpec(model);
     sessionLog(`导入变量数据 ${name} · ${rows.length} 子组 × ${colNames.length} 列`);
   },
@@ -283,12 +300,24 @@ export const useData = create<DataState>((set, get) => ({
 
   loadRecent: (name) => {
     const r = get().recents.find((x) => x.name === name);
-    if (!r) return;
-    const model = computeVarModel(r.data.name, r.data.colNames, r.data.rows);
-    set({ model, textCols: r.data.textCols ?? [] });
-    saveJson(LS_DATASET, r.data);
-    suggestSpec(model);
-    sessionLog(`加载最近数据集 ${name}`);
+    if (r) {
+      const model = computeVarModel(r.data.name, r.data.colNames, r.data.rows);
+      set({ model, textCols: r.data.textCols ?? [] });
+      saveJson(LS_DATASET, r.data);
+      suggestSpec(model);
+      sessionLog(`加载最近数据集 ${name}`);
+      return;
+    }
+    // 不在最近列表时,桌面端回落本机 SQLite 数据集库
+    platform.datasetDb?.get(name).then((json) => {
+      if (!json) return;
+      const data = JSON.parse(json) as StoredDataset;
+      const model = computeVarModel(data.name, data.colNames, data.rows);
+      set({ model, textCols: data.textCols ?? [] });
+      saveJson(LS_DATASET, data);
+      suggestSpec(model);
+      sessionLog(`从数据集库加载 ${name}`);
+    }).catch(() => { /* 库中无此集或读取失败,静默 */ });
   },
 
   resetDemo: () => {

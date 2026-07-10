@@ -1,5 +1,5 @@
 /** 四个弹窗：导入 / 导出 / 计算器 / 关于 + Toast。 */
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useApp, type ImportTab, type ExportFmt } from '../../store/appStore';
 import { useData } from '../../store/dataStore';
 import { parseMatrix, evalFormula, truthy, FormulaError, type ParsedMatrix } from '../../core';
@@ -449,6 +449,75 @@ function FormulaModal() {
   );
 }
 
+// ---------- 数据集库(本机 SQLite,仅桌面端) ----------
+function VaultModal() {
+  const { closeModal, goTo, showToast } = useApp();
+  const loadRecent = useData((s) => s.loadRecent);
+  const db = platform.datasetDb;
+  const [list, setList] = useState<Array<{ name: string; saved_at: string; bytes: number }>>([]);
+  const [stats, setStats] = useState<{ count: number; total_bytes: number; path: string } | null>(null);
+
+  const refresh = () => {
+    if (!db) return;
+    db.list().then(setList).catch(() => {});
+    db.stats().then(setStats).catch(() => {});
+  };
+  useEffect(refresh, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const fmtKB = (b: number) => (b >= 1024 * 1024 ? (b / 1024 / 1024).toFixed(1) + ' MB' : Math.max(1, Math.round(b / 1024)) + ' KB');
+
+  return (
+    <ModalFrame width={560} title="数据集库(本机)" onClose={closeModal}
+      footer={<div onClick={closeModal} style={primaryBtn}>关闭</div>}>
+      <div style={{ padding: '16px 20px', fontSize: 12.5, color: '#5b6472' }}>
+        {!db ? (
+          <div style={{ padding: '18px 4px', lineHeight: 1.8 }}>
+            数据集库由桌面版内置的 SQLite 提供,容量不受浏览器 localStorage(约 5MB)限制。
+            <br />当前为 Web 端,此功能不可用——请使用桌面安装版(.exe / .msi / .dmg)。
+            <br /><span style={{ color: '#9aa2ad', fontSize: 12 }}>Web 端数据仍通过「最近数据集」与 .qproj 项目文件持久化。</span>
+          </div>
+        ) : (
+          <>
+            <div style={{ fontSize: 12, color: '#8a929d', marginBottom: 10 }}>
+              每次导入或编辑的数据集都自动归档到本机 SQLite,不占浏览器存储配额;即使从「最近列表」移除也可在此找回。
+              {stats && <span> · 共 <b>{stats.count}</b> 个数据集 / {fmtKB(stats.total_bytes)}</span>}
+            </div>
+            {list.length === 0 ? (
+              <div style={{ padding: '16px 4px', color: '#9aa2ad' }}>库内暂无数据集——导入或编辑任意数据集后会自动归档到这里。</div>
+            ) : (
+              <div style={{ border: '1px solid #eaeef2', borderRadius: 6, overflow: 'hidden', maxHeight: 300, overflowY: 'auto' }}>
+                {list.map((d, i) => (
+                  <div key={d.name} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 12px', borderBottom: i < list.length - 1 ? '1px solid #f2f4f6' : undefined }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ color: '#2b3440', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.name}</div>
+                      <div className="mono" style={{ fontSize: 11, color: '#98a1ac' }}>{new Date(d.saved_at).toLocaleString('zh-CN')} · {fmtKB(d.bytes)}</div>
+                    </div>
+                    <div
+                      className="hov-act"
+                      onClick={() => { loadRecent(d.name); closeModal(); goTo('worksheet'); showToast('正在从数据集库加载 ' + d.name); }}
+                      style={{ padding: '5px 12px', border: '1px solid #1f6fb2', color: '#1f6fb2', borderRadius: 4, cursor: 'pointer', fontSize: 12, fontWeight: 600, flex: 'none' }}
+                    >
+                      加载
+                    </div>
+                    <div
+                      className="hov-act"
+                      onClick={() => { db.remove(d.name).then(() => { refresh(); showToast('已从数据集库删除 ' + d.name); }).catch(() => showToast('删除失败')); }}
+                      style={{ padding: '5px 12px', border: '1px solid #cfd5dd', color: '#c22f2f', borderRadius: 4, cursor: 'pointer', fontSize: 12, flex: 'none' }}
+                    >
+                      删除
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            {stats && <div className="mono" style={{ fontSize: 10.5, color: '#b3bac2', marginTop: 8, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={stats.path}>库文件:{stats.path}</div>}
+          </>
+        )}
+      </div>
+    </ModalFrame>
+  );
+}
+
 // ---------- 数据子集 / 条件筛选 ----------
 function SubsetModal() {
   const { closeModal, goTo, showToast } = useApp();
@@ -697,6 +766,7 @@ export function Modals() {
       {modal === 'calc' && <CalcModal />}
       {modal === 'formula' && <FormulaModal />}
       {modal === 'subset' && <SubsetModal />}
+      {modal === 'vault' && <VaultModal />}
       {modal === 'about' && <AboutModal />}
       {modal === 'help' && <HelpModal onClose={closeModal} />}
       {modal === 'options' && <OptionsModal onClose={closeModal} />}

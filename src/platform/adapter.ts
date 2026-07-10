@@ -17,6 +17,27 @@ export interface PickedFile {
   bytes?: Uint8Array; // 二进制（xlsx/xls）
 }
 
+export interface DatasetMeta {
+  name: string;
+  saved_at: string;
+  bytes: number;
+}
+
+export interface DatasetDbStats {
+  count: number;
+  total_bytes: number;
+  path: string;
+}
+
+/** 本机数据集库(桌面端 SQLite;Web 端为 null)。容量不受 localStorage ~5MB 限制。 */
+export interface DatasetDb {
+  put(name: string, json: string): Promise<void>;
+  get(name: string): Promise<string | null>;
+  list(): Promise<DatasetMeta[]>;
+  remove(name: string): Promise<boolean>;
+  stats(): Promise<DatasetDbStats>;
+}
+
 export interface PlatformAdapter {
   /** 是否为桌面端（Tauri 壳） */
   isDesktop: boolean;
@@ -24,6 +45,8 @@ export interface PlatformAdapter {
   exportFile(job: ExportJob): Promise<string | null>;
   /** 打开数据文件选择对话框（csv/txt 读文本,xlsx/xls 读二进制）；取消返回 null。 */
   pickImportFile(): Promise<PickedFile | null>;
+  /** 本机数据集库;仅桌面端可用。 */
+  datasetDb: DatasetDb | null;
 }
 
 const BINARY_EXT = /\.(xlsx|xls)$/i;
@@ -44,6 +67,7 @@ function toBase64(bytes: Uint8Array): string {
 // ---------- Web 实现：blob 下载 ----------
 const webAdapter: PlatformAdapter = {
   isDesktop: false,
+  datasetDb: null,
   async exportFile(job) {
     const name = `${job.defaultName}.${job.ext}`;
     const blob = job.bytes
@@ -82,8 +106,32 @@ function fromBase64(b64: string): Uint8Array {
 }
 
 // ---------- 桌面实现：原生对话框 + Rust 命令落盘 ----------
+const desktopDatasetDb: DatasetDb = {
+  async put(name, json) {
+    const { invoke } = await import('@tauri-apps/api/core');
+    await invoke('db_put_dataset', { name, json, savedAt: new Date().toISOString() });
+  },
+  async get(name) {
+    const { invoke } = await import('@tauri-apps/api/core');
+    return await invoke<string | null>('db_get_dataset', { name });
+  },
+  async list() {
+    const { invoke } = await import('@tauri-apps/api/core');
+    return await invoke<DatasetMeta[]>('db_list_datasets');
+  },
+  async remove(name) {
+    const { invoke } = await import('@tauri-apps/api/core');
+    return await invoke<boolean>('db_delete_dataset', { name });
+  },
+  async stats() {
+    const { invoke } = await import('@tauri-apps/api/core');
+    return await invoke<DatasetDbStats>('db_stats');
+  },
+};
+
 const desktopAdapter: PlatformAdapter = {
   isDesktop: true,
+  datasetDb: desktopDatasetDb,
   async exportFile(job) {
     const { save } = await import('@tauri-apps/plugin-dialog');
     const { invoke } = await import('@tauri-apps/api/core');
