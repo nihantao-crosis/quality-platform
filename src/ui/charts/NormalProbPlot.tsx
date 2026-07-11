@@ -3,11 +3,12 @@
  * 数据落在直线附近 → 正态假设成立。
  */
 import { memo, Fragment } from 'react';
-import { nf, probPlotPoints, mean, stdev, invNorm } from '../../core';
+import { nf, probPlotPoints, mean, stdev, invNorm, decimateUniform } from '../../core';
 import type { ChartTokens } from '../tokens';
 import { Svg, Ln, Txt } from './primitives';
 
 const PCT_TICKS = [1, 5, 20, 50, 80, 95, 99];
+const MAX_RENDER_PTS = 800;
 
 function NormalProbPlotImpl({ T, data, h }: { T: ChartTokens; data: number[]; h?: number }) {
   const W = 960;
@@ -44,8 +45,8 @@ function NormalProbPlotImpl({ T, data, h }: { T: ChartTokens; data: number[]; h?
       })}
       {/* 拟合直线 x = μ + σz */}
       <Ln x1={X(mu - zmax * sd)} y1={Y(-zmax)} x2={X(mu + zmax * sd)} y2={Y(zmax)} stroke={T.center} sw={T.sw + 0.4} />
-      {pts.map((p, i) => (
-        <circle key={i} cx={X(p.x)} cy={Y(p.z)} r={T.r - 0.6} fill={T.point} stroke={T.bg} strokeWidth={1} opacity={0.85} />
+      {decimateUniform(pts.length, MAX_RENDER_PTS).map((i) => (
+        <circle key={i} cx={X(pts[i].x)} cy={Y(pts[i].z)} r={T.r - 0.6} fill={T.point} stroke={T.bg} strokeWidth={1} opacity={0.85} />
       ))}
       <Txt x={m.l} y={m.t - 8} s="累积概率（正态分位）" fill={T.text} size={11} weight={600} />
       <Ln x1={m.l} y1={m.t + ph} x2={m.l + pw} y2={m.t + ph} stroke={T.axis} sw={1} />

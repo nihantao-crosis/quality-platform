@@ -10,6 +10,8 @@
  * 每行独立求值;聚合函数对「其参数在所有行上的取值」做一次归约并缓存。
  */
 
+import { arrMin, arrMax } from './basicMath';
+
 export interface FormulaCtx {
   /** 各列的数值数组，columns[j] 为第 j 列(0 基) */
   columns: number[][];
@@ -237,9 +239,9 @@ function aggregate(fn: string, xs: number[]): number {
   switch (fn) {
     case 'sum': return sum;
     case 'mean': case 'avg': return mean;
-    case 'min': return Math.min(...finite);
-    case 'max': return Math.max(...finite);
-    case 'range': return Math.max(...finite) - Math.min(...finite);
+    case 'min': return arrMin(finite);
+    case 'max': return arrMax(finite);
+    case 'range': return arrMax(finite) - arrMin(finite);
     case 'n': case 'count': return n;
     case 'var': return n > 1 ? finite.reduce((a, b) => a + (b - mean) ** 2, 0) / (n - 1) : 0;
     case 'std': case 'sd': return n > 1 ? Math.sqrt(finite.reduce((a, b) => a + (b - mean) ** 2, 0) / (n - 1)) : 0;

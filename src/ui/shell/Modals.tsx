@@ -2,7 +2,7 @@
 import { useState, useEffect } from 'react';
 import { useApp, type ImportTab, type ExportFmt } from '../../store/appStore';
 import { useData } from '../../store/dataStore';
-import { parseMatrix, evalFormula, truthy, FormulaError, type ParsedMatrix } from '../../core';
+import { parseMatrix, evalFormula, truthy, arrMin, arrMax, FormulaError, type ParsedMatrix } from '../../core';
 import { platform } from '../../platform/adapter';
 import { buildExportJob } from '../../platform/report';
 import { mesStart, mesStop } from '../../platform/mes';
@@ -668,8 +668,8 @@ function ColStatsModal() {
     const v = model.subs.map((s) => s.vals[j]);
     const mu = v.reduce((a, b) => a + b, 0) / v.length;
     const sd = Math.sqrt(v.reduce((a, b) => a + (b - mu) ** 2, 0) / Math.max(1, v.length - 1));
-    const mn = Math.min(...v);
-    const mx = Math.max(...v);
+    const mn = arrMin(v);
+    const mx = arrMax(v);
     return { name, n: v.length, mu, sd, mn, mx, range: mx - mn };
   });
   const td: React.CSSProperties = { padding: '7px 10px', borderTop: '1px solid #f0f2f5', textAlign: 'right', fontFamily: 'IBM Plex Mono,monospace', color: '#2a333f' };
@@ -717,8 +717,8 @@ function RandomModal() {
   const [k, setK] = useState(25);
   const [n, setN] = useState(5);
   const apply = () => {
-    if (sigma <= 0 || k < 2 || k > 500 || n < 1 || n > 10) {
-      showToast('参数无效：σ>0,子组数 2–500,子组大小 1–10');
+    if (sigma <= 0 || k < 2 || k > 100000 || n < 1 || n > 10) {
+      showToast('参数无效：σ>0,子组数 2–100000,子组大小 1–10');
       return;
     }
     const name = generateRandom(mu, sigma, k, n);

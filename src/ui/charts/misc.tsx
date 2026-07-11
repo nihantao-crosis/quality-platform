@@ -2,7 +2,7 @@
  * 帕累托图 / 分组柱状图 (Gage) / 箱线图 — 从原型 pareto/groupedBars/boxplot 迁移。
  */
 import { memo, Fragment } from 'react';
-import { nf, quantile } from '../../core';
+import { nf, quantile, arrMin, arrMax } from '../../core';
 import type { ChartTokens } from '../tokens';
 import { paretoColors } from '../tokens';
 import { Svg, Ln, Txt } from './primitives';
@@ -140,8 +140,8 @@ function BoxPlotImpl({ T, groups }: { T: ChartTokens; groups: { name: string; va
   const pw = W - m.l - m.r;
   const ph = H - m.t - m.b;
   const allv = groups.flatMap((g) => g.vals);
-  let lo = Math.min(...allv);
-  let hi = Math.max(...allv);
+  let lo = arrMin(allv);
+  let hi = arrMax(allv);
   const p = (hi - lo) * 0.15;
   lo -= p;
   hi += p;
@@ -165,8 +165,8 @@ function BoxPlotImpl({ T, groups }: { T: ChartTokens; groups: { name: string; va
         const q1 = quantile(grp.vals, 0.25);
         const q2 = quantile(grp.vals, 0.5);
         const q3 = quantile(grp.vals, 0.75);
-        const mn = Math.min(...grp.vals);
-        const mx = Math.max(...grp.vals);
+        const mn = arrMin(grp.vals);
+        const mx = arrMax(grp.vals);
         const mean = grp.vals.reduce((a, b) => a + b, 0) / grp.vals.length;
         return (
           <Fragment key={'b' + i}>

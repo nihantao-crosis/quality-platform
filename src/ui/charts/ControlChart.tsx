@@ -3,9 +3,12 @@
  * 中心线/UCL/LCL/σ 分区/失控点高亮/选中描边圈/点击回调。
  */
 import { memo, Fragment } from 'react';
-import { nf } from '../../core';
+import { nf, arrMin, arrMax, decimateMinMax } from '../../core';
 import type { ChartTokens } from '../tokens';
 import { Svg, Ln, Txt } from './primitives';
+
+/** 超过该点数即降采样渲染(统计/判异仍基于全量数据) */
+const MAX_RENDER_PTS = 600;
 
 export interface ControlChartProps {
   T: ChartTokens;
@@ -45,12 +48,12 @@ function ControlChartImpl(cfg: ControlChartProps) {
   const data = cfg.data;
   const dec = cfg.dec ?? 3;
   const sigma = (cfg.ucl - cfg.cl) / 3;
-  const ys = [
-    ...data, cfg.ucl, cfg.lcl, cfg.cl,
-    ...(cfg.uclSeries ?? []), ...(cfg.lclSeries ?? []), ...(cfg.clSeries ?? []), ...(cfg.series2 ?? []),
-  ];
-  let ymin = Math.min(...ys);
-  let ymax = Math.max(...ys);
+  // 大数组安全的 y 轴范围(Math.min(...) 十万级会栈溢出)
+  let ymin = Math.min(arrMin(data), cfg.lcl, cfg.cl);
+  let ymax = Math.max(arrMax(data), cfg.ucl, cfg.cl);
+  for (const s of [cfg.uclSeries, cfg.lclSeries, cfg.clSeries, cfg.series2]) {
+    if (s) { ymin = Math.min(ymin, arrMin(s)); ymax = Math.max(ymax, arrMax(s)); }
+  }
   const pad = (ymax - ymin) * 0.18 || 1;
   ymin -= pad;
   ymax += pad;
@@ -60,19 +63,27 @@ function ControlChartImpl(cfg: ControlChartProps) {
     cfg.violations ??
     new Set(data.map((v, i) => (v > cfg.ucl || v < cfg.lcl ? i : -1)).filter((i) => i >= 0));
   const label = (i: number) => (cfg.ptLabel ? cfg.ptLabel(i) : `点 ${i + 1}`);
+  // 渲染降采样:失控点/选中点/段边界必留,min-max 分桶保形;统计与判异均基于全量
+  const keep = [...viol, ...(cfg.sel != null ? [cfg.sel] : []), ...(cfg.stageBoundaries ?? []).flatMap((b) => [b - 1, b])];
+  const idx = decimateMinMax(data, MAX_RENDER_PTS, keep);
+  const sampled = idx.length < data.length;
   // 序列折线:step 模式在值跳变处插入垂直拐点(段边界中点)
   const seriesPts = (series: number[]) => {
-    if (!cfg.stepSeries) return series.map((v, i) => `${X(i)},${Y(v)}`).join(' ');
+    if (!cfg.stepSeries) return idx.map((i) => `${X(i)},${Y(series[i])}`).join(' ');
     const pts: string[] = [];
-    for (let i = 0; i < series.length; i++) {
-      if (i > 0 && series[i] !== series[i - 1]) {
-        const mid = (X(i) + X(i - 1)) / 2;
-        pts.push(`${mid},${Y(series[i - 1])}`, `${mid},${Y(series[i])}`);
+    for (let k = 0; k < idx.length; k++) {
+      const i = idx[k];
+      const prev = k > 0 ? idx[k - 1] : -1;
+      if (prev >= 0 && series[i] !== series[prev]) {
+        const mid = (X(i) + X(prev)) / 2;
+        pts.push(`${mid},${Y(series[prev])}`, `${mid},${Y(series[i])}`);
       }
       pts.push(`${X(i)},${Y(series[i])}`);
     }
     return pts.join(' ');
   };
+  // 自适应 X 轴刻度密度(全量时保持原每 5 点一签)
+  const lblStep = Math.max(5, Math.ceil(data.length / 60) * 5);
 
   return (
     <Svg w={W} h={H}>
@@ -133,17 +144,18 @@ function ControlChartImpl(cfg: ControlChartProps) {
       ))}
       {cfg.series2 && (
         <>
-          <polyline points={cfg.series2.map((v, i) => `${X(i)},${Y(v)}`).join(' ')} fill="none" stroke={T.curve2} strokeWidth={T.sw} />
-          {cfg.series2.map((v, i) => (
-            <circle key={'s2' + i} cx={X(i)} cy={Y(v)} r={T.r - 0.8} fill={T.curve2} stroke={T.bg} strokeWidth={1} />
+          <polyline points={idx.map((i) => `${X(i)},${Y(cfg.series2![i])}`).join(' ')} fill="none" stroke={T.curve2} strokeWidth={T.sw} />
+          {idx.map((i) => (
+            <circle key={'s2' + i} cx={X(i)} cy={Y(cfg.series2![i])} r={T.r - 0.8} fill={T.curve2} stroke={T.bg} strokeWidth={1} />
           ))}
           {cfg.series2Label && (
             <Txt x={m.l + pw + 8} y={Y(cfg.series2[cfg.series2.length - 1])} s={cfg.series2Label} fill={T.curve2} size={10} weight={600} />
           )}
         </>
       )}
-      <polyline points={data.map((v, i) => `${X(i)},${Y(v)}`).join(' ')} fill="none" stroke={T.line} strokeWidth={T.sw} />
-      {data.map((v, i) => {
+      <polyline points={idx.map((i) => `${X(i)},${Y(data[i])}`).join(' ')} fill="none" stroke={T.line} strokeWidth={T.sw} />
+      {idx.map((i) => {
+        const v = data[i];
         const bad = viol.has(i);
         const sel = cfg.sel === i;
         return (
@@ -160,10 +172,13 @@ function ControlChartImpl(cfg: ControlChartProps) {
           </Fragment>
         );
       })}
-      {data.map((_, i) =>
-        i % 5 === 0 || i === data.length - 1 ? (
+      {idx.map((i) =>
+        i % lblStep === 0 || i === data.length - 1 ? (
           <Txt key={'x' + i} x={X(i)} y={H - 10} s={String(i + 1)} fill={T.axis} size={10} anchor="middle" />
         ) : null,
+      )}
+      {sampled && (
+        <Txt x={m.l + pw} y={m.t - 10} s={`渲染 ${idx.length}/${data.length} 点(统计与判异基于全量)`} fill={T.axis} size={9.5} anchor="end" />
       )}
       <Ln x1={m.l} y1={m.t + ph} x2={m.l + pw} y2={m.t + ph} stroke={T.axis} sw={1} />
     </Svg>

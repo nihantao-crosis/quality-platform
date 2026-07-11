@@ -3,7 +3,7 @@
  * 从原型 histogram() 迁移。
  */
 import { memo, Fragment } from 'react';
-import { nf } from '../../core';
+import { nf, arrMin, arrMax } from '../../core';
 import type { ChartTokens } from '../tokens';
 import { Svg, Ln, Txt } from './primitives';
 
@@ -28,8 +28,8 @@ function HistogramImpl(p: HistogramProps) {
   const pw = W - m.l - m.r;
   const ph = H - m.t - m.b;
   const data = p.data;
-  let lo = Math.min(p.lsl ?? Infinity, ...data);
-  let hi = Math.max(p.usl ?? -Infinity, ...data);
+  let lo = Math.min(p.lsl ?? Infinity, arrMin(data));
+  let hi = Math.max(p.usl ?? -Infinity, arrMax(data));
   const sp = (hi - lo) * 0.08;
   lo -= sp;
   hi += sp;

@@ -49,7 +49,8 @@ export function parseMatrix(text: string): ParsedMatrix | { error: string } {
   const body = hasHeader ? cells.slice(1) : cells;
   if (body.length < 2) return { error: '数据不足：至少需要 2 行数据' };
 
-  const nCols = Math.max(...body.map((r) => r.length));
+  let nCols = 0; // 不用 Math.max(...) — 十万行展开会栈溢出
+  for (const r of body) if (r.length > nCols) nCols = r.length;
   // 数值列：≥80% 行可解析为数；其余为文本列
   const numericCols: number[] = [];
   const textColIdx: number[] = [];

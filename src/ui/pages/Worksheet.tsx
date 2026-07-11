@@ -1,16 +1,21 @@
 /** 数据工作表 — Excel 式表格（双层 sticky 表头）+ 手工录入编辑 + 数据来源 + 列统计。
  * 演示数据显示原型的 11 列布局；导入数据显示动态测量列 + 均值/极差。
  * 测量单元格双击可编辑（编辑演示集自动转「副本」），支持添加子组与删行。 */
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import type { CSSProperties } from 'react';
 import { useApp } from '../../store/appStore';
 import { useData } from '../../store/dataStore';
-import { nf, evalRules, parseMatrix } from '../../core';
+import { nf, evalRules, parseMatrix, arrMin, arrMax } from '../../core';
 import { Card, KvRows } from '../common';
 import { Icon, type IconName } from '../icons';
 
 const OPS = ['张伟', '李娜', '王强'];
 const SHIFTS = ['早班', '中班', '夜班'];
+
+/** 行虚拟化:超过该行数只渲染可视窗口(±OVERSCAN 行),其余用等高占位撑开滚动条 */
+const VIRTUAL_AT = 400;
+const ROW_H = 30;
+const OVERSCAN = 12;
 
 const numCell: CSSProperties = { border: '1px solid #eef0f3', padding: '5px 12px', textAlign: 'right', color: '#2a333f' };
 const txtCell: CSSProperties = { border: '1px solid #eef0f3', padding: '5px 12px', textAlign: 'left', color: '#5b6472' };
@@ -110,12 +115,25 @@ export function Worksheet() {
 
   const importMatrix = useData((s) => s.importMatrix);
 
+  // 行虚拟化(大数据集):跟踪滚动位置,只渲染可视窗口
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewH, setViewH] = useState(600);
+  const virtual = useData((s) => s.model.k) > VIRTUAL_AT;
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el) setViewH(el.clientHeight || 600);
+  }, [virtual]);
+
   // SPC 点选联动：进入工作表时滚动到选中子组
   useEffect(() => {
-    if (selSub != null) {
+    if (selSub == null) return;
+    if (virtual && scrollRef.current) {
+      scrollRef.current.scrollTop = Math.max(0, selSub * ROW_H - (scrollRef.current.clientHeight - ROW_H) / 2);
+    } else {
       document.getElementById(`ws-row-${selSub}`)?.scrollIntoView({ block: 'center' });
     }
-  }, [selSub]);
+  }, [selSub, virtual]);
 
   // 在工作表页直接 Ctrl/Cmd+V 粘贴表格 → 导入为新数据集（编辑单元格时不劫持）
   useEffect(() => {
@@ -145,6 +163,15 @@ export function Worksheet() {
     ? evalRules(means, M.xbarbar, sig, spcRules)
     : { viol: new Set<number>() };
 
+  // 列统计(大数组安全 min/max)
+  const allMin = arrMin(M.all);
+  const allMax = arrMax(M.all);
+
+  // 虚拟窗口边界
+  const winStart = virtual ? Math.max(0, Math.floor(scrollTop / ROW_H) - OVERSCAN) : 0;
+  const winEnd = virtual ? Math.min(M.k, Math.ceil((scrollTop + viewH) / ROW_H) + OVERSCAN) : M.k;
+  const visibleSubs = virtual ? M.subs.slice(winStart, winEnd) : M.subs;
+
   // 列头：C1 子组 + 测量列 + 均值/极差 +（演示）操作员/日期/班次
   const cols: { code: string; name: string }[] = [{ code: 'C1', name: '子组' }];
   M.colNames.forEach((n, i) => cols.push({ code: `C${i + 2}`, name: n }));
@@ -166,7 +193,11 @@ export function Worksheet() {
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '1fr 268px', gap: 16 }}>
       <div style={{ background: '#fff', border: '1px solid #d7dbe1', borderRadius: 5, overflow: 'hidden', boxShadow: '0 1px 2px rgba(20,30,50,0.04)' }}>
-        <div style={{ overflow: 'auto', maxHeight: 'calc(100vh - 220px)' }}>
+        <div
+          ref={scrollRef}
+          onScroll={virtual ? (e) => setScrollTop((e.target as HTMLDivElement).scrollTop) : undefined}
+          style={{ overflow: 'auto', maxHeight: 'calc(100vh - 220px)' }}
+        >
           <table className="mono" style={{ borderCollapse: 'collapse', fontSize: 12.5, whiteSpace: 'nowrap', minWidth: '100%' }}>
             <thead>
               <tr>
@@ -196,17 +227,20 @@ export function Worksheet() {
               </tr>
             </thead>
             <tbody>
-              {M.subs.map((s, i) => {
+              {virtual && winStart > 0 && <tr style={{ height: winStart * ROW_H }} />}
+              {visibleSubs.map((s, vi) => {
+                const i = winStart + vi;
                 const ooc = viol.has(i);
-                // content-visibility: 大数据集时浏览器跳过屏外行渲染（低成本虚拟化）
+                // 小数据集用 content-visibility 低成本跳渲染;大数据集由上方窗口化接管
                 return (
                   <tr
                     key={s.i}
                     id={`ws-row-${i}`}
                     className="ws-row"
                     style={{
-                      contentVisibility: 'auto',
-                      containIntrinsicSize: 'auto 30px',
+                      ...(virtual
+                        ? { height: ROW_H }
+                        : { contentVisibility: 'auto', containIntrinsicSize: 'auto 30px' }),
                       ...(selSub === i ? { outline: '2px solid #1f6fb2', outlineOffset: -2 } : {}),
                     } as React.CSSProperties}
                   >
@@ -246,9 +280,15 @@ export function Worksheet() {
                   </tr>
                 );
               })}
+              {virtual && winEnd < M.k && <tr style={{ height: (M.k - winEnd) * ROW_H }} />}
             </tbody>
           </table>
         </div>
+        {virtual && (
+          <div style={{ padding: '5px 12px', fontSize: 11, color: '#98a1ac', borderTop: '1px solid #eef0f3' }}>
+            大数据集已启用行虚拟化 · 共 {M.k.toLocaleString()} 行,仅渲染可视窗口({winStart + 1}–{winEnd})
+          </div>
+        )}
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -295,9 +335,9 @@ export function Worksheet() {
               { k: '样本量 N', v: String(M.all.length) },
               { k: '均值', v: nf(M.oMean, 4) },
               { k: '标准差', v: nf(M.oSd, 4) },
-              { k: '最小值', v: nf(Math.min(...M.all), 3) },
-              { k: '最大值', v: nf(Math.max(...M.all), 3) },
-              { k: '极差', v: nf(Math.max(...M.all) - Math.min(...M.all), 3) },
+              { k: '最小值', v: nf(allMin, 3) },
+              { k: '最大值', v: nf(allMax, 3) },
+              { k: '极差', v: nf(allMax - allMin, 3) },
             ]}
           />
         </Card>

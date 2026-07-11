@@ -81,6 +81,20 @@ export function quantile(xs: number[], f: number): number {
   return s[b] + ((s[b + 1] - s[b]) || 0) * (idx - b);
 }
 
+
+/** 大数组安全 min/max（Math.min(...xs) 在 ~6.5 万元素以上会栈溢出） */
+export function arrMin(xs: number[]): number {
+  let m = Infinity;
+  for (let i = 0; i < xs.length; i++) if (xs[i] < m) m = xs[i];
+  return m;
+}
+
+export function arrMax(xs: number[]): number {
+  let m = -Infinity;
+  for (let i = 0; i < xs.length; i++) if (xs[i] > m) m = xs[i];
+  return m;
+}
+
 /** 数字格式化（原型 nf） */
 export function nf(v: number, d: number): string {
   return Number(v).toFixed(d);

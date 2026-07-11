@@ -19,3 +19,4 @@ export * from './sampleData';
 export * from './calculator';
 export * from './formula';
 export * from './descriptive';
+export * from './downsample';
