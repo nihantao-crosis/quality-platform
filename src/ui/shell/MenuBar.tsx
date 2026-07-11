@@ -93,7 +93,7 @@ const MENUS: { name: string; items: Item[] }[] = [
     { label: '复制', kbd: 'Ctrl+C', act: tst('已复制') },
     { label: '粘贴', kbd: 'Ctrl+V', act: tst('已粘贴') },
     { sep: true },
-    { label: '查找 / 替换…', kbd: 'Ctrl+F', act: tst('查找 / 替换') } ] },
+    { label: '查找 / 替换…', kbd: 'Ctrl+F', act: mdl('findreplace') } ] },
   { name: '数据', items: [
     { label: '导入数据…', act: mdl('import') },
     { label: '堆叠列（多列 → 单列+来源）', act: { stack: true } },

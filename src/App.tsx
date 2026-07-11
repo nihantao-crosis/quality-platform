@@ -54,6 +54,9 @@ export default function App() {
       } else if (k === 'o') {
         e.preventDefault();
         s.openModal('import');
+      } else if (k === 'f') {
+        e.preventDefault();
+        s.openModal('findreplace');
       } else if (k === 'p') {
         e.preventDefault();
         if (platform.isDesktop) s.showToast('桌面端请使用「导出报表」生成文件后打印');

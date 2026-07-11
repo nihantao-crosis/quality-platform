@@ -518,6 +518,63 @@ function VaultModal() {
   );
 }
 
+// ---------- 查找 / 替换 ----------
+function FindReplaceModal() {
+  const { closeModal, goTo, showToast } = useApp();
+  const { model, findReplace } = useData();
+  const [findS, setFindS] = useState('');
+  const [replS, setReplS] = useState('');
+  const [col, setCol] = useState(-1);
+
+  const findV = parseFloat(findS);
+  const replV = parseFloat(replS);
+  const canFind = Number.isFinite(findV);
+  const matches = canFind ? findReplace(findV, null, col) : null;
+  const canApply = canFind && Number.isFinite(replV) && (matches ?? 0) > 0;
+
+  const apply = () => {
+    if (!canApply) return;
+    const n = findReplace(findV, replV, col);
+    closeModal();
+    goTo('worksheet');
+    showToast(`已替换 ${n} 处 ${findV} → ${replV}(可 Ctrl+Z 撤销)`);
+  };
+
+  const inp: React.CSSProperties = { width: 120, padding: '6px 9px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12.5, fontFamily: 'IBM Plex Mono,monospace', textAlign: 'right' };
+  return (
+    <ModalFrame width={420} title="查找 / 替换 · 测量值" onClose={closeModal}
+      footer={<>
+        <div onClick={closeModal} style={cancelBtn}>取消</div>
+        <div onClick={apply} style={{ ...primaryBtn, ...(canApply ? {} : { opacity: 0.5, pointerEvents: 'none' }) }}>全部替换</div>
+      </>}>
+      <div style={{ padding: '18px 20px', display: 'flex', flexDirection: 'column', gap: 13, fontSize: 12.5, color: '#5b6472' }}>
+        <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+          查找数值
+          <input autoFocus type="number" step="any" value={findS} onChange={(e) => setFindS(e.target.value)} placeholder="如 25.037" style={inp} />
+        </label>
+        <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+          替换为
+          <input type="number" step="any" value={replS} onChange={(e) => setReplS(e.target.value)} placeholder="如 25.000" style={inp} />
+        </label>
+        <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+          范围
+          <select value={col} onChange={(e) => setCol(+e.target.value)} style={{ padding: '6px 9px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12.5 }}>
+            <option value={-1}>全部测量列</option>
+            {model.colNames.map((n, i) => <option key={n} value={i}>{n}</option>)}
+          </select>
+        </label>
+        <div style={{ borderTop: '1px solid #eef0f3', paddingTop: 10, fontSize: 12.5 }}>
+          {matches == null
+            ? <span style={{ color: '#9aa2ad' }}>输入查找数值后实时显示命中数。匹配按显示精度(3 位小数)对齐。</span>
+            : matches === 0
+              ? <span style={{ color: '#d98324' }}>没有匹配的测量值</span>
+              : <span style={{ color: '#1c4e7a' }}>命中 <b className="mono">{matches}</b> 处,替换后可 Ctrl+Z 撤销</span>}
+        </div>
+      </div>
+    </ModalFrame>
+  );
+}
+
 // ---------- 数据子集 / 条件筛选 ----------
 function SubsetModal() {
   const { closeModal, goTo, showToast } = useApp();
@@ -767,6 +824,7 @@ export function Modals() {
       {modal === 'formula' && <FormulaModal />}
       {modal === 'subset' && <SubsetModal />}
       {modal === 'vault' && <VaultModal />}
+      {modal === 'findreplace' && <FindReplaceModal />}
       {modal === 'about' && <AboutModal />}
       {modal === 'help' && <HelpModal onClose={closeModal} />}
       {modal === 'options' && <OptionsModal onClose={closeModal} />}

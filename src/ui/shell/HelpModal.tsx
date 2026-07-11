@@ -73,6 +73,58 @@ const TOPICS: Topic[] = [
       '手工录入:工作表双击单元格编辑;编辑演示集自动另存「副本」。',
       '堆叠列:多测量列 → 单列+「来源列」,可直接做 ANOVA;转置:行列互换。',
       '撤销/重做:Ctrl+Z / Ctrl+Y(20 层);全部数据本地持久化,重启自动恢复。',
+      '查找/替换(Ctrl+F):按数值批量替换测量单元格,可限定列,可撤销。',
+    ],
+  },
+  {
+    key: 'formula', title: '公式计算列',
+    lines: [
+      '计算 → 公式计算列…:用表达式从已有列算出新列,如 (C1+C2)/2、sqrt(C1)。',
+      '列引用:C1 C2…(按工作表顺序)或引号列名 \'直径 (mm)\'。',
+      '运算:+ − × ÷ ^ 与括号;逐元素函数 abs/sqrt/ln/log10/exp/round/sq。',
+      '聚合函数整列折算成常量再广播:mean/std/var/min/max/sum/median/range/n。',
+      '典型用法:z 分数 (C1−mean(C1))/std(C1);两列均值 (C1+C2)/2。',
+      '弹窗内实时预览前几行结果并即时报错;新列可 Ctrl+Z 撤销。',
+    ],
+  },
+  {
+    key: 'subset', title: '条件子集筛选',
+    lines: [
+      '数据 → 子集/条件筛选…:条件为真的行保留为新数据集「…(子集)」,原集不变。',
+      '比较:> < >= <= =(等于) <>(不等);逻辑:and / or / not。',
+      '例:C1 > 25;C1 >= 24.9 and C1 <= 25.1;not (C2 = 0)。',
+      '弹窗实时显示命中行数;全命中或命中不足 2 行时不允许生成。',
+      '文本分组列随行同步筛选,子集可直接做 ANOVA / Gage。',
+    ],
+  },
+  {
+    key: 'vault', title: '数据集库(本机)',
+    lines: [
+      '桌面版内置 SQLite:每次导入/编辑的数据集自动归档,不占浏览器 5MB 配额。',
+      '数据 → 数据集库(本机)…:查看全部归档(名称/时间/大小),可加载或删除。',
+      '超大数据集(十万行级)超出浏览器存储时自动只存库,重启自动恢复。',
+      '从「最近列表」移除的数据集仍可在库中找回;删除仅经弹窗显式操作。',
+      'Web/便携版无此功能,数据经「最近数据集」与 .qproj 项目文件持久化。',
+    ],
+  },
+  {
+    key: 'summary', title: '描述性统计',
+    lines: [
+      '统计 → 描述性统计/图形化摘要:直方图+正态曲线、箱线图与完整统计表一屏呈现。',
+      '统计量:N/均值/SE/标准差/方差/CV/偏度/峰度/五数概括/极差/IQR/总和。',
+      '95% 置信区间:均值(t 分布)、中位数(次序统计)、标准差(χ² 近似)。',
+      'Anderson-Darling 正态检验:P ≥ 0.05 可用正态方法;偏态建议 Box-Cox。',
+      '任何深入分析前先看图形化摘要,是了解数据分布最稳妥的第一步。',
+    ],
+  },
+  {
+    key: 'assistant', title: '助手与结论卡',
+    lines: [
+      '助手·选分析:回答几个关于目标与数据的问题,自动推荐并打开正确的分析模块。',
+      '推荐卡三句话:这个分析做什么/需要什么数据/为什么推荐它。',
+      '结论卡:每个分析页顶部的红绿灯结论(通过/需注意/需处理)+逐项体检。',
+      '体检项:稳定性、正态性、样本量、GRR 判据、R² 分级等,并给出行动建议。',
+      '注意:结论卡是启发式指引,关键决策请结合原始统计量与业务背景判断。',
     ],
   },
 ];
@@ -116,7 +168,7 @@ export function HelpModal({ onClose }: { onClose: () => void }) {
           {topic !== 'data' && (
             <div
               onClick={() => {
-                const page = ({ spc: 'spc', capability: 'capability', msa: 'gagerr', hypo: 'anova', doe: 'doe', aql: 'aql' } as const)[topic];
+                const page = ({ spc: 'spc', capability: 'capability', msa: 'gagerr', hypo: 'anova', doe: 'doe', aql: 'aql', formula: 'worksheet', subset: 'worksheet', vault: 'worksheet', summary: 'summary', assistant: 'assistant' } as const)[topic as never];
                 if (page) {
                   goTo(page);
                   onClose();

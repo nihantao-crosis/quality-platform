@@ -120,6 +120,8 @@ interface DataState {
   addFormulaColumn(name: string, expr: string): string | null;
   /** 按条件表达式(如 C1>25 and C2<=25.1)筛出子集为新数据集 */
   subsetByCondition(cond: string): { ok: true; name: string; kept: number; total: number } | { ok: false; error: string };
+  /** 统计与替换测量值(3dp 显示容差);col=-1 全部列。replace 为 null 只计数。可撤销。 */
+  findReplace(find: number, replace: number | null, col: number): number;
   /** 转置：k×n → n×k,生成新数据集「xxx (转置)」 */
   transposeDataset(): void;
   /** 堆叠：多测量列堆成单列 + 「来源列」分组标签,生成新数据集「xxx (堆叠)」 */
@@ -541,6 +543,26 @@ export const useData = create<DataState>((set, get) => ({
     applyEdit(set, get, rows, get().textCols, colNames);
     sessionLog(`新增公式列「${clean}」= ${expr.trim()}`);
     return null;
+  },
+
+  findReplace: (find, replace, col) => {
+    const m = get().model;
+    // 与工作表显示一致的匹配:精确相等或 3 位小数四舍五入后相等
+    const hit = (v: number) => v === find || Math.abs(v - find) < 5e-4 && Number(v.toFixed(3)) === Number(find.toFixed(3));
+    let count = 0;
+    const rows = m.subs.map((s) =>
+      s.vals.map((v, j) => {
+        if ((col === -1 || j === col) && hit(v)) {
+          count++;
+          return replace != null ? replace : v;
+        }
+        return v;
+      }),
+    );
+    if (replace == null || count === 0) return count; // 只计数或无命中
+    applyEdit(set, get, rows, get().textCols);
+    sessionLog(`查找替换:${find} → ${replace} · ${count} 处${col >= 0 ? ` · 限「${m.colNames[col]}」列` : ''}`);
+    return count;
   },
 
   subsetByCondition: (cond) => {
