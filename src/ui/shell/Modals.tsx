@@ -7,7 +7,7 @@ import { platform } from '../../platform/adapter';
 import { buildExportJob } from '../../platform/report';
 import { mesStart, mesStop } from '../../platform/mes';
 import { sessionLog } from '../../store/sessionLog';
-import { isProjectFile, applyProjectJson } from '../../platform/project';
+import { isProjectFile, applyProjectText } from '../../platform/project';
 import { HelpModal } from './HelpModal';
 import { OptionsModal } from './OptionsModal';
 
@@ -76,14 +76,14 @@ function ImportModal() {
     const f = await platform.pickImportFile();
     if (!f) return;
     if (isProjectFile(f.name)) {
-      const err = applyProjectJson(f.contents ?? '');
-      if (err) {
-        showToast('打开项目失败：' + err);
+      const r = await applyProjectText(f.contents ?? '');
+      if (r.error) {
+        showToast('打开项目失败：' + r.error);
         return;
       }
-      sessionLog('打开项目文件 ' + f.name + ' · 即将重载');
-      showToast('项目已恢复,正在重载…');
-      setTimeout(() => location.reload(), 700);
+      sessionLog('打开项目文件 ' + f.name + (r.note ? ' · ' + r.note : '') + ' · 即将重载');
+      showToast(r.note ? `项目已恢复(${r.note}),正在重载…` : '项目已恢复,正在重载…');
+      setTimeout(() => location.reload(), 900);
       return;
     }
     handlePicked(f.name, f.contents, f.bytes);
@@ -96,14 +96,14 @@ function ImportModal() {
     const file = e.dataTransfer.files?.[0];
     if (!file) return;
     if (isProjectFile(file.name)) {
-      const err = applyProjectJson(await file.text());
-      if (err) {
-        showToast('打开项目失败：' + err);
+      const r = await applyProjectText(await file.text());
+      if (r.error) {
+        showToast('打开项目失败：' + r.error);
         return;
       }
-      sessionLog('打开项目文件 ' + file.name + ' · 即将重载');
-      showToast('项目已恢复,正在重载…');
-      setTimeout(() => location.reload(), 700);
+      sessionLog('打开项目文件 ' + file.name + (r.note ? ' · ' + r.note : '') + ' · 即将重载');
+      showToast(r.note ? `项目已恢复(${r.note}),正在重载…` : '项目已恢复,正在重载…');
+      setTimeout(() => location.reload(), 900);
       return;
     }
     if (/\.(xlsx|xls)$/i.test(file.name)) {
