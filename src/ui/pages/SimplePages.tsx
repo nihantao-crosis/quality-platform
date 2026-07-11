@@ -2,6 +2,8 @@
  * 活动数据集含分组列时对真实数据实算,否则回落到演示研究。 */
 import { useMemo, useState } from 'react';
 import type { CSSProperties } from 'react';
+import { ReportCard } from '../ReportCard';
+import { gageReport, anovaReport, tReport, regReport } from '../reportData';
 import {
   nf, anovaGroups, DEFECTS, gageStudyData, GAGE_TOLERANCE,
   computeGageRR, oneWayAnova, oneSampleT, twoSampleT, linearRegression,
@@ -86,7 +88,9 @@ function GageRRInner({ T }: { T: ChartTokens }) {
     tol: c.pctTolerance,
   }));
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 16 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <ReportCard data={gageReport({ grr: g.totalGageRR, verdict: g.verdict })} />
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 16 }}>
       <Card>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 16px', borderBottom: '1px solid #edf0f3', flexWrap: 'wrap' }}>
           <div style={{ fontWeight: 600, color: '#33404f' }}>变异分量 · 交叉 Gage R&R (ANOVA 法)</div>
@@ -154,6 +158,7 @@ function GageRRInner({ T }: { T: ChartTokens }) {
         </Card>
       </div>
     </div>
+    </div>
   );
 }
 
@@ -207,7 +212,9 @@ function RegressionPanel({ T }: { T: ChartTokens }) {
   }
   const sign = reg && reg.intercept >= 0 ? '+' : '−';
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: 16 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      {reg && <ReportCard data={regReport({ r2: reg.r2, p: reg.p, significant: reg.significant, n: reg.n })} />}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: 16 }}>
       <Card>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '11px 16px', borderBottom: '1px solid #edf0f3', flexWrap: 'wrap' }}>
           <div style={{ fontWeight: 600, color: '#33404f' }}>散点图与最小二乘回归</div>
@@ -269,6 +276,7 @@ function RegressionPanel({ T }: { T: ChartTokens }) {
         </div>
       )}
     </div>
+    </div>
   );
 }
 
@@ -315,7 +323,9 @@ function OneSampleTPanel({ T }: { T: ChartTokens }) {
     ? `P ${r.p < 0.001 ? '< 0.001' : '= ' + nf(r.p, 3)} < 0.05，「${model.colNames[col]}」的均值 ${nf(r.estimate, 4)} 与目标 ${nf(mu0, 4)} 存在显著差异,过程中心可能偏移,建议调整。`
     : `P = ${nf(r.p, 3)} ≥ 0.05，无充分证据表明「${model.colNames[col]}」的均值偏离目标 ${nf(mu0, 4)},过程中心可视为对准目标。`;
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: 16 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <ReportCard data={tReport({ kind: 't1', p: r.p, significant: r.significant, n: xs.length })} />
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: 16 }}>
       <Card>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '11px 16px', borderBottom: '1px solid #edf0f3', flexWrap: 'wrap' }}>
           <div style={{ fontWeight: 600, color: '#33404f' }}>单样本 t 检验 · 均值 vs 目标 μ₀</div>
@@ -342,6 +352,7 @@ function OneSampleTPanel({ T }: { T: ChartTokens }) {
       </Card>
       <TTestResultCards r={r} estimateLabel="样本均值" conclusion={conclusion} />
     </div>
+    </div>
   );
 }
 
@@ -363,7 +374,9 @@ function TwoSampleTPanel({ T }: { T: ChartTokens }) {
     ? `P ${r.p < 0.001 ? '< 0.001' : '= ' + nf(r.p, 3)} < 0.05，「${groups[0].name}」与「${groups[1].name}」均值差 ${nf(r.estimate, 4)} 显著（Welch 校正）,两组不可视为同一总体。`
     : `P = ${nf(r.p, 3)} ≥ 0.05，「${groups[0].name}」与「${groups[1].name}」均值无显著差异（Welch 校正）。`;
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: 16 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <ReportCard data={tReport({ kind: 't2', p: r.p, significant: r.significant, n: Math.min(groups[0].vals.length, groups[1].vals.length) })} />
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: 16 }}>
       <Card>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '11px 16px', borderBottom: '1px solid #edf0f3', flexWrap: 'wrap' }}>
           <div style={{ fontWeight: 600, color: '#33404f' }}>双样本 t 检验（Welch,不等方差）</div>
@@ -387,6 +400,7 @@ function TwoSampleTPanel({ T }: { T: ChartTokens }) {
         </div>
       </Card>
       <TTestResultCards r={r} estimateLabel="均值差 (1−2)" conclusion={conclusion} />
+    </div>
     </div>
   );
 }
@@ -428,7 +442,9 @@ function AnovaInner({ T }: { T: ChartTokens }) {
     ? `P = ${nf(a.pValue, 3)} < 0.05，在 95% 置信水平下拒绝原假设：各「${factorName}」组均值存在显著差异。「${hi}」组均值最高，建议优先排查。`
     : `P = ${nf(a.pValue, 3)} ≥ 0.05，无充分证据表明各「${factorName}」组均值存在显著差异，可视为同一总体。`;
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: 16 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <ReportCard data={anovaReport({ p: a.pValue, significant: a.significant, groups: groups.map((g) => ({ name: g.name, n: g.vals.length })) })} />
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: 16 }}>
       <Card>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 16px', borderBottom: '1px solid #edf0f3', flexWrap: 'wrap' }}>
           <div style={{ fontWeight: 600, color: '#33404f' }}>
@@ -492,6 +508,7 @@ function AnovaInner({ T }: { T: ChartTokens }) {
           <div style={{ fontSize: 12.5, color: '#5b6472', lineHeight: 1.6 }}>{conclusion}</div>
         </Card>
       </div>
+    </div>
     </div>
   );
 }

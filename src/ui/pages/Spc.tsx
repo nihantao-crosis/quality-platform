@@ -6,6 +6,8 @@ import type { CSSProperties } from 'react';
 import { useApp, type SpcType } from '../../store/appStore';
 import { useData } from '../../store/dataStore';
 import { nf, evalRules, ewmaSeries, cusumSeries, stagedXbar, stagedRange, splitStages } from '../../core';
+import { ReportCard } from '../ReportCard';
+import { spcReport } from '../reportData';
 import type { ChartTokens } from '../tokens';
 import { Card, KvRows, tabStyle, chipStyle } from '../common';
 import { ControlChart, type ControlChartProps } from '../charts/ControlChart';
@@ -242,8 +244,17 @@ export function Spc({ T }: { T: ChartTokens }) {
   ];
   const ruleToggles: Array<['r1' | 'r2' | 'r3' | 'r4', string]> = [['r1', '准则 1'], ['r2', '准则 2'], ['r3', '准则 3'], ['r4', '准则 4']];
 
+  const report = spcReport({
+    violList,
+    k: main.props.data.length,
+    n: M.n,
+    hasSubgroups: M.hasSubgroups,
+    typeLabel: typeTabs.find(([k]) => k === effType)?.[1] ?? effType,
+  });
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <ReportCard data={report} />
       <Card style={{ padding: '11px 16px', display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
         <span style={{ fontSize: 12, color: '#8a929d', fontWeight: 600 }}>控制图类型</span>
         <div style={{ display: 'flex', gap: 6 }}>

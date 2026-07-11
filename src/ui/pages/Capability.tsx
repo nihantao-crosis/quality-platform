@@ -2,14 +2,16 @@
 import { useState } from 'react';
 import { useApp } from '../../store/appStore';
 import { useData, suggestedSpec, rememberSpecFor } from '../../store/dataStore';
-import { nf, fmtCap, computeCapability, andersonDarling, bestLambda, transformWithSpec, stdev } from '../../core';
+import { nf, fmtCap, computeCapability, andersonDarling, bestLambda, transformWithSpec, stdev, evalRules } from '../../core';
+import { ReportCard } from '../ReportCard';
+import { capabilityReport } from '../reportData';
 import type { ChartTokens } from '../tokens';
 import { Card, CardHeader, KvRows, numInput, Badge } from '../common';
 import { Histogram } from '../charts/Histogram';
 import { NormalProbPlot } from '../charts/NormalProbPlot';
 
 export function Capability({ T }: { T: ChartTokens }) {
-  const { lsl, usl, tgt, lslOn, uslOn, toggleSide, setSpec: setSpecRaw } = useApp();
+  const { lsl, usl, tgt, lslOn, uslOn, toggleSide, setSpec: setSpecRaw, spcRules } = useApp();
   // 写规格限时同步记忆到当前数据集（切换数据集/重启后恢复）
   const setSpec = (patch: Partial<{ lsl: number; usl: number; tgt: number }>) => {
     setSpecRaw(patch);
@@ -71,8 +73,18 @@ export function Capability({ T }: { T: ChartTokens }) {
     { k: '整体 (实际)', lsl: cap.ppm.overall.belowLsl == null ? '—' : Math.round(cap.ppm.overall.belowLsl).toLocaleString(), usl: cap.ppm.overall.aboveUsl == null ? '—' : Math.round(cap.ppm.overall.aboveUsl).toLocaleString(), ppm: Math.round(cap.ppm.overall.total).toLocaleString() },
   ];
 
+  // 助手结论卡:稳定性检查沿用 X̄ 图判异
+  const spcViol = M.hasSubgroups
+    ? evalRules(M.subs.map((s) => s.mean), M.xbarbar, (M.uclX - M.xbarbar) / 3, spcRules).viol.size
+    : 0;
+  const report = capabilityReport({
+    cpk: cap.cpk, verdict: cap.verdict,
+    adP: ad ? ad.p : null, n: M.all.length, spcViolations: spcViol,
+  });
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <ReportCard data={report} />
       <Card style={{ padding: '11px 16px', display: 'flex', alignItems: 'center', gap: 18, flexWrap: 'wrap' }}>
         <span style={{ fontSize: 12, color: '#8a929d', fontWeight: 600 }}>规格限 (可编辑，实时重算)</span>
         {inputs.map((i) => (
