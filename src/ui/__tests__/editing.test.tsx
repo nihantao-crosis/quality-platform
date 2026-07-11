@@ -50,7 +50,7 @@ describe('工作表手工录入', () => {
     const s = useData.getState();
     expect(s.model.name).toBe('产线A.csv');
     expect(s.model.subs[1].vals[1]).toBe(42);
-    expect(s.recents[0].data.rows[1][1]).toBe(42);
+    expect(s.recents[0].data!.rows[1][1]).toBe(42);
   });
 });
 

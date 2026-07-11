@@ -14,6 +14,8 @@ import { platform } from '../platform/adapter';
 const LS_DATASET = 'qp-dataset-v1';
 const LS_RECENTS = 'qp-recents-v1';
 const LS_ATTR = 'qp-attr-v1';
+/** 活动数据集超出 localStorage 配额时的恢复标记(桌面端,数据在 SQLite 库中) */
+const LS_ACTIVE_REF = 'qp-active-ref-v1';
 const MAX_RECENTS = 5;
 const MAX_MES_SUBGROUPS = 200;
 
@@ -28,7 +30,8 @@ interface StoredDataset {
 export interface RecentEntry {
   name: string;
   savedAt: string;
-  data: StoredDataset;
+  /** 完整数据。桌面端条目过大导致配额超限时持久化为轻量条目(数据在 SQLite 库),加载时回落。 */
+  data?: StoredDataset;
 }
 
 const DEMO_COLS = ['直径1', '直径2', '直径3', '直径4', '直径5'];
@@ -56,20 +59,22 @@ function loadJson<T>(key: string): T | null {
 }
 
 let storageWarned = false;
-function saveJson(key: string, v: unknown) {
+function saveJson(key: string, v: unknown, silent = false): boolean {
   try {
     localStorage.setItem(key, JSON.stringify(v));
     storageWarned = false;
+    return true;
   } catch {
-    // 存储超限(浏览器 localStorage 通常约 5MB)：应用继续在内存工作,
-    // 但不再静默——提示用户数据本次未持久化,建议「保存到项目」导出为文件。
-    if (!storageWarned) {
+    // 存储超限(浏览器 localStorage 通常约 5MB)：应用继续在内存工作。
+    // silent=true 时由调用方接管提示(桌面端会转投 SQLite 数据集库)。
+    if (!silent && !storageWarned) {
       storageWarned = true;
       sessionLog('本地存储写入失败(可能超限)· 数据仍在内存,建议 保存到项目 导出文件');
       try {
         useApp.getState().showToast('本地存储已满,本次未自动保存;请用「保存到项目」导出为文件');
       } catch { /* 非浏览器环境忽略 */ }
     }
+    return false;
   }
 }
 
@@ -218,7 +223,7 @@ function restoreSnapshot(set: SetFn, snap: EditSnapshot) {
   const model = computeVarModel(snap.name, snap.colNames, snap.rows);
   set({ model, textCols: snap.textCols });
   const data: StoredDataset = { name: snap.name, colNames: snap.colNames, rows: snap.rows, textCols: snap.textCols, savedAt: new Date().toISOString() };
-  saveJson(LS_DATASET, data);
+  persistActive(data);
 }
 
 /** 桌面端把数据集镜像归档到本机 SQLite 数据集库(不受 localStorage 配额限制)。
@@ -233,6 +238,37 @@ export function archiveToVault(data: StoredDataset) {
     vaultTimers.delete(data.name);
     db.put(data.name, JSON.stringify(data)).catch(() => { /* 归档失败不打断编辑 */ });
   }, 400));
+}
+
+/** 活动数据集落盘。localStorage 写不下时(超 ~5MB):桌面端即时归档到 SQLite
+ * 并留恢复标记(重启自动恢复),Web 端沿用原有超限提示。 */
+function persistActive(data: StoredDataset) {
+  const db = platform.datasetDb;
+  if (saveJson(LS_DATASET, data, db != null)) {
+    try { localStorage.removeItem(LS_ACTIVE_REF); } catch { /* 忽略 */ }
+    return;
+  }
+  if (!db) return; // Web 端:saveJson 已提示
+  try { localStorage.setItem(LS_ACTIVE_REF, data.name); } catch { /* 标记写不进也不致命 */ }
+  const prev = vaultTimers.get(data.name); // 绕过防抖,立即归档,避免窗口期丢数据
+  if (prev) { clearTimeout(prev); vaultTimers.delete(data.name); }
+  db.put(data.name, JSON.stringify(data)).then(() => {
+    sessionLog(`数据集 ${data.name} 超浏览器配额,已存入本机数据集库(重启自动恢复)`);
+    try {
+      useApp.getState().showToast('数据集超出浏览器存储配额,已安全存入本机数据集库,重启自动恢复');
+    } catch { /* 非浏览器环境忽略 */ }
+  }).catch(() => {
+    try { useApp.getState().showToast('数据集过大且归档失败,请用「保存到项目」导出为文件'); } catch { /* 忽略 */ }
+  });
+}
+
+/** 最近列表落盘。写不下时桌面端把条目瘦身(仅名称/时间,数据在 SQLite 库)再写一次。 */
+function persistRecents(recents: RecentEntry[]) {
+  const db = platform.datasetDb;
+  if (saveJson(LS_RECENTS, recents, db != null)) return;
+  if (!db) return;
+  const light = recents.map((r) => ({ name: r.name, savedAt: r.savedAt }));
+  saveJson(LS_RECENTS, light, true);
 }
 
 /** 编辑落库：演示集首次编辑转「质检数据 (副本)」,导入集原名持久化并同步最近列表。
@@ -254,8 +290,8 @@ function applyEdit(set: SetFn, get: GetFn, rows: number[][], textCols: TextColum
     ...get().recents.filter((r) => r.name !== name),
   ].slice(0, MAX_RECENTS);
   set({ model, textCols, recents });
-  saveJson(LS_DATASET, data);
-  saveJson(LS_RECENTS, recents);
+  persistActive(data);
+  persistRecents(recents);
   archiveToVault(data);
 }
 
@@ -277,8 +313,8 @@ export const useData = create<DataState>((set, get) => ({
       ...get().recents.filter((r) => r.name !== name),
     ].slice(0, MAX_RECENTS);
     set({ model, textCols, recents });
-    saveJson(LS_DATASET, data);
-    saveJson(LS_RECENTS, recents);
+    persistActive(data);
+    persistRecents(recents);
     archiveToVault(data);
     suggestSpec(model);
     sessionLog(`导入变量数据 ${name} · ${rows.length} 子组 × ${colNames.length} 列`);
@@ -300,21 +336,21 @@ export const useData = create<DataState>((set, get) => ({
 
   loadRecent: (name) => {
     const r = get().recents.find((x) => x.name === name);
-    if (r) {
+    if (r?.data) {
       const model = computeVarModel(r.data.name, r.data.colNames, r.data.rows);
       set({ model, textCols: r.data.textCols ?? [] });
-      saveJson(LS_DATASET, r.data);
+      persistActive(r.data);
       suggestSpec(model);
       sessionLog(`加载最近数据集 ${name}`);
       return;
     }
-    // 不在最近列表时,桌面端回落本机 SQLite 数据集库
+    // 条目缺失或为轻量条目(数据超配额只存在库中)时,桌面端回落本机 SQLite 数据集库
     platform.datasetDb?.get(name).then((json) => {
       if (!json) return;
       const data = JSON.parse(json) as StoredDataset;
       const model = computeVarModel(data.name, data.colNames, data.rows);
       set({ model, textCols: data.textCols ?? [] });
-      saveJson(LS_DATASET, data);
+      persistActive(data);
       suggestSpec(model);
       sessionLog(`从数据集库加载 ${name}`);
     }).catch(() => { /* 库中无此集或读取失败,静默 */ });
@@ -326,6 +362,7 @@ export const useData = create<DataState>((set, get) => ({
     try {
       localStorage.removeItem(LS_DATASET);
       localStorage.removeItem(LS_ATTR);
+      localStorage.removeItem(LS_ACTIVE_REF);
     } catch { /* 非浏览器环境忽略 */ }
     suggestSpec(d.model);
     sessionLog('恢复演示数据集 质检数据.mtw');
@@ -581,3 +618,26 @@ export const useData = create<DataState>((set, get) => ({
 
   setMesRunning: (mesRunning) => set({ mesRunning }),
 }));
+
+/** 启动恢复:活动数据集曾因超配额只存到 SQLite 库时(留有标记),从库中取回。
+ * Web 端 datasetDb 为 null 直接跳过;测试中可显式调用。 */
+export function hydrateActiveFromVault(): void {
+  const db = platform.datasetDb;
+  if (!db) return;
+  let ref: string | null = null;
+  try { ref = localStorage.getItem(LS_ACTIVE_REF); } catch { /* 忽略 */ }
+  if (!ref || useData.getState().model.name === ref) return;
+  db.get(ref).then((json) => {
+    if (!json) {
+      try { localStorage.removeItem(LS_ACTIVE_REF); } catch { /* 忽略 */ }
+      return;
+    }
+    const data = JSON.parse(json) as StoredDataset;
+    const model = computeVarModel(data.name, data.colNames, data.rows);
+    useData.setState({ model, textCols: data.textCols ?? [] });
+    suggestSpec(model);
+    sessionLog(`从数据集库恢复活动数据集 ${ref}(上次因超配额存于本机库)`);
+  }).catch(() => { /* 恢复失败保持现状 */ });
+}
+
+hydrateActiveFromVault();
