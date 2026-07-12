@@ -1,12 +1,11 @@
 # Windows 桌面端打包 — 产出 .msi (WiX) 与 .exe (NSIS) 安装包。
-# 触发：推 tag（v*）或手动 workflow_dispatch。
-# 产物在 Actions 运行页的 Artifacts（quality-platform-windows）。
+# 仅手动触发(workflow_dispatch)。日常发版由 release.yml 统一构建并上传 Windows 安装包到
+# GitHub Release;本工作流保留作为独立产出到 Actions Artifacts 的备用手段,避免与 release
+# 在每个 tag 上重复构建 Windows(以往双跑会多产生一份失败/成功通知)。
 name: build-windows
 
 on:
   workflow_dispatch:
-  push:
-    tags: ['v*']
 
 jobs:
   build:
