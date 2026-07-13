@@ -31,6 +31,8 @@ interface AppState {
   lslOn: boolean; // 单侧规格开关（至少一侧开启）
   uslOn: boolean;
   doeView: DoeView;
+  doeFactorCols: string[] | null; // DOE 分析选中的因子列名(null=默认前 k-1 列);按名存储,换数据集自动失效回落默认
+  doeRespCol: string | null;      // DOE 分析选中的响应列名(null=默认末列)
   hypoTab: HypoTab;
   paretoView: ParetoView;
   aqlLot: number;
@@ -62,6 +64,7 @@ interface AppState {
   setProjectName(name: string): void;
   toggleSide(side: 'lslOn' | 'uslOn'): void;
   setDoeView(v: DoeView): void;
+  setDoeCols(factorCols: string[] | null, respCol: string | null): void;
   setHypoTab(v: HypoTab): void;
   setParetoView(v: ParetoView): void;
   setAql(patch: Partial<Pick<AppState, 'aqlLot' | 'aqlLevel' | 'aqlAQL'>>): void;
@@ -90,6 +93,8 @@ export const useApp = create<AppState>()(persist((set, get) => ({
   lslOn: true,
   uslOn: true,
   doeView: 'main',
+  doeFactorCols: null,
+  doeRespCol: null,
   hypoTab: 'anova',
   paretoView: 'pareto',
   aqlLot: 120,
@@ -130,6 +135,7 @@ export const useApp = create<AppState>()(persist((set, get) => ({
     return { [side]: next[side] } as Partial<AppState>;
   }),
   setDoeView: (doeView) => set({ doeView }),
+  setDoeCols: (doeFactorCols, doeRespCol) => set({ doeFactorCols, doeRespCol }),
   setHypoTab: (hypoTab) => set({ hypoTab }),
   setParetoView: (paretoView) => set({ paretoView }),
   setAql: (patch) => set(patch),

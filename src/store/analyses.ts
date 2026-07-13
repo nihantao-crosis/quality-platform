@@ -6,7 +6,7 @@
 import { create } from 'zustand';
 import {
   nf, computeCapability, evalRules, computeGageRR, gageStudyData, GAGE_TOLERANCE,
-  oneWayAnova, anovaGroups, analyzeDoe, aqlPlan, computeDescriptive, type InspectionLevel,
+  oneWayAnova, anovaGroups, analyzeDoe, detectFactorial, analyzeFactorial, resolveDoeColumns, aqlPlan, computeDescriptive, type InspectionLevel,
 } from '../core';
 import { useApp, type SpcType, type DoeView, type HypoTab, type ParetoView } from './appStore';
 import { useData } from './dataStore';
@@ -139,12 +139,33 @@ function buildSummary(kind: AnalysisKind): Omit<SavedAnalysis, 'id' | 'createdAt
       return { kind, title: `帕累托图 · ${pm.name}`, metric: `Top${topN} = ${pct}%`, status: '已分析', ...pick(OK) };
     }
     case 'doe': {
-      const r = analyzeDoe();
-      const sig = r.terms.filter((t) => t.sig).map((t) => t.name.split(' ')[0]);
-      return {
-        kind, title: '实验设计 · 2³ 全因子', metric: sig.length ? `${sig.join('、')} 显著` : '无显著项',
-        status: '已分析', ...pick(INFO),
-      };
+      if (M.isDemo) {
+        const r = analyzeDoe();
+        const sig = r.terms.filter((t) => t.sig).map((t) => t.name.split(' ')[0]);
+        return {
+          kind, title: '实验设计 · 2³ 全因子(示例)', metric: sig.length ? `${sig.join('、')} 显著` : '无显著项',
+          status: '演示', ...pick(INFO),
+        };
+      }
+      // 真实数据:与 DOE 分析页共用 resolveDoeColumns(同一选择/同一 4 因子上限),
+      // 保证「保存到项目的汇总卡」与分析页所见一致,避免页面出结果而卡片显示未分析。
+      const nc = M.colNames.length;
+      if (nc >= 3) {
+        const { factorIdx, respIdx } = resolveDoeColumns(M.colNames, app.doeFactorCols, app.doeRespCol);
+        const facs = factorIdx.map((i) => ({ name: M.colNames[i], values: M.subs.map((s) => s.vals[i]) }));
+        const resp = M.subs.map((s) => s.vals[respIdx]);
+        const det = detectFactorial(facs, resp);
+        if (det.ok) {
+          const fr = analyzeFactorial(det.design);
+          const sig = fr.terms.filter((t) => t.sig).map((t) => t.name);
+          return {
+            kind, title: `实验设计 · ${det.design.factorNames.length} 因子`,
+            metric: sig.length ? `${sig.slice(0, 3).join('、')} 显著` : '无显著项',
+            status: '已分析', ...pick(INFO),
+          };
+        }
+      }
+      return { kind, title: '实验设计 (DOE)', metric: '数据非因子设计', status: '未分析', ...pick(WARN) };
     }
     case 'aql': {
       const plan = aqlPlan(app.aqlLot, app.aqlLevel, app.aqlAQL);

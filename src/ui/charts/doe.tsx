@@ -51,7 +51,7 @@ function MainEffectsImpl({ T, factors }: { T: ChartTokens; factors: { name: stri
 }
 
 // ---------- 交互作用图 ----------
-function InteractionPlotImpl({ T, c00, c10, c01, c11 }: { T: ChartTokens; c00: number; c10: number; c01: number; c11: number }) {
+function InteractionPlotImpl({ T, c00, c10, c01, c11, labelA = 'A', labelB = 'B' }: { T: ChartTokens; c00: number; c10: number; c01: number; c11: number; labelA?: string; labelB?: string }) {
   const W = 960;
   const H = 250;
   const m = { t: 24, r: 120, b: 42, l: 58 };
@@ -86,10 +86,10 @@ function InteractionPlotImpl({ T, c00, c10, c01, c11 }: { T: ChartTokens; c00: n
       {dots.map(([x, v, c], i) => (
         <circle key={i} cx={x} cy={Y(v)} r={T.r + 1} fill={c} />
       ))}
-      <Txt x={xL} y={H - 18} s="A 低 (−1)" fill={T.axis} size={10.5} anchor="middle" />
-      <Txt x={xH} y={H - 18} s="A 高 (+1)" fill={T.axis} size={10.5} anchor="middle" />
-      <Txt x={m.l + pw + 10} y={Y(c10)} s="B 压力 低" fill={T.point} size={11} weight={600} />
-      <Txt x={m.l + pw + 10} y={Y(c11)} s="B 压力 高" fill={T.curve2} size={11} weight={600} />
+      <Txt x={xL} y={H - 18} s={`${labelA} 低 (−1)`} fill={T.axis} size={10.5} anchor="middle" />
+      <Txt x={xH} y={H - 18} s={`${labelA} 高 (+1)`} fill={T.axis} size={10.5} anchor="middle" />
+      <Txt x={m.l + pw + 10} y={Y(c10)} s={`${labelB} 低`} fill={T.point} size={11} weight={600} />
+      <Txt x={m.l + pw + 10} y={Y(c11)} s={`${labelB} 高`} fill={T.curve2} size={11} weight={600} />
       <Ln x1={m.l} y1={m.t + ph} x2={m.l + pw} y2={m.t + ph} stroke={T.axis} sw={1} />
     </Svg>
   );
@@ -127,7 +127,7 @@ function EffectsBarImpl({ T, terms, refLine }: { T: ChartTokens; terms: { name: 
 }
 
 // ---------- 立方图 ----------
-function CubePlotImpl({ T, y }: { T: ChartTokens; y: (a: number, b: number, c: number) => number }) {
+function CubePlotImpl({ T, y, labels = ['A 温度', 'B 压力', 'C 时间'] }: { T: ChartTokens; y: (a: number, b: number, c: number) => number; labels?: [string, string, string] }) {
   const W = 960;
   const H = 360;
   const s = 210;
@@ -161,12 +161,12 @@ function CubePlotImpl({ T, y }: { T: ChartTokens; y: (a: number, b: number, c: n
       {verts.map((v, i) => (
         <Fragment key={i}>
           <circle cx={v.p[0]} cy={v.p[1]} r={16} fill={T.bg} stroke={T.point} strokeWidth={1.8} />
-          <Txt x={v.p[0]} y={v.p[1]} s={String(v.val)} fill={T.point} size={12.5} anchor="middle" weight={700} />
+          <Txt x={v.p[0]} y={v.p[1]} s={Number.isFinite(v.val) ? nf(v.val, 1) : '—'} fill={T.point} size={12} anchor="middle" weight={700} />
         </Fragment>
       ))}
-      <Txt x={ox + s / 2} y={oy + 30} s="A 温度 →" fill={T.axis} size={11} anchor="middle" weight={600} />
-      <Txt x={ox - 42} y={oy - s / 2} s="B 压力 ↑" fill={T.axis} size={11} anchor="middle" weight={600} />
-      <Txt x={ox + s + dx / 2 + 20} y={oy + dy / 2 + 8} s="C 时间 ↗" fill={T.axis} size={11} anchor="middle" weight={600} />
+      <Txt x={ox + s / 2} y={oy + 30} s={`${labels[0]} →`} fill={T.axis} size={11} anchor="middle" weight={600} />
+      <Txt x={ox - 42} y={oy - s / 2} s={`${labels[1]} ↑`} fill={T.axis} size={11} anchor="middle" weight={600} />
+      <Txt x={ox + s + dx / 2 + 20} y={oy + dy / 2 + 8} s={`${labels[2]} ↗`} fill={T.axis} size={11} anchor="middle" weight={600} />
     </Svg>
   );
 }
