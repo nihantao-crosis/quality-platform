@@ -12,6 +12,7 @@ const QP_KEYS: Array<[string, string]> = [
   ['qp-specs-v1', '规格限记忆'],
   ['qp-fishbone-v1', '鱼骨图'],
   ['qp-analyses-v1', '已保存分析'],
+  ['qp-pareto-v1', '帕累托数据'],
   ['qp-prefs-v1', '界面偏好'],
 ];
 

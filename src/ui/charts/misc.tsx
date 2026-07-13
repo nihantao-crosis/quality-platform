@@ -2,7 +2,7 @@
  * 帕累托图 / 分组柱状图 (Gage) / 箱线图 — 从原型 pareto/groupedBars/boxplot 迁移。
  */
 import { memo, Fragment } from 'react';
-import { nf, quantile, arrMin, arrMax } from '../../core';
+import { nf, quantile, arrMin, arrMax, mean, stdev, tInv } from '../../core';
 import type { ChartTokens } from '../tokens';
 import { paretoColors } from '../tokens';
 import { Svg, Ln, Txt } from './primitives';
@@ -29,8 +29,8 @@ function ParetoChartImpl(p: {
   const m = { t: 24, r: 52, b: 52, l: 48 };
   const pw = W - m.l - m.r;
   const ph = H - m.t - m.b;
-  const total = rows.reduce((a, r) => a + r.count, 0);
-  const maxc = rows[0].count;
+  const total = rows.reduce((a, r) => a + r.count, 0) || 1;
+  const maxc = (rows[0]?.count ?? 0) || 1;
   const bw = pw / rows.length;
   const Yc = (c: number) => m.t + (1 - c / (maxc * 1.05)) * ph;
   const Yp = (pc: number) => m.t + (1 - pc / 100) * ph;
@@ -190,3 +190,100 @@ export const ParetoChart = memo(ParetoChartImpl);
 export const GroupedBars = memo(GroupedBarsImpl);
 
 export const BoxPlot = memo(BoxPlotImpl);
+
+
+/** 区间图 — 各组均值 ± 95% CI(t 分布),对标 Minitab Interval Plot。 */
+function IntervalPlotImpl({ T, groups, h }: {
+  T: ChartTokens;
+  groups: { name: string; vals: number[] }[];
+  h?: number;
+}) {
+  const W = 960;
+  const H = h ?? 320;
+  const m = { t: 26, r: 30, b: 44, l: 56 };
+  const pw = W - m.l - m.r;
+  const ph = H - m.t - m.b;
+  const stats = groups.map((g) => {
+    const n = g.vals.length;
+    const mu = mean(g.vals);
+    const half = n > 1 ? tInv(0.975, n - 1) * stdev(g.vals) / Math.sqrt(n) : 0;
+    return { name: g.name, mu, lo: mu - half, hi: mu + half, n };
+  });
+  let lo = arrMin(stats.map((s) => s.lo));
+  let hi = arrMax(stats.map((s) => s.hi));
+  const pad = (hi - lo) * 0.15 || 1;
+  lo -= pad; hi += pad;
+  const Y = (v: number) => m.t + (1 - (v - lo) / (hi - lo)) * ph;
+  const gw = pw / stats.length;
+  return (
+    <Svg w={W} h={H}>
+      <rect x={0} y={0} width={W} height={H} fill={T.bg} />
+      {Array.from({ length: 5 }, (_, g) => {
+        const yy = m.t + (g / 4) * ph;
+        return (
+          <Fragment key={'g' + g}>
+            <Ln x1={m.l} y1={yy} x2={m.l + pw} y2={yy} stroke={T.grid} sw={1} />
+            <Txt x={m.l - 8} y={yy} s={nf(hi - ((hi - lo) * g) / 4, 3)} fill={T.axis} size={10} anchor="end" />
+          </Fragment>
+        );
+      })}
+      {stats.map((s, i) => {
+        const cx = m.l + i * gw + gw / 2;
+        return (
+          <Fragment key={s.name}>
+            <Ln x1={cx} y1={Y(s.hi)} x2={cx} y2={Y(s.lo)} stroke={T.point} sw={2} />
+            <Ln x1={cx - 9} y1={Y(s.hi)} x2={cx + 9} y2={Y(s.hi)} stroke={T.point} sw={2} />
+            <Ln x1={cx - 9} y1={Y(s.lo)} x2={cx + 9} y2={Y(s.lo)} stroke={T.point} sw={2} />
+            <circle cx={cx} cy={Y(s.mu)} r={4.5} fill={T.point} stroke={T.bg} strokeWidth={1.4}>
+              <title>{`${s.name} 均值 ${nf(s.mu, 4)} · 95% CI (${nf(s.lo, 4)}, ${nf(s.hi, 4)}) · n=${s.n}`}</title>
+            </circle>
+            <Txt x={cx} y={H - 24} s={s.name} fill={T.text} size={11} anchor="middle" />
+            <Txt x={cx} y={H - 10} s={'n=' + s.n} fill={T.axis} size={9.5} anchor="middle" />
+          </Fragment>
+        );
+      })}
+      <Txt x={m.l} y={m.t - 10} s="各组均值 ± 95% 置信区间" fill={T.text} size={11} weight={600} />
+      <Ln x1={m.l} y1={m.t + ph} x2={m.l + pw} y2={m.t + ph} stroke={T.axis} sw={1} />
+    </Svg>
+  );
+}
+export const IntervalPlot = memo(IntervalPlotImpl);
+
+/** 迷你直方图 — 残差诊断用(无规格/目标线,带 0 参考线)。 */
+function MiniHistImpl({ T, data, h, xLabel }: { T: ChartTokens; data: number[]; h?: number; xLabel?: string }) {
+  const W = 960;
+  const H = h ?? 240;
+  const m = { t: 22, r: 24, b: 34, l: 46 };
+  const pw = W - m.l - m.r;
+  const ph = H - m.t - m.b;
+  let lo = arrMin(data);
+  let hi = arrMax(data);
+  if (hi === lo) { lo -= 1; hi += 1; }
+  const nb = Math.max(7, Math.min(15, Math.ceil(Math.sqrt(data.length))));
+  const bw = (hi - lo) / nb;
+  const counts = new Array(nb).fill(0);
+  data.forEach((v) => {
+    const b = Math.min(nb - 1, Math.max(0, Math.floor((v - lo) / bw)));
+    counts[b]++;
+  });
+  const maxc = arrMax(counts) || 1;
+  const X = (v: number) => m.l + ((v - lo) / (hi - lo)) * pw;
+  return (
+    <Svg w={W} h={H}>
+      <rect x={0} y={0} width={W} height={H} fill={T.bg} />
+      {counts.map((c, i) => {
+        const x0 = X(lo + i * bw);
+        const bh = (c / (maxc * 1.08)) * ph;
+        return <rect key={i} x={x0 + 1} y={m.t + ph - bh} width={pw / nb - 2} height={bh} fill={T.bar} opacity={0.85} />;
+      })}
+      {lo < 0 && hi > 0 && <Ln x1={X(0)} y1={m.t} x2={X(0)} y2={m.t + ph} stroke={T.center} sw={1.4} dash="5 4" />}
+      {Array.from({ length: 5 }, (_, i) => {
+        const v = lo + ((hi - lo) * i) / 4;
+        return <Txt key={'x' + i} x={X(v)} y={H - 10} s={nf(v, 3)} fill={T.axis} size={9.5} anchor="middle" />;
+      })}
+      <Txt x={m.l} y={m.t - 8} s={xLabel ?? '残差'} fill={T.text} size={11} weight={600} />
+      <Ln x1={m.l} y1={m.t + ph} x2={m.l + pw} y2={m.t + ph} stroke={T.axis} sw={1} />
+    </Svg>
+  );
+}
+export const MiniHist = memo(MiniHistImpl);

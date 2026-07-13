@@ -31,6 +31,9 @@ describe('九页渲染冒烟', () => {
     it(`${nav} 页渲染`, () => {
       render(<App />);
       fireEvent.click(screen.getAllByText(nav)[0]);
+      // 数据契约:无可分析数据的页面先显示空态卡,点「查看示例数据」进入示例
+      const demoBtn = screen.queryByText('查看示例数据');
+      if (demoBtn) fireEvent.click(demoBtn);
       expect(screen.getAllByText(new RegExp(marker)).length).toBeGreaterThan(0);
     });
   }

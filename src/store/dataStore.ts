@@ -14,6 +14,7 @@ import { platform } from '../platform/adapter';
 const LS_DATASET = 'qp-dataset-v1';
 const LS_RECENTS = 'qp-recents-v1';
 const LS_ATTR = 'qp-attr-v1';
+const LS_PARETO = 'qp-pareto-v1';
 /** 活动数据集超出 localStorage 配额时的恢复标记(桌面端,数据在 SQLite 库中) */
 const LS_ACTIVE_REF = 'qp-active-ref-v1';
 const MAX_RECENTS = 5;
@@ -26,6 +27,9 @@ interface StoredDataset {
   textCols: TextColumn[];
   savedAt: string;
 }
+
+export interface ParetoRow { name: string; count: number }
+export interface ParetoModel { name: string; rows: ParetoRow[] }
 
 export interface RecentEntry {
   name: string;
@@ -83,6 +87,8 @@ interface DataState {
   textCols: TextColumn[];
   pModel: PChartModel;
   cModel: CChartModel;
+  /** 帕累托数据(类别+频数);null = 未导入(页面显示空态/示例) */
+  paretoModel: ParetoModel | null;
   recents: RecentEntry[];
   mesRunning: boolean;
   /** 编辑历史（撤销/重做,仅覆盖手工编辑） */
@@ -90,6 +96,8 @@ interface DataState {
   redoStack: EditSnapshot[];
   importMatrix(name: string, colNames: string[], rows: number[][], textCols?: TextColumn[]): void;
   importCounts(kind: 'p' | 'c', name: string, counts: number[], sampleSize?: number): void;
+  /** 导入帕累托「类别+频数」数据并持久化 */
+  importPareto(name: string, rows: ParetoRow[]): void;
   loadRecent(name: string): void;
   resetDemo(): void;
   /** 手工录入：编辑单元格 / 添加子组（复制末行） / 删除行。编辑演示集自动转「副本」。 */
@@ -302,6 +310,7 @@ export const useData = create<DataState>((set, get) => ({
   textCols: initText,
   pModel: initP,
   cModel: initC,
+  paretoModel: loadJson<ParetoModel>(LS_PARETO),
   recents: loadJson<RecentEntry[]>(LS_RECENTS) ?? [],
   mesRunning: false,
   undoStack: [],
@@ -336,6 +345,13 @@ export const useData = create<DataState>((set, get) => ({
     sessionLog(`导入计数数据 ${name} · ${counts.length} 个${kind === 'p' ? '样本(P图)' : '单位(C图)'}`);
   },
 
+  importPareto: (name, rows) => {
+    const paretoModel: ParetoModel = { name, rows };
+    set({ paretoModel });
+    saveJson(LS_PARETO, paretoModel);
+    sessionLog(`导入帕累托数据 ${name} · ${rows.length} 个类别`);
+  },
+
   loadRecent: (name) => {
     const r = get().recents.find((x) => x.name === name);
     if (r?.data) {
@@ -360,10 +376,11 @@ export const useData = create<DataState>((set, get) => ({
 
   resetDemo: () => {
     const d = demoInit();
-    set({ model: d.model, textCols: [], pModel: d.p, cModel: d.c, mesRunning: false });
+    set({ model: d.model, textCols: [], pModel: d.p, cModel: d.c, paretoModel: null, mesRunning: false });
     try {
       localStorage.removeItem(LS_DATASET);
       localStorage.removeItem(LS_ATTR);
+      localStorage.removeItem(LS_PARETO);
       localStorage.removeItem(LS_ACTIVE_REF);
     } catch { /* 非浏览器环境忽略 */ }
     suggestSpec(d.model);

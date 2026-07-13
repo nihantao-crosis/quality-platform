@@ -9,6 +9,15 @@ export interface NelsonRules {
   r4: boolean; // 相邻 3 点中 ≥2 点位于同侧 2σ 区外
 }
 
+/** Nelson 判异准则静态定义(与是否检出无关)——供 UI 常驻展示与 tooltip。
+ * 对齐 Nelson (1984) 与 Minitab「特殊原因检验」;准则 4 对应 Minitab 检验 5。 */
+export const RULE_DEFS: Record<1 | 2 | 3 | 4, { name: string; def: string; points: string; source: string }> = {
+  1: { name: '准则 1', def: '1 点落在中心线任一侧 3σ 之外', points: '1 点', source: 'Nelson 1984 / Minitab 检验 1' },
+  2: { name: '准则 2', def: '连续 9 点落在中心线同一侧', points: '9 点', source: 'Nelson 1984 / Minitab 检验 2' },
+  3: { name: '准则 3', def: '连续 6 点持续上升或持续下降', points: '6 点', source: 'Nelson 1984 / Minitab 检验 3' },
+  4: { name: '准则 4', def: '相邻 3 点中有 2 点落在同侧 2σ 区之外', points: '3 中 2', source: 'Nelson 1984 / Minitab 检验 5' },
+};
+
 export interface RuleViolation {
   i: number; // 0-based 点索引
   rule: 1 | 2 | 3 | 4;
@@ -54,7 +63,7 @@ export function evalRules(
     data.forEach((v, i) => {
       if (Math.abs(v - cl) > 3 * sigma) {
         viol.add(i);
-        list.push({ i, rule: 1, desc: '单点超出 3σ 控制限' });
+        list.push({ i, rule: 1, desc: RULE_DEFS[1].def });
       }
     });
   if (rules.r2) {
@@ -69,7 +78,7 @@ export function evalRules(
       }
       if (run >= 9) {
         for (let q = i - 8; q <= i; q++) viol.add(q);
-        list.push({ i, rule: 2, desc: '连续 9 点位于中心线同侧' });
+        list.push({ i, rule: 2, desc: RULE_DEFS[2].def });
       }
     });
   }
@@ -89,7 +98,7 @@ export function evalRules(
       }
       if (inc >= 6 || dec >= 6) {
         for (let q = i - 5; q <= i; q++) viol.add(q);
-        list.push({ i, rule: 3, desc: '连续 6 点持续上升或下降' });
+        list.push({ i, rule: 3, desc: RULE_DEFS[3].def });
       }
     }
   }
@@ -102,7 +111,7 @@ export function evalRules(
         w.forEach((q) => {
           if (Math.abs(data[q] - cl) > 2 * sigma) viol.add(q);
         });
-        list.push({ i, rule: 4, desc: '相邻三点中两点位于 2σ 区外（同侧）' });
+        list.push({ i, rule: 4, desc: RULE_DEFS[4].def });
       }
     }
   }

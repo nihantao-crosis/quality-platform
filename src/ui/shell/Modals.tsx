@@ -2,7 +2,7 @@
 import { useState, useEffect } from 'react';
 import { useApp, type ImportTab, type ExportFmt } from '../../store/appStore';
 import { useData } from '../../store/dataStore';
-import { parseMatrix, evalFormula, truthy, arrMin, arrMax, FormulaError, type ParsedMatrix } from '../../core';
+import { parseMatrix, parseCategoryCounts, evalFormula, truthy, arrMin, arrMax, FormulaError, type ParsedMatrix } from '../../core';
 import { platform } from '../../platform/adapter';
 import { buildExportJob } from '../../platform/report';
 import { mesStart, mesStop } from '../../platform/mes';
@@ -11,7 +11,8 @@ import { isProjectFile, applyProjectText } from '../../platform/project';
 import { HelpModal } from './HelpModal';
 import { OptionsModal } from './OptionsModal';
 
-type DataKind = 'var' | 'p' | 'c';
+import type { ImportKind } from '../../store/appStore';
+type DataKind = ImportKind;
 
 const tabStyle = (a: boolean): React.CSSProperties =>
   a
@@ -40,21 +41,30 @@ const cancelBtn: React.CSSProperties = { padding: '8px 18px', border: '1px solid
 const primaryBtn: React.CSSProperties = { padding: '8px 18px', background: '#1f6fb2', color: '#fff', borderRadius: 5, cursor: 'pointer', fontSize: 12.5, fontWeight: 600 };
 
 function ImportModal() {
-  const { importTab, setImportTab, closeModal, goTo, showToast } = useApp();
-  const { importMatrix, importCounts, mesRunning, model } = useData();
-  const [pending, setPending] = useState<{ name: string; parsed: ParsedMatrix } | null>(null);
+  const { importTab, setImportTab, importKind, setImportKind, closeModal, goTo, showToast } = useApp();
+  const { importMatrix, importCounts, importPareto, mesRunning, model } = useData();
+  const [pending, setPending] = useState<{ name: string; raw: string; parsed?: ParsedMatrix; cats?: number } | null>(null);
   const [clipText, setClipText] = useState('');
-  const [dataKind, setDataKind] = useState<DataKind>('var');
+  const [dataKind, setDataKind] = useState<DataKind>(importKind);
   const [pSampleSize, setPSampleSize] = useState(50);
   const tabs: Array<[ImportTab, string]> = [['csv', 'CSV 文件'], ['excel', 'Excel 工作簿'], ['clip', '剪贴板粘贴'], ['mes', 'MES 实时采集']];
 
   const tryParse = (name: string, text: string) => {
+    if (dataKind === 'pareto') {
+      const r = parseCategoryCounts(text);
+      if ('error' in r) {
+        showToast('导入失败：' + r.error);
+        return;
+      }
+      setPending({ name, raw: text, cats: r.rows.length });
+      return;
+    }
     const r = parseMatrix(text);
     if ('error' in r) {
       showToast('导入失败：' + r.error);
       return;
     }
-    setPending({ name, parsed: r });
+    setPending({ name, raw: text, parsed: r });
   };
 
   const handlePicked = async (name: string, contents?: string, bytes?: Uint8Array) => {
@@ -113,8 +123,25 @@ function ImportModal() {
     }
   };
 
-  const applyJob = (name: string, p: ParsedMatrix) => {
+  const applyJob = (name: string, raw: string) => {
     mesStop(); // 导入新数据前停掉模拟采集
+    if (dataKind === 'pareto') {
+      const r = parseCategoryCounts(raw);
+      if ('error' in r) {
+        showToast('导入失败：' + r.error);
+        return false;
+      }
+      importPareto(name, r.rows);
+      goTo('pareto');
+      showToast(`已导入帕累托数据 ${name} · ${r.rows.length} 个类别${r.note ? ' · ' + r.note : ''}`);
+      return true;
+    }
+    const parsed = parseMatrix(raw);
+    if ('error' in parsed) {
+      showToast('导入失败：' + parsed.error);
+      return false;
+    }
+    const p = parsed;
     if (dataKind === 'var') {
       importMatrix(name, p.colNames, p.rows, p.textCols);
       goTo('worksheet');
@@ -145,18 +172,13 @@ function ImportModal() {
     if (importTab === 'mes') return; // MES tab 有自己的控制按钮
     let job = pending;
     if (!job && importTab === 'clip' && clipText.trim() !== '') {
-      const r = parseMatrix(clipText);
-      if ('error' in r) {
-        showToast('导入失败：' + r.error);
-        return;
-      }
-      job = { name: '剪贴板数据', parsed: r };
+      job = { name: '剪贴板数据', raw: clipText };
     }
     if (!job) {
       showToast(importTab === 'clip' ? '请先粘贴数据' : '请先选择数据文件');
       return;
     }
-    if (applyJob(job.name, job.parsed)) {
+    if (applyJob(job.name, job.raw)) {
       setPending(null);
       setClipText('');
     }
@@ -165,9 +187,9 @@ function ImportModal() {
   const kindSelector = (
     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12, fontSize: 12.5, flexWrap: 'wrap' }}>
       <span style={{ color: '#8a929d', fontWeight: 600, fontSize: 12 }}>数据类型</span>
-      {([['var', '变量数据（子组矩阵）'], ['p', '不良数（P 图）'], ['c', '缺陷数（C 图）']] as Array<[DataKind, string]>).map(([k, l]) => (
+      {([['var', '变量数据（子组矩阵）'], ['p', '不良数（P 图）'], ['c', '缺陷数（C 图）'], ['pareto', '缺陷类别+频数（帕累托）']] as Array<[DataKind, string]>).map(([k, l]) => (
         <label key={k} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, cursor: 'pointer', color: '#3a4350' }}>
-          <input type="radio" checked={dataKind === k} onChange={() => setDataKind(k)} />
+          <input type="radio" checked={dataKind === k} onChange={() => { setDataKind(k); setImportKind(k); setPending(null); }} />
           {l}
         </label>
       ))}
@@ -218,12 +240,14 @@ function ImportModal() {
               <>
                 <div style={{ fontSize: 13.5, color: '#2c8a45', fontWeight: 600 }}>✓ {pending.name}</div>
                 <div className="mono" style={{ fontSize: 12, color: '#5b6472', marginTop: 6 }}>
-                  {pending.parsed.rows.length} 子组 × {pending.parsed.colNames.length} 测量列 · {pending.parsed.colNames.join(' / ')}
+                  {pending.parsed
+                    ? `${pending.parsed.rows.length} 子组 × ${pending.parsed.colNames.length} 测量列 · ${pending.parsed.colNames.join(' / ')}`
+                    : `${pending.cats ?? 0} 个类别（帕累托）`}
                 </div>
-                {(pending.parsed.skippedRows > 0 || pending.parsed.droppedCols > 0) && (
+                {pending.parsed && (pending.parsed.skippedRows > 0 || pending.parsed.droppedCols > 0) && (
                   <div style={{ fontSize: 11.5, color: '#d98324', marginTop: 4 }}>
-                    {pending.parsed.skippedRows > 0 ? `跳过 ${pending.parsed.skippedRows} 行非法值 ` : ''}
-                    {pending.parsed.droppedCols > 0 ? `忽略 ${pending.parsed.droppedCols} 个非数值列` : ''}
+                    {pending.parsed!.skippedRows > 0 ? `跳过 ${pending.parsed!.skippedRows} 行非法值 ` : ''}
+                    {pending.parsed!.droppedCols > 0 ? `忽略 ${pending.parsed!.droppedCols} 个非数值列` : ''}
                   </div>
                 )}
                 <div onClick={pickFile} style={{ display: 'inline-block', marginTop: 14, padding: '8px 18px', border: '1px solid #cfd5dd', color: '#5b6472', borderRadius: 5, fontSize: 12.5, fontWeight: 600, cursor: 'pointer', background: '#fff' }}>重新选择</div>
@@ -243,7 +267,9 @@ function ImportModal() {
           <textarea
             value={clipText}
             onChange={(e) => setClipText(e.target.value)}
-            placeholder={'将数据粘贴到此处（支持 Tab / 逗号分隔）…\n例：\n直径1,直径2,直径3\n25.01,24.99,25.02\n24.98,25.03,25.00'}
+            placeholder={dataKind === 'pareto'
+              ? '将「类别,频数」数据粘贴到此处…\n纵向:  划伤,32↵毛刺,21↵缺料,9\n横向:  划伤,毛刺,缺料↵32,21,9\n单列原始标签也可(自动计数)'
+              : '将数据粘贴到此处（支持 Tab / 逗号分隔）…\n例：\n直径1,直径2,直径3\n25.01,24.99,25.02\n24.98,25.03,25.00'}
             style={{ width: '100%', height: 150, border: '1px solid #cfd5dd', borderRadius: 6, padding: 12, fontFamily: 'IBM Plex Mono,monospace', fontSize: 12.5, resize: 'none', boxSizing: 'border-box' }}
           />
         )}
@@ -565,7 +591,7 @@ function FindReplaceModal() {
         </label>
         <div style={{ borderTop: '1px solid #eef0f3', paddingTop: 10, fontSize: 12.5 }}>
           {matches == null
-            ? <span style={{ color: '#9aa2ad' }}>输入查找数值后实时显示命中数。匹配按显示精度(3 位小数)对齐。</span>
+            ? <span style={{ color: '#9aa2ad' }}>输入查找数值后实时显示命中数。匹配按 3 位小数四舍五入的容差判定(与单元格显示位数无关)。</span>
             : matches === 0
               ? <span style={{ color: '#d98324' }}>没有匹配的测量值</span>
               : <span style={{ color: '#1c4e7a' }}>命中 <b className="mono">{matches}</b> 处,替换后可 Ctrl+Z 撤销</span>}

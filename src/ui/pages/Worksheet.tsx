@@ -1,7 +1,7 @@
 /** 数据工作表 — Excel 式表格（双层 sticky 表头）+ 手工录入编辑 + 数据来源 + 列统计。
  * 演示数据显示原型的 11 列布局；导入数据显示动态测量列 + 均值/极差。
  * 测量单元格双击可编辑（编辑演示集自动转「副本」），支持添加子组与删行。 */
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import type { CSSProperties } from 'react';
 import { useApp } from '../../store/appStore';
 import { useData } from '../../store/dataStore';
@@ -22,21 +22,21 @@ const txtCell: CSSProperties = { border: '1px solid #eef0f3', padding: '5px 12px
 const thTop: CSSProperties = { position: 'sticky', top: 0, zIndex: 2, background: '#eceff3', border: '1px solid #d7dbe1', color: '#7a828d', fontWeight: 600, padding: '5px 12px', textAlign: 'left', minWidth: 78 };
 const thName: CSSProperties = { position: 'sticky', top: 26, zIndex: 2, background: '#f4f6f8', border: '1px solid #e2e5ea', color: '#2a333f', fontWeight: 600, padding: '5px 12px', textAlign: 'left', fontFamily: 'IBM Plex Sans' };
 
-/** 双击进入编辑态的测量单元格 */
-function EditableCell({ value, onCommit }: { value: number; onCommit: (v: number) => void }) {
+/** 双击进入编辑态的测量单元格。dp=按数据量级自适应的小数位;悬停显示全精度原值。 */
+function EditableCell({ value, dp, onCommit }: { value: number; dp: number; onCommit: (v: number) => void }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
   if (!editing) {
     return (
       <td
         style={{ ...numCell, cursor: 'cell' }}
-        title="双击编辑"
+        title={`${value}(双击编辑)`}
         onDoubleClick={() => {
-          setDraft(nf(value, 3));
+          setDraft(String(value));
           setEditing(true);
         }}
       >
-        {nf(value, 3)}
+        {nf(value, dp)}
       </td>
     );
   }
@@ -167,6 +167,16 @@ export function Worksheet() {
   const allMin = arrMin(M.all);
   const allMax = arrMax(M.all);
 
+  // 显示精度:按「列」量级自适应(3–6 位)——混合量纲数据(如 过盈量 0.0675 与 压入力 1350 同表)
+  // 不能用全局 σ,否则小量纲列被压到 3 位显示成 0.068,造成"数据被改"的误解
+  const colDp = useMemo(() => M.colNames.map((_, j) => {
+    let lo = Infinity, hi = -Infinity, sum = 0;
+    for (const sub of M.subs) { const v = sub.vals[j]; if (v < lo) lo = v; if (v > hi) hi = v; sum += Math.abs(v); }
+    const scale = Math.max(hi - lo, sum / M.k * 0.01, 1e-9); // 列内变差,退化时用量级的 1%
+    return Math.max(3, Math.min(6, 2 - Math.floor(Math.log10(scale))));
+  }), [M]);
+  const meanDp = colDp.length ? Math.max(...colDp) : 3;
+
   // 虚拟窗口边界
   const winStart = virtual ? Math.max(0, Math.floor(scrollTop / ROW_H) - OVERSCAN) : 0;
   const winEnd = virtual ? Math.min(M.k, Math.ceil((scrollTop + viewH) / ROW_H) + OVERSCAN) : M.k;
@@ -262,12 +272,12 @@ export function Worksheet() {
                     </td>
                     <td style={{ ...numCell, color: '#9aa2ad' }}>{s.i}</td>
                     {s.vals.map((v, j) => (
-                      <EditableCell key={j} value={v} onCommit={(nv) => updateCell(i, j, nv)} />
+                      <EditableCell key={j} value={v} dp={colDp[j]} onCommit={(nv) => updateCell(i, j, nv)} />
                     ))}
                     {M.hasSubgroups && (
                       <>
-                        <td style={{ ...numCell, fontWeight: 600, ...(ooc ? { background: '#fdecec', color: '#c22f2f' } : { color: '#1f6fb2' }) }}>{nf(s.mean, 3)}</td>
-                        <td style={numCell}>{nf(s.range, 3)}</td>
+                        <td title={String(s.mean)} style={{ ...numCell, fontWeight: 600, ...(ooc ? { background: '#fdecec', color: '#c22f2f' } : { color: '#1f6fb2' }) }}>{nf(s.mean, meanDp)}</td>
+                        <td title={String(s.range)} style={numCell}>{nf(s.range, meanDp)}</td>
                       </>
                     )}
                     {M.isDemo && (

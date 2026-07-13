@@ -96,3 +96,118 @@ export function parseCounts(text: string): { counts: number[]; name: string } | 
   if (counts.some((c) => c < 0 || !Number.isInteger(c))) return { error: '计数必须为非负整数' };
   return { counts, name: r.colNames[0] };
 }
+
+// ---------- 帕累托专用:类别 + 频数 ----------
+
+export interface CategoryCounts {
+  rows: { name: string; count: number }[];
+  /** 解析器做过的自动处理说明(如横向转置/剥离表头),用于 toast 告知用户 */
+  note?: string;
+}
+
+const CAT_HEADER_RE = /^(类别|名称|缺陷|项目|原因|category|name|defect|item)$/i;
+const CNT_HEADER_RE = /^(count|counts|频数|数量|次数|频次|frequency|freq)$/i;
+
+/** 解析「缺陷类别 + 频数」数据(帕累托)。与 parseMatrix 完全独立,规则:
+ *  1. 横向 2×N(类别一行/频数一行)→ 自动转置;
+ *  2. 纵向 文本列+数值列 → 直取;表头仅在命中关键词时剥离(不做「首行含文本即表头」的误判);
+ *  3. 单列文本标签 → 按出现次数 tally 聚合;
+ *  4. ≥1 个类别即可;频数须为非负数;同名类别自动合并求和。 */
+/** 分隔符探测(帕累托专用):Tab/逗号/分号之外,额外支持「文本 + 空白 + 数字」的空格分隔。 */
+function detectCatDelimiter(lines: string[]): string {
+  const first = lines[0];
+  if (/\t/.test(first)) return '\t';
+  if (/,/.test(first)) return ',';
+  if (/;/.test(first)) return ';';
+  const spaceLike = lines.filter((l) => /\S\s+\S/.test(l)).length;
+  return spaceLike >= Math.ceil(lines.length * 0.6) ? ' ' : ',';
+}
+
+/** 一列是否为「序号列」:全为整数且严格递增(常见 1..N 序号)。 */
+function isIndexColumn(vals: string[]): boolean {
+  if (vals.length < 2 || !vals.every((v) => /^\d+$/.test(v))) return false;
+  const nums = vals.map(Number);
+  for (let i = 1; i < nums.length; i++) if (nums[i] <= nums[i - 1]) return false;
+  return true;
+}
+
+export function parseCategoryCounts(text: string): CategoryCounts | { error: string } {
+  const lines = text
+    .replace(/^\uFEFF/, '')
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l !== '');
+  if (lines.length === 0) return { error: '没有可解析的内容。期望格式:「类别,频数」两列(纵向)或「类别一行 + 频数一行」(横向),也可粘贴单列原始缺陷标签。' };
+
+  const delim = detectCatDelimiter(lines);
+  const splitLine = (l: string): string[] =>
+    (delim === ' ' ? l.split(/\s+/) : l.split(delim)).map((c) => c.trim()).filter((c) => c !== '');
+  let cells = lines.map(splitLine);
+  const notes: string[] = [];
+  if (delim === ' ') notes.push('已按空格分隔解析');
+
+  // 规则 1:横向布局(恰 2 行),支持带行首标签(类别/频数)的 Excel 横向表
+  if (cells.length === 2 && cells[0].length >= 2 && cells[0].length === cells[1].length) {
+    const [r0, r1] = cells;
+    if (r0.every((c) => !isNum(c)) && r1.every((c) => isNum(c))) {
+      cells = r0.map((name, i) => [name, r1[i]]);
+      notes.push('检测到横向数据(类别一行/频数一行),已自动转置');
+    } else if (!isNum(r1[0]) && r0.slice(1).every((c) => !isNum(c)) && r1.slice(1).every((c) => isNum(c))) {
+      cells = r0.slice(1).map((name, i) => [name, r1[i + 1]]);
+      notes.push('检测到带行标签的横向数据,已剥离标签并转置');
+    }
+  }
+
+  // 关键词表头剥离(仅纵向、明确命中时)
+  if (cells.length >= 2 && cells[0].length >= 2
+      && CAT_HEADER_RE.test(cells[0][0]) && cells[0].slice(1).some((c) => CNT_HEADER_RE.test(c))) {
+    cells = cells.slice(1);
+    notes.push('已识别并跳过表头行');
+  } else if (cells.length >= 2 && cells[0].length === 1 && CAT_HEADER_RE.test(cells[0][0])) {
+    cells = cells.slice(1);
+    notes.push('已识别并跳过表头行');
+  }
+
+  const merged = new Map<string, number>();
+  const order: string[] = [];
+  const add = (name: string, count: number) => {
+    if (!merged.has(name)) order.push(name);
+    merged.set(name, (merged.get(name) ?? 0) + count);
+  };
+
+  if (cells.every((r) => r.length === 1)) {
+    // 单列:全数值无从命名类别;含文本则按标签 tally
+    if (cells.every((r) => isNum(r[0]))) {
+      return { error: '仅有一列数值,无法确定类别名。请提供「类别,频数」两列,或粘贴单列原始缺陷标签(将自动计数)。' };
+    }
+    cells.forEach((r) => add(r[0], 1));
+    notes.push('单列标签已按出现次数自动计数');
+  } else {
+    // 多列:先识别「序号列」以免把行号当频数(常见 Excel 序号,类别,频数)
+    const maxLen = Math.max(...cells.map((r) => r.length));
+    let indexCol = -1;
+    for (let j = 0; j < maxLen; j++) {
+      const col = cells.map((r) => r[j]).filter((c): c is string => c != null);
+      if (col.length === cells.length && isIndexColumn(col)) { indexCol = j; break; }
+    }
+    for (const [li, r] of cells.entries()) {
+      const name = r.find((c) => !isNum(c));
+      const nums = r.map((c, j) => ({ c, j })).filter((x) => isNum(x.c) && x.j !== indexCol);
+      if (name == null || nums.length === 0) {
+        return { error: `第 ${li + 1} 行无法解析(需要 1 个类别名 + 1 个频数):「${r.join(' ')}」` };
+      }
+      if (nums.length > 1) {
+        return { error: `第 ${li + 1} 行含多个数值列,无法确定哪列是频数;请只保留「类别,频数」两列(或加一列序号)。` };
+      }
+      const v = parseFloat(nums[0].c);
+      if (v < 0) return { error: `第 ${li + 1} 行频数为负(${v}),频数必须 ≥ 0` };
+      add(name, v);
+    }
+    if (indexCol >= 0) notes.push('已识别并忽略序号列');
+  }
+
+  const rows = order.map((name) => ({ name, count: merged.get(name)! }));
+  if (rows.length === 0) return { error: '没有解析到任何类别' };
+  if (rows.every((r) => r.count === 0)) return { error: '所有类别的频数都是 0,无法绘制帕累托图' };
+  return { rows, note: notes.length ? notes.join(';') : undefined };
+}

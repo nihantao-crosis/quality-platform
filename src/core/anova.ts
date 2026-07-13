@@ -18,6 +18,8 @@ export interface AnovaResult {
 
 export function oneWayAnova(groups: number[][]): AnovaResult {
   const k = groups.length;
+  if (k < 2) throw new Error('单因子 ANOVA 至少需要 2 个组');
+  if (groups.some((g) => g.length < 2)) throw new Error('每个组至少需要 2 个观测值');
   const all = groups.flat();
   const N = all.length;
   const grand = mean(all);
@@ -41,4 +43,18 @@ export function oneWayAnova(groups: number[][]): AnovaResult {
     pValue,
     significant: pValue < 0.05,
   };
+}
+
+/** 残差诊断数据:fits = 各观测所属组的均值,residuals = 观测 − 组均值(按组序展平)。 */
+export function anovaResiduals(groups: number[][]): { fits: number[]; residuals: number[] } {
+  const fits: number[] = [];
+  const residuals: number[] = [];
+  for (const g of groups) {
+    const m = mean(g);
+    for (const v of g) {
+      fits.push(m);
+      residuals.push(v - m);
+    }
+  }
+  return { fits, residuals };
 }

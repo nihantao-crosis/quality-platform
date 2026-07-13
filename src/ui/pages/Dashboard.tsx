@@ -43,6 +43,16 @@ export function Dashboard({ T }: { T: ChartTokens }) {
   ];
 
   const saved = useAnalyses((s) => s.saved);
+  const paretoModel = useData((s) => s.paretoModel);
+  const paretoRows = (() => {
+    if (!paretoModel || paretoModel.rows.length === 0) return null;
+    const sorted = [...paretoModel.rows].sort((a, b) => b.count - a.count);
+    if (sorted.length <= 6) return sorted;
+    // 超过 6 类:top5 + 其余并为「其他」,保证子集总和 = 全量总和,累计% 不失真
+    const other = sorted.slice(5).reduce((a, d) => a + d.count, 0);
+    return [...sorted.slice(0, 5), { name: '其他', count: other }];
+  })();
+  const paretoName = paretoModel?.name ?? '';
   const restore = useAnalyses((s) => s.restore);
   const fmtTime = (t: number) => {
     const d = new Date(t);
@@ -80,10 +90,12 @@ export function Dashboard({ T }: { T: ChartTokens }) {
         </Card>
         <Card>
           <div style={{ display: 'flex', alignItems: 'center', padding: '12px 16px', borderBottom: '1px solid #edf0f3' }}>
-            <div style={{ fontWeight: 600, color: '#33404f', fontSize: 13.5 }}>缺陷帕累托 · 本月</div>
+            <div style={{ fontWeight: 600, color: '#33404f', fontSize: 13.5 }}>
+              缺陷帕累托 · {paretoRows ? paretoName : '示例'}
+            </div>
           </div>
           <div style={{ padding: '10px 14px 6px' }}>
-            <ParetoChart T={T} rows={DEFECTS} w={520} h={210} />
+            <ParetoChart T={T} rows={paretoRows ?? DEFECTS} w={520} h={210} />
           </div>
         </Card>
       </div>

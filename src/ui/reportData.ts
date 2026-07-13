@@ -128,22 +128,28 @@ export function anovaReport(args: {
   p: number;
   significant: boolean;
   groups: { name: string; n: number }[];
+  /** 宽表模式(各数值列作为一组):附加量纲一致性提醒 */
+  wideCaution?: boolean;
 }): ReportData {
-  const { p, significant, groups } = args;
+  const { p, significant, groups, wideCaution } = args;
   const minN = Math.min(...groups.map((g) => g.n));
   const amount: CheckItem = minN >= 5
     ? { name: '各组样本量', level: 'ok', note: `${groups.length} 组,最小组 n=${minN} ≥ 5` }
     : { name: '各组样本量', level: 'warn', note: `最小组仅 n=${minN},检验功效有限,建议补样` };
   const sigTxt = p < 0.001 ? 'P<0.001' : `P=${nf(p, 3)}`;
+  const checks: CheckItem[] = [
+    { name: '显著性', level: 'ok', note: `${sigTxt}(α=0.05)` },
+    amount,
+  ];
+  if (wideCaution) {
+    checks.push({ name: '数据形态', level: 'warn', note: '宽表模式:各列须为同一响应量(同量纲)才可跨列比较均值' });
+  }
   return {
-    verdict: amount.level,
+    verdict: worst(amount.level, wideCaution ? 'warn' : 'ok'),
     headline: significant
       ? `组间均值差异显著(${sigTxt} < 0.05)——至少有一组与其他组不同,建议优先对比最高与最低的组找原因。`
       : `未发现显著的组间差异(${sigTxt} ≥ 0.05)——在当前数据量下,各组可视为同一总体。`,
-    checks: [
-      { name: '显著性', level: 'ok', note: `${sigTxt}(α=0.05)` },
-      amount,
-    ],
+    checks,
   };
 }
 

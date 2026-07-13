@@ -12,6 +12,7 @@ export type Page =
 export type SpcType = 'xbar-r' | 'xbar-s' | 'i-mr' | 'ewma' | 'cusum' | 'p' | 'c';
 export type Modal = 'import' | 'export' | 'calc' | 'formula' | 'subset' | 'vault' | 'findreplace' | 'about' | 'sort' | 'colstats' | 'random' | 'help' | 'options' | null;
 export type ImportTab = 'csv' | 'excel' | 'clip' | 'mes';
+export type ImportKind = 'var' | 'p' | 'c' | 'pareto';
 export type ExportFmt = 'pdf' | 'excel' | 'ppt' | 'word';
 export type DoeView = 'main' | 'interact' | 'pareto' | 'cube';
 export type HypoTab = 'anova' | 't1' | 't2' | 'reg';
@@ -41,6 +42,7 @@ interface AppState {
   activeVar: string;
   varOpen: boolean;
   importTab: ImportTab;
+  importKind: ImportKind;
   exportFmt: ExportFmt;
   chartStyle: ChartStyle;
   showGrid: boolean;
@@ -64,6 +66,7 @@ interface AppState {
   setParetoView(v: ParetoView): void;
   setAql(patch: Partial<Pick<AppState, 'aqlLot' | 'aqlLevel' | 'aqlAQL'>>): void;
   setImportTab(t: ImportTab): void;
+  setImportKind(k: ImportKind): void;
   setExportFmt(f: ExportFmt): void;
   setChartStyle(s: ChartStyle): void;
   cycleChartStyle(): void;
@@ -98,6 +101,7 @@ export const useApp = create<AppState>()(persist((set, get) => ({
   activeVar: 'C2 直径 (mm)',
   varOpen: false,
   importTab: 'csv',
+  importKind: 'var',
   exportFmt: 'pdf',
   chartStyle: '经典',
   showGrid: true,
@@ -130,6 +134,7 @@ export const useApp = create<AppState>()(persist((set, get) => ({
   setParetoView: (paretoView) => set({ paretoView }),
   setAql: (patch) => set(patch),
   setImportTab: (importTab) => set({ importTab }),
+  setImportKind: (importKind) => set({ importKind }),
   setExportFmt: (exportFmt) => set({ exportFmt }),
   setChartStyle: (chartStyle) => set({ chartStyle, openMenu: null }),
   cycleChartStyle: () =>

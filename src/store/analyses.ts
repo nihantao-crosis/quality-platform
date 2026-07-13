@@ -95,11 +95,32 @@ function buildSummary(kind: AnalysisKind): Omit<SavedAnalysis, 'id' | 'createdAt
     case 'anova': {
       const tab = app.hypoTab;
       if (tab === 'anova') {
-        const a = oneWayAnova(anovaGroups().map((x) => x.vals));
-        return {
-          kind, title: HYPO_TITLE.anova, metric: `P ${nf(a.pValue, 3)}`,
-          status: a.significant ? '显著' : '不显著', ...pick(a.significant ? INFO : OK),
-        };
+        // 与 ANOVA 页默认模式一致:出厂演示集→演示;有文本分组列按首列分组;否则宽表(各数值列一组)
+        const { textCols } = useData.getState();
+        let groups: number[][] | null = null;
+        if (M.isDemo) {
+          groups = anovaGroups().map((x) => x.vals);
+        } else if (textCols.length >= 1 && M.colNames.length >= 1) {
+          const byLabel = new Map<string, number[]>();
+          textCols[0].values.forEach((l, i) => {
+            if (!byLabel.has(l)) byLabel.set(l, []);
+            byLabel.get(l)!.push(M.subs[i].vals[0]);
+          });
+          const gs = [...byLabel.values()];
+          if (gs.length >= 2 && gs.every((g) => g.length >= 2)) groups = gs;
+        }
+        if (!groups && M.colNames.length >= 2 && M.k >= 2) {
+          groups = M.colNames.map((_, j) => M.subs.map((sub) => sub.vals[j]));
+        }
+        try {
+          const a = oneWayAnova(groups ?? anovaGroups().map((x) => x.vals));
+          return {
+            kind, title: HYPO_TITLE.anova, metric: `P ${nf(a.pValue, 3)}`,
+            status: a.significant ? '显著' : '不显著', ...pick(a.significant ? INFO : OK),
+          };
+        } catch {
+          return { kind, title: HYPO_TITLE.anova, metric: '数据不足', status: '未分析', ...pick(WARN) };
+        }
       }
       return { kind, title: HYPO_TITLE[tab], metric: '假设检验', status: '已分析', ...pick(INFO) };
     }
@@ -107,7 +128,15 @@ function buildSummary(kind: AnalysisKind): Omit<SavedAnalysis, 'id' | 'createdAt
       if (app.paretoView === 'fishbone') {
         return { kind, title: '因果图（鱼骨图）', metric: '6M 分析', status: '已分析', ...pick(INFO) };
       }
-      return { kind, title: '帕累托图 · 缺陷分析', metric: 'Top2 = 68%', status: '合格', ...pick(OK) };
+      const pm = useData.getState().paretoModel;
+      if (!pm || pm.rows.length === 0) {
+        return { kind, title: '帕累托图 · 缺陷分析', metric: '示例数据', status: '演示', ...pick(INFO) };
+      }
+      const sorted = [...pm.rows].sort((a, b) => b.count - a.count);
+      const total = sorted.reduce((a, r) => a + r.count, 0) || 1;
+      const topN = Math.min(2, sorted.length);
+      const pct = Math.round((sorted.slice(0, topN).reduce((a, r) => a + r.count, 0) / total) * 100);
+      return { kind, title: `帕累托图 · ${pm.name}`, metric: `Top${topN} = ${pct}%`, status: '已分析', ...pick(OK) };
     }
     case 'doe': {
       const r = analyzeDoe();
