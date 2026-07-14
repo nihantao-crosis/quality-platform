@@ -40,6 +40,20 @@ describe('九页渲染冒烟', () => {
 });
 
 describe('数据流冒烟', () => {
+  it('剪贴板导入成功后自动关闭弹窗并显示新工作表', () => {
+    render(<App />);
+    fireEvent.click(screen.getByText('导入 CSV/Excel'));
+    fireEvent.click(screen.getByText('剪贴板粘贴'));
+    fireEvent.change(screen.getByRole('textbox'), {
+      target: { value: '子组,测量1,测量2\n1,10,11\n2,12,13\n3,14,15' },
+    });
+    fireEvent.click(screen.getByText('导入', { exact: true }));
+    expect(useApp.getState()).toMatchObject({ modal: null, page: 'worksheet' });
+    expect(useData.getState().model.name).toBe('剪贴板数据');
+    expect(screen.queryByText('导入数据')).toBeNull();
+    expect(screen.getAllByText(/剪贴板数据/).length).toBeGreaterThan(0);
+  });
+
   it('导入变量数据 → 状态栏/工作表跟随,恢复演示可回退', () => {
     render(<App />);
     act(() => useData.getState().importMatrix('冒烟.csv', ['a', 'b'], [[1, 2], [2, 3], [3, 4]]));

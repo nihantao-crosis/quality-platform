@@ -2,7 +2,7 @@
 import { useEffect, useMemo } from 'react';
 import { useApp } from './store/appStore';
 import { useData } from './store/dataStore';
-import { computeCapability, computeGageRR, gageStudyData, GAGE_TOLERANCE, nf } from './core';
+import { capabilityInputError, computeCapability, computeGageRR, gageStudyData, GAGE_TOLERANCE, nf, prepareSpcData } from './core';
 import { platform } from './platform/adapter';
 import { exportProject } from './platform/project';
 import { useAnalyses } from './store/analyses';
@@ -26,11 +26,22 @@ import { Doe } from './ui/pages/Doe';
 import { Aql } from './ui/pages/Aql';
 
 export default function App() {
-  const { page, openMenu, varOpen, setOpenMenu, setVarOpen, openModal, showToast, chartStyle, showGrid, lsl, usl, tgt } = useApp();
-  const M = useData((s) => s.model);
+  const {
+    page, openMenu, varOpen, setOpenMenu, setVarOpen, openModal, showToast, chartStyle, showGrid, lsl, usl, tgt, lslOn, uslOn,
+    spcType, spcDataLayout, spcValueCol, spcSubgroupCol,
+  } = useApp();
+  const { model: M, textCols, pendingCells } = useData();
   const T = chartTokens(chartStyle, showGrid);
   const cur = PAGES.find((p) => p.key === page) ?? PAGES[0];
-  const cap = computeCapability(M.all, M.sigmaWithin, { lsl, tgt, usl });
+  const preparedSpc = prepareSpcData(M, textCols, {
+    layout: spcDataLayout, valueColumn: spcValueCol, subgroupColumn: spcSubgroupCol,
+    pendingCells,
+  });
+  const capModel = preparedSpc.model;
+  const capSpec = { lsl: lslOn ? lsl : null, tgt, usl: uslOn ? usl : null };
+  const cap = capModel && capabilityInputError(capModel.all, capModel.sigmaWithin, capSpec) == null
+    ? computeCapability(capModel.all, capModel.sigmaWithin, capSpec)
+    : null;
   const gage = useMemo(() => computeGageRR(gageStudyData(), GAGE_TOLERANCE), []);
 
   // 全局快捷键（菜单栏标注的 Ctrl+S/O/P/N;输入控件聚焦时不劫持）
@@ -81,7 +92,12 @@ export default function App() {
   // 数据相关页面的副标题跟随活动数据集
   const dynSub: Partial<Record<typeof page, string>> = {
     worksheet: `${M.k} 子组 × ${M.n} 测量值 · ${M.isDemo ? '直径 (mm)' : M.colNames.join(' / ')}`,
-    spc: M.hasSubgroups ? `均值-极差控制图 · 子组大小 n = ${M.n}` : '单值-移动极差控制图 · 单列数据',
+    spc: spcType === 'p' ? 'P 图 · 样本不良率'
+      : spcType === 'c' ? 'C 图 · 单位缺陷数'
+        : preparedSpc.error ? 'SPC 数据角色待配置'
+          : preparedSpc.model?.hasSubgroups
+            ? `子组控制图 · 子组大小 n = ${preparedSpc.model.n}`
+            : '单值-移动极差控制图 · 单值序列',
     capability: `正态能力 · 规格 ${nf(lsl, 2)}–${nf(usl, 2)}`,
   };
   const subtitle = dynSub[page] ?? cur.sub;
@@ -105,15 +121,17 @@ export default function App() {
               <div className="hov-act" onClick={() => openModal('export')} style={{ padding: '7px 14px', border: '1px solid #cfd5dd', borderRadius: 5, cursor: 'pointer', fontSize: 12.5, color: '#3a4350', background: '#fff', fontWeight: 500 }}>导出报表</div>
               <div
                 className="hov-act-primary"
-                title="把当前分析保存为项目中的一条记录（可在仪表盘 / 项目管理器回看）"
+                title={page === 'aql'
+                  ? '保存当前 AQL 方案与账本摘要；点击历史摘要只返回当前连续检验流，不会回滚活跃状态'
+                  : '把当前分析保存为项目中的一条记录（可在仪表盘 / 项目管理器恢复）'}
                 onClick={() => {
                   const saved = useAnalyses.getState().saveCurrent();
                   if (saved) showToast(`已保存分析「${saved.title}」到项目 · ${saved.metric}`);
-                  else showToast('当前页无可保存的分析,请先打开一个分析模块（SPC / 能力 / ANOVA…）');
+                  else showToast(useAnalyses.getState().lastError ?? '当前页无可保存的分析,请先打开一个分析模块（SPC / 能力 / ANOVA…）');
                 }}
                 style={{ padding: '7px 14px', border: '1px solid #1f6fb2', borderRadius: 5, cursor: 'pointer', fontSize: 12.5, color: '#fff', background: '#1f6fb2', fontWeight: 600 }}
               >
-                保存到项目
+                {page === 'aql' ? '保存当前摘要' : '保存到项目'}
               </div>
             </div>
           </div>
@@ -142,7 +160,7 @@ export default function App() {
       <Modals />
       <Toast />
       <SessionPanel />
-      <StatusBar cpk={cap.cpk} gageRR={gage.totalGageRR} wsName={M.name} rows={M.k} cols={wsCols} />
+      <StatusBar cpk={cap?.cpk ?? null} gageRR={gage.totalGageRR} wsName={M.name} rows={M.k} cols={wsCols} />
     </div>
   );
 }

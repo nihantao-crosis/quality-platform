@@ -6,7 +6,10 @@ import { computePChart, computeCChart } from '../attr';
 import { andersonDarling, probPlotPoints } from '../normality';
 import { bestLambda, boxCoxTransform, transformWithSpec } from '../boxcox';
 import { ewmaSeries, cusumSeries } from '../advancedSpc';
-import { recordBatch, plansByState, SWITCH_INIT, type SwitchStatus } from '../aqlSwitch';
+import {
+  freshSwitchStatus, plansByState, recordInspection, resumeTightenedInspection,
+  setSwitchConditions, type RecordInspectionInput, type SwitchStatus,
+} from '../aqlSwitch';
 import { computeCapability } from '../capability';
 import { parseMatrix } from '../csv';
 import { buildData } from '../sampleData';
@@ -94,30 +97,79 @@ describe('EWMA / CUSUM', () => {
 });
 
 describe('AQL 转移规则', () => {
-  const run = (results: string) => results.split('').reduce<SwitchStatus>((s, c) => recordBatch(s, c as 'A' | 'R'), SWITCH_INIT);
-  it('正常 → 加严：5 批中 2 批拒收', () => {
-    expect(run('ARAR').state).toBe('tightened');
-    expect(run('AAAAR').state).toBe('normal'); // 只有 1 个 R
+  let batchNo = 0;
+  const input = (nonconforming: number, patch: Partial<RecordInspectionInput> = {}): RecordInspectionInput => ({
+    lot: 2000,
+    level: 'II',
+    aql: 1.0,
+    nonconforming,
+    batchId: `LOT-${++batchNo}`,
+    inspector: '检验员A',
+    inspectedAt: `2026-07-14T00:${String(batchNo).padStart(2, '0')}:00.000Z`,
+    ...patch,
   });
+  const run = (defects: number[], initial: SwitchStatus = freshSwitchStatus()) => (
+    defects.reduce((status, d) => recordInspection(status, input(d)), initial)
+  );
+
+  it('正常 → 加严：5 批或少于 5 批初次检验中 2 批不接收', () => {
+    expect(run([4, 0, 4]).state).toBe('tightened');
+    expect(run([0, 0, 0, 0, 4]).state).toBe('normal');
+  });
+
   it('加严 → 正常：连续 5 批接收', () => {
-    expect(run('RRAAAA').state).toBe('tightened');
-    expect(run('RRAAAAA').state).toBe('normal');
+    const tightened = { ...freshSwitchStatus(), state: 'tightened' as const, note: '开始加严' };
+    expect(run([0, 0, 0, 0], tightened).state).toBe('tightened');
+    expect(run([0, 0, 0, 0, 0], tightened).state).toBe('normal');
   });
-  it('正常 → 放宽：连续 10 批接收；放宽 → 正常：任 1 批拒收', () => {
-    const relaxed = run('AAAAAAAAAA');
-    expect(relaxed.state).toBe('reduced');
-    expect(recordBatch(relaxed, 'R').state).toBe('normal');
+
+  it('正常 → 放宽：转移得分≥30 + 生产稳定 + 负责部门同意', () => {
+    const eligible = setSwitchConditions(freshSwitchStatus(), { productionSteady: true, reducedApproved: true });
+    const reduced = run(Array(10).fill(0), eligible); // K/1.0 严一档为 K/0.65/Ac2，每批 +3
+    expect(reduced.state).toBe('reduced');
+    expect(reduced.switchingScore).toBe(30);
+    expect(recordInspection(reduced, input(2)).state).toBe('normal'); // 表 2-C:K/50/Ac1/Re2
   });
-  it('三态方案：加严 Ac 更小,放宽 n 更小', () => {
-    const p = plansByState(2000, 'II', 1.0); // 正常 = 真表 K/125/3/4(直取,无箭头)
+
+  it('转移得分：Ac≥2 需在严一档 AQL 仍接收；Ac=0/1 接收时 +2', () => {
+    let status = recordInspection(freshSwitchStatus(), input(0));
+    expect(status.switchingScore).toBe(3);
+    status = recordInspection(status, input(3)); // 当前 Ac3 接收，但严一档 Ac2 不接收
+    expect(status.switchingScore).toBe(0);
+
+    const smallAc = recordInspection(freshSwitchStatus(), input(0, { lot: 120 }));
+    expect(plansByState(120, 'II', 1.0).normal.ac).toBe(0);
+    expect(smallAc.switchingScore).toBe(2);
+  });
+
+  it('复验批留痕但不计入转移；实际不合格数自动决定批结果', () => {
+    const original = recordInspection(freshSwitchStatus(), input(4));
+    const reinspection = recordInspection(original, input(4, { originalInspection: false }));
+    expect(reinspection.history).toEqual(['R']);
+    expect(reinspection.records).toHaveLength(2);
+    expect(reinspection.records[1]).toMatchObject({ originalInspection: false, nonconforming: 4, result: 'R', decision: 'rejected' });
+  });
+
+  it('加严检验累计 5 批不接收时暂停，纠正确认后从加严恢复', () => {
+    const tightened = { ...freshSwitchStatus(), state: 'tightened' as const, note: '开始加严' };
+    const stopped = run([3, 3, 3, 3, 3], tightened); // 表 2-B:K/125/Ac2/Re3
+    expect(stopped.suspended).toBe(true);
+    expect(() => recordInspection(stopped, input(0))).toThrow(/暂停/);
+    expect(resumeTightenedInspection(stopped)).toMatchObject({ state: 'tightened', suspended: false, tightenedRejections: 0 });
+  });
+
+  it('三态方案直接取正式表 2-A / 2-B / 2-C', () => {
+    const p = plansByState(2000, 'II', 1.0);
     expect(p.normal).toMatchObject({ code: 'K', n: 125, ac: 3 });
-    expect(p.tightened.ac).toBeLessThan(p.normal.ac); // 加严 Ac−1 = 2
-    expect(p.reduced.n).toBeLessThan(p.normal.n); // 放宽降两档 → H/50
+    expect(p.tightened).toMatchObject({ code: 'K', n: 125, ac: 2, re: 3 });
+    expect(p.reduced).toMatchObject({ code: 'K', n: 50, ac: 1, re: 2 });
   });
-  it('三态方案 Ac=0 边界:re 不变量守护(正常/加严均 re=ac+1≥1)', () => {
-    const q = plansByState(120, 'II', 1.0); // 正常 = 真表 E/13/Ac0
+
+  it('三态方案 Ac=0 边界仍满足 Re=Ac+1', () => {
+    const q = plansByState(120, 'II', 1.0);
     expect(q.normal).toMatchObject({ ac: 0, re: 1 });
-    expect(q.tightened).toMatchObject({ ac: 0, re: 1 }); // Ac 已 0,加严不再减(下限 0)
+    expect(q.tightened).toMatchObject({ code: 'F', n: 20, ac: 0, re: 1 });
+    expect(q.reduced).toMatchObject({ code: 'E', n: 5, ac: 0, re: 1 });
     expect(q.reduced.re).toBe(q.reduced.ac + 1);
   });
 });

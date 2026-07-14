@@ -15,11 +15,14 @@ import { Histogram } from '../ui/charts/Histogram';
 import { NormalProbPlot } from '../ui/charts/NormalProbPlot';
 import type { ReportSpec } from './report';
 import { svgMarkupToPng } from './svgToPng';
+import { analysisUsesWorksheet, type AnalysisReportPayload, type AnalysisReportTable } from './analysisReportModel';
 
 export interface ReportImages {
   xbar?: Uint8Array;
   hist?: Uint8Array;
   prob?: Uint8Array;
+  /** 与 AnalysisReportPayload.charts 保持相同顺序。 */
+  analysis?: Uint8Array[];
 }
 
 interface ReportStats {
@@ -30,9 +33,10 @@ interface ReportStats {
 
 function collectStats(M: VarModel, spec: ReportSpec): ReportStats {
   const cap = computeCapability(M.all, M.sigmaWithin, spec);
-  const means = M.subs.map((s) => s.mean);
-  const sig = (M.uclX - M.xbarbar) / 3;
-  const { list: viol } = evalRules(means, M.xbarbar, sig, DEFAULT_RULES);
+  const data = M.hasSubgroups ? M.subs.map((s) => s.mean) : M.indiv;
+  const cl = M.hasSubgroups ? M.xbarbar : M.indMean;
+  const sigma = M.hasSubgroups ? (M.uclX - M.xbarbar) / 3 : M.iSig;
+  const { list: viol } = evalRules(data, cl, sigma, DEFAULT_RULES);
   let adText = '样本量不足,未执行正态性检验';
   if (M.all.length >= 8) {
     const ad = andersonDarling(M.all);
@@ -42,16 +46,27 @@ function collectStats(M: VarModel, spec: ReportSpec): ReportStats {
 }
 
 /** 浏览器路径：渲染三张图为 PNG（经典主题,与界面一致） */
-export async function renderReportImages(M: VarModel, spec: ReportSpec): Promise<ReportImages> {
+export async function renderReportImages(
+  M: VarModel,
+  spec: ReportSpec,
+  analysis?: AnalysisReportPayload,
+): Promise<ReportImages> {
+  if (analysis) {
+    return {
+      analysis: await Promise.all(analysis.charts.map((chart) =>
+        svgMarkupToPng(chart.svg, chart.width, chart.height, 2))),
+    };
+  }
   const T = chartTokens('经典', true);
-  const means = M.subs.map((s) => s.mean);
-  const sig = (M.uclX - M.xbarbar) / 3;
-  const { viol } = evalRules(means, M.xbarbar, sig, DEFAULT_RULES);
+  const spc = M.hasSubgroups
+    ? { data: M.subs.map((s) => s.mean), cl: M.xbarbar, ucl: M.uclX, lcl: M.lclX, sigma: (M.uclX - M.xbarbar) / 3, label: 'X̄' }
+    : { data: M.indiv, cl: M.indMean, ucl: M.iUcl, lcl: M.iLcl, sigma: M.iSig, label: 'I' };
+  const { viol } = evalRules(spc.data, spc.cl, spc.sigma, DEFAULT_RULES);
   const mk = (el: React.ReactElement, w: number, h: number) =>
     svgMarkupToPng(renderToStaticMarkup(el), w, h, 2);
   return {
     xbar: await mk(
-      <ControlChart T={T} data={means} cl={M.xbarbar} ucl={M.uclX} lcl={M.lclX} clLabel="X̄" h={250} zones violations={viol} />,
+      <ControlChart T={T} data={spc.data} cl={spc.cl} ucl={spc.ucl} lcl={spc.lcl} clLabel={spc.label} h={250} zones violations={viol} />,
       960, 250,
     ),
     hist: await mk(
@@ -74,8 +89,12 @@ const verdictText = (cap: ReportStats['cap']) =>
 
 // ============================== Word ==============================
 
-export async function buildDocx(M: VarModel, spec: ReportSpec, images: ReportImages = {}): Promise<Uint8Array> {
-  const { cap, viol, adText } = collectStats(M, spec);
+export async function buildDocx(
+  M: VarModel,
+  spec: ReportSpec,
+  images: ReportImages = {},
+  analysis?: AnalysisReportPayload,
+): Promise<Uint8Array> {
   const border = { style: BorderStyle.SINGLE, size: 4, color: 'E2E5EA' };
   const borders = { top: border, bottom: border, left: border, right: border };
   const cell = (text: string, bold = false) =>
@@ -98,6 +117,41 @@ export async function buildDocx(M: VarModel, spec: ReportSpec, images: ReportIma
       ? [new Paragraph({ alignment: AlignmentType.CENTER, children: [new ImageRun({ type: 'png', data, transformation: { width: w, height: hpx } })] })]
       : [];
 
+  const detailTable = (table: AnalysisReportTable) => new Table({
+    width: { size: 100, type: WidthType.PERCENTAGE },
+    rows: [
+      new TableRow({ children: table.headers.map((header) => cell(header, true)) }),
+      ...table.rows.map((row) => new TableRow({ children: row.map((value) => cell(String(value))) })),
+    ],
+  });
+
+  if (analysis) {
+    const sourceContext = analysisUsesWorksheet(analysis) ? ` · 工作表 ${M.name}` : '';
+    const children: (Paragraph | Table)[] = [
+      new Paragraph({ heading: HeadingLevel.HEADING_1, children: [new TextRun({ text: analysis.title, size: 40, bold: true })] }),
+      p(`${analysis.subtitle}${sourceContext} · 生成于 ${analysis.generatedAt}`),
+      h('1. 分析结论'),
+      ...analysis.summary.map((line) => p(line)),
+      ...analysis.warnings.flatMap((line, index) => index === 0 ? [h('使用与解释注意事项'), p(line)] : [p(line)]),
+    ];
+    analysis.tables.forEach((table, index) => {
+      children.push(h(`${index + 2}. ${table.title}`), detailTable(table));
+      if (table.note) children.push(p(table.note));
+    });
+    const chartBase = analysis.tables.length + 2;
+    analysis.charts.forEach((chart, index) => {
+      children.push(h(`${chartBase + index}. ${chart.title}`));
+      children.push(...img(images.analysis?.[index], 620, Math.max(120, Math.round(620 * chart.height / chart.width))));
+      if (chart.note) children.push(p(chart.note));
+    });
+    children.push(p('—— 本报告由质量分析平台根据当前分析参数实时生成 ——'));
+    const doc = new Document({ sections: [{ children }] });
+    const blob = await Packer.toBlob(doc);
+    return new Uint8Array(await blob.arrayBuffer());
+  }
+
+  const { cap, viol, adText } = collectStats(M, spec);
+
   const children: (Paragraph | Table)[] = [
     new Paragraph({ heading: HeadingLevel.HEADING_1, children: [new TextRun({ text: '质量分析报告', size: 40, bold: true })] }),
     p(`工作表 ${M.name} · ${M.k} 子组 × ${M.n} 测量 = ${M.all.length} 观测 · 生成于 ${new Date().toLocaleString('zh-CN')}`),
@@ -108,7 +162,7 @@ export async function buildDocx(M: VarModel, spec: ReportSpec, images: ReportIma
     ]),
     h('2. SPC 控制图与判异'),
     ...img(images.xbar),
-    p(viol.length === 0 ? '未检出失控点，过程受控（Nelson 准则 1–4）。' : `检出 ${viol.length} 项失控：` + viol.map((v) => `点${v.i + 1}(准则${v.rule})`).join('、')),
+    p(viol.length === 0 ? '未检出失控点，过程受控（当前启用的 Nelson 准则）。' : `检出 ${viol.length} 项失控：` + viol.map((v) => `点${v.i + 1}(准则${v.rule})`).join('、')),
     h('3. 过程能力'),
     ...img(images.hist, 620, 194),
     kvTable(capPairs(cap)),
@@ -125,8 +179,12 @@ export async function buildDocx(M: VarModel, spec: ReportSpec, images: ReportIma
 
 // ============================== PowerPoint ==============================
 
-export async function buildPptx(M: VarModel, spec: ReportSpec, images: ReportImages = {}): Promise<Uint8Array> {
-  const { cap, viol, adText } = collectStats(M, spec);
+export async function buildPptx(
+  M: VarModel,
+  spec: ReportSpec,
+  images: ReportImages = {},
+  analysis?: AnalysisReportPayload,
+): Promise<Uint8Array> {
   const pptx = new PptxGenJS();
   pptx.defineLayout({ name: 'WIDE', width: 13.33, height: 7.5 });
   pptx.layout = 'WIDE';
@@ -152,6 +210,58 @@ export async function buildPptx(M: VarModel, spec: ReportSpec, images: ReportIma
     if (note) s.addText(note, { x: 0.9, y: 6.7, w: 11.5, h: 0.5, color: GRAY, fontSize: 12 });
     return s;
   };
+
+  if (analysis) {
+    const sourceContext = analysisUsesWorksheet(analysis) ? ` · 工作表 ${M.name}` : '';
+    const cover = pptx.addSlide();
+    cover.addShape('rect', { x: 0, y: 0, w: 13.33, h: 7.5, fill: { color: 'F4F6F8' } });
+    cover.addShape('rect', { x: 0, y: 3.0, w: 13.33, h: 0.06, fill: { color: BLUE } });
+    cover.addText(analysis.title, { x: 1, y: 1.55, w: 11.3, h: 1.35, fontSize: 38, bold: true, color: DARK, fit: 'shrink' });
+    cover.addText(`${analysis.subtitle}${sourceContext}`, { x: 1, y: 3.3, w: 11.3, h: 0.65, fontSize: 18, color: GRAY, fit: 'shrink' });
+    cover.addText(`${analysis.generatedAt} · 质量分析平台`, { x: 1, y: 4.05, w: 11.3, h: 0.5, fontSize: 14, color: GRAY });
+
+    const summarySlide = pptx.addSlide();
+    titleBar(summarySlide, '分析结论');
+    summarySlide.addText(analysis.summary.map((line) => ({ text: line, options: { bullet: { indent: 18 } } })), {
+      x: 0.8, y: 1.0, w: 11.8, h: analysis.warnings.length ? 2.5 : 5.6, fontSize: 17, color: DARK, breakLine: true,
+      valign: 'top', margin: 0.08, fit: 'shrink',
+    });
+    if (analysis.warnings.length > 0) {
+      summarySlide.addShape('rect', { x: 0.8, y: 4.0, w: 11.8, h: 0.06, fill: { color: 'D98324' } });
+      summarySlide.addText('使用与解释注意事项', { x: 0.8, y: 4.15, w: 11.8, h: 0.4, fontSize: 15, bold: true, color: 'B0620F' });
+      summarySlide.addText(analysis.warnings.map((line) => ({ text: line, options: { bullet: { indent: 18 } } })), {
+        x: 0.8, y: 4.6, w: 11.8, h: 2.1, fontSize: 13, color: GRAY, breakLine: true,
+        valign: 'top', margin: 0.08, fit: 'shrink',
+      });
+    }
+
+    for (const table of analysis.tables) {
+      const chunks: Array<typeof table.rows> = [];
+      for (let start = 0; start < table.rows.length; start += 14) chunks.push(table.rows.slice(start, start + 14));
+      if (chunks.length === 0) chunks.push([]);
+      chunks.forEach((chunk, chunkIndex) => {
+        const slide = pptx.addSlide();
+        titleBar(slide, `${table.title}${chunks.length > 1 ? ` (${chunkIndex + 1}/${chunks.length})` : ''}`);
+        const rows: PptxGenJS.TableRow[] = [
+          table.headers.map((header) => ({ text: header, options: { bold: true, color: DARK } })),
+          ...chunk.map((row) => row.map((value) => ({ text: String(value) }))),
+        ];
+        slide.addTable(rows, {
+          x: 0.55, y: 1.0, w: 12.2, h: 5.8, fontSize: 11,
+          border: { type: 'solid', color: 'E2E5EA', pt: 1 },
+          fill: { color: 'FFFFFF' }, margin: 0.05,
+        });
+        if (table.note) slide.addText(table.note, { x: 0.65, y: 6.95, w: 12, h: 0.3, fontSize: 9, color: GRAY, fit: 'shrink' });
+      });
+    }
+    analysis.charts.forEach((chart, index) =>
+      chartSlide(chart.title, images.analysis?.[index], chart.height / chart.width, chart.note));
+
+    const buf = (await pptx.write({ outputType: 'arraybuffer' })) as ArrayBuffer;
+    return new Uint8Array(buf);
+  }
+
+  const { cap, viol, adText } = collectStats(M, spec);
 
   // 封面
   const cover = pptx.addSlide();
@@ -179,7 +289,7 @@ export async function buildPptx(M: VarModel, spec: ReportSpec, images: ReportIma
   s2.addTable(capRows, { x: 0.6, y: 2.6, w: 12.1, fontSize: 14, border: { type: 'solid', color: 'E2E5EA', pt: 1 } });
   s2.addText(adText, { x: 0.6, y: 4.3, w: 12.1, h: 0.5, fontSize: 13, color: GRAY });
 
-  chartSlide('SPC 控制图（X̄）', images.xbar, 250 / 960,
+  chartSlide(`SPC 控制图（${M.hasSubgroups ? 'X̄' : 'I'}）`, images.xbar, 250 / 960,
     viol.length === 0 ? '未检出失控点，过程受控' : `检出 ${viol.length} 项失控：` + viol.slice(0, 8).map((v) => `点${v.i + 1}(准则${v.rule})`).join('、'));
   chartSlide('过程能力直方图', images.hist, 300 / 960);
   chartSlide('正态概率图', images.prob, 280 / 960, adText);

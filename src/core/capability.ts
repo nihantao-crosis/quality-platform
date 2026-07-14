@@ -33,13 +33,43 @@ export interface CapabilityResult {
   verdict: 'sufficient' | 'marginal' | 'insufficient';
 }
 
+/**
+ * 能力分析的统一输入契约。页面、摘要与导出可先用它展示“未运行”原因；
+ * computeCapability 自身也会再次校验，避免任何调用方绕过保护。
+ */
+export function capabilityInputError(
+  allValues: number[],
+  sigmaWithin: number,
+  spec: SpecLimits,
+): string | null {
+  if (!Array.isArray(allValues) || allValues.length < 2) return '过程能力分析至少需要 2 个观测值';
+  if (allValues.some((value) => !Number.isFinite(value))) return '过程能力观测值必须全部为有限数值';
+  if (!Number.isFinite(spec.tgt)) return '目标值 Target 必须是有限数值';
+  if (spec.lsl != null && !Number.isFinite(spec.lsl)) return '规格下限 LSL 必须是有限数值';
+  if (spec.usl != null && !Number.isFinite(spec.usl)) return '规格上限 USL 必须是有限数值';
+  if (spec.lsl == null && spec.usl == null) return '至少需要启用一侧规格限';
+  if (spec.lsl != null && spec.usl != null && spec.lsl >= spec.usl) {
+    return '双侧规格必须满足 LSL < USL';
+  }
+  const mu = allValues.reduce((sum, value) => sum + value, 0) / allValues.length;
+  const sigmaOverall = Math.sqrt(allValues.reduce((sum, value) => sum + (value - mu) ** 2, 0) / (allValues.length - 1));
+  if (!Number.isFinite(sigmaOverall) || sigmaOverall <= 0) {
+    return '过程整体标准差为 0 或不可估计，无法计算能力指数';
+  }
+  if (!Number.isFinite(sigmaWithin) || sigmaWithin <= 0) {
+    return '过程组内标准差为 0 或不可估计，无法计算 Cp/Cpk';
+  }
+  return null;
+}
+
 export function computeCapability(
   allValues: number[],
   sigmaWithin: number,
   spec: SpecLimits,
 ): CapabilityResult {
+  const inputError = capabilityInputError(allValues, sigmaWithin, spec);
+  if (inputError) throw new Error(inputError);
   const { lsl, usl } = spec;
-  if (lsl == null && usl == null) throw new Error('至少需要一侧规格限');
   const mu = allValues.reduce((a, b) => a + b, 0) / allValues.length;
   const so = Math.sqrt(allValues.reduce((a, b) => a + (b - mu) ** 2, 0) / (allValues.length - 1));
   const sw = sigmaWithin;

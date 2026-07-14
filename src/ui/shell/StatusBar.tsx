@@ -3,7 +3,7 @@ import { useApp } from '../../store/appStore';
 import { nf } from '../../core';
 
 export function StatusBar({ cpk, gageRR, wsName, rows, cols }: {
-  cpk: number; gageRR: number; wsName: string; rows: number; cols: number;
+  cpk: number | null; gageRR: number; wsName: string; rows: number; cols: number;
 }) {
   const { chartStyle, cycleChartStyle } = useApp();
   return (
@@ -12,7 +12,7 @@ export function StatusBar({ cpk, gageRR, wsName, rows, cols }: {
       <span>工作表: {wsName}</span>
       <span>行 {rows}</span>
       <span>列 {cols}</span>
-      <span style={{ marginLeft: 'auto' }}>Cpk {nf(cpk, 2)}</span>
+      <span style={{ marginLeft: 'auto' }}>Cpk {cpk != null && Number.isFinite(cpk) ? nf(cpk, 2) : '—'}</span>
       <span>Gage R&R {nf(gageRR, 1)}%</span>
       <span
         className="hov-tool"

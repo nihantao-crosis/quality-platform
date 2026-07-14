@@ -7,18 +7,52 @@ import {
   nf, computeCapability, evalRules, DEFAULT_RULES, type VarModel,
 } from '../core';
 import type { ReportSpec } from './report';
+import { safeSheetName, type AnalysisReportPayload } from './analysisReportModel';
 
-export function buildXlsx(M: VarModel, spec: ReportSpec): Uint8Array {
+export function buildXlsx(M: VarModel, spec: ReportSpec, analysis?: AnalysisReportPayload): Uint8Array {
   const wb = XLSX.utils.book_new();
 
-  // Sheet 1: 数据
-  const head = ['子组', ...M.colNames, ...(M.hasSubgroups ? ['均值', '极差'] : [])];
-  const dataRows = M.subs.map((s) => [
-    s.i,
-    ...s.vals,
-    ...(M.hasSubgroups ? [Number(nf(s.mean, 4)), Number(nf(s.range, 4))] : []),
-  ]);
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([head, ...dataRows]), '数据');
+  const appendDataSheet = () => {
+    const showDerived = M.hasSubgroups;
+    const head = [M.hasSubgroups ? '子组' : '观测', ...M.colNames, ...(showDerived ? ['均值', '极差'] : [])];
+    const dataRows = M.subs.map((s) => [
+      s.i,
+      ...s.vals,
+      ...(showDerived ? [Number(nf(s.mean, 4)), Number(nf(s.range, 4))] : []),
+    ]);
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([head, ...dataRows]), '数据');
+  };
+
+  // 当前页面有专项分析时，Excel 只导出与该分析有关的数据与结果。
+  // 尤其 AQL / Pareto / P / C 图不得夹带当前连续型工作表的能力摘要。
+  if (analysis) {
+    const rows: Array<Array<string | number>> = [
+      [analysis.title],
+      [analysis.subtitle],
+      ['生成时间', analysis.generatedAt],
+      [],
+      ['结论'],
+      ...analysis.summary.map((line) => [line]),
+    ];
+    if (analysis.warnings.length > 0) {
+      rows.push([], ['注意事项'], ...analysis.warnings.map((line) => [line]));
+    }
+    for (const table of analysis.tables) {
+      rows.push([], [table.title], table.headers, ...table.rows);
+      if (table.note) rows.push([table.note]);
+    }
+    if (analysis.charts.length > 0) {
+      rows.push([], ['图形清单'], ...analysis.charts.map((chart) => [chart.title, chart.note ?? '见 HTML/Word/PPT 图文报告']));
+    }
+    XLSX.utils.book_append_sheet(
+      wb,
+      XLSX.utils.aoa_to_sheet(rows),
+      safeSheetName(`${analysis.kind}-当前分析`),
+    );
+    return new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer);
+  }
+
+  appendDataSheet();
 
   // Sheet 2: 统计摘要
   const cap = computeCapability(M.all, M.sigmaWithin, spec);
@@ -45,10 +79,11 @@ export function buildXlsx(M: VarModel, spec: ReportSpec): Uint8Array {
   ];
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(summary), '统计摘要');
 
-  // Sheet 3: 失控点（X̄ 图 Nelson 全准则）
-  const means = M.subs.map((s) => s.mean);
-  const sig = (M.uclX - M.xbarbar) / 3;
-  const { list } = evalRules(means, M.xbarbar, sig, DEFAULT_RULES);
+  // Sheet 3: 失控点（子组数据用 X̄，单值/未转换形态用 I，绝不借用伪造的子组常数）
+  const data = M.hasSubgroups ? M.subs.map((s) => s.mean) : M.indiv;
+  const cl = M.hasSubgroups ? M.xbarbar : M.indMean;
+  const sigma = M.hasSubgroups ? (M.uclX - M.xbarbar) / 3 : M.iSig;
+  const { list } = evalRules(data, cl, sigma, DEFAULT_RULES);
   const violRows: (string | number)[][] = [['点号', 'Nelson 准则', '描述']];
   list.forEach((v) => violRows.push([v.i + 1, v.rule, v.desc]));
   if (list.length === 0) violRows.push(['—', '—', '未检出失控点，过程受控']);

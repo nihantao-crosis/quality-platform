@@ -12,6 +12,7 @@ describe('项目文件', () => {
     localStorage.setItem('qp-dataset-v1', JSON.stringify({ name: 't', colNames: ['a'], rows: [[1], [2]], textCols: [], savedAt: 'x' }));
     localStorage.setItem('qp-specs-v1', JSON.stringify({ t: { lsl: 1, tgt: 2, usl: 3 } }));
     localStorage.setItem('qp-fishbone-v1', JSON.stringify({ problem: 'p', categories: [] }));
+    localStorage.setItem('qp-analysis-data-v1', JSON.stringify({ d1: { name: '历史数据' } }));
     const json = buildProjectJson('9.9.9');
     const file = JSON.parse(json);
     expect(file.format).toBe('quality-platform-project');
@@ -22,6 +23,7 @@ describe('项目文件', () => {
     expect(applyProjectJson(json)).toBeNull();
     expect(JSON.parse(localStorage.getItem('qp-specs-v1')!)).toEqual({ t: { lsl: 1, tgt: 2, usl: 3 } });
     expect(localStorage.getItem('qp-dataset-v1')).toContain('"name":"t"');
+    expect(localStorage.getItem('qp-analysis-data-v1')).toContain('历史数据');
   });
 
   it('导入会清掉文件中不存在的项目键(完整替换语义)', () => {
@@ -49,5 +51,6 @@ describe('项目文件', () => {
     expect(isProjectFile('备份.qproj')).toBe(true);
     expect(isProjectFile('数据.csv')).toBe(false);
     expect(PROJECT_KEYS).toContain('qp-prefs-v1');
+    expect(PROJECT_KEYS).toContain('qp-analysis-data-v1');
   });
 });

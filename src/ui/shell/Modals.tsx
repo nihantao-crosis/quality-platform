@@ -47,11 +47,26 @@ function ImportModal() {
   const [clipText, setClipText] = useState('');
   const [dataKind, setDataKind] = useState<DataKind>(importKind);
   const [pSampleSize, setPSampleSize] = useState(50);
+  const [paretoCategoryCol, setParetoCategoryCol] = useState('');
+  const [paretoCountCol, setParetoCountCol] = useState('');
   const tabs: Array<[ImportTab, string]> = [['csv', 'CSV 文件'], ['excel', 'Excel 工作簿'], ['clip', '剪贴板粘贴'], ['mes', 'MES 实时采集']];
+
+  const paretoColumns = () => {
+    if (paretoCategoryCol.trim() === '' && paretoCountCol.trim() === '') return undefined;
+    const categoryColumn = Number(paretoCategoryCol) - 1;
+    const countColumn = Number(paretoCountCol) - 1;
+    if (!Number.isInteger(categoryColumn) || !Number.isInteger(countColumn) || categoryColumn < 0 || countColumn < 0) {
+      showToast('帕累托手动选列时，请同时填写从 1 开始的类别列和频数列');
+      return null;
+    }
+    return { categoryColumn, countColumn };
+  };
 
   const tryParse = (name: string, text: string) => {
     if (dataKind === 'pareto') {
-      const r = parseCategoryCounts(text);
+      const cols = paretoColumns();
+      if (cols === null) return;
+      const r = parseCategoryCounts(text, cols);
       if ('error' in r) {
         showToast('导入失败：' + r.error);
         return;
@@ -126,7 +141,9 @@ function ImportModal() {
   const applyJob = (name: string, raw: string) => {
     mesStop(); // 导入新数据前停掉模拟采集
     if (dataKind === 'pareto') {
-      const r = parseCategoryCounts(raw);
+      const cols = paretoColumns();
+      if (cols === null) return false;
+      const r = parseCategoryCounts(raw, cols);
       if ('error' in r) {
         showToast('导入失败：' + r.error);
         return false;
@@ -148,7 +165,7 @@ function ImportModal() {
       const notes: string[] = [];
       if (p.skippedRows > 0) notes.push(`跳过 ${p.skippedRows} 行非法值`);
       if (p.textCols.length > 0) notes.push(`含 ${p.textCols.length} 个分组列（可用于 ANOVA / Gage）`);
-      showToast(`已导入 ${name} · ${p.rows.length} 子组 × ${p.colNames.length} 测量列${notes.length ? ' · ' + notes.join(' · ') : ''}`);
+      showToast(`已导入 ${name} · ${p.rows.length} 行 × ${p.colNames.length} 个数值列；请在 SPC 页确认数据角色${notes.length ? ' · ' + notes.join(' · ') : ''}`);
       return true;
     }
     // 计数数据：取第一个数值列
@@ -181,6 +198,7 @@ function ImportModal() {
     if (applyJob(job.name, job.raw)) {
       setPending(null);
       setClipText('');
+      closeModal();
     }
   };
 
@@ -208,6 +226,24 @@ function ImportModal() {
             style={{ width: 64, padding: '3px 6px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12 }}
           />
         </label>
+      )}
+      {dataKind === 'pareto' && (
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, color: '#5b6472', flexWrap: 'wrap' }}>
+          多列时指定：类别列
+          <input
+            type="number" min={1} step={1} placeholder="自动" value={paretoCategoryCol}
+            onChange={(e) => { setParetoCategoryCol(e.target.value); setPending(null); }}
+            className="mono" title="从 1 开始；留空时自动识别"
+            style={{ width: 58, padding: '3px 6px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12 }}
+          />
+          频数列
+          <input
+            type="number" min={1} step={1} placeholder="自动" value={paretoCountCol}
+            onChange={(e) => { setParetoCountCol(e.target.value); setPending(null); }}
+            className="mono" title="从 1 开始；留空时自动识别"
+            style={{ width: 58, padding: '3px 6px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12 }}
+          />
+        </span>
       )}
     </div>
   );
@@ -241,13 +277,13 @@ function ImportModal() {
                 <div style={{ fontSize: 13.5, color: '#2c8a45', fontWeight: 600 }}>✓ {pending.name}</div>
                 <div className="mono" style={{ fontSize: 12, color: '#5b6472', marginTop: 6 }}>
                   {pending.parsed
-                    ? `${pending.parsed.rows.length} 子组 × ${pending.parsed.colNames.length} 测量列 · ${pending.parsed.colNames.join(' / ')}`
+                    ? `${pending.parsed.rows.length} 行 × ${pending.parsed.colNames.length} 个数值列 · ${pending.parsed.colNames.join(' / ')}`
                     : `${pending.cats ?? 0} 个类别（帕累托）`}
                 </div>
                 {pending.parsed && (pending.parsed.skippedRows > 0 || pending.parsed.droppedCols > 0) && (
                   <div style={{ fontSize: 11.5, color: '#d98324', marginTop: 4 }}>
                     {pending.parsed!.skippedRows > 0 ? `跳过 ${pending.parsed!.skippedRows} 行非法值 ` : ''}
-                    {pending.parsed!.droppedCols > 0 ? `忽略 ${pending.parsed!.droppedCols} 个非数值列` : ''}
+                    {pending.parsed!.droppedCols > 0 ? `保留 ${pending.parsed!.droppedCols} 个文本/分组列` : ''}
                   </div>
                 )}
                 <div onClick={pickFile} style={{ display: 'inline-block', marginTop: 14, padding: '8px 18px', border: '1px solid #cfd5dd', color: '#5b6472', borderRadius: 5, fontSize: 12.5, fontWeight: 600, cursor: 'pointer', background: '#fff' }}>重新选择</div>
@@ -320,19 +356,27 @@ function ImportModal() {
 function ExportModal() {
   const { exportFmt, setExportFmt, closeModal, showToast } = useApp();
   const fmts: Array<[ExportFmt, string, string]> = [
-    ['pdf', 'PDF 报告', '图文 HTML · 打开后打印即 PDF'],
-    ['excel', 'Excel', '真 .xlsx · 数据 + 统计 + 失控点'],
-    ['ppt', 'PowerPoint', '真 .pptx · 封面 + 指标 + 图表'],
-    ['word', 'Word', '真 .docx · 图文四节报告'],
+    ['pdf', 'PDF 报告', '当前分析图文 HTML · 打开后打印即 PDF'],
+    ['excel', 'Excel', '真 .xlsx · 数据 + 当前分析明细'],
+    ['ppt', 'PowerPoint', '真 .pptx · 当前分析表格与图形'],
+    ['word', 'Word', '真 .docx · 当前分析图文报告'],
   ];
   const doExport = async () => {
-    const { lsl, tgt, usl } = useApp.getState();
-    const job = await buildExportJob(exportFmt, useData.getState().model, { lsl, tgt, usl });
-    const dest = await platform.exportFile(job);
-    if (dest == null) return; // 用户取消
-    sessionLog(`导出报表 ${dest}`);
-    showToast(platform.isDesktop ? '报表已保存: ' + dest : '报表已导出: ' + dest);
-    closeModal();
+    try {
+      const { lsl, tgt, usl } = useApp.getState();
+      const { buildActiveAnalysisExport } = await import('../../platform/activeAnalysisReport');
+      const { report: analysis, model } = buildActiveAnalysisExport();
+      const job = await buildExportJob(exportFmt, model, { lsl, tgt, usl }, analysis);
+      const dest = await platform.exportFile(job);
+      if (dest == null) return; // 用户取消
+      sessionLog(`导出报表 ${dest}`);
+      showToast(platform.isDesktop ? '报表已保存: ' + dest : '报表已导出: ' + dest);
+      closeModal();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '未知错误';
+      sessionLog(`导出失败 · ${message}`);
+      showToast(`导出失败：${message}`);
+    }
   };
   return (
     <ModalFrame width={520} title="导出报表" onClose={closeModal}
@@ -692,7 +736,7 @@ function AboutModal() {
           <span style={{ width: 40, height: 40, borderRadius: 9, background: '#1f6fb2', color: '#fff', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 18, fontWeight: 700 }}>质</span>
           <div>
             <div style={{ fontSize: 16, fontWeight: 700, color: '#26303c' }}>质量分析平台</div>
-            <div style={{ fontSize: 12, color: '#8a929d' }}>Quality Analytics Platform · v1.0</div>
+            <div style={{ fontSize: 12, color: '#8a929d' }}>Quality Analytics Platform · v{__APP_VERSION__}</div>
           </div>
         </div>
         <div style={{ fontSize: 12.5, color: '#5b6472', lineHeight: 1.7 }}>

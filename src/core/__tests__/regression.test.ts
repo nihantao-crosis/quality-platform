@@ -21,10 +21,18 @@ describe('简单线性回归', () => {
     const r = linearRegression([1, 2, 3, 4], [10, 8, 6, 4]);
     expect(r.r).toBeCloseTo(-1, 10);
     expect(r.slope).toBeCloseTo(-2, 10);
+    expect(r.t).toBe(-Infinity);
+    expect(r.p).toBe(0);
     expect(r.significant).toBe(true);
+  });
+  it('常数 Y 的零斜率不是显著关系', () => {
+    const r = linearRegression([1, 2, 3, 4], [5, 5, 5, 5]);
+    expect(r).toMatchObject({ slope: 0, r: 0, r2: 0, seSlope: 0, t: 0, p: 1, significant: false });
   });
   it('X 无变异报错;观测不足报错', () => {
     expect(() => linearRegression([2, 2, 2], [1, 2, 3])).toThrow();
     expect(() => linearRegression([1, 2], [1, 2])).toThrow();
+    expect(() => linearRegression([1, 2, 3], [1, 2, 3, 4])).toThrow('观测数必须相同');
+    expect(() => linearRegression([1, 2, 3], [1, Number.NaN, 3])).toThrow('有限数值');
   });
 });

@@ -1,6 +1,9 @@
 /** 批次D:Nelson 判异准则 4/6/7/8 + AQL 国标查表 / 位移近似。 */
 import { describe, it, expect } from 'vitest';
-import { evalRules, aqlPlan, masterPlan2A, codeLetterGB, codeLetterShift, CODE_LETTER_TABLE, N_BY_CODE } from '../index';
+import {
+  evalRules, aqlPlan, masterPlan2A, codeLetterGB, codeLetterShift, CODE_LETTER_TABLE, N_BY_CODE,
+  rqlFor, rqlForResult, binomCdf, MAX_LOT_SIZE,
+} from '../index';
 
 const OFF = { r1: false, r2: false, r3: false, r4: false, r5: false, r6: false, r7: false, r8: false };
 const rulesOnly = (k: 'r4' | 'r6' | 'r7' | 'r8') => ({ ...OFF, [k]: true });
@@ -61,6 +64,12 @@ describe('AQL 字码判定:国标查表 vs 位移近似', () => {
     expect(N_BY_CODE[codeIII]).toBe(2000);
     expect(CODE_LETTER_TABLE[CODE_LETTER_TABLE.length - 1].hi).toBe(Infinity);
   });
+  it('UI 可用的安全整数批量覆盖 500,001+ 最后档', () => {
+    expect(codeLetterGB(500001, 'II')).toBe('Q');
+    expect(codeLetterGB(500001, 'III')).toBe('R');
+    expect(codeLetterGB(MAX_LOT_SIZE, 'III')).toBe('R');
+    expect(aqlPlan(500001, 'III', 0.65)).toEqual({ code: 'R', n: 2000, ac: 21, re: 22 });
+  });
 });
 
 describe('AQL 接收数·GB/T 2828.1 表 2-A 真查表(箭头已解析)', () => {
@@ -83,6 +92,29 @@ describe('AQL 接收数·GB/T 2828.1 表 2-A 真查表(箭头已解析)', () => 
     expect(aqlPlan(8, 'II', 0.65)).toEqual({ code: 'F', n: 8, ac: 0, re: 1, fullInspect: true });
     // 批量足够大时不触发
     expect(aqlPlan(2000, 'II', 1.0).fullInspect).toBeUndefined();
+  });
+  it('全检不计算抽样 RQL，数值兼容接口不返回伪边界', () => {
+    const plan = aqlPlan(8, 'II', 0.65);
+    expect(rqlForResult(plan)).toMatchObject({ status: 'not-applicable', reason: 'full-inspection', p: null });
+    expect(rqlFor(plan)).toBeNaN();
+  });
+  it('N=8/III/AQL4.0:RQL 超过 40%，不得把搜索上限虚报为 β=10%', () => {
+    const plan = aqlPlan(8, 'III', 4.0);
+    expect(plan).toEqual({ code: 'B', n: 3, ac: 0, re: 1 });
+
+    const limited = rqlForResult(plan, 0.1, 0.4);
+    expect(limited.status).toBe('not-reached');
+    if (limited.status === 'not-reached') expect(limited.paAtMax).toBeCloseTo(0.216, 12);
+
+    const result = rqlForResult(plan);
+    expect(result.status).toBe('found');
+    if (result.status === 'found') {
+      expect(result.p).toBeGreaterThan(0.53);
+      expect(result.p).toBeLessThan(0.54);
+      expect(result.pa).toBeLessThanOrEqual(0.1);
+      expect(binomCdf(plan.ac, plan.n, result.p)).toBeLessThanOrEqual(0.1);
+      expect(rqlFor(plan)).toBeCloseTo(result.p, 12);
+    }
   });
   it('aqlPlan 默认走真表(箭头会改字码/样本量)', () => {
     // N=120·II·AQL1.0:初始 F,↑ 后为 E/13/0/1(旧近似错给 F/20/1/2)

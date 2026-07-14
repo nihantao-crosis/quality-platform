@@ -43,12 +43,19 @@ export interface TTestResult {
 export function oneSampleT(xs: number[], mu0: number): TTestResult {
   const n = xs.length;
   if (n < 2) throw new Error('单样本 t 检验至少需要 2 个观测');
+  if (!Number.isFinite(mu0) || xs.some((value) => !Number.isFinite(value))) {
+    throw new Error('单样本 t 检验只接受有限数值');
+  }
   const m = mean(xs);
   const s = stdev(xs, true);
   const se = s / Math.sqrt(n);
   const df = n - 1;
-  const t = se === 0 ? 0 : (m - mu0) / se;
-  const p = se === 0 ? 1 : tTwoSidedP(t, df);
+  const diff = m - mu0;
+  const zeroDiff = Math.abs(diff) <= Number.EPSILON * Math.max(1, Math.abs(m), Math.abs(mu0)) * 8;
+  // 常数样本的标准误为 0：若均值正好等于 μ₀，则没有差异；若不等，则统计量
+  // 沿差异方向趋于无穷且双侧 P=0。不能一律退成 t=0、P=1。
+  const t = se === 0 ? (zeroDiff ? 0 : Math.sign(diff) * Infinity) : diff / se;
+  const p = se === 0 ? (zeroDiff ? 1 : 0) : tTwoSidedP(t, df);
   const tc = tInv(0.975, df);
   return { t, df, p, significant: p < 0.05, estimate: m, ciLow: m - tc * se, ciHigh: m + tc * se, se };
 }
@@ -56,6 +63,9 @@ export function oneSampleT(xs: number[], mu0: number): TTestResult {
 /** 双样本 t 检验（Welch）：H0 μ1 = μ2 */
 export function twoSampleT(xs: number[], ys: number[]): TTestResult {
   if (xs.length < 2 || ys.length < 2) throw new Error('双样本 t 检验每组至少需要 2 个观测');
+  if (xs.some((value) => !Number.isFinite(value)) || ys.some((value) => !Number.isFinite(value))) {
+    throw new Error('双样本 t 检验只接受有限数值');
+  }
   const m1 = mean(xs);
   const m2 = mean(ys);
   const v1 = stdev(xs, true) ** 2;
@@ -66,8 +76,10 @@ export function twoSampleT(xs: number[], ys: number[]): TTestResult {
   // Welch–Satterthwaite 自由度
   const df = se === 0 ? n1 + n2 - 2 : (v1 / n1 + v2 / n2) ** 2 / ((v1 / n1) ** 2 / (n1 - 1) + (v2 / n2) ** 2 / (n2 - 1));
   const diff = m1 - m2;
-  const t = se === 0 ? 0 : diff / se;
-  const p = se === 0 ? 1 : tTwoSidedP(t, df);
+  const zeroDiff = Math.abs(diff) <= Number.EPSILON * Math.max(1, Math.abs(m1), Math.abs(m2)) * 8;
+  // 两组都为常数时与单样本边界同理：相同常数 P=1，不同常数 P=0。
+  const t = se === 0 ? (zeroDiff ? 0 : Math.sign(diff) * Infinity) : diff / se;
+  const p = se === 0 ? (zeroDiff ? 1 : 0) : tTwoSidedP(t, df);
   const tc = tInv(0.975, df);
   return { t, df, p, significant: p < 0.05, estimate: diff, ciLow: diff - tc * se, ciHigh: diff + tc * se, se };
 }

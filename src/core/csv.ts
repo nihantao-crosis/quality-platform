@@ -61,7 +61,8 @@ export function parseMatrix(text: string): ParsedMatrix | { error: string } {
     else if (vals.filter((v) => v !== '').length / vals.length >= 0.8) textColIdx.push(j);
   }
   if (numericCols.length === 0) return { error: '未检测到数值列' };
-  if (numericCols.length > 10) return { error: `检测到 ${numericCols.length} 个数值列，子组大小上限为 10（控制图常数表范围）` };
+  // 不在导入层把“数值列数”当作“子组大小”。例如 20 个数值列可能是 20 个列式子组，
+  // 每列只有 5 次测量；SPC 页面会根据数据角色转置后再校验真正的组内样本量。
 
   const nameOf = (j: number, fallback: string) => {
     const h = header?.[j]?.trim();
@@ -105,8 +106,14 @@ export interface CategoryCounts {
   note?: string;
 }
 
-const CAT_HEADER_RE = /^(类别|名称|缺陷|项目|原因|category|name|defect|item)$/i;
-const CNT_HEADER_RE = /^(count|counts|频数|频率|数量|次数|频次|frequency|freq)$/i;
+/** 多列帕累托数据可由用户显式指定类别列/频数列（0-based）。 */
+export interface CategoryCountColumns {
+  categoryColumn: number;
+  countColumn: number;
+}
+
+const CAT_HEADER_RE = /^(类别|类型|名称|缺陷|缺陷类别|缺陷类型|不良|不良类别|不良类型|项目|原因|category|type|name|defect|item)$/i;
+const CNT_HEADER_RE = /^(count|counts|频数|频率|数量|件数|次数|发生次数|发生频数|发生频率|频次|不良数|缺陷数|frequency|freq)$/i;
 
 /** 解析「缺陷类别 + 频数」数据(帕累托)。与 parseMatrix 完全独立,规则:
  *  1. 横向 2×N(类别一行/频数一行)→ 自动转置;
@@ -114,13 +121,68 @@ const CNT_HEADER_RE = /^(count|counts|频数|频率|数量|次数|频次|frequen
  *  3. 单列文本标签 → 按出现次数 tally 聚合;
  *  4. ≥1 个类别即可;频数须为非负数;同名类别自动合并求和。 */
 /** 分隔符探测(帕累托专用):Tab/逗号/分号之外,额外支持「文本 + 空白 + 数字」的空格分隔。 */
+function delimiterCountOutsideQuotes(line: string, delimiter: string): number {
+  let quoted = false;
+  let count = 0;
+  for (let i = 0; i < line.length; i++) {
+    if (line[i] === '"') {
+      if (quoted && line[i + 1] === '"') i++;
+      else quoted = !quoted;
+    } else if (!quoted && line[i] === delimiter) count++;
+  }
+  return count;
+}
+
 function detectCatDelimiter(lines: string[]): string {
   const first = lines[0];
-  if (/\t/.test(first)) return '\t';
-  if (/,/.test(first)) return ',';
-  if (/;/.test(first)) return ';';
+  const ranked = ['\t', ',', ';']
+    .map((d) => ({ d, n: delimiterCountOutsideQuotes(first, d) }))
+    .sort((a, b) => b.n - a.n);
+  if (ranked[0].n > 0) return ranked[0].d;
   const spaceLike = lines.filter((l) => /\S\s+\S/.test(l)).length;
   return spaceLike >= Math.ceil(lines.length * 0.6) ? ' ' : ',';
+}
+
+/** RFC 4180 常见子集：保留空字段，支持双引号包裹、字段内分隔符与 "" 转义。 */
+function splitDelimitedLine(line: string, delimiter: string): string[] {
+  if (delimiter === ' ') return line.trim().split(/\s+/).filter(Boolean);
+  const out: string[] = [];
+  let cell = '';
+  let quoted = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') {
+      if (quoted && line[i + 1] === '"') { cell += '"'; i++; }
+      else quoted = !quoted;
+    } else if (!quoted && ch === delimiter) {
+      out.push(cell.trim());
+      cell = '';
+    } else cell += ch;
+  }
+  out.push(cell.trim());
+  return out;
+}
+
+/** 按逻辑 CSV 记录拆分：字段内换行保留，只有引号外换行才结束一条记录。 */
+function splitQuotedRecords(text: string): { records: string[]; unclosedQuote: boolean } {
+  const records: string[] = [];
+  let record = '';
+  let quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '"') {
+      record += ch;
+      if (quoted && text[i + 1] === '"') {
+        record += text[++i];
+      } else quoted = !quoted;
+    } else if (!quoted && (ch === '\n' || ch === '\r')) {
+      if (ch === '\r' && text[i + 1] === '\n') i++;
+      if (record.trim() !== '') records.push(record.trim());
+      record = '';
+    } else record += ch;
+  }
+  if (record.trim() !== '') records.push(record.trim());
+  return { records, unclosedQuote: quoted };
 }
 
 /** 一列是否为「序号列」:从 0 或 1 起、步长 1 的连续整数(如 1,2,3,…N)。
@@ -134,41 +196,52 @@ function isIndexColumn(vals: string[]): boolean {
   return true;
 }
 
-export function parseCategoryCounts(text: string): CategoryCounts | { error: string } {
-  const lines = text
-    .replace(/^\uFEFF/, '')
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter((l) => l !== '');
+export function parseCategoryCounts(text: string, columns?: CategoryCountColumns): CategoryCounts | { error: string } {
+  const logical = splitQuotedRecords(text.replace(/^\uFEFF/, ''));
+  if (logical.unclosedQuote) return { error: 'CSV 引号未闭合，请检查含逗号或换行的类别字段。' };
+  const lines = logical.records;
   if (lines.length === 0) return { error: '没有可解析的内容。期望格式:「类别,频数」两列(纵向)或「类别一行 + 频数一行」(横向),也可粘贴单列原始缺陷标签。' };
 
   const delim = detectCatDelimiter(lines);
-  const splitLine = (l: string): string[] =>
-    (delim === ' ' ? l.split(/\s+/) : l.split(delim)).map((c) => c.trim()).filter((c) => c !== '');
-  let cells = lines.map(splitLine);
+  let cells = lines.map((line) => splitDelimitedLine(line, delim));
   const notes: string[] = [];
+  let transposedHorizontal = false;
   if (delim === ' ') notes.push('已按空格分隔解析');
 
   // 规则 1:横向布局(恰 2 行),支持带行首标签(类别/频数)的 Excel 横向表
-  if (cells.length === 2 && cells[0].length >= 2 && cells[0].length === cells[1].length) {
+  if (!columns && cells.length === 2 && cells[0].length >= 2 && cells[0].length === cells[1].length) {
     const [r0, r1] = cells;
     if (r0.every((c) => !isNum(c)) && r1.every((c) => isNum(c))) {
       cells = r0.map((name, i) => [name, r1[i]]);
+      transposedHorizontal = true;
       notes.push('检测到横向数据(类别一行/频数一行),已自动转置');
-    } else if (!isNum(r1[0]) && r0.slice(1).every((c) => !isNum(c)) && r1.slice(1).every((c) => isNum(c))) {
+    } else if (!isNum(r1[0])
+        && r1.slice(1).every((c) => isNum(c))
+        && (r0.slice(1).every((c) => !isNum(c))
+          || (CAT_HEADER_RE.test(r0[0]) && CNT_HEADER_RE.test(r1[0]) && r0.slice(1).every((c) => c !== '')))) {
       cells = r0.slice(1).map((name, i) => [name, r1[i + 1]]);
+      transposedHorizontal = true;
       notes.push('检测到带行标签的横向数据,已剥离标签并转置');
+    } else if (r0.length >= 3 && r0.every((c) => isNum(c)) && r1.every((c) => isNum(c))) {
+      // Pure numeric category codes have no text cell to infer from. Only an unambiguous
+      // 2xN (N>=3) shape is treated as "category-code row + frequency row"; 2x2 stays ambiguous.
+      cells = r0.map((name, i) => [name, r1[i]]);
+      transposedHorizontal = true;
+      notes.push('检测到纯数字横向数据(类别代码一行/频数一行),已自动转置');
     }
   }
 
   // 关键词表头剥离(仅纵向、明确命中时):首行同时含类别关键词与频数关键词即视为表头,
   // 关键词可在任意列(兼容「序号,类别,频数」这类带序号前缀的表头,序号本身不是类别词)。
+  let headerRemoved = false;
   if (cells.length >= 2 && cells[0].length >= 2
       && cells[0].some((c) => CAT_HEADER_RE.test(c)) && cells[0].some((c) => CNT_HEADER_RE.test(c))) {
     cells = cells.slice(1);
+    headerRemoved = true;
     notes.push('已识别并跳过表头行');
   } else if (cells.length >= 2 && cells[0].length === 1 && CAT_HEADER_RE.test(cells[0][0])) {
     cells = cells.slice(1);
+    headerRemoved = true;
     notes.push('已识别并跳过表头行');
   }
 
@@ -179,7 +252,52 @@ export function parseCategoryCounts(text: string): CategoryCounts | { error: str
     merged.set(name, (merged.get(name) ?? 0) + count);
   };
 
-  if (cells.every((r) => r.length === 1)) {
+  // 多数字列由用户显式选列，避免把成本/金额等误当频数。类别列允许纯数字代码。
+  if (columns) {
+    const { categoryColumn, countColumn } = columns;
+    if (!Number.isInteger(categoryColumn) || !Number.isInteger(countColumn)
+        || categoryColumn < 0 || countColumn < 0 || categoryColumn === countColumn) {
+      return { error: '类别列与频数列必须是两个不同的有效列号。' };
+    }
+    const maxLen = Math.max(...cells.map((r) => r.length));
+    if (categoryColumn >= maxLen || countColumn >= maxLen) {
+      return { error: `指定列超出数据范围（当前最多 ${maxLen} 列）。` };
+    }
+    // 上方通用规则未覆盖「代码,频数,成本」时，按所选单元格关键词再识别一次；
+    // 不能仅因首条频数非法就静默吞掉数据。
+    let selected = cells;
+    if (!headerRemoved && selected.length >= 2) {
+      const countHead = selected[0][countColumn] ?? '';
+      // 类别值本身完全可能就叫“缺陷/类别/不良”；只有所选频数单元格明确命中
+      // 频数表头时才能吞掉首行，不能用类别关键词单独判定。
+      if (CNT_HEADER_RE.test(countHead)) {
+        selected = selected.slice(1);
+        notes.push('已按所选列跳过表头行');
+      }
+    }
+    for (const [li, r] of selected.entries()) {
+      const name = (r[categoryColumn] ?? '').trim();
+      const rawCount = r[countColumn] ?? '';
+      if (!name) return { error: `第 ${li + 1} 行所选类别列为空。` };
+      if (!isNum(rawCount)) return { error: `第 ${li + 1} 行所选频数「${rawCount}」不是有效数字。` };
+      const count = Number(rawCount);
+      if (!Number.isFinite(count) || count < 0) return { error: `第 ${li + 1} 行频数为 ${rawCount}，频数必须 ≥ 0。` };
+      add(name, count);
+    }
+    const rows = order.map((name) => ({ name, count: merged.get(name)! }));
+    if (rows.length === 0) return { error: '没有解析到任何类别' };
+    if (rows.every((r) => r.count === 0)) return { error: '所有类别的频数都是 0,无法绘制帕累托图' };
+    notes.push(`已使用第 ${categoryColumn + 1} 列作为类别、第 ${countColumn + 1} 列作为频数`);
+    return { rows, note: notes.join(';') };
+  }
+
+  if (transposedHorizontal) {
+    for (const [li, row] of cells.entries()) {
+      const count = Number(row[1]);
+      if (!Number.isFinite(count) || count < 0) return { error: `第 ${li + 1} 个类别的频数必须 ≥ 0。` };
+      add(row[0], count);
+    }
+  } else if (cells.every((r) => r.length === 1)) {
     // 单列:全数值无从命名类别;含文本则按标签 tally
     if (cells.every((r) => isNum(r[0]))) {
       return { error: '仅有一列数值,无法确定类别名。请提供「类别,频数」两列,或粘贴单列原始缺陷标签(将自动计数)。' };

@@ -24,6 +24,13 @@ export interface ControlChartProps {
   sel?: number | null;
   onPoint?: (i: number) => void;
   ptLabel?: (i: number) => string;
+  /** 明确的横轴点标签（如批次号/子组 ID）；长度须与 data 一致。 */
+  xLabels?: string[];
+  /** 轴语义；变量控制图不再只显示无含义的数字刻度。 */
+  xLabel?: string;
+  yLabel?: string;
+  /** X 轴显示序号相对数组索引的偏移；MR[0] 对应原始观测 2，故传 1。 */
+  xIndexOffset?: number;
   /** 时变控制限（EWMA/分阶段）：提供时覆盖水平 UCL/LCL 直线 */
   uclSeries?: number[];
   lclSeries?: number[];
@@ -42,11 +49,12 @@ function ControlChartImpl(cfg: ControlChartProps) {
   const T = cfg.T;
   const W = 960;
   const H = cfg.h ?? 260;
-  const m = { t: 24, r: 104, b: 30, l: 60 };
+  const m = { t: 24, r: 104, b: cfg.xLabel ? 48 : 30, l: cfg.yLabel ? 78 : 60 };
   const pw = W - m.l - m.r;
   const ph = H - m.t - m.b;
   const data = cfg.data;
   const dec = cfg.dec ?? 3;
+  const xIndexOffset = cfg.xIndexOffset ?? 0;
   const sigma = (cfg.ucl - cfg.cl) / 3;
   // 大数组安全的 y 轴范围(Math.min(...) 十万级会栈溢出)
   let ymin = Math.min(arrMin(data), cfg.lcl, cfg.cl);
@@ -63,6 +71,10 @@ function ControlChartImpl(cfg: ControlChartProps) {
     cfg.violations ??
     new Set(data.map((v, i) => (v > cfg.ucl || v < cfg.lcl ? i : -1)).filter((i) => i >= 0));
   const label = (i: number) => (cfg.ptLabel ? cfg.ptLabel(i) : `点 ${i + 1}`);
+  const tickLabel = (i: number) => {
+    const raw = cfg.xLabels?.length === data.length ? cfg.xLabels[i] : String(i + 1 + xIndexOffset);
+    return raw.length > 12 ? raw.slice(0, 11) + '…' : raw;
+  };
   // 渲染降采样:失控点/选中点/段边界必留,min-max 分桶保形;统计与判异均基于全量
   const keep = [...viol, ...(cfg.sel != null ? [cfg.sel] : []), ...(cfg.stageBoundaries ?? []).flatMap((b) => [b - 1, b])];
   const idx = decimateMinMax(data, MAX_RENDER_PTS, keep);
@@ -174,8 +186,18 @@ function ControlChartImpl(cfg: ControlChartProps) {
       })}
       {idx.map((i) =>
         i % lblStep === 0 || i === data.length - 1 ? (
-          <Txt key={'x' + i} x={X(i)} y={H - 10} s={String(i + 1)} fill={T.axis} size={10} anchor="middle" />
+          <Txt key={'x' + i} x={X(i)} y={H - (cfg.xLabel ? 25 : 10)} s={tickLabel(i)} fill={T.axis} size={10} anchor="middle" />
         ) : null,
+      )}
+      {cfg.xLabel && <Txt x={m.l + pw / 2} y={H - 8} s={cfg.xLabel} fill={T.text} size={10.5} anchor="middle" weight={600} />}
+      {cfg.yLabel && (
+        <text
+          x={18} y={m.t + ph / 2} fill={T.text} fontSize={10.5} textAnchor="middle"
+          fontFamily="IBM Plex Mono, monospace" fontWeight={600}
+          transform={`rotate(-90 18 ${m.t + ph / 2})`}
+        >
+          {cfg.yLabel}
+        </text>
       )}
       {sampled && (
         <Txt x={m.l + pw} y={m.t - 10} s={`渲染 ${idx.length}/${data.length} 点(统计与判异基于全量)`} fill={T.axis} size={9.5} anchor="end" />

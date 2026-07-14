@@ -5,7 +5,7 @@
 import { describe, it, expect } from 'vitest';
 import { phi, invNorm, binomCdf, median, quantile } from '../basicMath';
 import { evalRules, DEFAULT_RULES } from '../spc';
-import { computeCapability } from '../capability';
+import { capabilityInputError, computeCapability } from '../capability';
 import { analyzeDoe, mainEffectMeans, interactionMeans } from '../doe';
 import { aqlPlan, rqlFor, producerRiskPct, codeLetterGB, codeLetterShift } from '../aql';
 import { buildData, anovaGroups } from '../sampleData';
@@ -77,6 +77,22 @@ describe('过程能力（默认规格 24.90/25.00/25.10）', () => {
   });
   it('西格玛水平 = Z.bench + 1.5', () => {
     expect(cap.sigmaLevel).toBeCloseTo(cap.zBench + 1.5, 10);
+  });
+  it('反序/相等双侧规格在核心层阻断，不输出负能力指数或双重 PPM', () => {
+    const values = [9, 10, 11, 10];
+    for (const spec of [
+      { lsl: 20, tgt: 15, usl: 0 },
+      { lsl: 10, tgt: 10, usl: 10 },
+    ]) {
+      expect(capabilityInputError(values, 1, spec)).toContain('LSL < USL');
+      expect(() => computeCapability(values, 1, spec)).toThrow('LSL < USL');
+    }
+  });
+  it('零方差过程与双侧均关闭时明确判为不可估计', () => {
+    expect(() => computeCapability([10, 10, 10], 0, { lsl: 9, tgt: 10, usl: 11 }))
+      .toThrow('整体标准差为 0');
+    expect(() => computeCapability([9, 10, 11], 1, { lsl: null, tgt: 10, usl: null }))
+      .toThrow('至少需要启用一侧规格限');
   });
 });
 

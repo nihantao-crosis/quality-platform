@@ -11,6 +11,7 @@ import { PROJECT_KEYS, buildProjectJson, applyProjectJson } from '../../platform
 beforeEach(() => {
   localStorage.clear();
   useData.getState().resetDemo();
+  useAnalyses.setState({ saved: [] });
 });
 
 describe('paretoModel', () => {
@@ -35,6 +36,51 @@ describe('paretoModel', () => {
     const saved = useAnalyses.getState().saveCurrent();
     expect(saved?.metric).toBe('Top2 = 90%');
     expect(saved?.title).toContain('六月缺陷');
+  });
+
+  it('保存 A、导入 B 后回看 A：恢复当时数据与合并参数', () => {
+    useData.getState().importPareto('帕累托A', [{ name: '划伤', count: 30 }, { name: '毛刺', count: 10 }]);
+    useApp.setState({ page: 'pareto', paretoView: 'pareto', paretoMergeOther: true, paretoThreshold: 0.9 });
+    const saved = useAnalyses.getState().saveCurrent()!;
+    expect(saved.datasetName).toBe('帕累托A');
+
+    useData.getState().importPareto('帕累托B', [{ name: '缺料', count: 99 }]);
+    useApp.setState({ paretoMergeOther: false, paretoThreshold: 0.8 });
+    useAnalyses.getState().restore(saved.id);
+
+    expect(useData.getState().paretoModel).toEqual({
+      name: '帕累托A', rows: [{ name: '划伤', count: 30 }, { name: '毛刺', count: 10 }],
+    });
+    expect(useApp.getState().paretoMergeOther).toBe(true);
+    expect(useApp.getState().paretoThreshold).toBe(0.9);
+    expect('paretoData' in useApp.getState()).toBe(false);
+  });
+
+  it('保存内置示例后可回看示例，不会落到空态或误用当前数据', () => {
+    useApp.setState({ page: 'pareto', paretoView: 'pareto', paretoShowDemo: true });
+    const saved = useAnalyses.getState().saveCurrent()!;
+    expect(saved.title).toContain('内置示例');
+    expect(saved.datasetName).toBe('内置示例');
+
+    useData.getState().importPareto('当前B', [{ name: 'B类', count: 99 }]);
+    useAnalyses.getState().restore(saved.id);
+    expect(useData.getState().paretoModel).toBeNull();
+    expect(useApp.getState().paretoShowDemo).toBe(true);
+  });
+
+  it('旧版缺数据的帕累托记录拒绝伪回看，明确提示且保留当前工作', () => {
+    useData.getState().importPareto('当前B', [{ name: 'B类', count: 99 }]);
+    useAnalyses.setState({
+      saved: [{
+        id: 'legacy-pareto', kind: 'pareto', title: '旧帕累托A', datasetName: '旧A',
+        metric: 'Top2 = 80%', status: '已分析', statusColor: '#000', statusBg: '#fff', createdAt: 1,
+        snapshot: { paretoView: 'pareto' },
+      }],
+    });
+    useAnalyses.getState().restore('legacy-pareto');
+    expect(useData.getState().paretoModel?.name).toBe('当前B');
+    expect(useApp.getState().paretoShowDemo).toBe(false);
+    expect(useApp.getState().toast).toContain('无法重建原图');
   });
 
   it('.qproj 白名单含 qp-pareto-v1 且往返恢复', () => {

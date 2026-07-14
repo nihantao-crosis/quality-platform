@@ -5,7 +5,7 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 import type { CSSProperties } from 'react';
 import { useApp } from '../../store/appStore';
 import { useData } from '../../store/dataStore';
-import { nf, evalRules, parseMatrix, arrMin, arrMax } from '../../core';
+import { nf, evalRules, parseMatrix, arrMin, arrMax, prepareSpcData } from '../../core';
 import { Card, KvRows } from '../common';
 import { Icon, type IconName } from '../icons';
 
@@ -23,20 +23,20 @@ const thTop: CSSProperties = { position: 'sticky', top: 0, zIndex: 2, background
 const thName: CSSProperties = { position: 'sticky', top: 26, zIndex: 2, background: '#f4f6f8', border: '1px solid #e2e5ea', color: '#2a333f', fontWeight: 600, padding: '5px 12px', textAlign: 'left', fontFamily: 'IBM Plex Sans' };
 
 /** 双击进入编辑态的测量单元格。dp=按数据量级自适应的小数位;悬停显示全精度原值。 */
-function EditableCell({ value, dp, onCommit }: { value: number; dp: number; onCommit: (v: number) => void }) {
+function EditableCell({ value, dp, pending = false, onCommit }: { value: number; dp: number; pending?: boolean; onCommit: (v: number) => void }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
   if (!editing) {
     return (
       <td
-        style={{ ...numCell, cursor: 'cell' }}
-        title={`${value}(双击编辑)`}
+        style={{ ...numCell, cursor: 'cell', ...(pending ? { background: '#fff6e6', color: '#a46b00', fontFamily: 'IBM Plex Sans', fontStyle: 'italic' } : {}) }}
+        title={pending ? '尚未录入；双击输入实测值（实测为 0 也请确认录入）' : `${value}(双击编辑)`}
         onDoubleClick={() => {
-          setDraft(String(value));
+          setDraft(pending ? '' : String(value));
           setEditing(true);
         }}
       >
-        {nf(value, dp)}
+        {pending ? '待录入' : nf(value, dp)}
       </td>
     );
   }
@@ -110,8 +110,20 @@ function HeaderCell({ name, canDelete, onRename, onDelete }: {
 }
 
 export function Worksheet() {
-  const { openModal, setImportTab, showToast, spcRules, selSub } = useApp();
-  const { model: M, updateCell, addSubgroupRow, deleteRow, renameColumn, deleteColumn, insertColumn } = useData();
+  const {
+    openModal, setImportTab, showToast, spcRules, selSub,
+    spcDataLayout, spcValueCol, spcSubgroupCol,
+  } = useApp();
+  const { model: M, textCols, pendingCells, updateCell, addSubgroupRow, deleteRow, renameColumn, deleteColumn, insertColumn } = useData();
+  const prepared = prepareSpcData(M, textCols, {
+    layout: spcDataLayout, valueColumn: spcValueCol, subgroupColumn: spcSubgroupCol,
+    pendingCells,
+  });
+  // 只有行式转换与原工作表行一一对齐，才能把均值/极差安全回显到原行。
+  const rowSpc = !prepared.error && prepared.layout === 'rows'
+    && prepared.model?.hasSubgroups && prepared.model.k === M.k
+    ? prepared.model
+    : null;
 
   const importMatrix = useData((s) => s.importMatrix);
 
@@ -150,22 +162,23 @@ export function Worksheet() {
       e.preventDefault();
       importMatrix('剪贴板数据', r.colNames, r.rows, r.textCols);
       const note = r.textCols.length > 0 ? ` · 含 ${r.textCols.length} 个分组列` : '';
-      showToast(`已粘贴导入 · ${r.rows.length} 子组 × ${r.colNames.length} 测量列${note}`);
+      showToast(`已粘贴导入 · ${r.rows.length} 行 × ${r.colNames.length} 个数值列${note}`);
     };
     window.addEventListener('paste', onPaste);
     return () => window.removeEventListener('paste', onPaste);
   }, [importMatrix, showToast]);
 
   // 均值失控行高亮（与 SPC 主图一致：准则引擎）
-  const means = M.subs.map((s) => s.mean);
-  const sig = (M.uclX - M.xbarbar) / 3;
-  const { viol } = M.hasSubgroups
-    ? evalRules(means, M.xbarbar, sig, spcRules)
+  const means = rowSpc?.subs.map((s) => s.mean) ?? [];
+  const sig = rowSpc ? (rowSpc.uclX - rowSpc.xbarbar) / 3 : Number.NaN;
+  const { viol } = rowSpc
+    ? evalRules(means, rowSpc.xbarbar, sig, spcRules)
     : { viol: new Set<number>() };
 
   // 列统计(大数组安全 min/max)
-  const allMin = arrMin(M.all);
-  const allMax = arrMax(M.all);
+  const analysisValues = prepared.model?.all ?? [];
+  const allMin = analysisValues.length ? arrMin(analysisValues) : Number.NaN;
+  const allMax = analysisValues.length ? arrMax(analysisValues) : Number.NaN;
 
   // 显示精度:按「列」量级自适应(3–6 位)——混合量纲数据(如 过盈量 0.0675 与 压入力 1350 同表)
   // 不能用全局 σ,否则小量纲列被压到 3 位显示成 0.068,造成"数据被改"的误解
@@ -176,6 +189,7 @@ export function Worksheet() {
     return Math.max(3, Math.min(6, 2 - Math.floor(Math.log10(scale))));
   }), [M]);
   const meanDp = colDp.length ? Math.max(...colDp) : 3;
+  const pendingSet = useMemo(() => new Set(pendingCells.map((p) => `${p.row}:${p.col}`)), [pendingCells]);
 
   // 虚拟窗口边界
   const winStart = virtual ? Math.max(0, Math.floor(scrollTop / ROW_H) - OVERSCAN) : 0;
@@ -185,12 +199,13 @@ export function Worksheet() {
   // 列头：C1 子组 + 测量列 + 均值/极差 +（演示）操作员/日期/班次
   const cols: { code: string; name: string }[] = [{ code: 'C1', name: '子组' }];
   M.colNames.forEach((n, i) => cols.push({ code: `C${i + 2}`, name: n }));
+  textCols.forEach((column, i) => cols.push({ code: `C${M.colNames.length + 2 + i}-T`, name: column.name }));
   const extra: Array<[string, string]> = [
-    ...(M.hasSubgroups ? ([['', '均值'], ['', '极差']] as Array<[string, string]>) : []),
+    ...(rowSpc ? ([['', '均值'], ['', '极差']] as Array<[string, string]>) : []),
     ...(M.isDemo ? ([['-T', '操作员'], ['-D', '日期'], ['-T', '班次']] as Array<[string, string]>) : []),
   ];
   extra.forEach(([suffix, name], i) =>
-    cols.push({ code: `C${M.colNames.length + 2 + i}${suffix}`, name }),
+    cols.push({ code: `C${M.colNames.length + textCols.length + 2 + i}${suffix}`, name }),
   );
 
   const sources: Array<{ icon: IconName; iconColor: string; label: string; status: string; statusColor: string; onClick: () => void }> = [
@@ -272,12 +287,13 @@ export function Worksheet() {
                     </td>
                     <td style={{ ...numCell, color: '#9aa2ad' }}>{s.i}</td>
                     {s.vals.map((v, j) => (
-                      <EditableCell key={j} value={v} dp={colDp[j]} onCommit={(nv) => updateCell(i, j, nv)} />
+                      <EditableCell key={j} value={v} dp={colDp[j]} pending={pendingSet.has(`${i}:${j}`)} onCommit={(nv) => updateCell(i, j, nv)} />
                     ))}
-                    {M.hasSubgroups && (
+                    {textCols.map((column) => <td key={column.name} style={txtCell}>{column.values[i] ?? ''}</td>)}
+                    {rowSpc && (
                       <>
-                        <td title={String(s.mean)} style={{ ...numCell, fontWeight: 600, ...(ooc ? { background: '#fdecec', color: '#c22f2f' } : { color: '#1f6fb2' }) }}>{nf(s.mean, meanDp)}</td>
-                        <td title={String(s.range)} style={numCell}>{nf(s.range, meanDp)}</td>
+                        <td title={String(rowSpc.subs[i].mean)} style={{ ...numCell, fontWeight: 600, ...(ooc ? { background: '#fdecec', color: '#c22f2f' } : { color: '#1f6fb2' }) }}>{nf(rowSpc.subs[i].mean, meanDp)}</td>
+                        <td title={String(rowSpc.subs[i].range)} style={numCell}>{nf(rowSpc.subs[i].range, meanDp)}</td>
                       </>
                     )}
                     {M.isDemo && (
@@ -312,15 +328,11 @@ export function Worksheet() {
               ＋ 子组
             </div>
             <div
-              onClick={() => {
-                if (M.n >= 10) { showToast('测量列已达上限 10'); return; }
-                insertColumn();
-                showToast('已插入测量列（双击列名可重命名）');
-              }}
-              title={M.n >= 10 ? '控制图常数表上限为 10' : '在末尾插入一个测量列'}
-              style={{ flex: 1, padding: '7px 0', textAlign: 'center', border: '1px solid #cfd5dd', color: '#3a4350', background: '#fff', borderRadius: 5, fontSize: 12.5, fontWeight: 600, cursor: 'pointer', ...(M.n >= 10 ? { opacity: 0.5 } : {}) }}
+              onClick={() => { insertColumn(); showToast('已插入数值列（双击列名可重命名）'); }}
+              title="在末尾插入一个数值列；SPC 会按数据角色校验真正子组大小"
+              style={{ flex: 1, padding: '7px 0', textAlign: 'center', border: '1px solid #cfd5dd', color: '#3a4350', background: '#fff', borderRadius: 5, fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}
             >
-              ＋ 测量列
+              ＋ 数值列
             </div>
           </div>
           <div style={{ fontSize: 11.5, color: '#9aa2ad', marginTop: 8, lineHeight: 1.5 }}>
@@ -338,18 +350,22 @@ export function Worksheet() {
           ))}
         </Card>
         <Card style={{ padding: '14px 16px' }}>
-          <div style={{ fontWeight: 600, color: '#33404f', marginBottom: 10 }}>列统计 · {M.isDemo ? 'C2 直径' : '全部测量'}</div>
-          <KvRows
-            valueWeight={500}
-            rows={[
-              { k: '样本量 N', v: String(M.all.length) },
-              { k: '均值', v: nf(M.oMean, 4) },
-              { k: '标准差', v: nf(M.oSd, 4) },
-              { k: '最小值', v: nf(allMin, 3) },
-              { k: '最大值', v: nf(allMax, 3) },
-              { k: '极差', v: nf(allMax - allMin, 3) },
-            ]}
-          />
+          <div style={{ fontWeight: 600, color: '#33404f', marginBottom: 10 }}>列统计 · {prepared.error ? '角色待配置' : prepared.variableName}</div>
+          {prepared.model ? (
+            <KvRows
+              valueWeight={500}
+              rows={[
+                { k: '样本量 N', v: String(analysisValues.length) },
+                { k: '均值', v: nf(prepared.model.oMean, 4) },
+                { k: '标准差', v: nf(prepared.model.oSd, 4) },
+                { k: '最小值', v: nf(allMin, 3) },
+                { k: '最大值', v: nf(allMax, 3) },
+                { k: '极差', v: nf(allMax - allMin, 3) },
+              ]}
+            />
+          ) : (
+            <div style={{ fontSize: 12, color: '#b05b2f', lineHeight: 1.6 }}>数值列角色存在歧义，请在 SPC 页选择测量值与子组 ID；这里不显示混算统计。</div>
+          )}
         </Card>
       </div>
     </div>

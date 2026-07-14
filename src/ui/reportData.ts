@@ -19,6 +19,23 @@ export interface ReportData {
   checks: CheckItem[];
 }
 
+export interface SpcReportData extends ReportData {
+  /** 供 SPC 专项报告/导出复用；不依赖页面 DOM。 */
+  details: {
+    typeLabel: string;
+    variableName?: string;
+    dataRole?: string;
+    readingOrder?: string;
+    variationChartLabel?: string;
+    variationStable?: boolean;
+    /** 受影响点×准则的去重命中数，不是窗口型准则的触发事件数。 */
+    pointRuleHitCount: number;
+    /** @deprecated 向后兼容；语义同 pointRuleHitCount。 */
+    signalCount: number;
+    affectedPointCount: number;
+  };
+}
+
 const worst = (...ls: Level[]): Level => (ls.includes('bad') ? 'bad' : ls.includes('warn') ? 'warn' : 'ok');
 
 // ---------- SPC ----------
@@ -27,31 +44,166 @@ export function spcReport(args: {
   k: number;            // 点数(子组/观测)
   n: number;            // 子组大小
   hasSubgroups: boolean;
+  structure?: 'subgroup' | 'individual' | 'attribute-p' | 'attribute-c';
   typeLabel: string;    // 如 X̄-R
-}): ReportData {
+  /** 配对图的离散图信号；X̄-R 先判 R、X̄-S 先判 S、I-MR 先判 MR。 */
+  variationChartLabel?: string | null;
+  variationViolations?: { i: number; rule: number; desc: string; chartLabel?: string }[];
+  variableName?: string;
+  dataRole?: string;
+}): SpcReportData {
   const { violList, k, n, hasSubgroups, typeLabel } = args;
-  // 按(图 × 点)去重——同一子组在 X̄ 图与 R 图同时失控应计 2,否则顶部卡会比右侧列表/摘要少数
-  const nViol = new Set(violList.map((v) => `${v.chartLabel ?? ''}:${v.i}`)).size;
+  const structure = args.structure ?? (hasSubgroups ? 'subgroup' : 'individual');
+  // 按实际子组/观测点去重：同一点可在多张子图、多条准则上产生多条信号，
+  // 但对现场调查而言仍是 1 个需追溯的实际点。
+  const nViol = new Set(violList.map((v) => v.i)).size;
+  const variationViol = args.variationViolations ?? [];
+  const nVariationViol = new Set(variationViol.map((v) => v.i)).size;
   const byRule = new Map<number, number>();
   violList.forEach((v) => byRule.set(v.rule, (byRule.get(v.rule) ?? 0) + 1));
   const ruleTxt = [...byRule.entries()].sort((a, b) => a[0] - b[0]).map(([r, c]) => `准则${r}×${c}`).join('、');
 
   const stab: CheckItem = nViol === 0
     ? { name: '过程稳定性', level: 'ok', note: `全部 ${k} 点均在控制限内,无模式异常` }
-    : { name: '过程稳定性', level: 'bad', note: `${nViol} 个失控点(${ruleTxt}),存在特殊原因变异` };
+    : { name: '过程稳定性', level: 'bad', note: `${nViol} 个失控点(${violList.length} 个点-准则命中:${ruleTxt}),存在特殊原因变异` };
   const amount: CheckItem = k >= 20
     ? { name: '数据量', level: 'ok', note: `${k} 个点 ≥ 20,控制限估计可靠` }
     : { name: '数据量', level: 'warn', note: `仅 ${k} 个点,建议积累 ≥20 点后再固化控制限` };
-  const struct: CheckItem = hasSubgroups
-    ? { name: '子组结构', level: 'ok', note: `子组大小 n=${n},组内变异估计合理` }
-    : { name: '子组结构', level: 'warn', note: '单值数据,对小漂移的灵敏度低于子组图(可配合 EWMA/CUSUM)' };
+  const struct: CheckItem = structure === 'attribute-p'
+    ? { name: '抽样结构', level: 'ok', note: `每个样本检验 n=${n} 件，以不良率监控；样本量来自 P 图数据` }
+    : structure === 'attribute-c'
+      ? { name: '计数结构', level: 'ok', note: '按单位缺陷数监控；各单位大小与检验机会应保持一致' }
+      : structure === 'subgroup'
+        ? { name: '子组结构', level: 'ok', note: `子组大小 n=${n},组内变异估计合理` }
+        : { name: '子组结构', level: 'warn', note: '单值数据,对小漂移的灵敏度低于子组图(可配合 EWMA/CUSUM)' };
+
+  const variation: CheckItem | null = args.variationChartLabel
+    ? nVariationViol === 0
+      ? {
+          name: `先判 ${args.variationChartLabel} 图`, level: 'ok',
+          note: `${args.variationChartLabel} 图未检出特殊原因信号，过程变异受控；现在才可解释${args.variationChartLabel === 'MR' ? ' I ' : ' X̄ '}图`,
+        }
+      : {
+          name: `先判 ${args.variationChartLabel} 图`, level: 'bad',
+          note: `${args.variationChartLabel} 图有 ${nVariationViol} 个异常点，过程变异未受控；暂不解释均值/单值图，先调查离散异常`,
+        }
+    : null;
+  const role: CheckItem | null = args.dataRole
+    ? { name: '数据角色', level: 'ok', note: args.dataRole }
+    : null;
+
+  const checks = [variation, stab, amount, struct, role].filter((c): c is CheckItem => c != null);
+  const headline = nVariationViol > 0 && args.variationChartLabel
+    ? `${args.variationChartLabel} 图先检出 ${nVariationViol} 个异常点——过程变异未受控，暂停解释均值/单值图并先调查特殊原因。`
+    : nViol === 0
+      ? `${typeLabel} 显示过程统计受控——可继续监控,并可进行能力评估。`
+      : `${typeLabel} 检测到 ${nViol} 个失控点——先调查并消除特殊原因,再做能力评估。`;
 
   return {
-    verdict: worst(stab.level, amount.level === 'warn' && nViol === 0 ? 'warn' : 'ok'),
-    headline: nViol === 0
-      ? `${typeLabel} 显示过程统计受控——可继续监控,并可进行能力评估。`
-      : `${typeLabel} 检测到 ${nViol} 个失控信号——先调查并消除特殊原因,再做能力评估。`,
-    checks: [stab, amount, struct],
+    verdict: worst(variation?.level ?? 'ok', stab.level, amount.level === 'warn' && nViol === 0 ? 'warn' : 'ok'),
+    headline,
+    checks,
+    details: {
+      typeLabel, variableName: args.variableName, dataRole: args.dataRole,
+      readingOrder: args.variationChartLabel ? `先判 ${args.variationChartLabel} 图，再解释${args.variationChartLabel === 'MR' ? ' I ' : ' X̄ '}图` : undefined,
+      variationChartLabel: args.variationChartLabel ?? undefined,
+      variationStable: args.variationChartLabel ? nVariationViol === 0 : undefined,
+      pointRuleHitCount: violList.length,
+      signalCount: violList.length,
+      affectedPointCount: nViol,
+    },
+  };
+}
+
+// ---------- 帕累托专项报告 ----------
+export interface ParetoReportRow {
+  name: string;
+  count: number;
+  percentage: number;
+  cumulativePercentage: number;
+  mergedOther: boolean;
+}
+
+export interface ParetoReportData {
+  total: number;
+  sourceCategoryCount: number;
+  displayedCategoryCount: number;
+  mergeOther: boolean;
+  threshold: number;
+  mergedCategoryCount: number;
+  rows: ParetoReportRow[];
+  topTwoShare: number;
+  categoriesTo80Percent: number;
+  followsParetoPattern: boolean;
+  conclusion: string;
+}
+
+/** 页面、保存摘要和专项导出可共同使用的帕累托排序/累计/合并结果。 */
+export function paretoReport(args: {
+  rows: { name: string; count: number }[];
+  mergeOther: boolean;
+  threshold: number;
+}): ParetoReportData {
+  const sorted = args.rows
+    .filter((r) => r.name.trim() !== '' && Number.isFinite(r.count) && r.count >= 0)
+    .map((r) => ({ name: r.name, count: r.count }))
+    .sort((a, b) => b.count - a.count);
+  const total = sorted.reduce((sum, row) => sum + row.count, 0);
+  const threshold = Math.max(0.5, Math.min(1, Number.isFinite(args.threshold) ? args.threshold : 0.95));
+  let display = sorted;
+  let mergedCategoryCount = 0;
+  if (args.mergeOther && sorted.length > 3 && total > 0) {
+    let cumulative = 0;
+    let cut = sorted.length;
+    for (let i = 0; i < sorted.length; i++) {
+      cumulative += sorted[i].count;
+      if (cumulative / total >= threshold) { cut = i + 1; break; }
+    }
+    if (sorted.length - cut >= 2) {
+      mergedCategoryCount = sorted.length - cut;
+      const kept = sorted.slice(0, cut);
+      const tailCount = sorted.slice(cut).reduce((sum, row) => sum + row.count, 0);
+      const existingOther = kept.filter((row) => row.name.trim() === '其他');
+      // 源数据可能本来就有“其他”类别。合并尾部时必须收敛成唯一的“其他”，
+      // 否则图上会出现两个同名柱且累计语义不明。
+      display = [
+        ...kept.filter((row) => row.name.trim() !== '其他'),
+        { name: '其他', count: tailCount + existingOther.reduce((sum, row) => sum + row.count, 0) },
+      ];
+    }
+  }
+  let cumulative = 0;
+  const rows = display.map((row) => {
+    cumulative += row.count;
+    return {
+      ...row,
+      percentage: total > 0 ? (row.count / total) * 100 : 0,
+      cumulativePercentage: total > 0 ? (cumulative / total) * 100 : 0,
+      mergedOther: row.name === '其他' && mergedCategoryCount > 0,
+    };
+  });
+  const topN = Math.min(2, sorted.length);
+  const topTwoShare = total > 0 ? (sorted.slice(0, topN).reduce((sum, row) => sum + row.count, 0) / total) * 100 : 0;
+  let categoriesTo80Percent = 0;
+  let run = 0;
+  for (const row of sorted) {
+    run += row.count;
+    categoriesTo80Percent++;
+    if (total === 0 || run / total >= 0.8) break;
+  }
+  const followsParetoPattern = sorted.length >= 5 && categoriesTo80Percent / sorted.length <= 0.25;
+  const topNames = sorted.slice(0, topN).map((d) => `「${d.name}」`).join('与');
+  const topRounded = Math.round(topTwoShare);
+  const vitalPct = sorted.length ? Math.round((categoriesTo80Percent / sorted.length) * 100) : 0;
+  const conclusion = topN < 2
+    ? `${topNames || '当前类别'}占缺陷总数的 ${topRounded}%。`
+    : followsParetoPattern
+      ? `前 ${categoriesTo80Percent} 类(仅占 ${sorted.length} 类中的 ${vitalPct}%)即累计贡献 80% 的缺陷,呈典型帕累托「关键少数」集中——优先改善这几类可消除大部分不良。`
+      : `前 ${topN} 类(${topNames})合计占 ${topRounded}%;需前 ${categoriesTo80Percent}/${sorted.length} 类才累计达 80%,集中度不足以称"80/20",建议扩大改善范围或细分类别。`;
+  return {
+    total, sourceCategoryCount: sorted.length, displayedCategoryCount: rows.length,
+    mergeOther: args.mergeOther, threshold, mergedCategoryCount, rows,
+    topTwoShare, categoriesTo80Percent, followsParetoPattern, conclusion,
   };
 }
 

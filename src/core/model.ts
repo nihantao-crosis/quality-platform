@@ -1,6 +1,6 @@
 /**
- * 变量数据模型 — 从任意测量矩阵（k 子组 × n 测量，n=1..10）实时计算
- * X̄-R / X̄-S / I-MR 全套统计量。演示与导入数据共用此模型。
+ * 变量数据模型 — 保存任意数值矩阵，并在行式子组大小 n=2..10 时计算
+ * X̄-R / X̄-S；其他形态仍可用于 I-MR，随后由 SPC 数据角色层转换。
  */
 import { CONTROL_CONSTANTS } from './spc';
 
@@ -17,7 +17,7 @@ export interface VarModel {
   isDemo: boolean;
   k: number; // 子组数
   n: number; // 子组大小（1 = 单值数据）
-  hasSubgroups: boolean; // n ≥ 2 才有 X̄-R / X̄-S
+  hasSubgroups: boolean; // n=2..10 才可直接作为行式子组用于 X̄-R / X̄-S
   subs: SubgroupRow[];
   all: number[]; // 全部观测（行优先展平）
   // X̄-R
@@ -59,8 +59,11 @@ export function computeVarModel(
   const k = rows.length;
   const n = rows[0]?.length ?? 0;
   if (k < 2) throw new Error('至少需要 2 行数据');
-  if (n < 1 || n > 10) throw new Error('子组大小需在 1–10 之间（控制图常数表范围）');
-  const hasSubgroups = n >= 2;
+  if (n < 1) throw new Error('至少需要 1 个数值列');
+  // 超过 10 列时仍须允许导入：这些列可能代表“列式子组”，SPC 页面会先转置，
+  // 不能在数据入口把合法的 20 个子组列误当作 n=20 的行式子组而拒绝。
+  const hasMultipleValues = n >= 2;
+  const hasSubgroups = hasMultipleValues && n <= 10;
 
   const subs: SubgroupRow[] = rows.map((vals, i) => ({
     i: i + 1,
@@ -75,20 +78,22 @@ export function computeVarModel(
   const xbarbar = subs.reduce((a, s) => a + s.mean, 0) / k;
   const rbar = subs.reduce((a, s) => a + s.range, 0) / k;
 
-  const C = hasSubgroups ? CONTROL_CONSTANTS[n] : CONTROL_CONSTANTS[2];
-  const uclX = xbarbar + C.A2 * rbar;
-  const lclX = xbarbar - C.A2 * rbar;
-  const uclR = C.D4 * rbar;
-  const lclR = C.D3 * rbar;
+  // 不支持的原始形态绝不借用 n=2 常数伪造子组限值。消费者必须先检查
+  // hasSubgroups，或经 SPC 角色层转成真实 n=2..10 矩阵；NaN 使漏用能在测试/调试中立即暴露。
+  const C = hasSubgroups ? CONTROL_CONSTANTS[n] : null;
+  const uclX = C ? xbarbar + C.A2 * rbar : Number.NaN;
+  const lclX = C ? xbarbar - C.A2 * rbar : Number.NaN;
+  const uclR = C ? C.D4 * rbar : Number.NaN;
+  const lclR = C ? C.D3 * rbar : Number.NaN;
 
   const svals = subs.map((s) =>
-    hasSubgroups ? Math.sqrt(s.vals.reduce((a, b) => a + (b - s.mean) ** 2, 0) / (n - 1)) : 0,
+    hasMultipleValues ? Math.sqrt(s.vals.reduce((a, b) => a + (b - s.mean) ** 2, 0) / (n - 1)) : 0,
   );
   const sbar = svals.reduce((a, b) => a + b, 0) / svals.length;
-  const uclXs = xbarbar + C.A3 * sbar;
-  const lclXs = xbarbar - C.A3 * sbar;
-  const uclS = C.B4 * sbar;
-  const lclS = C.B3 * sbar;
+  const uclXs = C ? xbarbar + C.A3 * sbar : Number.NaN;
+  const lclXs = C ? xbarbar - C.A3 * sbar : Number.NaN;
+  const uclS = C ? C.B4 * sbar : Number.NaN;
+  const lclS = C ? C.B3 * sbar : Number.NaN;
 
   // I-MR：默认用展平序列（导入数据）；演示数据可传原型专用序列
   const indiv = opts?.indivSeries ?? all;
@@ -100,12 +105,12 @@ export function computeVarModel(
   const iLcl = indMean - 3 * iSig;
   const mrUcl = 3.267 * mrbar;
 
-  const sigmaWithin = hasSubgroups ? rbar / C.d2 : iSig;
+  const sigmaWithin = C ? rbar / C.d2 : iSig;
 
   return {
     name, colNames, isDemo: opts?.isDemo ?? false, k, n, hasSubgroups, subs, all,
     xbarbar, rbar, uclX, lclX, uclR, lclR,
-    svals, sbar, uclXs, lclXs, uclS, lclS, c4: C.c4,
+    svals, sbar, uclXs, lclXs, uclS, lclS, c4: C?.c4 ?? Number.NaN,
     sigmaWithin, oMean, oSd,
     indiv, mr, mrbar, indMean, iUcl, iLcl, mrUcl, iSig,
   };

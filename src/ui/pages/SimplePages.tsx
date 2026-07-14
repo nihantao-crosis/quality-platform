@@ -3,21 +3,23 @@
 import { useMemo, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { ReportCard } from '../ReportCard';
-import { gageReport, anovaReport, tReport, regReport } from '../reportData';
+import { gageReport, anovaReport, tReport, regReport, paretoReport } from '../reportData';
 import {
   nf, anovaGroups, DEFECTS, gageStudyData, GAGE_TOLERANCE,
-  computeGageRR, oneWayAnova, anovaResiduals, buildAnovaGroups, wideScaleDisparate, oneSampleT, twoSampleT, linearRegression,
-  type GageObservation, type TTestResult, type AnovaMode,
+  computeGageRR, oneWayAnova, anovaResiduals, anovaGroupSummaries, buildAnovaGroups, wideScaleDisparate, oneSampleT, twoSampleT, linearRegression,
+  resolveAnovaMode, resolveAnovaNumericRoles, countAnovaPendingCells, isDoeAnalysisColumn, prepareGageStudy,
+  type TTestResult, type AnovaMode, type AnovaGroup,
 } from '../../core';
 import { ScatterPlot } from '../charts/ScatterPlot';
 import { NormalProbPlot } from '../charts/NormalProbPlot';
 import { Fishbone } from './Fishbone';
+import { loadFishboneState } from '../../store/fishboneStore';
 import { useApp } from '../../store/appStore';
 import { useData } from '../../store/dataStore';
 import type { ChartTokens } from '../tokens';
 import { paretoColors } from '../tokens';
 import { Card, CardHeader, KvRows, Badge, tabStyle, numInput, EmptyStateCard, DemoBadge } from '../common';
-import { ParetoChart, GroupedBars, BoxPlot, IntervalPlot, MiniHist } from '../charts/misc';
+import { ParetoChart, GroupedBars, BoxPlot, IndividualValuePlot, IntervalPlot, MiniHist } from '../charts/misc';
 
 const selStyle: CSSProperties = {
   padding: '4px 8px', border: '1px solid #cfd5dd', borderRadius: 4,
@@ -39,40 +41,75 @@ export function GageRR({ T }: { T: ChartTokens }) {
 }
 
 function GageRRInner({ T }: { T: ChartTokens }) {
-  const { model, textCols } = useData();
-  const { lsl, usl } = useApp();
+  const { model, textCols, pendingCells } = useData();
+  const {
+    lsl, usl, gageUseReal, gageValueName, gagePartName, gageOperatorName, setGageOptions,
+  } = useApp();
   // 真实研究需要：≥1 测量列 + ≥2 文本列（部件 / 操作员）
   const canReal = textCols.length >= 2 && model.colNames.length >= 1;
-  const [useReal, setUseReal] = useState(canReal);
-  const [valCol, setValCol] = useState(0);
-  const [partCol, setPartCol] = useState(0);
-  const [operCol, setOperCol] = useState(1);
-
-  const real = useMemo(() => {
-    if (!canReal || !useReal) return null;
-    const parts = textCols[partCol].values;
-    const opers = textCols[operCol].values;
-    const vals = model.subs.map((s) => s.vals[valCol]);
-    const partIds = [...new Set(parts)];
-    const operIds = [...new Set(opers)];
-    if (partIds.length < 2 || operIds.length < 2) return null;
-    const trialCount = new Map<string, number>();
-    const obs: GageObservation[] = vals.map((v, i) => {
-      const key = parts[i] + '¦' + opers[i];
-      const t = trialCount.get(key) ?? 0;
-      trialCount.set(key, t + 1);
-      return { part: partIds.indexOf(parts[i]), operator: operIds.indexOf(opers[i]), trial: t, value: v };
-    });
-    // 每个 部件×操作员 至少 2 次重复才能分离重复性
-    if (Math.min(...trialCount.values()) < 2) return null;
+  const namedValueIndex = gageValueName ? model.colNames.indexOf(gageValueName) : -1;
+  const namedPartIndex = gagePartName ? textCols.findIndex((column) => column.name === gagePartName) : -1;
+  const namedOperatorIndex = gageOperatorName ? textCols.findIndex((column) => column.name === gageOperatorName) : -1;
+  const valCol = namedValueIndex >= 0 ? namedValueIndex : 0;
+  const partCol = namedPartIndex >= 0 ? namedPartIndex : 0;
+  const operCol = namedOperatorIndex >= 0 ? namedOperatorIndex : 1;
+  const controls = (!model.isDemo || canReal) ? (
+    <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#5b6472' }}>
+      <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
+        <input type="checkbox" checked={gageUseReal} onChange={(e) => setGageOptions({ gageUseReal: e.target.checked })} />
+        用导入数据
+      </label>
+      {canReal && (
+        <>
+          测量
+          <select style={selStyle} value={valCol} onChange={(e) => setGageOptions({ gageValueName: model.colNames[+e.target.value] })}>
+            {model.colNames.map((n, i) => <option key={n} value={i}>{n}</option>)}
+          </select>
+          部件
+          <select style={selStyle} value={partCol} onChange={(e) => setGageOptions({ gagePartName: textCols[+e.target.value].name })}>
+            {textCols.map((c, i) => <option key={c.name} value={i}>{c.name}</option>)}
+          </select>
+          操作员
+          <select style={selStyle} value={operCol} onChange={(e) => setGageOptions({ gageOperatorName: textCols[+e.target.value].name })}>
+            {textCols.map((c, i) => <option key={c.name} value={i}>{c.name}</option>)}
+          </select>
+        </>
+      )}
+    </div>
+  ) : null;
+  const prepared = useMemo(() => prepareGageStudy(model, textCols, {
+    valueColumn: gageValueName,
+    partColumn: gagePartName,
+    operatorColumn: gageOperatorName,
+    pendingCells,
+  }), [model, textCols, gageValueName, gagePartName, gageOperatorName, pendingCells]);
+  const requestedReal = !model.isDemo && gageUseReal;
+  let real: ReturnType<typeof computeGageRR> | null = null;
+  let realError = requestedReal && !prepared.ok ? prepared.reason : '';
+  if (requestedReal && prepared.ok) {
     try {
-      return computeGageRR(obs, Math.abs(usl - lsl));
-    } catch {
-      return null;
+      real = computeGageRR(prepared.study.observations, Math.abs(usl - lsl));
+    } catch (error) {
+      realError = (error as Error).message;
     }
-  }, [canReal, useReal, model, textCols, valCol, partCol, operCol, lsl, usl]);
+  }
+  if (requestedReal && !real) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <Card>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 16px', flexWrap: 'wrap' }}>
+            <div style={{ fontWeight: 600, color: '#33404f' }}>交叉 Gage R&R (ANOVA 法)</div>
+            {controls}
+          </div>
+        </Card>
+        <Card style={{ padding: '18px 20px', fontSize: 12.5, color: '#b0620f', background: '#fff8e8', lineHeight: 1.7 }}>
+          <b>Gage R&R 尚未运行：</b>{realError}。系统不会静默回落到演示研究；可修正列角色/数据，或取消“用导入数据”明确查看示例。
+        </Card>
+      </div>
+    );
+  }
 
-  const g = useMemo(() => real ?? computeGageRR(gageStudyData(), GAGE_TOLERANCE), [real]);
+  const g = real ?? computeGageRR(gageStudyData(), GAGE_TOLERANCE);
   const isReal = real != null;
   const verdictText = { acceptable: '可接受', marginal: '临界', unacceptable: '不可接受' }[g.verdict];
   const verdictStyle = {
@@ -96,32 +133,9 @@ function GageRRInner({ T }: { T: ChartTokens }) {
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 16px', borderBottom: '1px solid #edf0f3', flexWrap: 'wrap' }}>
           <div style={{ fontWeight: 600, color: '#33404f' }}>变异分量 · 交叉 Gage R&R (ANOVA 法)</div>
           <SourceBadge real={isReal} />
-          {canReal && (
-            <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#5b6472' }}>
-              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
-                <input type="checkbox" checked={useReal} onChange={(e) => setUseReal(e.target.checked)} />
-                用导入数据
-              </label>
-              测量
-              <select style={selStyle} value={valCol} onChange={(e) => setValCol(+e.target.value)}>
-                {model.colNames.map((n, i) => <option key={n} value={i}>{n}</option>)}
-              </select>
-              部件
-              <select style={selStyle} value={partCol} onChange={(e) => setPartCol(+e.target.value)}>
-                {textCols.map((c, i) => <option key={c.name} value={i}>{c.name}</option>)}
-              </select>
-              操作员
-              <select style={selStyle} value={operCol} onChange={(e) => setOperCol(+e.target.value)}>
-                {textCols.map((c, i) => <option key={c.name} value={i}>{c.name}</option>)}
-              </select>
-            </div>
-          )}
+          {controls}
         </div>
-        {canReal && useReal && !isReal && (
-          <div style={{ margin: '10px 16px 0', padding: '8px 12px', background: '#fcf3e3', border: '1px solid #f0e0c8', borderRadius: 4, fontSize: 12, color: '#d98324' }}>
-            所选列不构成有效交叉研究（需 ≥2 部件 × ≥2 操作员，且每组合 ≥2 次重复）— 已回落到演示研究。
-          </div>
-        )}
+        {!isReal && <div style={{ margin: '10px 16px 0' }}><DemoBadge /></div>}
         <div style={{ padding: '14px 16px 6px' }}>
           <GroupedBars T={T} cats={cats} />
         </div>
@@ -187,11 +201,37 @@ export function Anova({ T }: { T: ChartTokens }) {
   );
 }
 
+function PendingHypothesisNotice({
+  title, count, controls,
+}: {
+  title: string;
+  count: number;
+  controls: React.ReactNode;
+}) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <Card>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '11px 16px', flexWrap: 'wrap' }}>
+          <div style={{ fontWeight: 600, color: '#33404f' }}>{title}</div>
+          {controls}
+        </div>
+      </Card>
+      <Card style={{ padding: '18px 20px', fontSize: 12.5, color: '#b0620f', background: '#fff8e8', lineHeight: 1.7 }}>
+        <b>分析尚未运行：</b>当前参与分析的列中还有 {count} 个待录入单元格。
+        请先完成实测数据录入；系统不会把占位 0 当作观测值计算统计量或 P 值。
+      </Card>
+    </div>
+  );
+}
+
 function RegressionPanel({ T }: { T: ChartTokens }) {
-  const { model } = useData();
+  const { model, pendingCells } = useData();
+  const { regXName, regYName, setHypothesisOptions } = useApp();
   const multi = model.colNames.length >= 2;
-  const [colX, setColX] = useState(0);
-  const [colY, setColY] = useState(multi ? 1 : 0);
+  const namedX = regXName ? model.colNames.indexOf(regXName) : -1;
+  const namedY = regYName ? model.colNames.indexOf(regYName) : -1;
+  const colX = namedX >= 0 ? namedX : 0;
+  const colY = namedY >= 0 ? namedY : (multi ? 1 : 0);
   if (!multi) {
     return (
       <Card style={{ padding: 20 }}>
@@ -200,6 +240,23 @@ function RegressionPanel({ T }: { T: ChartTokens }) {
         </div>
       </Card>
     );
+  }
+  const controls = (
+    <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#5b6472' }}>
+      X
+      <select style={selStyle} value={colX} onChange={(e) => setHypothesisOptions({ regXName: model.colNames[+e.target.value] })}>
+        {model.colNames.map((n, i) => <option key={n} value={i}>{n}</option>)}
+      </select>
+      Y
+      <select style={selStyle} value={colY} onChange={(e) => setHypothesisOptions({ regYName: model.colNames[+e.target.value] })}>
+        {model.colNames.map((n, i) => <option key={n} value={i}>{n}</option>)}
+      </select>
+    </div>
+  );
+  const pendingCount = pendingCells.filter((cell) =>
+    cell.row >= 0 && cell.row < model.k && (cell.col === colX || cell.col === colY)).length;
+  if (pendingCount > 0) {
+    return <PendingHypothesisNotice title="散点图与最小二乘回归" count={pendingCount} controls={controls} />;
   }
   const xs = model.subs.map((s) => s.vals[colX]);
   const ys = model.subs.map((s) => s.vals[colY]);
@@ -219,16 +276,7 @@ function RegressionPanel({ T }: { T: ChartTokens }) {
       <Card>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '11px 16px', borderBottom: '1px solid #edf0f3', flexWrap: 'wrap' }}>
           <div style={{ fontWeight: 600, color: '#33404f' }}>散点图与最小二乘回归</div>
-          <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#5b6472' }}>
-            X
-            <select style={selStyle} value={colX} onChange={(e) => setColX(+e.target.value)}>
-              {model.colNames.map((n, i) => <option key={n} value={i}>{n}</option>)}
-            </select>
-            Y
-            <select style={selStyle} value={colY} onChange={(e) => setColY(+e.target.value)}>
-              {model.colNames.map((n, i) => <option key={n} value={i}>{n}</option>)}
-            </select>
-          </div>
+          {controls}
         </div>
         {reg ? (
           <>
@@ -314,10 +362,30 @@ function TTestResultCards({ r, estimateLabel, conclusion }: { r: TTestResult; es
 }
 
 function OneSampleTPanel({ T }: { T: ChartTokens }) {
-  const { model } = useData();
-  const { tgt } = useApp();
-  const [col, setCol] = useState(0);
-  const [mu0, setMu0] = useState(tgt);
+  const { model, pendingCells } = useData();
+  const { tgt, t1ColName, t1Mu0, setHypothesisOptions } = useApp();
+  const namedCol = t1ColName ? model.colNames.indexOf(t1ColName) : -1;
+  const col = namedCol >= 0 ? namedCol : 0;
+  const mu0 = t1Mu0 ?? tgt;
+  const controls = (
+    <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#5b6472' }}>
+      测量列
+      <select style={selStyle} value={col} onChange={(e) => setHypothesisOptions({ t1ColName: model.colNames[+e.target.value] })}>
+        {model.colNames.map((n, i) => <option key={n} value={i}>{n}</option>)}
+      </select>
+      <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+        μ₀
+        <input
+          type="number" step="0.01" value={mu0} style={numInput}
+          onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) setHypothesisOptions({ t1Mu0: v }); }}
+        />
+      </label>
+    </div>
+  );
+  const pendingCount = pendingCells.filter((cell) => cell.row >= 0 && cell.row < model.k && cell.col === col).length;
+  if (pendingCount > 0) {
+    return <PendingHypothesisNotice title="单样本 t 检验 · 均值 vs 目标 μ₀" count={pendingCount} controls={controls} />;
+  }
   const xs = model.subs.map((s) => s.vals[col]);
   const r = oneSampleT(xs, mu0);
   const conclusion = r.significant
@@ -330,19 +398,7 @@ function OneSampleTPanel({ T }: { T: ChartTokens }) {
       <Card>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '11px 16px', borderBottom: '1px solid #edf0f3', flexWrap: 'wrap' }}>
           <div style={{ fontWeight: 600, color: '#33404f' }}>单样本 t 检验 · 均值 vs 目标 μ₀</div>
-          <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#5b6472' }}>
-            测量列
-            <select style={selStyle} value={col} onChange={(e) => setCol(+e.target.value)}>
-              {model.colNames.map((n, i) => <option key={n} value={i}>{n}</option>)}
-            </select>
-            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-              μ₀
-              <input
-                type="number" step="0.01" value={mu0} style={numInput}
-                onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) setMu0(v); }}
-              />
-            </label>
-          </div>
+          {controls}
         </div>
         <div style={{ padding: '14px 16px 6px' }}>
           <BoxPlot T={T} groups={[{ name: model.colNames[col], vals: xs }]} />
@@ -358,18 +414,39 @@ function OneSampleTPanel({ T }: { T: ChartTokens }) {
 }
 
 function TwoSampleTPanel({ T }: { T: ChartTokens }) {
-  const { model } = useData();
+  const { model, pendingCells } = useData();
+  const { t2ColAName, t2ColBName, setHypothesisOptions } = useApp();
   const multi = model.colNames.length >= 2;
   // 单列数据集时退回演示两组（设备 A vs B）
   const demo = useMemo(() => anovaGroups(), []);
-  const [colA, setColA] = useState(0);
-  const [colB, setColB] = useState(multi ? 1 : 0);
+  const namedA = t2ColAName ? model.colNames.indexOf(t2ColAName) : -1;
+  const namedB = t2ColBName ? model.colNames.indexOf(t2ColBName) : -1;
+  const colA = namedA >= 0 ? namedA : 0;
+  const candidateB = namedB >= 0 ? namedB : (multi ? 1 : 0);
+  const colB = multi && candidateB === colA ? (colA === 0 ? 1 : 0) : candidateB;
   const groups = multi
     ? [
         { name: model.colNames[colA], vals: model.subs.map((s) => s.vals[colA]) },
         { name: model.colNames[colB], vals: model.subs.map((s) => s.vals[colB]) },
       ]
     : [demo[0], demo[1]];
+  const controls = multi ? (
+    <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#5b6472' }}>
+      样本 1
+      <select style={selStyle} value={colA} onChange={(e) => setHypothesisOptions({ t2ColAName: model.colNames[+e.target.value] })}>
+        {model.colNames.map((n, i) => i === colB ? null : <option key={n} value={i}>{n}</option>)}
+      </select>
+      样本 2
+      <select style={selStyle} value={colB} onChange={(e) => setHypothesisOptions({ t2ColBName: model.colNames[+e.target.value] })}>
+        {model.colNames.map((n, i) => i === colA ? null : <option key={n} value={i}>{n}</option>)}
+      </select>
+    </div>
+  ) : <div style={{ marginLeft: 'auto' }}><SourceBadge real={false} /></div>;
+  const pendingCount = multi ? pendingCells.filter((cell) =>
+    cell.row >= 0 && cell.row < model.k && (cell.col === colA || cell.col === colB)).length : 0;
+  if (pendingCount > 0) {
+    return <PendingHypothesisNotice title="双样本 t 检验（Welch,不等方差）" count={pendingCount} controls={controls} />;
+  }
   const r = twoSampleT(groups[0].vals, groups[1].vals);
   const conclusion = r.significant
     ? `P ${r.p < 0.001 ? '< 0.001' : '= ' + nf(r.p, 3)} < 0.05，「${groups[0].name}」与「${groups[1].name}」均值差 ${nf(r.estimate, 4)} 显著（Welch 校正）,两组不可视为同一总体。`
@@ -381,20 +458,7 @@ function TwoSampleTPanel({ T }: { T: ChartTokens }) {
       <Card>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '11px 16px', borderBottom: '1px solid #edf0f3', flexWrap: 'wrap' }}>
           <div style={{ fontWeight: 600, color: '#33404f' }}>双样本 t 检验（Welch,不等方差）</div>
-          {multi ? (
-            <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#5b6472' }}>
-              样本 1
-              <select style={selStyle} value={colA} onChange={(e) => setColA(+e.target.value)}>
-                {model.colNames.map((n, i) => <option key={n} value={i}>{n}</option>)}
-              </select>
-              样本 2
-              <select style={selStyle} value={colB} onChange={(e) => setColB(+e.target.value)}>
-                {model.colNames.map((n, i) => <option key={n} value={i}>{n}</option>)}
-              </select>
-            </div>
-          ) : (
-            <div style={{ marginLeft: 'auto' }}><SourceBadge real={false} /></div>
-          )}
+          {controls}
         </div>
         <div style={{ padding: '14px 16px 6px' }}>
           <BoxPlot T={T} groups={groups} />
@@ -407,23 +471,28 @@ function TwoSampleTPanel({ T }: { T: ChartTokens }) {
 }
 
 function AnovaInner({ T }: { T: ChartTokens }) {
-  const { model, textCols, stackColumns } = useData();
-  const { openModal, showToast, anovaMode, anovaRespName, anovaFactorName, setAnovaSel } = useApp();
-  const canStacked = textCols.length >= 1 && model.colNames.length >= 1;
-  const canWide = model.colNames.length >= 2 && model.k >= 2;
-  const canNumFactor = model.colNames.length >= 2; // 一列作因子 + 一列作响应
-  const [showDemo, setShowDemo] = useState(false);
-  const [chartKind, setChartKind] = useState<'box' | 'interval'>('box');
+  const { model, textCols, pendingCells, stackColumns } = useData();
+  const {
+    openModal, showToast, anovaMode, anovaRespName, anovaFactorName, setAnovaSel,
+    anovaShowDemo: showDemo, setAnovaShowDemo: setShowDemo,
+  } = useApp();
+  const [chartKind, setChartKind] = useState<'box' | 'individual' | 'interval'>('box');
 
   // 出厂演示集(直径1..5 是同一量的子组位置,不是「分组」)不作为真实宽表数据,直接走演示研究
   const isDemoDataset = model.isDemo;
   const dataRows = useMemo(() => model.subs.map((s) => s.vals), [model]);
+  const numericRoles = useMemo(
+    () => resolveAnovaNumericRoles(model.colNames, dataRows, anovaRespName, anovaFactorName),
+    [model.colNames, dataRows, anovaRespName, anovaFactorName],
+  );
+  const eligibleTextCols = useMemo(() => textCols.filter((column) => isDoeAnalysisColumn(column.name)), [textCols]);
+  const canStacked = eligibleTextCols.length >= 1 && numericRoles.eligibleIdx.length >= 1;
+  const canWide = numericRoles.eligibleIdx.length >= 2 && model.k >= 2;
+  const canNumFactor = numericRoles.eligibleIdx.length >= 2; // 一列作因子 + 一列作响应
 
   // 有效模式:store 里的模式若当前数据集不支持则回落;都不可用为 null(空态)
-  const modeOk = (m: AnovaMode) => (m === 'stacked' ? canStacked : m === 'wide' ? canWide : canNumFactor);
   const effMode: AnovaMode | null = isDemoDataset ? null
-    : modeOk(anovaMode) ? anovaMode
-    : canStacked ? 'stacked' : canWide ? 'wide' : canNumFactor ? 'numfactor' : null;
+    : resolveAnovaMode(anovaMode, model.colNames, dataRows, eligibleTextCols.length, anovaRespName, anovaFactorName);
 
   // 页面与项目汇总共用 buildAnovaGroups,保证界面/卡片一致
   const builtGroups = useMemo(
@@ -446,16 +515,15 @@ function AnovaInner({ T }: { T: ChartTokens }) {
   }
 
   const isDemo = effMode === null; // 含出厂演示集与「查看示例」
-  const groups = isDemo ? demoGroups : builtGroups;
+  const groups: AnovaGroup[] | null = isDemo ? demoGroups : builtGroups;
 
   // 选择器解析索引(与 buildAnovaGroups 默认口径一致)
-  const idxOf = (name: string | null, fb: number) => { const i = name ? model.colNames.indexOf(name) : -1; return i >= 0 ? i : fb; };
-  const factorNumIdx = idxOf(anovaFactorName, 0);
-  const respIdx = idxOf(anovaRespName, effMode === 'numfactor' && factorNumIdx === 0 ? 1 : 0);
-  const grpTextIdx = Math.max(0, textCols.findIndex((t) => t.name === anovaFactorName));
+  const factorNumIdx = numericRoles.factorIdx;
+  const respIdx = numericRoles.respIdx;
+  const grpTextIdx = Math.max(0, eligibleTextCols.findIndex((t) => t.name === anovaFactorName));
 
   const factorName = isDemo ? '设备'
-    : effMode === 'stacked' ? (textCols[grpTextIdx]?.name ?? '分组')
+    : effMode === 'stacked' ? (eligibleTextCols[grpTextIdx]?.name ?? '分组')
     : effMode === 'numfactor' ? model.colNames[factorNumIdx]
     : '测量列';
   const respLabel = (effMode === 'stacked' || effMode === 'numfactor') ? model.colNames[respIdx] : '';
@@ -483,11 +551,11 @@ function AnovaInner({ T }: { T: ChartTokens }) {
         <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, color: '#5b6472' }}>
           响应
           <select style={selStyle} value={respIdx} onChange={(e) => setAnovaSel({ anovaRespName: model.colNames[+e.target.value] })}>
-            {model.colNames.map((n, i) => <option key={n} value={i}>{n}</option>)}
+            {numericRoles.eligibleIdx.map((i) => <option key={model.colNames[i]} value={i}>{model.colNames[i]}</option>)}
           </select>
           分组
-          <select style={selStyle} value={grpTextIdx} onChange={(e) => setAnovaSel({ anovaFactorName: textCols[+e.target.value].name })}>
-            {textCols.map((c, i) => <option key={c.name} value={i}>{c.name}</option>)}
+          <select style={selStyle} value={grpTextIdx} onChange={(e) => setAnovaSel({ anovaFactorName: eligibleTextCols[+e.target.value].name })}>
+            {eligibleTextCols.map((c, i) => <option key={c.name} value={i}>{c.name}</option>)}
           </select>
         </div>
       )}
@@ -495,17 +563,32 @@ function AnovaInner({ T }: { T: ChartTokens }) {
         <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, color: '#5b6472' }}>
           因子
           <select style={selStyle} value={factorNumIdx} onChange={(e) => setAnovaSel({ anovaFactorName: model.colNames[+e.target.value] })}>
-            {model.colNames.map((n, i) => <option key={n} value={i}>{n}</option>)}
+            {numericRoles.eligibleIdx.filter((i) => i !== respIdx).map((i) => <option key={model.colNames[i]} value={i}>{model.colNames[i]}</option>)}
           </select>
           响应
           <select style={selStyle} value={respIdx} onChange={(e) => setAnovaSel({ anovaRespName: model.colNames[+e.target.value] })}>
-            {model.colNames.map((n, i) => <option key={n} value={i}>{n}</option>)}
+            {numericRoles.eligibleIdx.filter((i) => i !== factorNumIdx).map((i) => <option key={model.colNames[i]} value={i}>{model.colNames[i]}</option>)}
           </select>
         </div>
       )}
       {isDemo && <div style={{ marginLeft: 'auto' }}><DemoBadge /></div>}
     </Card>
   );
+
+  const pendingCount = !isDemo && effMode
+    ? countAnovaPendingCells(effMode, model.colNames, dataRows, anovaRespName, anovaFactorName, pendingCells)
+    : 0;
+  if (pendingCount > 0) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        {modeBar}
+        <Card style={{ padding: '18px 20px', fontSize: 12.5, color: '#b0620f', background: '#fff8e8', lineHeight: 1.7 }}>
+          <b>ANOVA 尚未运行：</b>当前因子/响应角色中还有 {pendingCount} 个待录入单元格。
+          请先完成实测数据录入，系统不会把占位 0 当作观测值计算 F/P。
+        </Card>
+      </div>
+    );
+  }
 
   // 模式已选但当前列选不成有效分组
   if (!groups) {
@@ -540,9 +623,14 @@ function AnovaInner({ T }: { T: ChartTokens }) {
   }
 
   let a; let resid;
+  let residualsInWorksheetOrder: boolean;
   try {
     a = oneWayAnova(groups.map((g) => g.vals));
-    resid = anovaResiduals(groups.map((g) => g.vals));
+    const rowOrder = groups.every((g) => g.rowIndices?.length === g.vals.length)
+      ? groups.map((g) => g.rowIndices!)
+      : undefined;
+    residualsInWorksheetOrder = rowOrder != null;
+    resid = anovaResiduals(groups.map((g) => g.vals), rowOrder);
   } catch (e) {
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -552,11 +640,12 @@ function AnovaInner({ T }: { T: ChartTokens }) {
     );
   }
   const means = groups.map((g) => g.vals.reduce((x, y) => x + y, 0) / g.vals.length);
+  const groupStats = anovaGroupSummaries(groups, a);
   const hi = groups[means.indexOf(Math.max(...means))].name;
   const rows = [
-    { src: factorName, df: String(a.factorDf), ss: nf(a.factorSS, 5), f: nf(a.fStat, 2), p: nf(a.pValue, 3), pColor: a.significant ? '#c22f2f' : '#5b6472' },
-    { src: '误差', df: String(a.errorDf), ss: nf(a.errorSS, 5), f: '', p: '', pColor: '#5b6472' },
-    { src: '合计', df: String(a.totalDf), ss: nf(a.totalSS, 5), f: '', p: '', pColor: '#5b6472' },
+    { src: factorName, df: String(a.factorDf), ss: nf(a.factorSS, 5), ms: nf(a.factorMS, 5), f: nf(a.fStat, 2), p: nf(a.pValue, 3), pColor: a.significant ? '#c22f2f' : '#5b6472' },
+    { src: '误差', df: String(a.errorDf), ss: nf(a.errorSS, 5), ms: nf(a.errorMS, 5), f: '', p: '', pColor: '#5b6472' },
+    { src: '合计', df: String(a.totalDf), ss: nf(a.totalSS, 5), ms: '', f: '', p: '', pColor: '#5b6472' },
   ];
   const conclusion = a.significant
     ? `P = ${nf(a.pValue, 3)} < 0.05，在 95% 置信水平下拒绝原假设：各「${factorName}」组均值存在显著差异。「${hi}」组均值最高，建议优先排查。`
@@ -579,7 +668,7 @@ function AnovaInner({ T }: { T: ChartTokens }) {
           </div>
         </div>
       )}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: 16 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 430px', gap: 16 }}>
       <Card>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 16px', borderBottom: '1px solid #edf0f3', flexWrap: 'wrap' }}>
           <div style={{ fontWeight: 600, color: '#33404f' }}>
@@ -587,11 +676,16 @@ function AnovaInner({ T }: { T: ChartTokens }) {
           </div>
           <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
             <div style={tabStyle(chartKind === 'box')} onClick={() => setChartKind('box')}>箱线图</div>
+            <div style={tabStyle(chartKind === 'individual')} onClick={() => setChartKind('individual')}>个体值图</div>
             <div style={tabStyle(chartKind === 'interval')} onClick={() => setChartKind('interval')}>区间图</div>
           </div>
         </div>
         <div style={{ padding: '14px 16px 6px' }}>
-          {chartKind === 'box' ? <BoxPlot T={T} groups={groups} /> : <IntervalPlot T={T} groups={groups} />}
+          {chartKind === 'box'
+            ? <BoxPlot T={T} groups={groups} />
+            : chartKind === 'individual'
+              ? <IndividualValuePlot T={T} groups={groups} />
+              : <IntervalPlot T={T} groups={groups} pooledError={{ mse: a.errorSS / a.errorDf, df: a.errorDf }} />}
         </div>
       </Card>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -603,6 +697,7 @@ function AnovaInner({ T }: { T: ChartTokens }) {
                 <th style={{ padding: '7px 8px 7px 16px', textAlign: 'left', fontWeight: 600 }}>来源</th>
                 <th style={{ padding: '7px 6px', fontWeight: 600 }}>DF</th>
                 <th style={{ padding: '7px 6px', fontWeight: 600 }}>SS</th>
+                <th style={{ padding: '7px 6px', fontWeight: 600 }}>MS</th>
                 <th style={{ padding: '7px 6px', fontWeight: 600 }}>F</th>
                 <th style={{ padding: '7px 16px', fontWeight: 600 }}>P</th>
               </tr>
@@ -613,6 +708,7 @@ function AnovaInner({ T }: { T: ChartTokens }) {
                   <td style={{ padding: '7px 8px 7px 16px', textAlign: 'left', color: '#33404f', fontFamily: 'IBM Plex Sans' }}>{r.src}</td>
                   <td style={{ padding: '7px 6px', color: '#5b6472' }}>{r.df}</td>
                   <td style={{ padding: '7px 6px', color: '#5b6472' }}>{r.ss}</td>
+                  <td style={{ padding: '7px 6px', color: '#5b6472' }}>{r.ms}</td>
                   <td style={{ padding: '7px 6px', color: '#5b6472' }}>{r.f}</td>
                   <td style={{ padding: '7px 16px', color: r.pColor, fontWeight: 600 }}>{r.p}</td>
                 </tr>
@@ -627,12 +723,39 @@ function AnovaInner({ T }: { T: ChartTokens }) {
       </div>
       </div>
       <Card>
+        <CardHeader title="分组描述统计" right={<span style={{ fontSize: 11.5, color: '#98a1ac' }}>均值 95% CI 使用合并误差 MSE = {nf(a.errorMS, 5)}</span>} />
+        <div style={{ overflowX: 'auto' }}>
+          <table className="mono" style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+            <thead>
+              <tr style={{ color: '#98a1ac', textAlign: 'right', fontFamily: 'IBM Plex Sans' }}>
+                <th style={{ padding: '8px 16px', textAlign: 'left', fontWeight: 600 }}>组</th>
+                <th style={{ padding: '8px 12px', fontWeight: 600 }}>N</th>
+                <th style={{ padding: '8px 12px', fontWeight: 600 }}>Mean</th>
+                <th style={{ padding: '8px 12px', fontWeight: 600 }}>StDev</th>
+                <th style={{ padding: '8px 16px', fontWeight: 600 }}>均值 95% CI（合并）</th>
+              </tr>
+            </thead>
+            <tbody>
+              {groupStats.map((group) => (
+                <tr key={group.name} style={{ borderTop: '1px solid #f0f2f5', textAlign: 'right' }}>
+                  <td style={{ padding: '8px 16px', textAlign: 'left', color: '#33404f', fontFamily: 'IBM Plex Sans' }}>{group.name}</td>
+                  <td style={{ padding: '8px 12px', color: '#5b6472' }}>{group.n}</td>
+                  <td style={{ padding: '8px 12px', color: '#2a333f', fontWeight: 600 }}>{nf(group.mean, 5)}</td>
+                  <td style={{ padding: '8px 12px', color: '#5b6472' }}>{nf(group.stDev, 5)}</td>
+                  <td style={{ padding: '8px 16px', color: '#5b6472' }}>({nf(group.ciLow, 5)}, {nf(group.ciHigh, 5)})</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+      <Card>
         <CardHeader title="残差诊断(四合一)" right={<span style={{ fontSize: 11.5, color: '#98a1ac' }}>残差 = 观测 − 组均值 · 用于检查模型假设</span>} />
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, padding: '10px 12px 12px' }}>
           <NormalProbPlot T={T} data={resid.residuals} h={230} />
           <ScatterPlot T={T} xs={resid.fits} ys={resid.residuals} slope={0} intercept={0} xLabel="拟合值(组均值)" yLabel="残差" h={230} />
           <MiniHist T={T} data={resid.residuals} h={230} xLabel="残差分布" />
-          <ScatterPlot T={T} xs={resid.residuals.map((_, i) => i + 1)} ys={resid.residuals} slope={0} intercept={0} xLabel="观测序(按组)" yLabel="残差" h={230} />
+          <ScatterPlot T={T} xs={resid.residuals.map((_, i) => i + 1)} ys={resid.residuals} slope={0} intercept={0} xLabel={residualsInWorksheetOrder ? '观测序(工作表行序)' : '观测序(按组)'} yLabel="残差" h={230} />
         </div>
       </Card>
     </div>
@@ -641,7 +764,7 @@ function AnovaInner({ T }: { T: ChartTokens }) {
 
 // ---------- 帕累托 ----------
 export function Pareto({ T }: { T: ChartTokens }) {
-  const { paretoView, setParetoView } = useApp();
+  const { paretoView, setParetoView, fishboneRevision } = useApp();
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <Card style={{ padding: '11px 16px', display: 'flex', alignItems: 'center', gap: 14 }}>
@@ -654,16 +777,18 @@ export function Pareto({ T }: { T: ChartTokens }) {
           <span style={{ marginLeft: 'auto', fontSize: 11.5, color: '#8a929d' }}>针对帕累托 Top 缺陷做根因分析</span>
         )}
       </Card>
-      {paretoView === 'pareto' ? <ParetoInner T={T} /> : <Fishbone T={T} />}
+      {paretoView === 'pareto' ? <ParetoInner T={T} /> : <Fishbone key={`${fishboneRevision}:${JSON.stringify(loadFishboneState())}`} T={T} />}
     </div>
   );
 }
 
 function ParetoInner({ T }: { T: ChartTokens }) {
-  const { openModal, setImportTab, setImportKind } = useApp();
+  const {
+    openModal, setImportTab, setImportKind,
+    paretoMergeOther: mergeOther, paretoThreshold, setParetoOptions,
+    paretoShowDemo: showDemo, setParetoShowDemo: setShowDemo,
+  } = useApp();
   const pareto = useData((st) => st.paretoModel);
-  const [showDemo, setShowDemo] = useState(false);
-  const [mergeOther, setMergeOther] = useState(false);
   const colors = paretoColors(T);
 
   const isReal = !!(pareto && pareto.rows.length > 0);
@@ -679,43 +804,15 @@ function ParetoInner({ T }: { T: ChartTokens }) {
   }
 
   const source = isReal ? pareto!.rows : DEFECTS;
-  const sorted = [...source].sort((a, b) => b.count - a.count);
-  const total0 = sorted.reduce((a, d) => a + d.count, 0) || 1;
-  // 合并尾部:累计占比超过 95% 之后的类别并为「其他」(至少剩 2 个尾部类别才合并)
-  let display = sorted;
-  if (mergeOther && sorted.length > 3) {
-    let cum = 0; let cut = sorted.length;
-    for (let i = 0; i < sorted.length; i++) {
-      cum += sorted[i].count;
-      if (cum / total0 >= 0.95) { cut = i + 1; break; }
-    }
-    if (sorted.length - cut >= 2) {
-      display = [...sorted.slice(0, cut), { name: '其他', count: sorted.slice(cut).reduce((a, d) => a + d.count, 0) }];
-    }
-  }
-  const total = display.reduce((a, d) => a + d.count, 0) || 1;
-  const cums = display.reduce<number[]>((acc, d) => [...acc, (acc[acc.length - 1] ?? 0) + d.count], []);
-  const rows = display.map((d, i) => ({
-    ...d,
-    cum: Math.round((cums[i] / total) * 100) + '%',
-    color: d.name === '其他' ? '#c8cfd8' : colors[i % colors.length],
+  const analysis = paretoReport({ rows: source, mergeOther, threshold: paretoThreshold });
+  const display = analysis.rows.map(({ name, count }) => ({ name, count }));
+  const total0 = analysis.total;
+  const rows = analysis.rows.map((d, i) => ({
+    name: d.name, count: d.count,
+    cum: Math.round(d.cumulativePercentage) + '%',
+    color: d.mergedOther ? '#c8cfd8' : colors[i % colors.length],
   }));
-  const topN = Math.min(2, sorted.length);
-  const topShare = Math.round((sorted.slice(0, topN).reduce((a, d) => a + d.count, 0) / total0) * 100);
-  const topNames = sorted.slice(0, topN).map((d) => `「${d.name}」`).join('与');
-  // 帕累托(80/20)判定:统计"累计达 80% 所需的类别数 k80"占全部类别的比例——
-  // 真正的"关键少数"是少数类别(≤~1/4)贡献 80% 缺陷,且类别数需足够多(≥5)才有意义。
-  // 旧逻辑"前两类≥60% 即判 80/20"会把 3 类里 2 类占 61% 也误判为符合,已废弃。
-  const nCats = sorted.length;
-  let k80 = 0; let run = 0;
-  for (const d of sorted) { run += d.count; k80++; if (run / total0 >= 0.8) break; }
-  const vitalPct = Math.round((k80 / nCats) * 100);
-  const isPareto = nCats >= 5 && k80 / nCats <= 0.25;
-  const conclusion = topN < 2
-    ? `${topNames}占缺陷总数的 ${topShare}%。`
-    : isPareto
-      ? `前 ${k80} 类(仅占 ${nCats} 类中的 ${vitalPct}%)即累计贡献 80% 的缺陷,呈典型帕累托「关键少数」集中——优先改善这几类可消除大部分不良。`
-      : `前 ${topN} 类(${topNames})合计占 ${topShare}%;需前 ${k80}/${nCats} 类才累计达 80%,集中度不足以称"80/20",建议扩大改善范围或细分类别。`;
+  const conclusion = analysis.conclusion;
 
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '1fr 300px', gap: 16 }}>
@@ -724,11 +821,25 @@ function ParetoInner({ T }: { T: ChartTokens }) {
           title={isReal ? `缺陷帕累托图 · ${pareto!.name}` : '缺陷帕累托图 · 示例'}
           right={
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              {sorted.length > 3 && (
-                <label style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 12, color: '#5b6472', cursor: 'pointer' }}>
-                  <input type="checkbox" checked={mergeOther} onChange={(e) => setMergeOther(e.target.checked)} />
-                  合并尾部为「其他」(95%)
-                </label>
+              {analysis.sourceCategoryCount > 3 && (
+                <div style={{ display: 'inline-flex', alignItems: 'center', gap: 7, fontSize: 12, color: '#5b6472' }}>
+                  <label style={{ display: 'inline-flex', alignItems: 'center', gap: 5, cursor: 'pointer' }}>
+                    <input type="checkbox" checked={mergeOther} onChange={(e) => setParetoOptions({ paretoMergeOther: e.target.checked })} />
+                    合并尾部为「其他」
+                  </label>
+                  <input
+                    type="number" min={50} max={100} step={1}
+                    value={Math.round(paretoThreshold * 100)}
+                    onChange={(e) => {
+                      const value = e.currentTarget.valueAsNumber;
+                      if (Number.isFinite(value)) setParetoOptions({ paretoThreshold: value / 100 });
+                    }}
+                    disabled={!mergeOther}
+                    aria-label="合并其他累计阈值"
+                    className="mono"
+                    style={{ width: 58, padding: '3px 5px', border: '1px solid #cfd5dd', borderRadius: 4, color: '#4a5462', background: mergeOther ? '#fff' : '#f4f6f8' }}
+                  />%
+                </div>
               )}
               {!isReal && <DemoBadge />}
             </div>

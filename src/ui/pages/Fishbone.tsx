@@ -5,45 +5,18 @@
 import { memo, useState, Fragment } from 'react';
 import type { CSSProperties } from 'react';
 import { useApp } from '../../store/appStore';
+import {
+  FISHBONE_DEFAULT,
+  loadFishboneState,
+  saveFishboneState,
+  type FishboneData,
+} from '../../store/fishboneStore';
 import type { ChartTokens } from '../tokens';
-import { Card, tabStyle } from '../common';
+import { Card, DemoBadge, tabStyle } from '../common';
 import { Svg, Ln, Txt } from '../charts/primitives';
 
-export interface FishboneData {
-  problem: string;
-  categories: { name: string; causes: string[] }[];
-}
-
-const LS_KEY = 'qp-fishbone-v1';
-
-export const FISHBONE_DEFAULT: FishboneData = {
-  problem: '尺寸超差',
-  categories: [
-    { name: '人 (Man)', causes: ['新员工操作不熟练', '对刀凭经验无标准'] },
-    { name: '机 (Machine)', causes: ['刀具磨损未监控', '主轴热变形'] },
-    { name: '料 (Material)', causes: ['毛坯硬度批次波动'] },
-    { name: '法 (Method)', causes: ['工序卡未更新', '装夹方式不统一'] },
-    { name: '环 (Environment)', causes: ['车间昼夜温差大'] },
-    { name: '测 (Measurement)', causes: ['量具未按期校准'] },
-  ],
-};
-
-export function loadFishbone(): FishboneData {
-  try {
-    const s = localStorage.getItem(LS_KEY);
-    if (s) {
-      const d = JSON.parse(s) as FishboneData;
-      if (d.problem != null && Array.isArray(d.categories) && d.categories.length === 6) return d;
-    }
-  } catch { /* 回落默认 */ }
-  return FISHBONE_DEFAULT;
-}
-
-function saveFishbone(d: FishboneData) {
-  try {
-    localStorage.setItem(LS_KEY, JSON.stringify(d));
-  } catch { /* 忽略 */ }
-}
+export { FISHBONE_DEFAULT, loadFishbone } from '../../store/fishboneStore';
+export type { FishboneData } from '../../store/fishboneStore';
 
 // ---------- SVG 鱼骨 ----------
 const MAX_SHOWN = 4; // 每根骨最多展示的原因数
@@ -104,7 +77,7 @@ function FishboneChartImpl({ T, data }: { T: ChartTokens; data: FishboneData }) 
   );
 }
 
-const FishboneChart = memo(FishboneChartImpl);
+export const FishboneChart = memo(FishboneChartImpl);
 
 // ---------- 编辑面板 + 页面 ----------
 const inputStyle: CSSProperties = {
@@ -114,13 +87,18 @@ const inputStyle: CSSProperties = {
 
 export function Fishbone({ T }: { T: ChartTokens }) {
   const showToast = useApp((s) => s.showToast);
-  const [data, setData] = useState<FishboneData>(loadFishbone);
+  const [state, setState] = useState(loadFishboneState);
+  const { data, isDemo } = state;
   const [catIdx, setCatIdx] = useState(0);
   const [draft, setDraft] = useState('');
 
-  const update = (next: FishboneData) => {
-    setData(next);
-    saveFishbone(next);
+  const update = (next: FishboneData, nextIsDemo = false) => {
+    setState({ data: next, isDemo: nextIsDemo });
+    try {
+      saveFishboneState(next, nextIsDemo);
+    } catch {
+      showToast('鱼骨图未能保存到本机，请检查本地存储空间');
+    }
   };
   const addCause = () => {
     const cause = draft.trim();
@@ -140,8 +118,14 @@ export function Fishbone({ T }: { T: ChartTokens }) {
       <Card>
         <div style={{ display: 'flex', alignItems: 'center', padding: '11px 16px', borderBottom: '1px solid #edf0f3' }}>
           <div style={{ fontWeight: 600, color: '#33404f' }}>因果图（鱼骨图）· 6M 分析</div>
+          {isDemo && <div style={{ marginLeft: 10 }}><DemoBadge /></div>}
           <div style={{ marginLeft: 'auto', fontSize: 11, color: '#a3abb5' }}>每根骨展示前 {MAX_SHOWN} 条原因</div>
         </div>
+        {isDemo && (
+          <div style={{ margin: '10px 14px 0', padding: '8px 10px', borderRadius: 4, background: '#fff8e8', color: '#9a6616', fontSize: 11.5 }}>
+            当前为内置“尺寸超差”示例，非用户根因分析；编辑问题或任一原因后才记为用户数据。
+          </div>
+        )}
         <div style={{ padding: '10px 14px 6px' }}>
           <FishboneChart T={T} data={data} />
         </div>
@@ -184,7 +168,7 @@ export function Fishbone({ T }: { T: ChartTokens }) {
             <div onClick={addCause} style={{ padding: '6px 14px', background: '#1f6fb2', color: '#fff', borderRadius: 4, fontSize: 12.5, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap' }}>添加</div>
           </div>
           <div
-            onClick={() => { update(FISHBONE_DEFAULT); setCatIdx(0); showToast('鱼骨图已重置为演示内容'); }}
+            onClick={() => { update(FISHBONE_DEFAULT, true); setCatIdx(0); showToast('鱼骨图已重置为演示内容'); }}
             style={{ marginTop: 10, fontSize: 11.5, color: '#8a929d', cursor: 'pointer', textDecoration: 'underline' }}
           >
             重置为演示内容

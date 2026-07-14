@@ -4,8 +4,8 @@
  */
 import { create } from 'zustand';
 import {
-  buildData, computeVarModel, computePChart, computeCChart, evalFormula, truthy, FormulaError,
-  type VarModel, type PChartModel, type CChartModel, type TextColumn,
+  buildData, computeVarModel, computePChart, computeCChart, evalFormula, truthy, FormulaError, prepareSpcData,
+  type VarModel, type PChartModel, type CChartModel, type TextColumn, type SpcPreparedData,
 } from '../core';
 import { useApp } from './appStore';
 import { sessionLog } from './sessionLog';
@@ -25,8 +25,21 @@ interface StoredDataset {
   colNames: string[];
   rows: number[][];
   textCols: TextColumn[];
+  /** 尚未录入的占位单元格；与数值分离，允许“实测值确为 0”。 */
+  pendingCells?: PendingCell[];
+  /** 历史恢复/内置研究需要保留的模型语义；普通导入省略。 */
+  isDemo?: boolean;
+  /** 仅当 I-MR 序列不同于 rows 行优先展平值时保存，避免普通数据重复占空间。 */
+  indivSeries?: number[];
   savedAt: string;
 }
+
+export interface DatasetModelOptions {
+  isDemo?: boolean;
+  indivSeries?: number[];
+}
+
+export interface PendingCell { row: number; col: number }
 
 export interface ParetoRow { name: string; count: number }
 export interface ParetoModel { name: string; rows: ParetoRow[] }
@@ -89,15 +102,31 @@ interface DataState {
   cModel: CChartModel;
   /** 帕累托数据(类别+频数);null = 未导入(页面显示空态/示例) */
   paretoModel: ParetoModel | null;
+  /** 显式待录入单元格，不依赖列名或占位数值。 */
+  pendingCells: PendingCell[];
   recents: RecentEntry[];
   mesRunning: boolean;
   /** 编辑历史（撤销/重做,仅覆盖手工编辑） */
   undoStack: EditSnapshot[];
   redoStack: EditSnapshot[];
-  importMatrix(name: string, colNames: string[], rows: number[][], textCols?: TextColumn[]): void;
+  importMatrix(
+    name: string,
+    colNames: string[],
+    rows: number[][],
+    textCols?: TextColumn[],
+    pendingCells?: PendingCell[],
+    modelOptions?: DatasetModelOptions,
+  ): void;
+  /** 追加或覆盖分析输出列；数值列与文本列均按当前工作表行对齐并纳入撤销/持久化。 */
+  writeAnalysisColumns(
+    numericColumns: { name: string; values: number[] }[],
+    textColumns?: TextColumn[],
+  ): void;
   importCounts(kind: 'p' | 'c', name: string, counts: number[], sampleSize?: number): void;
   /** 导入帕累托「类别+频数」数据并持久化 */
   importPareto(name: string, rows: ParetoRow[]): void;
+  /** 清除活动帕累托数据（旧分析记录无法重建时用于避免误显当前数据）。 */
+  clearPareto(): void;
   loadRecent(name: string): void;
   resetDemo(): void;
   /** 手工录入：编辑单元格 / 添加子组（复制末行） / 删除行。编辑演示集自动转「副本」。 */
@@ -122,7 +151,7 @@ interface DataState {
   renameColumn(col: number, name: string): void;
   /** 删除测量列（至少保留 1 列） */
   deleteColumn(col: number): void;
-  /** 在末尾插入测量列（值默认取各行首列的副本,便于随后编辑） */
+  /** 在末尾插入数值列（值默认取各行首列的副本,便于随后编辑） */
   insertColumn(): void;
   /** 用公式(引用 C1../列名)算出一列并追加;成功返回 null,失败返回错误信息 */
   addFormulaColumn(name: string, expr: string): string | null;
@@ -130,8 +159,8 @@ interface DataState {
   subsetByCondition(cond: string): { ok: true; name: string; kept: number; total: number } | { ok: false; error: string };
   /** 统计与替换测量值(3dp 显示容差);col=-1 全部列。replace 为 null 只计数。可撤销。 */
   findReplace(find: number, replace: number | null, col: number): number;
-  /** 转置：k×n → n×k,生成新数据集「xxx (转置)」 */
-  transposeDataset(): void;
+  /** 转置：k×n → n×k；可只转置 SPC 角色层确认的子组列。 */
+  transposeDataset(sourceColumns?: string[]): void;
   /** 堆叠：多测量列堆成单列 + 「来源列」分组标签,生成新数据集「xxx (堆叠)」 */
   stackColumns(): void;
   /** MES 模拟：追加一个子组（首次调用前需 startMesDataset） */
@@ -157,6 +186,20 @@ export function suggestedSpec(model: VarModel): { lsl: number; tgt: number; usl:
   };
 }
 
+/**
+ * 工作表当前的“测量数据口径”。SPC、能力分析和自动规格建议必须共用这一解析，
+ * 否则数值型子组 ID 会在不同页面一会儿是标签、一会儿又被算成测量值。
+ */
+export function resolveActiveMeasurementData(model: VarModel, textCols: TextColumn[]): SpcPreparedData {
+  const app = useApp.getState();
+  return prepareSpcData(model, textCols, {
+    layout: app.spcDataLayout,
+    valueColumn: app.spcValueCol,
+    subgroupColumn: app.spcSubgroupCol,
+    pendingCells: useData.getState().pendingCells,
+  });
+}
+
 const LS_SPECS = 'qp-specs-v1';
 type SpecMap = Record<string, { lsl: number; tgt: number; usl: number }>;
 
@@ -167,10 +210,17 @@ export function rememberSpecFor(name: string, spec: { lsl: number; tgt: number; 
   saveJson(LS_SPECS, map);
 }
 
-/** 切换数据集时恢复其规格限;没有记忆则按 μ±4σ 建议 */
-function suggestSpec(model: VarModel) {
+/** 切换数据集时恢复其规格限;没有记忆则按当前测量角色的 μ±4σ 建议。 */
+export function specForActiveMeasurement(model: VarModel, textCols: TextColumn[]) {
   const saved = (loadJson<SpecMap>(LS_SPECS) ?? {})[model.name];
-  useApp.setState({ ...(saved ?? suggestedSpec(model)), selSub: null });
+  const prepared = saved ? null : resolveActiveMeasurementData(model, textCols);
+  // 角色有歧义时不用原始宽表偷算规格；待用户在 SPC 页明确角色后可在能力页复位。
+  return saved ?? (prepared?.model ? suggestedSpec(prepared.model) : null);
+}
+
+function suggestSpec(model: VarModel, textCols: TextColumn[]) {
+  const suggestion = specForActiveMeasurement(model, textCols);
+  useApp.setState({ ...(suggestion ?? {}), selSub: null });
 }
 
 // ---------- 启动恢复 ----------
@@ -178,12 +228,43 @@ const demo = demoInit();
 const storedAttr = loadJson<{ p?: { name: string; counts: number[]; sampleSize: number }; c?: { name: string; counts: number[] } }>(LS_ATTR);
 const stored = loadJson<StoredDataset>(LS_DATASET);
 
+function modelFromStored(data: StoredDataset): VarModel {
+  return computeVarModel(data.name, data.colNames, data.rows, {
+    isDemo: data.isDemo === true,
+    indivSeries: data.indivSeries?.map((value) => value),
+  });
+}
+
+function storedModelMetadata(model: VarModel, rows: number[][]): Pick<StoredDataset, 'isDemo' | 'indivSeries'> {
+  const flattened = rows.flat();
+  const hasDistinctIndiv = flattened.length !== model.indiv.length
+    || flattened.some((value, index) => value !== model.indiv[index]);
+  return {
+    isDemo: model.isDemo || undefined,
+    indivSeries: hasDistinctIndiv ? [...model.indiv] : undefined,
+  };
+}
+
+function pendingFromStored(data: StoredDataset): PendingCell[] {
+  const source = data.pendingCells ?? data.colNames.flatMap((name, col) =>
+    /待录入/.test(name)
+      ? data.rows.flatMap((row, rowIndex) => row[col] === 0 ? [{ row: rowIndex, col }] : [])
+      : [],
+  );
+  return source.filter((p) =>
+    Number.isInteger(p.row) && Number.isInteger(p.col)
+    && p.row >= 0 && p.row < data.rows.length && p.col >= 0 && p.col < data.colNames.length,
+  );
+}
+
 let initModel = demo.model;
 let initText: TextColumn[] = [];
+let initPending: PendingCell[] = [];
 if (stored) {
   try {
-    initModel = computeVarModel(stored.name, stored.colNames, stored.rows);
+    initModel = modelFromStored(stored);
     initText = stored.textCols ?? [];
+    initPending = pendingFromStored(stored);
   } catch {
     initModel = demo.model;
   }
@@ -216,6 +297,9 @@ interface EditSnapshot {
   colNames: string[];
   rows: number[][];
   textCols: TextColumn[];
+  pendingCells: PendingCell[];
+  isDemo?: boolean;
+  indivSeries?: number[];
 }
 
 const MAX_UNDO = 20;
@@ -226,14 +310,29 @@ function snapshotOf(st: DataState): EditSnapshot {
     colNames: [...st.model.colNames],
     rows: st.model.subs.map((s) => [...s.vals]),
     textCols: st.textCols.map((c) => ({ ...c, values: [...c.values] })),
+    pendingCells: st.pendingCells.map((p) => ({ ...p })),
+    ...storedModelMetadata(st.model, st.model.subs.map((subgroup) => subgroup.vals)),
   };
 }
 
-function restoreSnapshot(set: SetFn, snap: EditSnapshot) {
-  const model = computeVarModel(snap.name, snap.colNames, snap.rows);
-  set({ model, textCols: snap.textCols });
-  const data: StoredDataset = { name: snap.name, colNames: snap.colNames, rows: snap.rows, textCols: snap.textCols, savedAt: new Date().toISOString() };
+function restoreSnapshot(set: SetFn, get: GetFn, snap: EditSnapshot) {
+  const model = computeVarModel(snap.name, snap.colNames, snap.rows, {
+    isDemo: snap.isDemo === true,
+    indivSeries: snap.indivSeries?.map((value) => value),
+  });
+  const data: StoredDataset = {
+    name: snap.name, colNames: snap.colNames, rows: snap.rows, textCols: snap.textCols,
+    pendingCells: snap.pendingCells, isDemo: snap.isDemo, indivSeries: snap.indivSeries,
+    savedAt: new Date().toISOString(),
+  };
+  const recents = [
+    { name: data.name, savedAt: data.savedAt, data },
+    ...get().recents.filter((r) => r.name !== data.name),
+  ].slice(0, MAX_RECENTS);
+  set({ model, textCols: snap.textCols, pendingCells: snap.pendingCells, recents });
   persistActive(data);
+  persistRecents(recents);
+  archiveToVault(data);
 }
 
 /** 桌面端把数据集镜像归档到本机 SQLite 数据集库(不受 localStorage 配额限制)。
@@ -283,7 +382,10 @@ function persistRecents(recents: RecentEntry[]) {
 
 /** 编辑落库：演示集首次编辑转「质检数据 (副本)」,导入集原名持久化并同步最近列表。
  * colNames 省略时沿用当前列名（值编辑）;传入时用于列结构变化（重命名/增删列）。 */
-function applyEdit(set: SetFn, get: GetFn, rows: number[][], textCols: TextColumn[], colNames?: string[]) {
+function applyEdit(
+  set: SetFn, get: GetFn, rows: number[][], textCols: TextColumn[], colNames?: string[],
+  pendingCells: PendingCell[] = get().pendingCells,
+) {
   const st = get();
   const m = st.model;
   // 编辑前快照入撤销栈,清空重做栈
@@ -294,12 +396,12 @@ function applyEdit(set: SetFn, get: GetFn, rows: number[][], textCols: TextColum
   const cols = colNames ?? m.colNames;
   const name = m.isDemo ? '质检数据 (副本)' : m.name;
   const model = computeVarModel(name, cols, rows);
-  const data: StoredDataset = { name, colNames: cols, rows, textCols, savedAt: new Date().toISOString() };
+  const data: StoredDataset = { name, colNames: cols, rows, textCols, pendingCells, savedAt: new Date().toISOString() };
   const recents = [
     { name, savedAt: data.savedAt, data },
     ...get().recents.filter((r) => r.name !== name),
   ].slice(0, MAX_RECENTS);
-  set({ model, textCols, recents });
+  set({ model, textCols, pendingCells, recents });
   persistActive(data);
   persistRecents(recents);
   archiveToVault(data);
@@ -311,24 +413,84 @@ export const useData = create<DataState>((set, get) => ({
   pModel: initP,
   cModel: initC,
   paretoModel: loadJson<ParetoModel>(LS_PARETO),
+  pendingCells: initPending,
   recents: loadJson<RecentEntry[]>(LS_RECENTS) ?? [],
   mesRunning: false,
   undoStack: [],
   redoStack: [],
 
-  importMatrix: (name, colNames, rows, textCols = []) => {
-    const model = computeVarModel(name, colNames, rows);
-    const data: StoredDataset = { name, colNames, rows, textCols, savedAt: new Date().toISOString() };
+  importMatrix: (name, colNames, rows, textCols = [], pendingCells = [], modelOptions = {}) => {
+    const model = computeVarModel(name, colNames, rows, {
+      isDemo: modelOptions.isDemo === true,
+      indivSeries: modelOptions.indivSeries?.map((value) => value),
+    });
+    const validPending = pendingCells.filter((p) =>
+      Number.isInteger(p.row) && Number.isInteger(p.col)
+      && p.row >= 0 && p.row < rows.length && p.col >= 0 && p.col < colNames.length,
+    );
+    const data: StoredDataset = {
+      name, colNames, rows, textCols, pendingCells: validPending,
+      ...storedModelMetadata(model, rows),
+      savedAt: new Date().toISOString(),
+    };
     const recents = [
       { name, savedAt: data.savedAt, data },
       ...get().recents.filter((r) => r.name !== name),
     ].slice(0, MAX_RECENTS);
-    set({ model, textCols, recents });
+    // 导入/创建/另存为会切换数据集，编辑历史不得跨数据集生效。
+    set({ model, textCols, pendingCells: validPending, recents, undoStack: [], redoStack: [] });
+    useApp.setState({ anovaShowDemo: false });
     persistActive(data);
     persistRecents(recents);
     archiveToVault(data);
-    suggestSpec(model);
-    sessionLog(`导入变量数据 ${name} · ${rows.length} 子组 × ${colNames.length} 列`);
+    suggestSpec(model, textCols);
+    sessionLog(`导入变量数据 ${name} · ${rows.length} 行 × ${colNames.length} 个数值列`);
+  },
+
+  writeAnalysisColumns: (numericColumns, textColumns = []) => {
+    const st = get();
+    const rowCount = st.model.k;
+    const allNames = [...numericColumns.map((column) => column.name), ...textColumns.map((column) => column.name)];
+    if (new Set(allNames).size !== allNames.length) throw new Error('分析输出列名不能重复');
+    for (const column of numericColumns) {
+      if (!column.name.trim()) throw new Error('分析输出列名不能为空');
+      if (column.values.length !== rowCount) throw new Error(`「${column.name}」行数与工作表不一致`);
+      if (column.values.some((value) => !Number.isFinite(value))) throw new Error(`「${column.name}」包含非有限数值`);
+    }
+    for (const column of textColumns) {
+      if (!column.name.trim()) throw new Error('分析输出列名不能为空');
+      if (column.values.length !== rowCount) throw new Error(`「${column.name}」行数与工作表不一致`);
+    }
+
+    const textNameSet = new Set(textColumns.map((column) => column.name));
+    const keptOldIndices = st.model.colNames
+      .map((name, index) => ({ name, index }))
+      .filter(({ name }) => !textNameSet.has(name));
+    const indexMap = new Map(keptOldIndices.map(({ index }, nextIndex) => [index, nextIndex]));
+    const colNames = keptOldIndices.map(({ name }) => name);
+    const rows = st.model.subs.map((subgroup) => keptOldIndices.map(({ index }) => subgroup.vals[index]));
+    let pendingCells = st.pendingCells
+      .filter((cell) => indexMap.has(cell.col))
+      .map((cell) => ({ ...cell, col: indexMap.get(cell.col)! }));
+
+    for (const column of numericColumns) {
+      let index = colNames.indexOf(column.name);
+      if (index < 0) {
+        index = colNames.length;
+        colNames.push(column.name);
+        rows.forEach((row, rowIndex) => row.push(column.values[rowIndex]));
+      } else {
+        rows.forEach((row, rowIndex) => { row[index] = column.values[rowIndex]; });
+        pendingCells = pendingCells.filter((cell) => cell.col !== index);
+      }
+    }
+    const numericNameSet = new Set(numericColumns.map((column) => column.name));
+    const nextText = st.textCols
+      .filter((column) => !numericNameSet.has(column.name) && !textNameSet.has(column.name))
+      .map((column) => ({ ...column, values: [...column.values] }));
+    nextText.push(...textColumns.map((column) => ({ name: column.name, values: [...column.values] })));
+    applyEdit(set, get, rows, nextText, colNames, pendingCells);
+    sessionLog(`写回分析结果 · ${numericColumns.length} 个数值列 + ${textColumns.length} 个文本列`);
   },
 
   importCounts: (kind, name, counts, sampleSize = 50) => {
@@ -348,17 +510,24 @@ export const useData = create<DataState>((set, get) => ({
   importPareto: (name, rows) => {
     const paretoModel: ParetoModel = { name, rows };
     set({ paretoModel });
+    useApp.setState({ paretoShowDemo: false });
     saveJson(LS_PARETO, paretoModel);
     sessionLog(`导入帕累托数据 ${name} · ${rows.length} 个类别`);
+  },
+
+  clearPareto: () => {
+    set({ paretoModel: null });
+    try { localStorage.removeItem(LS_PARETO); } catch { /* 非浏览器环境忽略 */ }
   },
 
   loadRecent: (name) => {
     const r = get().recents.find((x) => x.name === name);
     if (r?.data) {
-      const model = computeVarModel(r.data.name, r.data.colNames, r.data.rows);
-      set({ model, textCols: r.data.textCols ?? [] });
+      const model = modelFromStored(r.data);
+      set({ model, textCols: r.data.textCols ?? [], pendingCells: pendingFromStored(r.data), undoStack: [], redoStack: [] });
+      useApp.setState({ anovaShowDemo: false });
       persistActive(r.data);
-      suggestSpec(model);
+      suggestSpec(model, r.data.textCols ?? []);
       sessionLog(`加载最近数据集 ${name}`);
       return;
     }
@@ -366,24 +535,29 @@ export const useData = create<DataState>((set, get) => ({
     platform.datasetDb?.get(name).then((json) => {
       if (!json) return;
       const data = JSON.parse(json) as StoredDataset;
-      const model = computeVarModel(data.name, data.colNames, data.rows);
-      set({ model, textCols: data.textCols ?? [] });
+      const model = modelFromStored(data);
+      set({ model, textCols: data.textCols ?? [], pendingCells: pendingFromStored(data), undoStack: [], redoStack: [] });
+      useApp.setState({ anovaShowDemo: false });
       persistActive(data);
-      suggestSpec(model);
+      suggestSpec(model, data.textCols ?? []);
       sessionLog(`从数据集库加载 ${name}`);
     }).catch(() => { /* 库中无此集或读取失败,静默 */ });
   },
 
   resetDemo: () => {
     const d = demoInit();
-    set({ model: d.model, textCols: [], pModel: d.p, cModel: d.c, paretoModel: null, mesRunning: false });
+    set({
+      model: d.model, textCols: [], pModel: d.p, cModel: d.c, paretoModel: null,
+      pendingCells: [], mesRunning: false, undoStack: [], redoStack: [],
+    });
+    useApp.setState({ paretoShowDemo: false, anovaShowDemo: false });
     try {
       localStorage.removeItem(LS_DATASET);
       localStorage.removeItem(LS_ATTR);
       localStorage.removeItem(LS_PARETO);
       localStorage.removeItem(LS_ACTIVE_REF);
     } catch { /* 非浏览器环境忽略 */ }
-    suggestSpec(d.model);
+    suggestSpec(d.model, []);
     sessionLog('恢复演示数据集 质检数据.mtw');
   },
 
@@ -393,7 +567,8 @@ export const useData = create<DataState>((set, get) => ({
     const rows = m.subs.map((s) => [...s.vals]);
     if (row < 0 || row >= rows.length || col < 0 || col >= m.n) return;
     rows[row][col] = value;
-    applyEdit(set, get, rows, get().textCols);
+    const pendingCells = get().pendingCells.filter((p) => p.row !== row || p.col !== col);
+    applyEdit(set, get, rows, get().textCols, undefined, pendingCells);
   },
 
   addSubgroupRow: () => {
@@ -401,7 +576,12 @@ export const useData = create<DataState>((set, get) => ({
     const rows = m.subs.map((s) => [...s.vals]);
     rows.push([...rows[rows.length - 1]]); // 复制末行,便于就地修改
     const textCols = get().textCols.map((c) => ({ ...c, values: [...c.values, c.values[c.values.length - 1] ?? ''] }));
-    applyEdit(set, get, rows, textCols);
+    // 若末行仍含占位值，新复制行必须继承同列的待录入语义。
+    const pendingCells = [
+      ...get().pendingCells,
+      ...get().pendingCells.filter((p) => p.row === m.k - 1).map((p) => ({ row: m.k, col: p.col })),
+    ];
+    applyEdit(set, get, rows, textCols, undefined, pendingCells);
   },
 
   deleteRow: (row) => {
@@ -415,7 +595,10 @@ export const useData = create<DataState>((set, get) => ({
       values.splice(row, 1);
       return { ...c, values };
     });
-    applyEdit(set, get, rows, textCols);
+    const pendingCells = get().pendingCells
+      .filter((p) => p.row !== row)
+      .map((p) => ({ ...p, row: p.row > row ? p.row - 1 : p.row }));
+    applyEdit(set, get, rows, textCols, undefined, pendingCells);
     useApp.setState({ selSub: null });
   },
 
@@ -427,7 +610,7 @@ export const useData = create<DataState>((set, get) => ({
       undoStack: st.undoStack.slice(0, -1),
       redoStack: [...st.redoStack.slice(-(MAX_UNDO - 1)), snapshotOf(st)],
     });
-    restoreSnapshot(set, snap);
+    restoreSnapshot(set, get, snap);
     sessionLog('撤销编辑');
     return true;
   },
@@ -440,7 +623,7 @@ export const useData = create<DataState>((set, get) => ({
       redoStack: st.redoStack.slice(0, -1),
       undoStack: [...st.undoStack.slice(-(MAX_UNDO - 1)), snapshotOf(st)],
     });
-    restoreSnapshot(set, snap);
+    restoreSnapshot(set, get, snap);
     sessionLog('重做编辑');
     return true;
   },
@@ -461,11 +644,13 @@ export const useData = create<DataState>((set, get) => ({
     const base = m.name.replace(/ \(副本\d*\)$/, '');
     const existing = get().recents.filter((r) => r.name.startsWith(base + ' (副本')).length;
     const name = `${base} (副本${existing > 0 ? existing + 1 : ''})`;
-    get().importMatrix(name, m.colNames, m.subs.map((s) => [...s.vals]), get().textCols);
+    get().importMatrix(name, m.colNames, m.subs.map((s) => [...s.vals]), get().textCols, get().pendingCells);
     return name;
   },
 
   standardize: () => {
+    // 占位值不是观测值，参与均值/标准差会污染所有标准化结果。
+    if (get().pendingCells.length > 0) return null;
     const m = get().model;
     // 各列 z = (x − x̄ⱼ)/sⱼ;列内无变异则拒绝
     const cols = m.colNames.map((_, j) => m.subs.map((s) => s.vals[j]));
@@ -505,7 +690,12 @@ export const useData = create<DataState>((set, get) => ({
     );
     const rows = idx.map((i) => [...m.subs[i].vals]);
     const textCols = get().textCols.map((c) => ({ ...c, values: idx.map((i) => c.values[i]) }));
-    applyEdit(set, get, rows, textCols);
+    const oldPending = new Set(get().pendingCells.map((p) => `${p.row}:${p.col}`));
+    const pendingCells: PendingCell[] = [];
+    idx.forEach((oldRow, newRow) => {
+      for (let col2 = 0; col2 < m.n; col2++) if (oldPending.has(`${oldRow}:${col2}`)) pendingCells.push({ row: newRow, col: col2 });
+    });
+    applyEdit(set, get, rows, textCols, undefined, pendingCells);
     sessionLog(`按「${m.colNames[col]}」${asc ? '升序' : '降序'}排序`);
   },
 
@@ -529,21 +719,27 @@ export const useData = create<DataState>((set, get) => ({
     if (col < 0 || col >= m.n) return;
     const colNames = m.colNames.filter((_, i) => i !== col);
     const rows = m.subs.map((s) => s.vals.filter((_, i) => i !== col));
-    applyEdit(set, get, rows, get().textCols, colNames);
+    const pendingCells = get().pendingCells
+      .filter((p) => p.col !== col)
+      .map((p) => ({ ...p, col: p.col > col ? p.col - 1 : p.col }));
+    applyEdit(set, get, rows, get().textCols, colNames, pendingCells);
     useApp.setState({ selSub: null });
   },
 
   insertColumn: () => {
     const m = get().model;
-    if (m.n >= 10) return; // 控制图常数表上限
     const colNames = [...m.colNames, `测量${m.n + 1}`];
     const rows = m.subs.map((s) => [...s.vals, s.vals[s.vals.length - 1]]);
-    applyEdit(set, get, rows, get().textCols, colNames);
+    const pendingCells = [
+      ...get().pendingCells,
+      ...get().pendingCells.filter((p) => p.col === m.n - 1).map((p) => ({ row: p.row, col: m.n })),
+    ];
+    applyEdit(set, get, rows, get().textCols, colNames, pendingCells);
   },
 
   addFormulaColumn: (name, expr) => {
+    if (get().pendingCells.length > 0) return '工作表仍有待录入单元格，不能用占位值生成公式列';
     const m = get().model;
-    if (m.n >= 10) return '测量列已达上限（10 列），无法再添加';
     const clean = name.trim() || `公式${m.n + 1}`;
     const columns = m.colNames.map((_, j) => m.subs.map((s) => s.vals[j]));
     let values: number[];
@@ -576,13 +772,21 @@ export const useData = create<DataState>((set, get) => ({
         return v;
       }),
     );
-    if (replace == null || count === 0) return count; // 只计数或无命中
-    applyEdit(set, get, rows, get().textCols);
+    // 查找或“原值替换为原值”不代表确认录入，不能借此清除待录入标记。
+    if (replace == null || count === 0 || replace === find) return count;
+    const pendingCells = get().pendingCells.filter((p) => {
+      if (col !== -1 && p.col !== col) return true;
+      return !hit(m.subs[p.row]?.vals[p.col]);
+    });
+    applyEdit(set, get, rows, get().textCols, undefined, pendingCells);
     sessionLog(`查找替换:${find} → ${replace} · ${count} 处${col >= 0 ? ` · 限「${m.colNames[col]}」列` : ''}`);
     return count;
   },
 
   subsetByCondition: (cond) => {
+    if (get().pendingCells.length > 0) {
+      return { ok: false, error: '工作表仍有待录入单元格，请完成录入后再生成子集' };
+    }
     const m = get().model;
     const columns = m.colNames.map((_, j) => m.subs.map((s) => s.vals[j]));
     let flags: number[];
@@ -604,19 +808,29 @@ export const useData = create<DataState>((set, get) => ({
     return { ok: true, name, kept, total: m.k };
   },
 
-  transposeDataset: () => {
+  transposeDataset: (sourceColumns) => {
+    if (get().pendingCells.length > 0) throw new Error('工作表仍有待录入单元格，请完成录入后再转置');
     const m = get().model;
     const rows = m.subs.map((s) => s.vals);
     if (rows.length > 10) {
-      throw new Error(`转置后子组大小为 ${rows.length},超出控制图常数表上限 10`);
+      throw new Error(`转置后每个子组将包含 ${rows.length} 次测量；X̄-R/X̄-S 的组内样本量需为 2–10。数值列数量本身不限。`);
     }
-    const t: number[][] = Array.from({ length: m.n }, (_, j) => rows.map((r) => r[j]));
-    const colNames = rows.map((_, i) => `子组${i + 1}`);
+    const selectedIndices = sourceColumns == null
+      ? m.colNames.map((_, index) => index)
+      : sourceColumns.map((name) => m.colNames.indexOf(name)).filter((index) => index >= 0);
+    if (selectedIndices.length < 2 || new Set(selectedIndices).size !== selectedIndices.length) {
+      throw new Error('转置至少需要 2 个不重复的数值子组列');
+    }
+    const t: number[][] = selectedIndices.map((j) => rows.map((r) => r[j]));
+    // 转置后每行才是一个子组；原数值列名是子组身份，必须保留而不是改成隐含序号。
+    const colNames = rows.map((_, i) => `测量${i + 1}`);
+    const subgroupLabels: TextColumn[] = [{ name: '原列子组', values: selectedIndices.map((i) => m.colNames[i]) }];
     const base = m.name.replace(/ \(转置\)$/, '');
-    get().importMatrix(`${base} (转置)`, colNames, t);
+    get().importMatrix(`${base} (转置)`, colNames, t, subgroupLabels);
   },
 
   stackColumns: () => {
+    if (get().pendingCells.length > 0) throw new Error('工作表仍有待录入单元格，请完成录入后再堆叠');
     const m = get().model;
     if (m.n < 2) throw new Error('单列数据无需堆叠');
     const rows: number[][] = [];
@@ -640,8 +854,8 @@ export const useData = create<DataState>((set, get) => ({
     ];
     const colNames = Array.from({ length: n }, (_, i) => `测点${i + 1}`);
     const model = computeVarModel('MES 实时采集', colNames, seedRows);
-    set({ model, textCols: [] });
-    suggestSpec(model);
+    set({ model, textCols: [], pendingCells: [], undoStack: [], redoStack: [] });
+    suggestSpec(model, []);
   },
 
   appendSubgroup: (vals) => {
@@ -652,11 +866,19 @@ export const useData = create<DataState>((set, get) => ({
     }
     const rows = [...m.subs.map((s) => s.vals), vals];
     const model = computeVarModel(m.name, m.colNames, rows);
-    set({ model });
+    set({ model, pendingCells: [] });
   },
 
   setMesRunning: (mesRunning) => set({ mesRunning }),
 }));
+
+/** SPC 角色在导入之后才被用户明确时，同步刷新全局规格建议，供仪表盘与能力页共用。 */
+export function syncSpecForActiveMeasurement() {
+  const { model, textCols } = useData.getState();
+  const suggestion = specForActiveMeasurement(model, textCols);
+  if (suggestion) useApp.setState(suggestion);
+  return suggestion;
+}
 
 /** 启动恢复:活动数据集曾因超配额只存到 SQLite 库时(留有标记),从库中取回。
  * Web 端 datasetDb 为 null 直接跳过;测试中可显式调用。 */
@@ -672,9 +894,12 @@ export function hydrateActiveFromVault(): void {
       return;
     }
     const data = JSON.parse(json) as StoredDataset;
-    const model = computeVarModel(data.name, data.colNames, data.rows);
-    useData.setState({ model, textCols: data.textCols ?? [] });
-    suggestSpec(model);
+    const model = modelFromStored(data);
+    useData.setState({
+      model, textCols: data.textCols ?? [], pendingCells: pendingFromStored(data),
+      undoStack: [], redoStack: [],
+    });
+    suggestSpec(model, data.textCols ?? []);
     sessionLog(`从数据集库恢复活动数据集 ${ref}(上次因超配额存于本机库)`);
   }).catch(() => { /* 恢复失败保持现状 */ });
 }

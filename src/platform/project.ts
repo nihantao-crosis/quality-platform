@@ -13,6 +13,7 @@ export const PROJECT_KEYS = [
   'qp-specs-v1',
   'qp-fishbone-v1',
   'qp-analyses-v1',
+  'qp-analysis-data-v1',
   'qp-pareto-v1',
   'qp-prefs-v1',
 ] as const;

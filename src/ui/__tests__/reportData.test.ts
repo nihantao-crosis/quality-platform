@@ -1,6 +1,6 @@
 /** 助手结论卡纯 builder:红绿灯与体检项。 */
 import { describe, it, expect } from 'vitest';
-import { spcReport, capabilityReport, gageReport, anovaReport, tReport, regReport } from '../reportData';
+import { spcReport, capabilityReport, gageReport, anovaReport, tReport, regReport, paretoReport } from '../reportData';
 
 describe('SPC 结论', () => {
   it('无失控 + 数据充足 → 通过', () => {
@@ -15,9 +15,21 @@ describe('SPC 结论', () => {
       k: 25, n: 5, hasSubgroups: true, typeLabel: 'X̄-R',
     });
     expect(r.verdict).toBe('bad');
-    expect(r.headline).toContain('2 个失控信号'); // 去重后 2 个点
+    expect(r.headline).toContain('2 个失控点');
     expect(r.checks[0].note).toContain('准则1×2');
     expect(r.checks[0].note).toContain('准则2×1');
+    expect(r.checks[0].note).toContain('3 个点-准则命中');
+  });
+  it('同一子组在 X̄/R 两图命中仍计 1 个实际失控点', () => {
+    const r = spcReport({
+      violList: [
+        { i: 7, rule: 1, desc: '', chartLabel: 'X̄' },
+        { i: 7, rule: 1, desc: '', chartLabel: 'R' },
+      ],
+      k: 25, n: 5, hasSubgroups: true, typeLabel: 'X̄-R',
+    });
+    expect(r.headline).toContain('1 个失控点');
+    expect(r.checks[0].note).toContain('2 个点-准则命中');
   });
   it('点数不足 → 需注意', () => {
     const r = spcReport({ violList: [], k: 12, n: 5, hasSubgroups: true, typeLabel: 'X̄-R' });
@@ -26,6 +38,73 @@ describe('SPC 结论', () => {
   it('单值数据提示灵敏度', () => {
     const r = spcReport({ violList: [], k: 30, n: 1, hasSubgroups: false, typeLabel: 'I-MR' });
     expect(r.checks.find((c) => c.name === '子组结构')!.level).toBe('warn');
+  });
+  it('P/C 属性图不借用变量工作表的子组结构', () => {
+    const p = spcReport({
+      violList: [], k: 25, n: 50, hasSubgroups: false, structure: 'attribute-p', typeLabel: 'P 图',
+    });
+    expect(p.checks.find((c) => c.name === '抽样结构')?.note).toContain('n=50');
+    expect(p.checks.some((c) => c.note.includes('组内变异'))).toBe(false);
+
+    const c = spcReport({
+      violList: [], k: 25, n: 1, hasSubgroups: false, structure: 'attribute-c', typeLabel: 'C 图',
+    });
+    expect(c.checks.find((x) => x.name === '计数结构')?.note).toContain('检验机会');
+    expect(c.checks.some((x) => x.note.includes('单值数据'))).toBe(false);
+  });
+  it('X̄-R 明确先判 R；R 失控时暂停解释 X̄，并输出结构化角色信息', () => {
+    const r = spcReport({
+      violList: [
+        { i: 4, rule: 2, desc: '趋势', chartLabel: 'X̄' },
+        { i: 7, rule: 1, desc: '越界', chartLabel: 'R' },
+      ],
+      variationViolations: [{ i: 7, rule: 1, desc: '越界', chartLabel: 'R' }],
+      variationChartLabel: 'R', k: 25, n: 5, hasSubgroups: true, typeLabel: 'X̄-R',
+      variableName: '直径', dataRole: '子组列只作标签；5 个测量列',
+    });
+    expect(r.headline).toContain('R 图先检出');
+    expect(r.headline).toContain('暂停解释');
+    expect(r.checks[0].name).toBe('先判 R 图');
+    expect(r.details.readingOrder).toBe('先判 R 图，再解释 X̄ 图');
+    expect(r.details.variableName).toBe('直径');
+    expect(r.details.dataRole).toContain('只作标签');
+    expect(r.details.variationStable).toBe(false);
+  });
+});
+
+describe('帕累托专项报告', () => {
+  it('按频数降序、计算累计百分比并保留柱值所需结构', () => {
+    const r = paretoReport({
+      rows: [{ name: 'A', count: 35 }, { name: 'B', count: 15 }, { name: 'C', count: 50 }],
+      mergeOther: false, threshold: 0.95,
+    });
+    expect(r.total).toBe(100);
+    expect(r.rows.map((x) => x.name)).toEqual(['C', 'A', 'B']);
+    expect(r.rows.map((x) => x.count)).toEqual([50, 35, 15]);
+    expect(r.rows.map((x) => x.cumulativePercentage)).toEqual([50, 85, 100]);
+  });
+
+  it('95% 阈值将超过阈值后的多个尾部类别合并为其他', () => {
+    const r = paretoReport({
+      rows: [70, 20, 5, 2, 2, 1].map((count, i) => ({ name: String.fromCharCode(65 + i), count })),
+      mergeOther: true, threshold: 0.95,
+    });
+    expect(r.rows.map((x) => x.name)).toEqual(['A', 'B', 'C', '其他']);
+    expect(r.rows[r.rows.length - 1]).toMatchObject({ count: 5, mergedOther: true, cumulativePercentage: 100 });
+    expect(r.mergedCategoryCount).toBe(3);
+  });
+
+  it('源数据已有“其他”时，尾部合并后只保留一个“其他”', () => {
+    const r = paretoReport({
+      rows: [
+        { name: 'A', count: 50 }, { name: 'B', count: 20 }, { name: '其他', count: 15 },
+        { name: 'C', count: 8 }, { name: 'D', count: 5 }, { name: 'E', count: 2 },
+      ],
+      mergeOther: true, threshold: 0.8,
+    });
+    expect(r.rows.map((row) => row.name)).toEqual(['A', 'B', '其他']);
+    expect(r.rows.find((row) => row.name === '其他')).toMatchObject({ count: 30, mergedOther: true });
+    expect(r.rows.filter((row) => row.name === '其他')).toHaveLength(1);
   });
 });
 

@@ -106,7 +106,7 @@ export function SideNav() {
             <div
               key={a.id}
               className="hov-nav rc-row"
-              title={`${a.title} · ${a.metric} · ${a.datasetName}\n点击回看此分析`}
+              title={`${a.title} · ${a.metric} · ${a.datasetName}\n${a.kind === 'aql' ? '历史摘要：点击返回当前 AQL，不回滚连续检验流' : '点击恢复此分析的数据集与参数'}`}
               onClick={() => restore(a.id)}
               style={{ paddingLeft: 16, color: '#7a828d', cursor: 'pointer', borderRadius: 4, overflow: 'hidden', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center' }}
             >

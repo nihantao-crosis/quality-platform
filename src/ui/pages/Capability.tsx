@@ -1,8 +1,7 @@
 /** 过程能力分析 ★深度实现 — 可编辑规格限实时重算 + 直方图 + PPM 性能表。 */
-import { useState } from 'react';
 import { useApp } from '../../store/appStore';
-import { useData, suggestedSpec, rememberSpecFor } from '../../store/dataStore';
-import { nf, fmtCap, computeCapability, andersonDarling, bestLambda, transformWithSpec, stdev, evalRules } from '../../core';
+import { useData, suggestedSpec, rememberSpecFor, resolveActiveMeasurementData } from '../../store/dataStore';
+import { nf, fmtCap, capabilityInputError, computeCapability, andersonDarling, bestLambda, transformWithSpec, stdev, evalRules } from '../../core';
 import { ReportCard } from '../ReportCard';
 import { capabilityReport } from '../reportData';
 import type { ChartTokens } from '../tokens';
@@ -11,18 +10,98 @@ import { Histogram } from '../charts/Histogram';
 import { NormalProbPlot } from '../charts/NormalProbPlot';
 
 export function Capability({ T }: { T: ChartTokens }) {
-  const { lsl, usl, tgt, lslOn, uslOn, toggleSide, setSpec: setSpecRaw, spcRules } = useApp();
+  const { lsl, usl, tgt, lslOn, uslOn, toggleSide, setSpec: setSpecRaw, spcRules, goTo, capabilityBins: bins, setCapabilityBins: setBins } = useApp();
+  const rawModel = useData((s) => s.model);
+  const textCols = useData((s) => s.textCols);
+  const prepared = resolveActiveMeasurementData(rawModel, textCols);
+  const M = prepared.model;
+  // 规格同步只在“导入/切换数据集”和“SPC 明确数据角色”两个入口发生。
+  // 能力页不能再按数据集记忆自动覆盖规格，否则历史恢复（包括页面已挂载时）
+  // 会把快照中的 LSL/Target/USL 改成今天的规格，导致同一记录回看出不同 Cpk。
+  if (!M) {
+    return (
+      <Card style={{ padding: 24, borderColor: '#f0caca', color: '#a62b2b', lineHeight: 1.7 }}>
+        <b>过程能力分析未运行：</b>{prepared.error ?? '无法确定当前测量数据角色。'}<br />
+        能力页与控制图共用同一数据口径，不会把子组 ID 或其他数值字段静默混入计算。
+        <button
+          type="button"
+          onClick={() => goTo('spc')}
+          style={{ display: 'block', marginTop: 12, padding: '6px 12px', border: '1px solid #bcd6ee', borderRadius: 4, background: '#fff', color: '#1f6fb2', cursor: 'pointer', fontWeight: 600 }}
+        >
+          前往控制图配置数据角色
+        </button>
+      </Card>
+    );
+  }
   // 写规格限时同步记忆到当前数据集（切换数据集/重启后恢复）
   const setSpec = (patch: Partial<{ lsl: number; usl: number; tgt: number }>) => {
     setSpecRaw(patch);
     const s = useApp.getState();
     rememberSpecFor(M.name, { lsl: s.lsl, tgt: s.tgt, usl: s.usl });
   };
-  const M = useData((s) => s.model);
-  const [bins, setBins] = useState(13);
   // 单侧规格：关闭的一侧传 null
   const effLsl = lslOn ? lsl : null;
   const effUsl = uslOn ? usl : null;
+  const inputs: Array<{ label: string; value: number; key: 'lsl' | 'tgt' | 'usl'; on: boolean; side?: 'lslOn' | 'uslOn' }> = [
+    { label: 'LSL 下限', value: lsl, key: 'lsl', on: lslOn, side: 'lslOn' },
+    { label: '目标 Target', value: tgt, key: 'tgt', on: true },
+    { label: 'USL 上限', value: usl, key: 'usl', on: uslOn, side: 'uslOn' },
+  ];
+  const specEditor = (
+    <Card style={{ padding: '11px 16px', display: 'flex', alignItems: 'center', gap: 18, flexWrap: 'wrap' }}>
+      <span style={{ fontSize: 12, color: '#8a929d', fontWeight: 600 }}>规格限 (可编辑，实时重算)</span>
+      {inputs.map((i) => (
+        <label key={i.key} style={{ display: 'inline-flex', alignItems: 'center', gap: 7, fontSize: 12.5, color: i.on ? '#5b6472' : '#b6bdc6' }}>
+          {i.side && (
+            <input
+              type="checkbox"
+              checked={i.on}
+              title={i.on ? '取消勾选 → 单侧规格（忽略此限）' : '启用此侧规格限'}
+              onChange={() => toggleSide(i.side!)}
+            />
+          )}
+          {i.label}
+          <input
+            type="number"
+            step="0.01"
+            value={i.value}
+            disabled={!i.on}
+            onChange={(e) => {
+              const v = parseFloat(e.target.value);
+              if (!isNaN(v)) setSpec({ [i.key]: v });
+            }}
+            style={{ ...numInput, ...(i.on ? {} : { background: '#f4f6f8', color: '#b6bdc6' }) }}
+          />
+        </label>
+      ))}
+      {!(lslOn && uslOn) && (
+        <span style={{ fontSize: 11.5, color: '#d98324', fontWeight: 600 }}>
+          单侧规格：Cpk = {lslOn ? 'CPL' : 'CPU'},双侧指标（Cp/Pp/Cpm）不适用
+        </span>
+      )}
+      <div
+        onClick={() => setSpec(suggestedSpec(M))}
+        title={M.isDemo ? '恢复默认规格 24.90 / 25.00 / 25.10' : `按当前测量口径（${prepared.variableName}）的 μ±4σ 重新建议规格限`}
+        style={{ padding: '5px 12px', border: '1px solid #cfd5dd', borderRadius: 4, cursor: 'pointer', fontSize: 12, color: '#5b6472', background: '#fff' }}
+      >
+        复位
+      </div>
+    </Card>
+  );
+  const inputError = capabilityInputError(M.all, M.sigmaWithin, { lsl: effLsl, tgt, usl: effUsl });
+  if (inputError) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <Card style={{ padding: '10px 16px', color: '#5b6472', fontSize: 12.5, lineHeight: 1.6 }}>
+          <b style={{ color: '#33404f' }}>能力数据口径：</b>{prepared.note}；变量：{prepared.variableName}；实际观测 N={M.all.length}。
+        </Card>
+        {specEditor}
+        <Card style={{ padding: '18px 20px', color: '#a62b2b', background: '#fff5f5', borderColor: '#f0caca', lineHeight: 1.7 }}>
+          <b>过程能力分析未运行：</b>{inputError}。请修正规格限或补充有变异的实测数据；系统不会输出负能力指数、无穷 Cpk 或超过 100% 的预测缺陷率。
+        </Card>
+      </div>
+    );
+  }
   const cap = computeCapability(M.all, M.sigmaWithin, { lsl: effLsl, tgt, usl: effUsl });
   const good = cap.verdict === 'sufficient';
   const marginal = cap.verdict === 'marginal';
@@ -32,12 +111,6 @@ export function Capability({ T }: { T: ChartTokens }) {
     : marginal
       ? { background: '#fcf3e3', color: '#d98324' }
       : { background: '#fdecec', color: '#c22f2f' };
-
-  const inputs: Array<{ label: string; value: number; key: 'lsl' | 'tgt' | 'usl'; on: boolean; side?: 'lslOn' | 'uslOn' }> = [
-    { label: 'LSL 下限', value: lsl, key: 'lsl', on: lslOn, side: 'lslOn' },
-    { label: '目标 Target', value: tgt, key: 'tgt', on: true },
-    { label: 'USL 上限', value: usl, key: 'usl', on: uslOn, side: 'uslOn' },
-  ];
 
   const big = [
     { k: 'Cp', v: fmtCap(cap.cp), color: '#1f6fb2' },
@@ -85,50 +158,15 @@ export function Capability({ T }: { T: ChartTokens }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <ReportCard data={report} />
-      <Card style={{ padding: '11px 16px', display: 'flex', alignItems: 'center', gap: 18, flexWrap: 'wrap' }}>
-        <span style={{ fontSize: 12, color: '#8a929d', fontWeight: 600 }}>规格限 (可编辑，实时重算)</span>
-        {inputs.map((i) => (
-          <label key={i.key} style={{ display: 'inline-flex', alignItems: 'center', gap: 7, fontSize: 12.5, color: i.on ? '#5b6472' : '#b6bdc6' }}>
-            {i.side && (
-              <input
-                type="checkbox"
-                checked={i.on}
-                title={i.on ? '取消勾选 → 单侧规格（忽略此限）' : '启用此侧规格限'}
-                onChange={() => toggleSide(i.side!)}
-              />
-            )}
-            {i.label}
-            <input
-              type="number"
-              step="0.01"
-              value={i.value}
-              disabled={!i.on}
-              onChange={(e) => {
-                const v = parseFloat(e.target.value);
-                if (!isNaN(v)) setSpec({ [i.key]: v });
-              }}
-              style={{ ...numInput, ...(i.on ? {} : { background: '#f4f6f8', color: '#b6bdc6' }) }}
-            />
-          </label>
-        ))}
-        {!(lslOn && uslOn) && (
-          <span style={{ fontSize: 11.5, color: '#d98324', fontWeight: 600 }}>
-            单侧规格：Cpk = {lslOn ? 'CPL' : 'CPU'},双侧指标（Cp/Pp/Cpm）不适用
-          </span>
-        )}
-        <div
-          onClick={() => setSpec(suggestedSpec(M))}
-          title={M.isDemo ? '恢复默认规格 24.90 / 25.00 / 25.10' : '按 μ±4σ 重新建议规格限'}
-          style={{ padding: '5px 12px', border: '1px solid #cfd5dd', borderRadius: 4, cursor: 'pointer', fontSize: 12, color: '#5b6472', background: '#fff' }}
-        >
-          复位
-        </div>
+      <Card style={{ padding: '10px 16px', color: '#5b6472', fontSize: 12.5, lineHeight: 1.6 }}>
+        <b style={{ color: '#33404f' }}>能力数据口径：</b>{prepared.note}；变量：{prepared.variableName}；实际观测 N={M.all.length}。
       </Card>
+      {specEditor}
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 16 }}>
         <Card>
           <div style={{ display: 'flex', alignItems: 'center', padding: '11px 16px', borderBottom: '1px solid #edf0f3' }}>
-            <div style={{ fontWeight: 600, color: '#33404f' }}>过程能力直方图 · {M.isDemo ? '直径 (mm)' : M.name}</div>
+            <div style={{ fontWeight: 600, color: '#33404f' }}>过程能力直方图 · {M.isDemo ? '直径 (mm)' : prepared.variableName}</div>
             <label className="mono" style={{ marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 11.5, color: '#8a929d' }}>
               组数 {bins}
               <input

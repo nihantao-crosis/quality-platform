@@ -201,7 +201,12 @@ export function MenuBar({ wsName }: { wsName: string }) {
       return;
     }
     if (act.standardize) {
-      const name = useData.getState().standardize();
+      const data = useData.getState();
+      if (data.pendingCells.length > 0) {
+        showToast(`仍有 ${data.pendingCells.length} 个单元格待录入，完成后才能标准化`);
+        return;
+      }
+      const name = data.standardize();
       if (name) {
         goTo('worksheet');
         showToast('已标准化为新数据集 ' + name);

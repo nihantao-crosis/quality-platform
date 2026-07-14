@@ -19,9 +19,16 @@ function MainEffectsImpl({ T, factors }: { T: ChartTokens; factors: { name: stri
   const allMeans = factors.flatMap((f) => [f.lo, f.hi]);
   let lo = Math.min(...allMeans);
   let hi = Math.max(...allMeans);
-  const p = (hi - lo) * 0.3;
-  lo -= p;
-  hi += p;
+  if (!(hi > lo)) {
+    const center = Number.isFinite(lo) ? lo : 0;
+    const half = Math.max(1, Math.abs(center) * 0.1);
+    lo = center - half;
+    hi = center + half;
+  } else {
+    const p = (hi - lo) * 0.3;
+    lo -= p;
+    hi += p;
+  }
   const ph = H - m.t - m.b;
   const grand = allMeans.reduce((a, b) => a + b, 0) / allMeans.length;
   const Y = (v: number) => m.t + (1 - (v - lo) / (hi - lo)) * ph;
@@ -60,9 +67,16 @@ function InteractionPlotImpl({ T, c00, c10, c01, c11, labelA = 'A', labelB = 'B'
   const vals = [c00, c10, c01, c11];
   let lo = Math.min(...vals);
   let hi = Math.max(...vals);
-  const pad = (hi - lo) * 0.32;
-  lo -= pad;
-  hi += pad;
+  if (!(hi > lo)) {
+    const center = Number.isFinite(lo) ? lo : 0;
+    const half = Math.max(1, Math.abs(center) * 0.1);
+    lo = center - half;
+    hi = center + half;
+  } else {
+    const pad = (hi - lo) * 0.32;
+    lo -= pad;
+    hi += pad;
+  }
   const Y = (v: number) => m.t + (1 - (v - lo) / (hi - lo)) * ph;
   const xL = m.l + pw * 0.22;
   const xH = m.l + pw * 0.78;
@@ -102,9 +116,9 @@ function EffectsBarImpl({ T, terms, refLine }: { T: ChartTokens; terms: { name: 
   const m = { t: 26, r: 40, b: 26, l: 88 };
   const pw = W - m.l - m.r;
   const ph = H - m.t - m.b;
-  const maxv = Math.max(refLine, ...terms.map((t) => t.abs)) * 1.12;
+  const maxv = Math.max(1e-9, refLine, ...terms.map((t) => t.abs)) * 1.12;
   const X = (v: number) => m.l + (v / maxv) * pw;
-  const bh = (ph / terms.length) * 0.6;
+  const bh = (ph / Math.max(1, terms.length)) * 0.6;
   return (
     <Svg w={W} h={H}>
       <rect x={0} y={0} width={W} height={H} fill={T.bg} />

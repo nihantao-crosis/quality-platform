@@ -1,10 +1,11 @@
-/** 抽样检验 AQL ★深度实现 — 批量/水平/AQL 实时重算 + OC 曲线 + 方案表 + 转移规则模拟。 */
+/** 抽样检验 AQL—正式主表、实际批判定、责任追溯与第 9.3/9.4 条转移规则。 */
 import { useState } from 'react';
 import { useApp } from '../../store/appStore';
 import {
-  aqlPlan, rqlFor, producerRiskPct, acceptNumber, masterPlan2A, N_BY_CODE, LETTERS, CODE_LETTER_TABLE,
-  type InspectionLevel, type AqlMethod, type AqlAcMethod,
-  recordBatch, plansByState, SWITCH_INIT, type SwitchStatus, type InspState,
+  rqlForResult, producerRiskPct, masterPlanByState, CODE_LETTER_TABLE, MAX_LOT_SIZE, TABLE_BY_STATE,
+  decideLot, recordInspection, plansByState, normalizeSwitchStatus,
+  restoreNormalInspection, resumeTightenedInspection, setSwitchConditions,
+  type InspectionLevel, type InspState,
 } from '../../core';
 import type { ChartTokens } from '../tokens';
 import { Card, CardHeader, KvRows, tabStyle } from '../common';
@@ -17,58 +18,107 @@ const STATE_META: Record<InspState, { label: string; bg: string; color: string }
 };
 
 const AQL_OPTIONS = [0.65, 1.0, 1.5, 2.5, 4.0, 6.5];
-const LEVEL_SHIFT: Record<InspectionLevel, number> = { I: -2, II: 0, III: 2 };
 const fmtLot = (lo: number, hi: number) => (hi === Infinity ? `${lo.toLocaleString()}+` : `${lo.toLocaleString()}–${hi.toLocaleString()}`);
 
-/** 按当前检验水平 + 字码判定法生成批量范围 → 字码方案表。
- *  gb:真实 GB/T 2828.1 字码表(覆盖到 50 万+);shift:水平 II 基准 ∓2 位位移近似。 */
-function planTableRows(level: InspectionLevel, aqlPct: number, lot: number, method: AqlMethod, acMethod: AqlAcMethod) {
+/** 按表 1 + 选定的正式主表生成批量范围 → 最终执行方案。 */
+function planTableRows(level: InspectionLevel, aqlPct: number, lot: number, state: InspState) {
   const mk = (lo: number, hi: number, initialCode: string) => {
-    let code = initialCode; let n = N_BY_CODE[initialCode]; let ac: number;
-    const m = acMethod === 'gb' ? masterPlan2A(initialCode, aqlPct) : null;
-    if (m) { code = m.code; n = m.n; ac = m.ac; } else { ac = acceptNumber(n, aqlPct); }
-    // 整段批量范围都 ≤ 样本量(n ≥ 范围上限)→ 该档必转 100% 全检
-    return { label: fmtLot(lo, hi), code, n, ac, active: lot >= lo && lot <= hi, fullInspect: n >= hi };
+    const plan = masterPlanByState(state, initialCode, aqlPct);
+    if (!plan) throw new Error(`正式表 ${TABLE_BY_STATE[state]} 缺少 ${initialCode} / AQL ${aqlPct}`);
+    const active = lot >= lo && lot <= hi;
+    return { label: fmtLot(lo, hi), initialCode, ...plan, active, fullInspect: active && plan.n >= lot };
   };
-  if (method === 'gb') {
-    return CODE_LETTER_TABLE.map((r) => mk(r.lo, r.hi, r[level]));
-  }
-  const shift = LEVEL_SHIFT[level];
-  return LETTERS.map(([, lo, hi], i) => {
-    const idx = Math.max(0, Math.min(LETTERS.length - 1, i + shift));
-    return mk(lo, hi, LETTERS[idx][0]);
-  });
+  return CODE_LETTER_TABLE.map((r) => mk(r.lo, r.hi, r[level]));
 }
 
 export function Aql({ T }: { T: ChartTokens }) {
-  const { aqlLot, aqlLevel, aqlAQL, aqlMethod, aqlAcMethod, setAql } = useApp();
-  const [sw, setSw] = useState<SwitchStatus>(SWITCH_INIT);
-  const plan = aqlPlan(aqlLot, aqlLevel, aqlAQL, aqlMethod, aqlAcMethod);
+  const { aqlLot, aqlLevel, aqlAQL, aqlSwitch: storedSwitch, setAql, setAqlSwitch: setSw } = useApp();
+  const sw = normalizeSwitchStatus(storedSwitch);
+  const [lotDraft, setLotDraft] = useState<string | null>(null);
+  const [lotError, setLotError] = useState<string | null>(null);
+  const [nonconformingDraft, setNonconformingDraft] = useState('0');
+  const [batchId, setBatchId] = useState('');
+  const [inspector, setInspector] = useState('');
+  const [originalInspection, setOriginalInspection] = useState(true);
+  const [batchError, setBatchError] = useState<string | null>(null);
+  const [referenceState, setReferenceState] = useState<InspState>('normal');
+  const statePlans = plansByState(aqlLot, aqlLevel, aqlAQL);
+  const plan = statePlans[sw.state];
   const aqlP = aqlAQL / 100;
-  const rqlP = rqlFor(plan);
+  const rql = rqlForResult(plan);
+  const rqlP = rql.status === 'found' ? rql.p : undefined;
   const prodRisk = producerRiskPct(plan, aqlAQL);
-  const statePlans = plansByState(aqlLot, aqlLevel, aqlAQL, aqlMethod, aqlAcMethod);
   const meta = STATE_META[sw.state];
+  const nonconforming = Number(nonconformingDraft);
+  const batchValid = Number.isSafeInteger(nonconforming) && nonconforming >= 0 && nonconforming <= plan.n;
+  const decision = batchValid ? decideLot(plan, nonconforming) : null;
+  const batchReady = batchValid && batchId.trim().length > 0 && inspector.trim().length > 0 && !sw.suspended;
+
+  const submitInspection = () => {
+    if (!batchValid) {
+      setBatchError(`不合格品数必须是 0–${plan.n} 的整数`);
+      return;
+    }
+    if (!batchId.trim()) {
+      setBatchError('请填写批次号，以便追溯质量判定');
+      return;
+    }
+    if (!inspector.trim()) {
+      setBatchError('请填写检验人，以便追溯质量责任');
+      return;
+    }
+    try {
+      setSw(recordInspection(sw, {
+        lot: aqlLot,
+        level: aqlLevel,
+        aql: aqlAQL,
+        nonconforming,
+        batchId,
+        inspector,
+        originalInspection,
+      }));
+      setNonconformingDraft('0');
+      setBatchId('');
+      setBatchError(null);
+    } catch (error) {
+      setBatchError(error instanceof Error ? error.message : '无法记录本批检验结果');
+    }
+  };
 
   const fmtAql = (a: number) => 'AQL ' + a.toFixed(2).replace(/0$/, '').replace(/\.$/, '.0');
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <Card style={{ padding: '11px 16px', display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
-        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 12.5, color: '#5b6472' }}>
-          批量 N
-          <input
-            type="number"
-            min={2}
-            value={aqlLot}
-            onChange={(e) => {
-              const v = parseInt(e.target.value);
-              if (!isNaN(v)) setAql({ aqlLot: Math.max(2, Math.min(150000, v)) }); // 批量须 ≥2、≤15 万,避免 0/负数静默回落
-            }}
-            className="mono"
-            style={{ width: 96, padding: '6px 9px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12.5, color: '#2a333f' }}
-          />
-        </label>
+        <div>
+          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 12.5, color: '#5b6472' }}>
+            批量 N
+            <input
+              type="number"
+              min={2}
+              max={MAX_LOT_SIZE}
+              step={1}
+              value={lotDraft ?? aqlLot}
+              onFocus={() => { setLotDraft(String(aqlLot)); setLotError(null); }}
+              onBlur={() => { if (!lotError) setLotDraft(null); }}
+              onChange={(e) => {
+                const raw = e.target.value;
+                setLotDraft(raw);
+                const v = Number(raw);
+                if (raw.trim() === '' || !Number.isSafeInteger(v) || v < 2 || v > MAX_LOT_SIZE) {
+                  setLotError(`请输入 2–${MAX_LOT_SIZE.toLocaleString()} 的整数（当前仍使用 ${aqlLot.toLocaleString()}）`);
+                  return;
+                }
+                setLotError(null);
+                setAql({ aqlLot: v });
+              }}
+              aria-invalid={lotError != null}
+              className="mono"
+              style={{ width: 132, padding: '6px 9px', border: `1px solid ${lotError ? '#c22f2f' : '#cfd5dd'}`, borderRadius: 4, fontSize: 12.5, color: '#2a333f' }}
+            />
+          </label>
+          {lotError && <div role="alert" style={{ maxWidth: 360, marginTop: 4, fontSize: 11, color: '#c22f2f' }}>{lotError}</div>}
+        </div>
         <span style={{ width: 1, height: 22, background: '#e5e9ee' }} />
         <span style={{ fontSize: 12, color: '#8a929d', fontWeight: 600 }}>检验水平</span>
         <div style={{ display: 'flex', gap: 6 }}>
@@ -84,30 +134,17 @@ export function Aql({ T }: { T: ChartTokens }) {
           ))}
         </div>
         <span style={{ width: 1, height: 22, background: '#e5e9ee' }} />
-        <span style={{ fontSize: 12, color: '#8a929d', fontWeight: 600 }}>字码判定</span>
-        <div style={{ display: 'flex', gap: 6 }}>
-          {([['gb', '国标查表'], ['shift', '位移近似']] as [AqlMethod, string][]).map(([m, label]) => (
-            <div key={m} style={tabStyle(aqlMethod === m)}
-              title={m === 'gb' ? '按 GB/T 2828.1 样本量字码表(批量×水平)直接查字码' : '以水平 II 为基准,水平 I/III 各偏移 ∓2 位字码(近似)'}
-              onClick={() => setAql({ aqlMethod: m })}>{label}</div>
-          ))}
-        </div>
-        <span style={{ fontSize: 12, color: '#8a929d', fontWeight: 600 }}>接收数 Ac</span>
-        <div style={{ display: 'flex', gap: 6 }}>
-          {([['gb', '国标主表'], ['binom', '二项近似']] as [AqlAcMethod, string][]).map(([m, label]) => (
-            <div key={m} style={tabStyle(aqlAcMethod === m)}
-              title={m === 'gb' ? '按 GB/T 2828.1 表 2-A(正常检验一次抽样主表)逐格查表,含 ↑↓ 箭头改档(会同时改字码/样本量/Ac);覆盖常用 AQL 0.65–6.5' : '取最小满足 95% 接收概率的接收数(二项近似)'}
-              onClick={() => setAql({ aqlAcMethod: m })}>{label}</div>
-          ))}
-        </div>
+        <span style={{ padding: '5px 9px', borderRadius: 4, background: '#eef5fb', color: '#1f6fb2', fontSize: 11.5, fontWeight: 600 }}>
+          GB/T 2828.1-2012 · 表 1 + {TABLE_BY_STATE[sw.state]}
+        </span>
       </Card>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 12 }}>
         {[
-          { k: '样本字码', v: plan.code },
-          { k: '样本量 n', v: String(plan.n) },
-          { k: '接收数 Ac', v: String(plan.ac) },
-          { k: '拒收数 Re', v: String(plan.re) },
+          { k: plan.fullInspect ? '参考字码' : '样本字码', v: plan.code },
+          { k: plan.fullInspect ? '全检数量 N' : '样本量 n', v: String(plan.n) },
+          { k: plan.fullInspect ? '允许不合格 Ac' : '接收数 Ac', v: String(plan.ac) },
+          { k: plan.fullInspect ? '拒收门槛 Re' : '拒收数 Re', v: String(plan.re) },
         ].map((c) => (
           <Card key={c.k} style={{ padding: '14px 16px' }}>
             <div style={{ fontSize: 12, color: '#8a929d' }}>{c.k}</div>
@@ -118,58 +155,140 @@ export function Aql({ T }: { T: ChartTokens }) {
 
       {plan.fullInspect && (
         <div style={{ padding: '10px 14px', background: '#fff6e6', border: '1px solid #f0d69a', borderRadius: 6, fontSize: 12.5, color: '#8a6414', lineHeight: 1.5 }}>
-          ⚠ <b>100% 全检</b>:按 GB/T 2828.1,查表样本量已 ≥ 批量 N（{aqlLot}）——此时应对整批逐件检验（样本量取 N），而非抽样。上表 n 已夹到批量;OC 曲线仅作参考。
+          ⚠ <b>100% 全检</b>：按 GB/T 2828.1，查表样本量已 ≥ 批量 N（{aqlLot.toLocaleString()}），因此对整批逐件检验。本批仍可在下方录入实际不合格品数并留存判定/追溯记录；抽样 OC、RQL 及 α/β 风险指标不适用，因此不展示。
         </div>
       )}
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 16 }}>
-        <Card>
-          <CardHeader title="OC 特性曲线 · 接收概率 vs 批质量" />
-          <div style={{ padding: '14px 16px 6px' }}>
-            <OcCurveChart T={T} n={plan.n} ac={plan.ac} pmax={Math.max(0.1, rqlP * 1.25)} aqlP={aqlP} rqlP={rqlP} />
-          </div>
-        </Card>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-          <Card style={{ padding: 16 }}>
-            <div style={{ fontWeight: 600, color: '#33404f', marginBottom: 10 }}>风险指标</div>
-            <KvRows
-              rows={[
-                { k: 'AQL (可接收质量)', v: (aqlP * 100).toFixed(2) + '%' },
-                { k: '生产方风险 α', v: prodRisk.toFixed(1) + '%' },
-                { k: 'RQL / LTPD (Pa=10%)', v: (rqlP * 100).toFixed(2) + '%' },
-                { k: '使用方风险 β', v: '10.0%' },
-              ]}
-            />
-            <div style={{ marginTop: 12, padding: 11, background: '#f7f9fb', border: '1px solid #eef1f4', borderRadius: 4, fontSize: 11.5, color: '#6b7480', lineHeight: 1.55 }}>
-              OC 曲线描述在不同批质量 p 下该抽样方案的接收概率 Pa。绿线为 AQL 点（生产方希望高概率接收），红线为 RQL 点（使用方希望低概率接收，此处 Pa=10%）。曲线越陡，方案对好坏批的区分力越强。
+      {!plan.fullInspect && (
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 16 }}>
+          <Card>
+            <CardHeader title="OC 特性曲线 · 接收概率 vs 批质量" />
+            <div style={{ padding: '14px 16px 6px' }}>
+              <OcCurveChart T={T} n={plan.n} ac={plan.ac} pmax={Math.min(1, Math.max(0.1, (rqlP ?? 0.4) * 1.25))} aqlP={aqlP} rqlP={rqlP} />
             </div>
           </Card>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+            <Card style={{ padding: 16 }}>
+              <div style={{ fontWeight: 600, color: '#33404f', marginBottom: 10 }}>风险指标</div>
+              <KvRows
+                rows={[
+                  { k: 'AQL (可接收质量)', v: (aqlP * 100).toFixed(2) + '%' },
+                  { k: '生产方风险 α', v: prodRisk.toFixed(1) + '%' },
+                  { k: 'RQL / LTPD (Pa≤10%)', v: rql.status === 'found' ? (rql.p * 100).toFixed(2) + '%' : `未达到（p≤${(rql.searchMax * 100).toFixed(0)}%）` },
+                  { k: '使用方风险 β@RQL', v: rql.status === 'found' ? (rql.pa * 100).toFixed(2) + '%' : `>${(rql.targetPa * 100).toFixed(1)}%` },
+                ]}
+              />
+              <div style={{ marginTop: 12, padding: 11, background: '#f7f9fb', border: '1px solid #eef1f4', borderRadius: 4, fontSize: 11.5, color: '#6b7480', lineHeight: 1.55 }}>
+                OC 曲线描述在不同批质量 p 下该抽样方案的接收概率 Pa。绿线为 AQL 点；{rql.status === 'found' ? '红线为计算得到的 RQL 点，右侧 β 为该点的实际接收概率。' : '在搜索范围内未达到目标接收概率，因此不绘制伪 RQL 标记。'}
+              </div>
+            </Card>
+          </div>
         </div>
-      </div>
+      )}
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
         <Card>
           <div style={{ display: 'flex', alignItems: 'center', padding: '11px 16px', borderBottom: '1px solid #edf0f3' }}>
-            <div style={{ fontWeight: 600, color: '#33404f' }}>转移规则模拟 · 正常 / 加严 / 放宽</div>
-            <div style={{ marginLeft: 'auto', padding: '2px 10px', borderRadius: 11, fontSize: 12, fontWeight: 700, background: meta.bg, color: meta.color }}>{meta.label}</div>
+            <div style={{ fontWeight: 600, color: '#33404f' }}>批次判定与正式转移规则</div>
+            <div style={{ marginLeft: 'auto', padding: '2px 10px', borderRadius: 11, fontSize: 12, fontWeight: 700, background: sw.suspended ? '#fff6e6' : meta.bg, color: sw.suspended ? '#8a6414' : meta.color }}>
+              {sw.suspended ? '抽样检验已暂停' : `${meta.label}${plan.fullInspect ? ' · 全检' : ''}`}
+            </div>
           </div>
           <div style={{ padding: '14px 16px' }}>
-            <div style={{ fontSize: 12, color: '#5b6472', marginBottom: 10 }}>{sw.note}</div>
-            <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
-              <div onClick={() => setSw(recordBatch(sw, 'A'))} style={{ padding: '6px 14px', background: '#2c8a45', color: '#fff', borderRadius: 5, fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}>✓ 本批接收</div>
-              <div onClick={() => setSw(recordBatch(sw, 'R'))} style={{ padding: '6px 14px', background: '#c22f2f', color: '#fff', borderRadius: 5, fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}>✗ 本批拒收</div>
-              <div onClick={() => setSw(SWITCH_INIT)} style={{ padding: '6px 14px', border: '1px solid #cfd5dd', color: '#5b6472', borderRadius: 5, fontSize: 12.5, cursor: 'pointer' }}>重置</div>
+            <div style={{ fontSize: 12, color: '#5b6472', marginBottom: 12, lineHeight: 1.55 }}>{sw.note}</div>
+
+            {sw.suspended ? (
+              <div role="alert" style={{ padding: 12, background: '#fff6e6', border: '1px solid #f0d69a', borderRadius: 5, fontSize: 12.5, color: '#8a6414', lineHeight: 1.65 }}>
+                加严检验已累计 5 批不接收。按 GB/T 2828.1 第 9.4 条，只有供方完成纠正且负责部门确认有效后，才能以加严检验重新开始。
+                <button type="button" onClick={() => setSw(resumeTightenedInspection(sw))} style={{ display: 'block', marginTop: 10, padding: '6px 12px', border: 0, borderRadius: 4, background: '#8a6414', color: '#fff', cursor: 'pointer' }}>
+                  已确认纠正有效，恢复加严检验
+                </button>
+              </div>
+            ) : (
+              <>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2,minmax(0,1fr))', gap: 9 }}>
+                  <label style={{ fontSize: 11.5, color: '#6b7480' }}>
+                    批次号 *
+                    <input aria-label="批次号" value={batchId} onChange={(e) => { setBatchId(e.target.value); setBatchError(null); }} placeholder="例：LOT-20260714-01" style={{ display: 'block', width: '100%', boxSizing: 'border-box', marginTop: 4, padding: '6px 8px', border: '1px solid #cfd5dd', borderRadius: 4 }} />
+                  </label>
+                  <label style={{ fontSize: 11.5, color: '#6b7480' }}>
+                    检验人 *
+                    <input aria-label="检验人" value={inspector} onChange={(e) => { setInspector(e.target.value); setBatchError(null); }} placeholder="姓名 / 工号" style={{ display: 'block', width: '100%', boxSizing: 'border-box', marginTop: 4, padding: '6px 8px', border: '1px solid #cfd5dd', borderRadius: 4 }} />
+                  </label>
+                  <label style={{ fontSize: 11.5, color: '#6b7480' }}>
+                    {plan.fullInspect ? '全检不合格品数' : '样本中不合格品数'} *
+                    <input aria-label="实际不合格品数" type="number" min={0} max={plan.n} step={1} value={nonconformingDraft} onChange={(e) => { setNonconformingDraft(e.target.value); setBatchError(null); }} className="mono" style={{ display: 'block', width: '100%', boxSizing: 'border-box', marginTop: 4, padding: '6px 8px', border: `1px solid ${batchValid ? '#cfd5dd' : '#c22f2f'}`, borderRadius: 4 }} />
+                  </label>
+                  <div style={{ padding: '7px 10px', alignSelf: 'end', borderRadius: 4, background: decision === 'accepted' ? '#e8f4ea' : decision === 'rejected' ? '#fdecec' : '#f7f9fb', color: decision === 'accepted' ? '#2c8a45' : decision === 'rejected' ? '#c22f2f' : '#8a929d', fontWeight: 700, fontSize: 12.5 }}>
+                    自动判定：{decision === 'accepted' ? `接收（d=${nonconforming} ≤ Ac=${plan.ac}）` : decision === 'rejected' ? `不接收（d=${nonconforming} ≥ Re=${plan.re}）` : '请输入有效整数'}
+                  </div>
+                </div>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 10, fontSize: 11.5, color: '#6b7480' }}>
+                  <input type="checkbox" checked={originalInspection} onChange={(e) => setOriginalInspection(e.target.checked)} />
+                  初次检验（只有初次检验批计入正式转移规则；取消勾选时作为复验留痕）
+                </label>
+                {batchError && <div role="alert" style={{ marginTop: 8, fontSize: 11.5, color: '#c22f2f' }}>{batchError}</div>}
+                <div style={{ display: 'flex', gap: 8, marginTop: 11, flexWrap: 'wrap' }}>
+                  <button type="button" disabled={!batchReady} onClick={submitInspection} style={{ padding: '6px 14px', border: 0, background: batchReady ? (decision === 'accepted' ? '#2c8a45' : '#c22f2f') : '#c7ccd2', color: '#fff', borderRadius: 5, fontSize: 12.5, fontWeight: 600, cursor: batchReady ? 'pointer' : 'not-allowed' }}>
+                    记录本批并执行转移判定
+                  </button>
+                  {sw.state === 'reduced' && (
+                    <button type="button" onClick={() => setSw(restoreNormalInspection(sw, '负责部门因其他条件决定恢复正常检验'))} style={{ padding: '6px 12px', border: '1px solid #cfd5dd', background: '#fff', color: '#5b6472', borderRadius: 5, cursor: 'pointer' }}>
+                      因其他条件恢复正常检验
+                    </button>
+                  )}
+                </div>
+              </>
+            )}
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 14 }}>
+              <div style={{ padding: '8px 10px', border: '1px solid #edf0f3', borderRadius: 4, fontSize: 11.5, color: '#6b7480' }}>转移得分 <b className="mono" style={{ float: 'right', color: '#33404f' }}>{sw.switchingScore}/30</b></div>
+              <div style={{ padding: '8px 10px', border: '1px solid #edf0f3', borderRadius: 4, fontSize: 11.5, color: '#6b7480' }}>加严不接收 <b className="mono" style={{ float: 'right', color: '#33404f' }}>{sw.tightenedRejections}/5</b></div>
             </div>
-            <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', minHeight: 18, marginBottom: 10 }}>
-              {sw.history.slice(-30).map((r, i) => (
-                <span key={i} title={r === 'A' ? '接收' : '拒收'} style={{ width: 14, height: 14, borderRadius: 3, background: r === 'A' ? '#2c8a45' : '#c22f2f', display: 'inline-block' }} />
+            <div style={{ display: 'flex', gap: 16, marginTop: 10, flexWrap: 'wrap' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11.5, color: '#5b6472' }}>
+                <input type="checkbox" checked={sw.productionSteady} onChange={(e) => setSw(setSwitchConditions(sw, { productionSteady: e.target.checked }))} />
+                生产稳定
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11.5, color: '#5b6472' }}>
+                <input type="checkbox" checked={sw.reducedApproved} onChange={(e) => setSw(setSwitchConditions(sw, { reducedApproved: e.target.checked }))} />
+                负责部门同意放宽
+              </label>
+            </div>
+            <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', minHeight: 18, marginTop: 12 }}>
+              {sw.history.slice(-30).map((result, i) => (
+                <span key={`${i}-${result}`} title={result === 'A' ? '初次检验批接收' : '初次检验批不接收'} style={{ width: 14, height: 14, borderRadius: 3, background: result === 'A' ? '#2c8a45' : '#c22f2f', display: 'inline-block' }} />
               ))}
-              {sw.history.length === 0 && <span style={{ fontSize: 12, color: '#9aa2ad' }}>点击按钮模拟批检验结果…</span>}
+              {sw.history.length === 0 && <span style={{ fontSize: 11.5, color: '#9aa2ad' }}>尚无初次检验批历史</span>}
             </div>
-            <div style={{ fontSize: 11.5, color: '#9aa2ad', lineHeight: 1.6 }}>
-              正常→加严：连续 5 批中 2 批拒收 · 加严→正常：连续 5 批接收<br />
-              正常→放宽：连续 10 批接收 · 放宽→正常：任 1 批拒收（GB/T 2828.1 简化模型）
+            <div style={{ marginTop: 12, paddingTop: 10, borderTop: '1px solid #edf0f3', fontSize: 11.5, color: '#7b8490', lineHeight: 1.65 }}>
+              正常→加严：5 批或少于 5 批初次检验中有 2 批不接收。<br />
+              正常→放宽：转移得分≥30，且生产稳定、负责部门同意；Ac≥2 时按严一档 AQL 仍接收才 +3，Ac=0/1 且本批接收时 +2。<br />
+              加严→正常：连续 5 批接收；加严累计 5 批不接收时暂停抽样检验。<br />
+              放宽→正常：任一批不接收、生产不稳定/延误，或其他条件需要。复验批只留痕，不计入以上转移计数。
             </div>
+
+            {sw.records.length > 0 && (
+              <div style={{ marginTop: 14, overflowX: 'auto' }}>
+                <div style={{ marginBottom: 6, fontSize: 12, fontWeight: 600, color: '#33404f' }}>最近批次追溯记录</div>
+                <table style={{ width: '100%', minWidth: 900, borderCollapse: 'collapse', fontSize: 11 }}>
+                  <thead><tr style={{ color: '#8a929d', textAlign: 'left' }}>
+                    <th style={{ padding: '5px 4px' }}>批次</th><th style={{ padding: '5px 4px' }}>N/水平/AQL</th><th style={{ padding: '5px 4px' }}>类型</th><th style={{ padding: '5px 4px' }}>方案</th><th style={{ padding: '5px 4px' }}>d</th><th style={{ padding: '5px 4px' }}>判定</th><th style={{ padding: '5px 4px' }}>检验人</th>
+                  </tr></thead>
+                  <tbody>{sw.records.slice(-8).reverse().map((record) => (
+                    <tr key={record.id} style={{ borderTop: '1px solid #f0f2f5' }}>
+                      <td style={{ padding: '5px 4px', color: '#33404f' }}>{record.batchId}</td>
+                      <td className="mono" style={{ padding: '5px 4px', color: '#6b7480' }}>{record.lot}/{record.level}/{record.aql}</td>
+                      <td style={{ padding: '5px 4px', color: '#6b7480' }}>{record.originalInspection ? '初次' : '复验'}</td>
+                      <td className="mono" style={{ padding: '5px 4px', color: '#6b7480' }}>{record.sourceTable} {record.initialCode}→{record.finalCode}/{record.fullInspection ? '全检' : `n${record.sampleSize}`}/Ac{record.acceptanceNumber}/Re{record.rejectionNumber}</td>
+                      <td className="mono" style={{ padding: '5px 4px' }}>{record.nonconforming}</td>
+                      <td style={{ padding: '5px 4px', color: record.result === 'A' ? '#2c8a45' : '#c22f2f', fontWeight: 600 }}>{record.result === 'A' ? '接收' : '不接收'}</td>
+                      <td style={{ padding: '5px 4px', color: '#6b7480' }}>{record.inspector}</td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            )}
           </div>
         </Card>
         <Card>
@@ -193,7 +312,7 @@ export function Aql({ T }: { T: ChartTokens }) {
                   <tr key={st} style={{ borderTop: '1px solid #f0f2f5', ...(active ? { background: m2.bg } : {}) }}>
                     <td style={{ padding: '8px 16px', color: m2.color, fontWeight: active ? 700 : 500 }}>{m2.label}{active ? ' ←' : ''}</td>
                     <td className="mono" style={{ padding: '8px 8px', color: '#5b6472' }}>{p.code}</td>
-                    <td className="mono" style={{ padding: '8px 8px', textAlign: 'right', fontWeight: 600, color: '#2a333f' }}>{p.n}</td>
+                    <td className="mono" style={{ padding: '8px 8px', textAlign: 'right', fontWeight: 600, color: '#2a333f' }}>{p.n}{p.fullInspect ? ' 全检' : ''}</td>
                     <td className="mono" style={{ padding: '8px 8px', textAlign: 'right', fontWeight: 600, color: '#2c8a45' }}>{p.ac}</td>
                     <td className="mono" style={{ padding: '8px 16px', textAlign: 'right', fontWeight: 600, color: '#c22f2f' }}>{p.re}</td>
                   </tr>
@@ -202,34 +321,43 @@ export function Aql({ T }: { T: ChartTokens }) {
             </tbody>
           </table>
           <div style={{ padding: '10px 16px', fontSize: 11.5, color: '#9aa2ad', lineHeight: 1.55 }}>
-            简化模型（非正式表 2-B/2-C）：加严 = 同样本量、Ac−1（下限 0;Ac 已为 0 时不再减,正式加严应改用主表 2-B 增大样本量）；放宽 = 字码降两档（字码已到最小档 A/B 时无法再降,退化为与正常相同样本量）。生产环境应使用标准正式表格。
+            三列分别直接查 GB/T 2828.1-2012 表 2-A / 2-B / 2-C，箭头已解析为最终执行字码、n、Ac 和 Re。表 2-C 使用自身的字码—样本量关系，未使用“降两档”近似。
           </div>
         </Card>
       </div>
 
       <Card>
         <div style={{ display: 'flex', alignItems: 'center', padding: '11px 16px', borderBottom: '1px solid #edf0f3' }}>
-          <div style={{ fontWeight: 600, color: '#33404f' }}>抽样方案表 (当前检验水平与 AQL，高亮为当前批量)</div>
-          <div style={{ marginLeft: 'auto', fontSize: 11.5, color: '#8a929d' }}>{aqlAcMethod === 'gb' ? '依据 GB/T 2828.1 表 2-A(箭头已解析)' : '二项近似 · ≈95% 接收于 AQL'}</div>
+          <div style={{ fontWeight: 600, color: '#33404f' }}>{STATE_META[referenceState].label}参考方案表（当前检验水平与 AQL）</div>
+          <div style={{ display: 'flex', gap: 5, marginLeft: 'auto' }}>
+            {(['normal', 'tightened', 'reduced'] as InspState[]).map((state) => (
+              <div key={state} style={tabStyle(referenceState === state)} onClick={() => setReferenceState(state)}>{TABLE_BY_STATE[state]}</div>
+            ))}
+          </div>
+        </div>
+        <div style={{ padding: '8px 16px', background: '#f7f9fb', borderBottom: '1px solid #edf0f3', fontSize: 11.5, color: '#6b7480' }}>
+          依据 GB/T 2828.1-2012 表 1 + 表 {TABLE_BY_STATE[referenceState]}；“初始字码”来自表 1，“执行字码”为主表箭头解析后的最终字码。高亮行为当前批量。
         </div>
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
           <thead>
             <tr style={{ color: '#98a1ac', textAlign: 'left' }}>
               <th style={{ padding: '9px 16px', fontWeight: 600 }}>批量范围 N</th>
-              <th style={{ padding: '9px 8px', fontWeight: 600 }}>样本字码</th>
+              <th style={{ padding: '9px 8px', fontWeight: 600 }}>初始字码</th>
+              <th style={{ padding: '9px 8px', fontWeight: 600 }}>执行字码</th>
               <th style={{ padding: '9px 8px', fontWeight: 600, textAlign: 'right' }}>样本量 n</th>
               <th style={{ padding: '9px 8px', fontWeight: 600, textAlign: 'right' }}>Ac 接收</th>
               <th style={{ padding: '9px 16px', fontWeight: 600, textAlign: 'right' }}>Re 拒收</th>
             </tr>
           </thead>
           <tbody>
-            {planTableRows(aqlLevel, aqlAQL, aqlLot, aqlMethod, aqlAcMethod).map((row) => (
+            {planTableRows(aqlLevel, aqlAQL, aqlLot, referenceState).map((row) => (
               <tr key={row.label} style={{ borderTop: '1px solid #f0f2f5', ...(row.active ? { background: '#e7f0f9' } : {}) }}>
                 <td className="mono" style={{ padding: '8px 16px', color: '#33404f' }}>{row.label}</td>
+                <td className="mono" style={{ padding: '8px 8px', color: '#5b6472' }}>{row.initialCode}</td>
                 <td className="mono" style={{ padding: '8px 8px', color: '#5b6472' }}>{row.code}</td>
-                <td className="mono" style={{ padding: '8px 8px', color: '#2a333f', textAlign: 'right', fontWeight: 600 }}>{row.fullInspect ? `${row.n} 全检` : row.n}</td>
+                <td className="mono" style={{ padding: '8px 8px', color: '#2a333f', textAlign: 'right', fontWeight: 600 }}>{row.fullInspect ? `${aqlLot} 全检` : row.n}</td>
                 <td className="mono" style={{ padding: '8px 8px', color: '#2c8a45', textAlign: 'right', fontWeight: 600 }}>{row.ac}</td>
-                <td className="mono" style={{ padding: '8px 16px', color: '#c22f2f', textAlign: 'right', fontWeight: 600 }}>{row.ac + 1}</td>
+                <td className="mono" style={{ padding: '8px 16px', color: '#c22f2f', textAlign: 'right', fontWeight: 600 }}>{row.re}</td>
               </tr>
             ))}
           </tbody>

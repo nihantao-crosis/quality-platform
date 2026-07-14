@@ -2,7 +2,7 @@
  * 分阶段控制图 — 按阶段列（如 改进前/后、班次、批次）分段计算控制限。
  * 每个连续段独立估计中心线与 σ,判异在段内进行（Minitab Stages 语义）。
  */
-import { CONTROL_CONSTANTS, evalRules, type NelsonRules, type RuleViolation } from './spc';
+import { CONTROL_CONSTANTS, evalLimitedRules, evalRules, type NelsonRules, type RuleViolation } from './spc';
 
 export interface StageSegment {
   label: string;
@@ -51,7 +51,7 @@ export function stagedXbar(rows: number[][], labels: string[], rules: NelsonRule
     const rbar = segRows.map((r) => Math.max(...r) - Math.min(...r)).reduce((a, b) => a + b, 0) / segRows.length;
     const half = C.A2 * rbar;
     return { cl: xbarbar, ucl: xbarbar + half, lcl: xbarbar - half, sigma: half / 3 || 1e-12 };
-  }, rules);
+  }, rules, false);
 }
 
 /** R 图分阶段：UCL=D4·R̄,LCL=D3·R̄（段内估计） */
@@ -64,7 +64,7 @@ export function stagedRange(rows: number[][], labels: string[], rules: NelsonRul
     const ucl = C.D4 * rbar;
     const lcl = C.D3 * rbar;
     return { cl: rbar, ucl, lcl, sigma: (ucl - rbar) / 3 || 1e-12 };
-  }, rules);
+  }, rules, true);
 }
 
 function buildStaged(
@@ -72,6 +72,7 @@ function buildStaged(
   points: number[],
   limitsOf: (seg: { start: number; end: number }) => { cl: number; ucl: number; lcl: number; sigma: number },
   rules: NelsonRules,
+  limited: boolean,
 ): StagedResult {
   const raw = splitStages(labels);
   const clSeries = new Array<number>(points.length);
@@ -92,7 +93,9 @@ function buildStaged(
     // 段内判异（段长 ≥ 2 才有意义）
     if (seg.end - seg.start >= 1) {
       const segData = points.slice(seg.start, seg.end + 1);
-      const r = evalRules(segData, lim.cl, lim.sigma, rules);
+      const r = limited
+        ? evalLimitedRules(segData, lim.cl, lim.ucl, lim.lcl, rules)
+        : evalRules(segData, lim.cl, lim.sigma, rules);
       r.viol.forEach((i) => viol.add(i + seg.start));
       r.list.forEach((v) => list.push({ ...v, i: v.i + seg.start }));
     }

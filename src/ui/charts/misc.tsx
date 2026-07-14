@@ -2,7 +2,7 @@
  * 帕累托图 / 分组柱状图 (Gage) / 箱线图 — 从原型 pareto/groupedBars/boxplot 迁移。
  */
 import { memo, Fragment } from 'react';
-import { nf, quantile, arrMin, arrMax, mean, stdev, tInv } from '../../core';
+import { nf, quantile, arrMin, arrMax, mean, stdev, tInv, decimateUniform } from '../../core';
 import type { ChartTokens } from '../tokens';
 import { paretoColors } from '../tokens';
 import { Svg, Ln, Txt } from './primitives';
@@ -26,7 +26,7 @@ function ParetoChartImpl(p: {
   const rows = p.rows;
   const W = p.w ?? 960;
   const H = p.h ?? 300;
-  const m = { t: 24, r: 52, b: 52, l: 48 };
+  const m = { t: 24, r: 66, b: 64, l: 62 };
   const pw = W - m.l - m.r;
   const ph = H - m.t - m.b;
   const total = rows.reduce((a, r) => a + r.count, 0) || 1;
@@ -60,7 +60,7 @@ function ParetoChartImpl(p: {
           <Fragment key={'b' + i}>
             <rect x={x0} y={Yc(r.count)} width={x1 - x0} height={m.t + ph - Yc(r.count)} fill={colors[i % colors.length]} opacity={0.9} />
             <Txt x={(x0 + x1) / 2} y={Yc(r.count) - 8} s={String(r.count)} fill={T.text} size={10} anchor="middle" weight={600} />
-            <Txt x={m.l + i * bw + bw / 2} y={H - 26} s={r.name} fill={T.axis} size={10} anchor="middle" />
+            <Txt x={m.l + i * bw + bw / 2} y={H - 34} s={r.name} fill={T.axis} size={10} anchor="middle" />
           </Fragment>
         );
       })}
@@ -71,6 +71,9 @@ function ParetoChartImpl(p: {
           <Txt x={p[0]} y={p[1] - 11} s={p[2] + '%'} fill={T.curve} size={9.5} anchor="middle" weight={600} />
         </Fragment>
       ))}
+      <Txt x={m.l + pw / 2} y={H - 10} s="缺陷 / 原因类别（按频数降序）" fill={T.text} size={10.5} anchor="middle" weight={600} />
+      <text x={16} y={m.t + ph / 2} fill={T.text} fontSize={10.5} textAnchor="middle" fontFamily="IBM Plex Mono, monospace" fontWeight={600} transform={`rotate(-90 16 ${m.t + ph / 2})`}>频数</text>
+      <text x={W - 14} y={m.t + ph / 2} fill={T.text} fontSize={10.5} textAnchor="middle" fontFamily="IBM Plex Mono, monospace" fontWeight={600} transform={`rotate(90 ${W - 14} ${m.t + ph / 2})`}>累计百分比</text>
       <Ln x1={m.l} y1={m.t + ph} x2={m.l + pw} y2={m.t + ph} stroke={T.axis} sw={1} />
     </Svg>
   );
@@ -139,12 +142,19 @@ function BoxPlotImpl({ T, groups }: { T: ChartTokens; groups: { name: string; va
   const m = { t: 24, r: 30, b: 44, l: 52 };
   const pw = W - m.l - m.r;
   const ph = H - m.t - m.b;
-  const allv = groups.flatMap((g) => g.vals);
+  const allv = groups.flatMap((g) => g.vals).filter(Number.isFinite);
   let lo = arrMin(allv);
   let hi = arrMax(allv);
-  const p = (hi - lo) * 0.15;
-  lo -= p;
-  hi += p;
+  if (!(hi > lo)) {
+    const center = Number.isFinite(lo) ? lo : 0;
+    const half = Math.max(1, Math.abs(center) * 0.1);
+    lo = center - half;
+    hi = center + half;
+  } else {
+    const p = (hi - lo) * 0.15;
+    lo -= p;
+    hi += p;
+  }
   const Y = (v: number) => m.t + (1 - (v - lo) / (hi - lo)) * ph;
   const gw = pw / groups.length;
   return (
@@ -191,9 +201,8 @@ export const GroupedBars = memo(GroupedBarsImpl);
 
 export const BoxPlot = memo(BoxPlotImpl);
 
-
-/** 区间图 — 各组均值 ± 95% CI(t 分布),对标 Minitab Interval Plot。 */
-function IntervalPlotImpl({ T, groups, h }: {
+/** 个体值图 — 按组显示每个原始观测，短横线为组均值。 */
+function IndividualValuePlotImpl({ T, groups, h }: {
   T: ChartTokens;
   groups: { name: string; vals: number[] }[];
   h?: number;
@@ -203,10 +212,103 @@ function IntervalPlotImpl({ T, groups, h }: {
   const m = { t: 26, r: 30, b: 44, l: 56 };
   const pw = W - m.l - m.r;
   const ph = H - m.t - m.b;
+  const all = groups.flatMap((g) => g.vals).filter(Number.isFinite);
+  let lo = arrMin(all);
+  let hi = arrMax(all);
+  if (!(hi > lo)) {
+    const center = Number.isFinite(lo) ? lo : 0;
+    const half = Math.max(1, Math.abs(center) * 0.1);
+    lo = center - half;
+    hi = center + half;
+  } else {
+    const pad = (hi - lo) * 0.12;
+    lo -= pad;
+    hi += pad;
+  }
+  const Y = (v: number) => m.t + (1 - (v - lo) / (hi - lo)) * ph;
+  const gw = pw / Math.max(1, groups.length);
+  const perGroupLimit = Math.max(2, Math.floor(1200 / Math.max(1, groups.length)));
+  const prepared = groups.map((grp) => {
+    const finite = grp.vals.map((v, i) => ({ v, i })).filter((p) => Number.isFinite(p.v));
+    let minI = 0; let maxI = 0;
+    finite.forEach((p, i) => {
+      if (p.v < (finite[minI]?.v ?? Infinity)) minI = i;
+      if (p.v > (finite[maxI]?.v ?? -Infinity)) maxI = i;
+    });
+    return {
+      grp,
+      finite,
+      selected: decimateUniform(finite.length, perGroupLimit, finite.length ? [minI, maxI] : []),
+    };
+  });
+  const plotted = prepared.reduce((a, p) => a + p.selected.length, 0);
+  const total = prepared.reduce((a, p) => a + p.finite.length, 0);
+  return (
+    <Svg w={W} h={H}>
+      <rect x={0} y={0} width={W} height={H} fill={T.bg} />
+      {Array.from({ length: 5 }, (_, g) => {
+        const yy = m.t + (g / 4) * ph;
+        return (
+          <Fragment key={'g' + g}>
+            <Ln x1={m.l} y1={yy} x2={m.l + pw} y2={yy} stroke={T.grid} sw={1} />
+            <Txt x={m.l - 8} y={yy} s={nf(hi - ((hi - lo) * g) / 4, 3)} fill={T.axis} size={10} anchor="end" />
+          </Fragment>
+        );
+      })}
+      {prepared.map(({ grp, finite, selected }, gi) => {
+        const cx = m.l + gi * gw + gw / 2;
+        // 大样本时保留首尾与极值，并明确标注渲染数；均值仍使用全量数据。
+        const mu = finite.length ? mean(finite.map((p) => p.v)) : 0;
+        return (
+          <Fragment key={grp.name}>
+            {selected.map((si) => {
+              const p = finite[si];
+              // 确定性水平抖动，使重合观测仍可见，同时不改变纵轴数值。
+              const jitter = (((p.i * 37) % 9) - 4) * Math.min(5, gw * 0.035);
+              return (
+                <circle key={p.i} cx={cx + jitter} cy={Y(p.v)} r={T.r} fill={T.point} stroke={T.bg} strokeWidth={1} opacity={0.82}>
+                  <title>{`${grp.name} · ${nf(p.v, 4)}`}</title>
+                </circle>
+              );
+            })}
+            {finite.length > 0 && <Ln x1={cx - Math.min(18, gw * 0.18)} y1={Y(mu)} x2={cx + Math.min(18, gw * 0.18)} y2={Y(mu)} stroke={T.center} sw={2.2} />}
+            <Txt x={cx} y={H - 17} s={grp.name} fill={T.text} size={11} anchor="middle" />
+          </Fragment>
+        );
+      })}
+      <Txt
+        x={m.l} y={m.t - 10}
+        s={plotted < total ? `个体值（渲染 ${plotted}/${total} 点，含极值；短横线 = 全量组均值）` : '个体值（短横线 = 组均值）'}
+        fill={T.text} size={11} weight={600}
+      />
+      <Ln x1={m.l} y1={m.t + ph} x2={m.l + pw} y2={m.t + ph} stroke={T.axis} sw={1} />
+      <Ln x1={m.l} y1={m.t} x2={m.l} y2={m.t + ph} stroke={T.axis} sw={1} />
+    </Svg>
+  );
+}
+export const IndividualValuePlot = memo(IndividualValuePlotImpl);
+
+
+/** 区间图 — 各组均值 ± 95% CI(t 分布),对标 Minitab Interval Plot。 */
+function IntervalPlotImpl({ T, groups, h, pooledError }: {
+  T: ChartTokens;
+  groups: { name: string; vals: number[] }[];
+  h?: number;
+  /** ANOVA 页传入模型的合并误差，使置信区间与方差分析的等方差假设保持一致。 */
+  pooledError?: { mse: number; df: number };
+}) {
+  const W = 960;
+  const H = h ?? 320;
+  const m = { t: 26, r: 30, b: 44, l: 56 };
+  const pw = W - m.l - m.r;
+  const ph = H - m.t - m.b;
   const stats = groups.map((g) => {
     const n = g.vals.length;
     const mu = mean(g.vals);
-    const half = n > 1 ? tInv(0.975, n - 1) * stdev(g.vals) / Math.sqrt(n) : 0;
+    const usePooled = pooledError != null && Number.isFinite(pooledError.mse) && pooledError.mse >= 0 && pooledError.df > 0;
+    const half = usePooled
+      ? tInv(0.975, pooledError.df) * Math.sqrt(pooledError.mse / n)
+      : n > 1 ? tInv(0.975, n - 1) * stdev(g.vals) / Math.sqrt(n) : 0;
     return { name: g.name, mu, lo: mu - half, hi: mu + half, n };
   });
   let lo = arrMin(stats.map((s) => s.lo));
@@ -242,7 +344,7 @@ function IntervalPlotImpl({ T, groups, h }: {
           </Fragment>
         );
       })}
-      <Txt x={m.l} y={m.t - 10} s="各组均值 ± 95% 置信区间" fill={T.text} size={11} weight={600} />
+      <Txt x={m.l} y={m.t - 10} s={pooledError ? `各组均值 ± 95% 置信区间（合并误差 MSE，df=${pooledError.df}）` : '各组均值 ± 95% 置信区间'} fill={T.text} size={11} weight={600} />
       <Ln x1={m.l} y1={m.t + ph} x2={m.l + pw} y2={m.t + ph} stroke={T.axis} sw={1} />
     </Svg>
   );

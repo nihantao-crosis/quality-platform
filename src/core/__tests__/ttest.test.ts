@@ -31,6 +31,17 @@ describe('单样本 t', () => {
     expect(r.significant).toBe(true);
     expect(r.p).toBeLessThan(0.01);
   });
+  it('零方差边界：常数等于目标不显著，常数偏离目标为无穷 t / P=0', () => {
+    const equal = oneSampleT([5, 5, 5], 5);
+    expect(equal).toMatchObject({ t: 0, p: 1, significant: false, se: 0, ciLow: 5, ciHigh: 5 });
+    const shifted = oneSampleT([5, 5, 5], 0);
+    expect(shifted.t).toBe(Infinity);
+    expect(shifted).toMatchObject({ p: 0, significant: true, se: 0, ciLow: 5, ciHigh: 5 });
+  });
+  it('拒绝非有限观测或目标', () => {
+    expect(() => oneSampleT([1, Number.NaN], 0)).toThrow('有限数值');
+    expect(() => oneSampleT([1, 2], Infinity)).toThrow('有限数值');
+  });
 });
 
 describe('双样本 t (Welch)', () => {
@@ -45,5 +56,11 @@ describe('双样本 t (Welch)', () => {
   it('同分布两组不显著', () => {
     const r = twoSampleT([1, 2, 3], [1, 2, 3]);
     expect(r.p).toBeCloseTo(1, 10);
+  });
+  it('两组零方差边界：相同常数 P=1，不同常数 |t|=∞ / P=0', () => {
+    expect(twoSampleT([5, 5], [5, 5])).toMatchObject({ t: 0, p: 1, significant: false, se: 0 });
+    const different = twoSampleT([5, 5], [4, 4]);
+    expect(different.t).toBe(Infinity);
+    expect(different).toMatchObject({ estimate: 1, p: 0, significant: true, se: 0, ciLow: 1, ciHigh: 1 });
   });
 });

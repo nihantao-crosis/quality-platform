@@ -11,6 +11,7 @@ import { ControlChart } from '../ui/charts/ControlChart';
 import { Histogram } from '../ui/charts/Histogram';
 import { NormalProbPlot } from '../ui/charts/NormalProbPlot';
 import type { ReportSpec } from './report';
+import { analysisUsesWorksheet, type AnalysisReportPayload } from './analysisReportModel';
 
 const CSS = `
   body { font-family: "IBM Plex Sans", "PingFang SC", "Microsoft YaHei", sans-serif; color: #2a333f; margin: 0; padding: 32px 40px; }
@@ -24,6 +25,9 @@ const CSS = `
   .verdict-ok { color: #2c8a45; font-weight: 700; }
   .verdict-warn { color: #d98324; font-weight: 700; }
   .verdict-bad { color: #c22f2f; font-weight: 700; }
+  .summary { background: #f4f8fc; border-left: 4px solid #1f6fb2; padding: 10px 14px; margin: 10px 0 16px; }
+  .summary p, .warning p { margin: 4px 0; line-height: 1.55; }
+  .warning { background: #fff8e8; border-left: 4px solid #d98324; padding: 10px 14px; margin: 10px 0 16px; }
   .chart { margin: 10px 0 18px; border: 1px solid #eef0f3; border-radius: 4px; }
   .footer { margin-top: 30px; color: #9aa2ad; font-size: 11px; border-top: 1px solid #eef0f3; padding-top: 10px; }
   @media print { body { padding: 0; } .chart { break-inside: avoid; } h2 { break-after: avoid; } }
@@ -31,16 +35,53 @@ const CSS = `
 
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-export function buildHtmlReport(M: VarModel, spec: ReportSpec): string {
+function buildAnalysisHtml(M: VarModel, analysis: AnalysisReportPayload): string {
+  const sourceContext = analysisUsesWorksheet(analysis) ? ` · 工作表 ${esc(M.name)}` : '';
+  const summary = `<div class="summary">${analysis.summary.map((line) => `<p>${esc(line)}</p>`).join('')}</div>`;
+  const warnings = analysis.warnings.length
+    ? `<div class="warning"><b>使用与解释注意事项</b>${analysis.warnings.map((line) => `<p>${esc(line)}</p>`).join('')}</div>`
+    : '';
+  const tables = analysis.tables.map((table, index) => `
+    <h2>${index + 2}. ${esc(table.title)}</h2>
+    <table>
+      <tr>${table.headers.map((header) => `<th>${esc(header)}</th>`).join('')}</tr>
+      ${table.rows.map((row) => `<tr>${row.map((value) => `<td>${esc(String(value))}</td>`).join('')}</tr>`).join('')}
+    </table>
+    ${table.note ? `<p class="sub">${esc(table.note)}</p>` : ''}
+  `).join('');
+  const chartBase = analysis.tables.length + 2;
+  const charts = analysis.charts.map((chart, index) => `
+    <h2>${chartBase + index}. ${esc(chart.title)}</h2>
+    <div class="chart">${chart.svg}</div>
+    ${chart.note ? `<p>${esc(chart.note)}</p>` : ''}
+  `).join('');
+  return `<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>${esc(analysis.title)}</title><style>${CSS}</style></head>
+<body>
+<h1>${esc(analysis.title)}</h1>
+<div class="sub">${esc(analysis.subtitle)}${sourceContext} · 生成于 ${esc(analysis.generatedAt)} · 质量分析平台</div>
+<h2>1. 分析结论</h2>
+${summary}
+${warnings}
+${tables}
+${charts}
+<div class="footer">本报告由质量分析平台根据当前分析参数实时生成 · 打印本页（⌘/Ctrl+P）即可保存为 PDF</div>
+</body></html>`;
+}
+
+export function buildHtmlReport(M: VarModel, spec: ReportSpec, analysis?: AnalysisReportPayload): string {
+  if (analysis) return buildAnalysisHtml(M, analysis);
   const T = chartTokens('经典', true);
   const cap = computeCapability(M.all, M.sigmaWithin, spec);
-  const means = M.subs.map((s) => s.mean);
-  const sig = (M.uclX - M.xbarbar) / 3;
-  const { list: viol } = evalRules(means, M.xbarbar, sig, DEFAULT_RULES);
+  const spc = M.hasSubgroups
+    ? { data: M.subs.map((s) => s.mean), cl: M.xbarbar, ucl: M.uclX, lcl: M.lclX, sigma: (M.uclX - M.xbarbar) / 3, label: 'X̄' }
+    : { data: M.indiv, cl: M.indMean, ucl: M.iUcl, lcl: M.iLcl, sigma: M.iSig, label: 'I' };
+  const { list: viol } = evalRules(spc.data, spc.cl, spc.sigma, DEFAULT_RULES);
   const ad = M.all.length >= 8 ? andersonDarling(M.all) : null;
 
   const xbarSvg = renderToStaticMarkup(
-    <ControlChart T={T} data={means} cl={M.xbarbar} ucl={M.uclX} lcl={M.lclX} clLabel="X̄" h={250} zones violations={new Set(viol.map((v) => v.i))} />,
+    <ControlChart T={T} data={spc.data} cl={spc.cl} ucl={spc.ucl} lcl={spc.lcl} clLabel={spc.label} h={250} zones violations={new Set(viol.map((v) => v.i))} />,
   );
   const histSvg = renderToStaticMarkup(
     <Histogram T={T} data={M.all} mu={M.oMean} sigmaWithin={M.sigmaWithin} sigmaOverall={M.oSd} lsl={spec.lsl} usl={spec.usl} tgt={spec.tgt} h={300} />,
@@ -58,7 +99,7 @@ export function buildHtmlReport(M: VarModel, spec: ReportSpec): string {
   ];
 
   const violHtml = viol.length === 0
-    ? '<p class="verdict-ok">✓ 未检出失控点，过程受控（Nelson 准则 1–4）</p>'
+    ? '<p class="verdict-ok">✓ 未检出失控点，过程受控（当前启用的 Nelson 准则）</p>'
     : `<table><tr><th>点号</th><th>准则</th><th>描述</th></tr>${viol
         .map((v) => `<tr><td class="num">${v.i + 1}</td><td class="num">${v.rule}</td><td>${esc(v.desc)}</td></tr>`)
         .join('')}</table>`;
@@ -86,7 +127,7 @@ export function buildHtmlReport(M: VarModel, spec: ReportSpec): string {
   </tr>
 </table>
 
-<h2>2. SPC 控制图（X̄）与判异</h2>
+<h2>2. SPC 控制图（${spc.label}）与判异</h2>
 <div class="chart">${xbarSvg}</div>
 ${violHtml}
 

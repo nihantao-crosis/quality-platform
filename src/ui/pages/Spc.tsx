@@ -1,11 +1,15 @@
 /** SPC 控制图 ★深度实现 — 七种图型（X̄-R/X̄-S/I-MR/EWMA/CUSUM/P/C），
  * Nelson 判异（Shewhart 图）/ 限值判异（EWMA/CUSUM）/ 点选明细 /
  * 分阶段控制限（按分组列分段,Minitab Stages 语义）。 */
-import { useState } from 'react';
 import type { CSSProperties } from 'react';
 import { useApp, type SpcType } from '../../store/appStore';
-import { useData } from '../../store/dataStore';
-import { nf, evalRules, RULE_DEFS, ewmaSeries, cusumSeries, stagedXbar, stagedRange, splitStages, type RuleNo } from '../../core';
+import { syncSpecForActiveMeasurement, useData } from '../../store/dataStore';
+import { expandSpcRuleItems, uniqueSpcPointCount, type SpcViolationItem } from '../../store/analyses';
+import {
+  nf, evalRules, evalLimitedRules, RULE_DEFS, ewmaSeries, cusumSeries, stagedXbar, stagedRange, splitStages,
+  prepareSpcData, spcMeasurementColumnNames, spcRoleOptions,
+  type RuleNo, type SpcDataLayout, type SpcPreparedData, type VarModel, type TextColumn,
+} from '../../core';
 import { ReportCard } from '../ReportCard';
 import { spcReport } from '../reportData';
 import type { ChartTokens } from '../tokens';
@@ -24,14 +28,116 @@ interface ChartSpec {
   dec: number;
 }
 
+const LAYOUT_OPTIONS: Array<[SpcDataLayout, string]> = [
+  ['auto', '自动识别（推荐）'],
+  ['rows', '行式子组：一行一个子组'],
+  ['stacked', '堆叠：测量值列 + 子组 ID'],
+  ['columns', '列式子组：一列一个子组'],
+  ['individuals', '单值列：I-MR'],
+];
+
+function SpcRolePanel({
+  model, textCols, prepared, layout, valueColumn, subgroupColumn, onRoles, onTranspose,
+}: {
+  model: VarModel;
+  textCols: TextColumn[];
+  prepared: SpcPreparedData;
+  layout: SpcDataLayout;
+  valueColumn: string | null;
+  subgroupColumn: string | null;
+  onRoles: (patch: Partial<{ spcDataLayout: SpcDataLayout; spcValueCol: string | null; spcSubgroupCol: string | null }>) => void;
+  onTranspose: () => void;
+}) {
+  const roles = spcRoleOptions(model, textCols);
+  const measurementColumns = spcMeasurementColumnNames(model);
+  return (
+    <Card style={{ padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+      <span style={{ fontSize: 12, color: '#687382', fontWeight: 700 }}>SPC 数据角色</span>
+      <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#5b6472' }}>
+        布局
+        <select style={stageSelStyle} value={layout} onChange={(e) => onRoles({ spcDataLayout: e.target.value as SpcDataLayout })}>
+          {LAYOUT_OPTIONS.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
+        </select>
+      </label>
+      <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#5b6472' }}>
+        测量值列
+        <select style={stageSelStyle} value={valueColumn ?? ''} onChange={(e) => onRoles({ spcValueCol: e.target.value || null })}>
+          <option value="">自动 / 不适用</option>
+          {measurementColumns.map((name, i) => <option key={name + i} value={name}>{name}</option>)}
+        </select>
+      </label>
+      <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#5b6472' }}>
+        子组 ID / 点标签
+        <select style={stageSelStyle} value={subgroupColumn ?? ''} onChange={(e) => onRoles({ spcSubgroupCol: e.target.value || null })}>
+          <option value="">自动 / 无</option>
+          {roles.map((r, i) => <option key={r.ref + i} value={r.ref}>{r.name}（{r.kind === 'numeric' ? '数值' : '文本'}）</option>)}
+        </select>
+      </label>
+      {prepared.layout === 'columns' && !prepared.error && (
+        <button type="button" onClick={onTranspose} style={{ ...stageSelStyle, cursor: 'pointer', color: '#1f6fb2', borderColor: '#bcd6ee', fontWeight: 600 }}>
+          转为行式工作表
+        </button>
+      )}
+      <div style={{ flexBasis: '100%', fontSize: 11.5, lineHeight: 1.55, color: prepared.error ? '#c22f2f' : '#6f7885' }}>
+        {prepared.error
+          ? `角色配置错误：${prepared.error}`
+          : `${layout === 'auto' ? `自动识别为「${prepared.layoutLabel}」。` : ''}${prepared.note}；变量：${prepared.variableName}`}
+      </div>
+    </Card>
+  );
+}
+
 export function Spc({ T }: { T: ChartTokens }) {
-  const { spcType, setSpcType, spcRules, toggleRule, selSub, setSelSub } = useApp();
-  const { model: M, textCols, pModel, cModel, mesRunning } = useData();
+  const {
+    spcType, setSpcType, spcRules, toggleRule,
+    spcDataLayout, spcValueCol, spcSubgroupCol, setSpcRoles,
+    spcStageCol, setSpcStageCol, selSub, setSelSub, showToast,
+  } = useApp();
+  const { model: rawModel, textCols: rawTextCols, pendingCells, pModel, cModel, mesRunning, transposeDataset } = useData();
+  const prepared = prepareSpcData(rawModel, rawTextCols, {
+    layout: spcDataLayout, valueColumn: spcValueCol, subgroupColumn: spcSubgroupCol,
+    pendingCells,
+  });
+  const setRolesAndSyncSpec = (patch: Partial<{
+    spcDataLayout: SpcDataLayout; spcValueCol: string | null; spcSubgroupCol: string | null;
+  }>) => {
+    setSpcRoles(patch);
+    syncSpecForActiveMeasurement();
+  };
+  const rolePanel = (
+    <SpcRolePanel
+      model={rawModel} textCols={rawTextCols} prepared={prepared}
+      layout={spcDataLayout} valueColumn={spcValueCol} subgroupColumn={spcSubgroupCol}
+      onRoles={setRolesAndSyncSpec}
+      onTranspose={() => {
+        try {
+          transposeDataset(prepared.subgroupLabels);
+          setRolesAndSyncSpec({ spcDataLayout: 'rows', spcValueCol: null, spcSubgroupCol: 'text:原列子组' });
+          showToast('已转为行式子组工作表；原列名已保留为子组标签');
+        } catch (e) { showToast((e as Error).message); }
+      }}
+    />
+  );
+  if (prepared.error && spcType !== 'p' && spcType !== 'c') {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        {rolePanel}
+        <Card style={{ padding: 24, borderColor: '#f0caca', color: '#a62b2b', lineHeight: 1.7 }}>
+          <b>控制图未运行：</b>{prepared.error}<br />
+          请在上方明确选择数据布局、测量值列和子组 ID。系统不会回退到“把所有数值列都当测量值”的旧口径。
+        </Card>
+      </div>
+    );
+  }
+  const M = prepared.model ?? rawModel;
+  const textCols = prepared.textCols;
 
   const means = M.subs.map((s) => s.mean);
+  const subgroupLabels = prepared.subgroupLabels;
+  const labelsFor = (length: number) => subgroupLabels.length === length ? subgroupLabels : undefined;
 
   // 分阶段：选择一个文本列作为阶段变量（仅 X̄-R,需 ≥2 段）
-  const [stageCol, setStageCol] = useState(-1); // -1 = 不分阶段
+  const stageCol = spcStageCol == null ? -1 : textCols.findIndex((c) => c.name === spcStageCol);
   const stageLabels = stageCol >= 0 && stageCol < textCols.length ? textCols[stageCol].values : null;
   const canStage = M.hasSubgroups && textCols.length > 0;
   const staged =
@@ -47,6 +153,10 @@ export function Spc({ T }: { T: ChartTokens }) {
   const advSigma = M.hasSubgroups ? M.sigmaWithin / Math.sqrt(M.n) : M.iSig;
   const ewma = ewmaSeries(advData, advMu, advSigma);
   const cusum = cusumSeries(advData, advMu, advSigma, 0.5, M.hasSubgroups ? 4 : 5);
+  const variableName = prepared.variableName;
+  const groupXLabel = prepared.xAxisLabel;
+  const groupPointLabels = labelsFor(M.k);
+  const indivPointLabels = labelsFor(M.indiv.length);
 
   type SpecDef = {
     sub: string;
@@ -69,26 +179,28 @@ export function Spc({ T }: { T: ChartTokens }) {
       charts: staged
         ? [
             {
-              t: `均值控制图 (X̄) · 分阶段`, main: true, dec: 3,
+              t: `${variableName} 的均值控制图 (X̄) · 分阶段`, main: true, dec: 3,
               props: {
                 data: means, cl: M.xbarbar, ucl: M.uclX, lcl: M.lclX, clLabel: 'X̄', h: 250,
+                xLabel: groupXLabel, yLabel: `${variableName} · 子组均值`, xLabels: groupPointLabels,
                 clSeries: staged.x.clSeries, uclSeries: staged.x.uclSeries, lclSeries: staged.x.lclSeries,
                 stepSeries: true, stageBoundaries: staged.x.boundaries,
                 stageLabels: staged.x.segments.map((sg) => ({ at: Math.round((sg.start + sg.end) / 2), label: sg.label })),
               },
             },
             {
-              t: '极差控制图 (R) · 分阶段', dec: 3,
+              t: `${variableName} 的极差控制图 (R) · 分阶段`, dec: 3,
               props: {
                 data: M.subs.map((s) => s.range), cl: M.rbar, ucl: M.uclR, lcl: M.lclR, clLabel: 'R̄', h: 210,
+                xLabel: groupXLabel, yLabel: `${variableName} · 子组极差`, xLabels: groupPointLabels,
                 clSeries: staged.r.clSeries, uclSeries: staged.r.uclSeries, lclSeries: staged.r.lclSeries,
                 stepSeries: true, stageBoundaries: staged.r.boundaries,
               },
             },
           ]
         : [
-            { t: '均值控制图 (X̄)', main: true, dec: 3, props: { data: means, cl: M.xbarbar, ucl: M.uclX, lcl: M.lclX, clLabel: 'X̄', zones: true, h: 250 } },
-            { t: '极差控制图 (R)', dec: 3, props: { data: M.subs.map((s) => s.range), cl: M.rbar, ucl: M.uclR, lcl: M.lclR, clLabel: 'R̄', h: 210 } },
+            { t: `${variableName} 的均值控制图 (X̄)`, main: true, dec: 3, props: { data: means, cl: M.xbarbar, ucl: M.uclX, lcl: M.lclX, clLabel: 'X̄', zones: true, h: 250, xLabel: groupXLabel, yLabel: `${variableName} · 子组均值`, xLabels: groupPointLabels } },
+            { t: `${variableName} 的极差控制图 (R)`, dec: 3, props: { data: M.subs.map((s) => s.range), cl: M.rbar, ucl: M.uclR, lcl: M.lclR, clLabel: 'R̄', h: 210, xLabel: groupXLabel, yLabel: `${variableName} · 子组极差`, xLabels: groupPointLabels } },
           ],
     },
     'xbar-s': {
@@ -96,16 +208,16 @@ export function Spc({ T }: { T: ChartTokens }) {
       disabled: !M.hasSubgroups,
       shewhart: true,
       charts: [
-        { t: '均值控制图 (X̄)', main: true, dec: 3, props: { data: means, cl: M.xbarbar, ucl: M.uclXs, lcl: M.lclXs, clLabel: 'X̄', zones: true, h: 250 } },
-        { t: '标准差控制图 (S)', dec: 4, props: { data: M.svals, cl: M.sbar, ucl: M.uclS, lcl: M.lclS, clLabel: 'S̄', h: 210 } },
+        { t: `${variableName} 的均值控制图 (X̄)`, main: true, dec: 3, props: { data: means, cl: M.xbarbar, ucl: M.uclXs, lcl: M.lclXs, clLabel: 'X̄', zones: true, h: 250, xLabel: groupXLabel, yLabel: `${variableName} · 子组均值`, xLabels: groupPointLabels } },
+        { t: `${variableName} 的标准差控制图 (S)`, dec: 4, props: { data: M.svals, cl: M.sbar, ucl: M.uclS, lcl: M.lclS, clLabel: 'S̄', h: 210, xLabel: groupXLabel, yLabel: `${variableName} · 子组标准差`, xLabels: groupPointLabels } },
       ],
     },
     'i-mr': {
       sub: M.isDemo ? '单值 - 移动极差 · 演示序列' : '单值 - 移动极差 · 全部观测',
       shewhart: true,
       charts: [
-        { t: '单值控制图 (I)', main: true, dec: 3, props: { data: M.indiv, cl: M.indMean, ucl: M.iUcl, lcl: M.iLcl, clLabel: 'X̄', zones: true, h: 250 } },
-        { t: '移动极差图 (MR)', dec: 3, props: { data: M.mr.slice(1) as number[], cl: M.mrbar, ucl: M.mrUcl, lcl: 0, clLabel: 'MR̄', h: 210 } },
+        { t: `${variableName} 的单值控制图 (I)`, main: true, dec: 3, props: { data: M.indiv, cl: M.indMean, ucl: M.iUcl, lcl: M.iLcl, clLabel: 'X̄', zones: true, h: 250, xLabel: prepared.layout === 'individuals' ? groupXLabel : '观测序号', yLabel: `${variableName} · 单值`, xLabels: indivPointLabels } },
+        { t: `${variableName} 的移动极差图 (MR)`, dec: 3, props: { data: M.mr.slice(1) as number[], cl: M.mrbar, ucl: M.mrUcl, lcl: 0, clLabel: 'MR̄', h: 210, xIndexOffset: 1, xLabel: prepared.layout === 'individuals' ? groupXLabel : '观测序号（MR 从第 2 个观测开始）', yLabel: `${variableName} · 移动极差`, xLabels: indivPointLabels?.slice(1) } },
       ],
     },
     ewma: {
@@ -113,7 +225,7 @@ export function Spc({ T }: { T: ChartTokens }) {
       shewhart: false,
       coreViol: ewma.viol,
       charts: [
-        { t: 'EWMA 控制图（指数加权移动平均）', main: true, dec: 4, props: { data: ewma.z, cl: ewma.cl, ucl: ewma.ucl[ewma.ucl.length - 1], lcl: ewma.lcl[ewma.lcl.length - 1], uclSeries: ewma.ucl, lclSeries: ewma.lcl, clLabel: 'μ₀', h: 300 } },
+        { t: `${variableName} 的 EWMA 控制图（指数加权移动平均）`, main: true, dec: 4, props: { data: ewma.z, cl: ewma.cl, ucl: ewma.ucl[ewma.ucl.length - 1], lcl: ewma.lcl[ewma.lcl.length - 1], uclSeries: ewma.ucl, lclSeries: ewma.lcl, clLabel: 'μ₀', h: 300, xLabel: M.hasSubgroups ? groupXLabel : '观测序号', yLabel: `${variableName} · EWMA`, xLabels: labelsFor(advData.length) } },
       ],
     },
     cusum: {
@@ -121,21 +233,21 @@ export function Spc({ T }: { T: ChartTokens }) {
       shewhart: false,
       coreViol: cusum.viol,
       charts: [
-        { t: 'CUSUM 控制图（C⁺ 蓝 / C⁻ 品红）', main: true, dec: 4, props: { data: cusum.cp, series2: cusum.cn, series2Label: 'C⁻', cl: 0, ucl: cusum.H, lcl: 0, clLabel: '0', h: 300 } },
+        { t: `${variableName} 的 CUSUM 控制图（C⁺ 蓝 / C⁻ 品红）`, main: true, dec: 4, props: { data: cusum.cp, series2: cusum.cn, series2Label: 'C⁻', cl: 0, ucl: cusum.H, lcl: 0, clLabel: '0', h: 300, xLabel: M.hasSubgroups ? groupXLabel : '观测序号', yLabel: `${variableName} · 累积和`, xLabels: labelsFor(advData.length) } },
       ],
     },
     p: {
       sub: `不良率 · 样本量 n = ${pModel.pN} · ${pModel.isDemo ? '演示数据' : pModel.name}`,
       shewhart: true,
       charts: [
-        { t: `不良率控制图 (P) · ${pModel.name}`, main: true, dec: 3, props: { data: pModel.pprop, cl: pModel.pbar, ucl: pModel.pUcl, lcl: pModel.pLcl, clLabel: 'p̄', zones: true, h: 300 } },
+        { t: `不良率控制图 (P) · ${pModel.name}`, main: true, dec: 3, props: { data: pModel.pprop, cl: pModel.pbar, ucl: pModel.pUcl, lcl: pModel.pLcl, clLabel: 'p̄', zones: true, h: 300, xLabel: '样本序号', yLabel: '样本不良率' } },
       ],
     },
     c: {
       sub: `单位缺陷数 · ${cModel.isDemo ? '演示数据' : cModel.name}`,
       shewhart: true,
       charts: [
-        { t: `缺陷数控制图 (C) · ${cModel.name}`, main: true, dec: 1, props: { data: cModel.cdata, cl: cModel.cbar, ucl: cModel.cUcl, lcl: cModel.cLcl, clLabel: 'c̄', zones: true, h: 300 } },
+        { t: `缺陷数控制图 (C) · ${cModel.name}`, main: true, dec: 1, props: { data: cModel.cdata, cl: cModel.cbar, ucl: cModel.cUcl, lcl: cModel.cLcl, clLabel: 'c̄', zones: true, h: 300, xLabel: '检验单位序号', yLabel: '单位缺陷数' } },
       ],
     },
   };
@@ -151,8 +263,9 @@ export function Spc({ T }: { T: ChartTokens }) {
     viol = spec.coreViol;
     violList = spec.coreList;
   } else if (spec.shewhart) {
-    const sig = (main.props.ucl - main.props.cl) / 3;
-    const r = evalRules(main.props.data, main.props.cl, sig, spcRules);
+    const r = effType === 'p' || effType === 'c'
+      ? evalLimitedRules(main.props.data, main.props.cl, main.props.ucl, main.props.lcl, spcRules)
+      : evalRules(main.props.data, main.props.cl, (main.props.ucl - main.props.cl) / 3, spcRules);
     viol = r.viol;
     violList = r.list;
   } else {
@@ -164,43 +277,52 @@ export function Spc({ T }: { T: ChartTokens }) {
     }));
   }
 
-  // 离散图(R/S/MR)判异——准则 1:点超出各自控制限。反馈要求"先看极差图":极差失控会使
-  // X̄ 控制限失真,故极差/标准差图也须判异、显示红点并计入检验结果(而非仅绘制不检测)。
+  // 离散图(R/S/MR)按其适用的准则 1–4 判异。反馈要求"先看极差图":极差失控会使
+  // X̄ 控制限失去解释前提,故离散图须显示完整适用信号并计入结论。
   // 分阶段模式下用段内判异结果 staged.r(否则会因固定控制限而漏判/误判)。
   const dispViolByChart = new Map<string, Set<number>>();
-  const dispItems: { i: number; rule: number; desc: string; chartLabel: string }[] = [];
+  const dispItems: SpcViolationItem[] = [];
   if (spec.shewhart) {
     for (const ch of spec.charts) {
       if (ch.main) continue;
-      const clLabel = ch.props.clLabel ?? '离散';
+      const chartLabel = effType === 'xbar-r' ? 'R' : effType === 'xbar-s' ? 'S' : effType === 'i-mr' ? 'MR' : ch.props.clLabel ?? '离散';
       if (staged && effType === 'xbar-r') {
         // 分阶段极差图:采用段内准则判异(否则整段被跳过、极差失控不显示)
         if (staged.r.viol.size) {
           dispViolByChart.set(ch.t, staged.r.viol);
-          staged.r.list.forEach((o) => dispItems.push({ i: o.i, rule: o.rule, desc: `${clLabel} 图:${o.desc}`, chartLabel: clLabel }));
+          expandSpcRuleItems(staged.r.viol, staged.r.list, chartLabel).forEach((o) =>
+            dispItems.push({ ...o, desc: `${chartLabel} 图：${o.desc}` }));
         }
       } else if (!spec.coreViol && ch.props.ucl != null) {
         const { ucl, lcl, data: cdata } = ch.props;
-        const dv = new Set<number>();
-        (cdata as number[]).forEach((v, i) => {
-          if (v > ucl || (lcl != null && v < lcl)) dv.add(i);
-        });
-        if (dv.size) {
-          dispViolByChart.set(ch.t, dv);
-          [...dv].sort((a, b) => a - b).forEach((i) =>
-            dispItems.push({ i, rule: 1, desc: `${clLabel} 图点超出控制限`, chartLabel: clLabel }));
+        const dr = evalLimitedRules(cdata as number[], ch.props.cl, ucl, lcl, spcRules);
+        if (dr.viol.size) {
+          dispViolByChart.set(ch.t, dr.viol);
+          expandSpcRuleItems(dr.viol, dr.list, chartLabel).forEach((item) => {
+            // MR 图数组索引 0 对应原始观测 2；结果列表统一映射回原观测索引。
+            const i = effType === 'i-mr' ? item.i + 1 : item.i;
+            dispItems.push({ ...item, i, desc: `${chartLabel} 图：${item.desc}` });
+          });
         }
       }
     }
   }
+  const mainChartLabel: Record<SpcType, string> = {
+    'xbar-r': 'X̄', 'xbar-s': 'X̄', 'i-mr': 'I', ewma: 'EWMA', cusum: 'CUSUM', p: 'P', c: 'C',
+  };
   const allViolItems = [
-    ...violList.map((o) => ({ ...o, chartLabel: '' })),
+    ...expandSpcRuleItems(viol, violList, mainChartLabel[effType]),
     ...dispItems,
-  ];
+  ].sort((a, b) => a.i - b.i || a.chartLabel.localeCompare(b.chartLabel) || a.rule - b.rule);
+  const uniqueViolCount = uniqueSpcPointCount(allViolItems);
+  const uniqueViolPoints = new Set(allViolItems.map((o) => o.i));
+  const variationChartLabel = effType === 'xbar-r' ? 'R' : effType === 'xbar-s' ? 'S' : effType === 'i-mr' ? 'MR' : null;
+  const variationViolCount = uniqueSpcPointCount(dispItems);
 
   const sel = selSub != null && selSub < main.props.data.length ? selSub : null;
   const labWord = { 'xbar-r': '子组', 'xbar-s': '子组', 'i-mr': '观测', ewma: '点', cusum: '点', p: '样本', c: '单位' }[effType];
-  const ptLab = (i: number) => labWord + ' ' + (i + 1);
+  const mainLabels = effType === 'p' || effType === 'c' ? undefined : labelsFor(main.props.data.length);
+  const ptLab = (i: number) => labWord + ' ' + (mainLabels?.[i] ?? (i + 1));
 
   const stats: { k: string; v: string }[] = [];
   if (effType === 'ewma') {
@@ -270,7 +392,7 @@ export function Spc({ T }: { T: ChartTokens }) {
       subRows = [{ k: '缺陷数', v: String(cModel.cdata[sel]) }];
     }
   }
-  const selBad = sel != null && viol.has(sel);
+  const selBad = sel != null && uniqueViolPoints.has(sel);
 
   const typeTabs: Array<[SpcType, string]> = [
     ['xbar-r', 'X̄-R'], ['xbar-s', 'X̄-S'], ['i-mr', 'I-MR'],
@@ -281,13 +403,19 @@ export function Spc({ T }: { T: ChartTokens }) {
   const report = spcReport({
     violList: allViolItems, // 含 R/S/MR 离散图失控点——顶部结论卡与右侧列表口径一致
     k: main.props.data.length,
-    n: M.n,
-    hasSubgroups: M.hasSubgroups,
+    n: effType === 'p' ? pModel.pN : effType === 'c' ? 1 : M.n,
+    hasSubgroups: effType === 'p' || effType === 'c' ? false : M.hasSubgroups,
+    structure: effType === 'p' ? 'attribute-p' : effType === 'c' ? 'attribute-c' : M.hasSubgroups ? 'subgroup' : 'individual',
     typeLabel: typeTabs.find(([k]) => k === effType)?.[1] ?? effType,
+    variationChartLabel,
+    variationViolations: dispItems,
+    variableName: effType === 'p' || effType === 'c' ? undefined : variableName,
+    dataRole: effType === 'p' || effType === 'c' ? undefined : prepared.note,
   });
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      {effType !== 'p' && effType !== 'c' && rolePanel}
       <ReportCard data={report} />
       <Card style={{ padding: '11px 16px', display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
         <span style={{ fontSize: 12, color: '#8a929d', fontWeight: 600 }}>控制图类型</span>
@@ -313,9 +441,15 @@ export function Spc({ T }: { T: ChartTokens }) {
             <div style={{ display: 'flex', gap: 7 }}>
               {ruleToggles.map(([k, l]) => {
                 const d = RULE_DEFS[Number(k.slice(1)) as RuleNo];
+                const unavailable = (effType === 'p' || effType === 'c') && Number(k.slice(1)) > 4;
                 return (
-                  <div key={k} style={chipStyle(spcRules[k])} onClick={() => toggleRule(k)} title={`${d.def}(${d.points})· ${d.source}`}>
-                    <span style={{ width: 7, height: 7, borderRadius: '50%', background: spcRules[k] ? '#1f6fb2' : '#c8cfd8' }} />
+                  <div
+                    key={k}
+                    style={{ ...chipStyle(!unavailable && spcRules[k]), ...(unavailable ? { opacity: 0.4, cursor: 'not-allowed' } : {}) }}
+                    onClick={() => !unavailable && toggleRule(k)}
+                    title={unavailable ? 'P/C 属性控制图仅适用准则 1–4' : `${d.def}(${d.points})· ${d.source}`}
+                  >
+                    <span style={{ width: 7, height: 7, borderRadius: '50%', background: !unavailable && spcRules[k] ? '#1f6fb2' : '#c8cfd8' }} />
                     {l}
                   </div>
                 );
@@ -329,7 +463,14 @@ export function Spc({ T }: { T: ChartTokens }) {
           <>
             <span style={{ width: 1, height: 22, background: '#e5e9ee' }} />
             <span style={{ fontSize: 12, color: '#8a929d', fontWeight: 600 }}>分阶段</span>
-            <select style={stageSelStyle} value={stageCol} onChange={(e) => { setStageCol(+e.target.value); setSelSub(null); }}>
+            <select
+              style={stageSelStyle}
+              value={stageCol}
+              onChange={(e) => {
+                const next = +e.target.value;
+                setSpcStageCol(next >= 0 ? textCols[next]?.name ?? null : null);
+              }}
+            >
               <option value={-1}>不分阶段</option>
               {textCols.map((c, i) => <option key={c.name} value={i}>按 {c.name}</option>)}
             </select>
@@ -355,7 +496,22 @@ export function Spc({ T }: { T: ChartTokens }) {
               <b style={{ color: '#5b6472' }}>{RULE_DEFS[n].name}</b>:{RULE_DEFS[n].def}({RULE_DEFS[n].points})
             </span>
           ))}
-          <span style={{ color: '#a3abb5' }}>依据:Nelson (1984) / Minitab 特殊原因检验 1–8</span>
+          <span style={{ color: '#a3abb5' }}>
+            依据：Nelson (1984) / Minitab 特殊原因检验；R、S、MR、P、C 图仅适用准则 1–4，X̄/I 图适用 1–8
+          </span>
+        </div>
+      )}
+
+      {variationChartLabel && (
+        <div style={{
+          padding: '10px 16px', borderRadius: 5, border: `1px solid ${variationViolCount ? '#efc7c7' : '#cfe5d3'}`,
+          background: variationViolCount ? '#fff6f6' : '#f5fbf6', color: variationViolCount ? '#a62b2b' : '#2c6b3c',
+          fontSize: 12.5, lineHeight: 1.6,
+        }}>
+          <b>判读顺序：先看 {variationChartLabel} 图。</b>{' '}
+          {variationViolCount > 0
+            ? `${variationChartLabel} 图检出 ${variationViolCount} 个异常点，过程变异尚未受控；此时均值/单值图的控制限缺乏稳定变异前提，暂不解释其信号，先调查离散异常。`
+            : `${variationChartLabel} 图未检出异常，过程变异受控；现在才可继续解释 ${effType === 'i-mr' ? 'I' : 'X̄'} 图。`}
         </div>
       )}
 
@@ -375,7 +531,7 @@ export function Spc({ T }: { T: ChartTokens }) {
                   violations={ch.main ? viol : dispViolByChart.get(ch.t)}
                   sel={ch.main ? sel : null}
                   onPoint={ch.main ? (i) => setSelSub(i) : undefined}
-                  ptLabel={ptLab}
+                  ptLabel={effType === 'i-mr' && !ch.main ? (i) => ptLab(i + 1) : ptLab}
                 />
               </div>
             </Card>
@@ -408,20 +564,22 @@ export function Spc({ T }: { T: ChartTokens }) {
           </Card>
           <div style={{ background: '#fff', border: '1px solid #f0d3d3', borderRadius: 5, padding: '15px 16px', boxShadow: '0 1px 2px rgba(20,30,50,0.04)' }}>
             <div style={{ fontWeight: 600, color: '#c22f2f', marginBottom: 6, display: 'flex', alignItems: 'center' }}>
-              检验结果
-              <span className="mono" style={{ marginLeft: 8, background: '#e23b3b', color: '#fff', fontSize: 11, padding: '1px 7px', borderRadius: 9 }}>{allViolItems.length}</span>
+              检验结果（按实际点去重）
+              <span className="mono" style={{ marginLeft: 8, background: '#e23b3b', color: '#fff', fontSize: 11, padding: '1px 7px', borderRadius: 9 }}>{uniqueViolCount} 点</span>
             </div>
-            {allViolItems.length === 0 && (
+            {uniqueViolCount === 0 && (
               <div style={{ padding: '8px 0', fontSize: 12.5, color: '#2c8a45', fontWeight: 500 }}>✓ 未检出失控点，过程受控</div>
             )}
             {allViolItems.slice(0, 12).map((o) => (
               <div key={(o.chartLabel || 'main') + '-' + o.rule + '-' + o.i} style={{ padding: '8px 0', borderTop: '1px solid #f6eaea', fontSize: 12.5 }}>
-                <div style={{ color: '#c22f2f', fontWeight: 600 }}>{o.chartLabel ? `${o.chartLabel} 图 · ` : ''}点 {o.i + 1}{spec.shewhart ? ` · 准则 ${o.rule}` : ''}</div>
+                <div style={{ color: '#c22f2f', fontWeight: 600 }}>{o.chartLabel ? `${o.chartLabel} 图 · ` : ''}{ptLab(o.i)}{spec.shewhart ? ` · 准则 ${o.rule}` : ''}</div>
                 <div style={{ color: '#8a929d', marginTop: 2 }}>{o.desc}</div>
               </div>
             ))}
-            {allViolItems.length > 12 && (
-              <div style={{ padding: '8px 0', fontSize: 12, color: '#9aa2ad' }}>… 共 {allViolItems.length} 项</div>
+            {allViolItems.length > 0 && (
+              <div style={{ padding: '8px 0', fontSize: 12, color: '#9aa2ad', borderTop: '1px solid #f6eaea' }}>
+                {allViolItems.length > 12 ? '… ' : ''}共 {uniqueViolCount} 个失控点 · {allViolItems.length} 个点-准则命中
+              </div>
             )}
           </div>
         </div>

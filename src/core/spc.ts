@@ -37,6 +37,31 @@ export interface RuleViolation {
   desc: string;
 }
 
+/** R/S/MR 与属性图按 Minitab 适用性仅执行准则 1–4；5–8 只用于均值/单值等位置图。 */
+export function evalLimitedRules(
+  data: number[], cl: number, ucl: number, lcl: number, rules: NelsonRules,
+): { viol: Set<number>; list: RuleViolation[] } {
+  const viol = new Set<number>();
+  const list: RuleViolation[] = [];
+  if (rules.r1) {
+    data.forEach((v, i) => {
+      if (v > ucl || v < lcl) {
+        viol.add(i);
+        list.push({ i, rule: 1, desc: '1 点超出该图的 3σ 控制限' });
+      }
+    });
+  }
+  const patternRules: NelsonRules = {
+    r1: false, r2: rules.r2, r3: rules.r3, r4: rules.r4,
+    r5: false, r6: false, r7: false, r8: false,
+  };
+  // 准则 2–4 只依赖中心线/点序；sigma 取有限正数即可。准则 1 由非对称 UCL/LCL 精确判断。
+  const pattern = evalRules(data, cl, Math.max(Math.abs(ucl - cl), Math.abs(cl - lcl)) / 3 || 1e-12, patternRules);
+  pattern.viol.forEach((i) => viol.add(i));
+  list.push(...pattern.list);
+  return { viol, list: list.sort((a, b) => a.i - b.i || a.rule - b.rule) };
+}
+
 export interface ControlConstants {
   A2: number;
   A3: number;
