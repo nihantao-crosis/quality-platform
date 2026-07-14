@@ -1,6 +1,6 @@
 /** 批次D:Nelson 判异准则 4/6/7/8 + AQL 国标查表 / 位移近似。 */
 import { describe, it, expect } from 'vitest';
-import { evalRules, aqlPlan, codeLetterGB, codeLetterShift, CODE_LETTER_TABLE, N_BY_CODE } from '../index';
+import { evalRules, aqlPlan, codeLetterGB, codeLetterShift, CODE_LETTER_TABLE, N_BY_CODE, acceptNumber, acceptNumberGB, PREFERRED_AC } from '../index';
 
 const OFF = { r1: false, r2: false, r3: false, r4: false, r5: false, r6: false, r7: false, r8: false };
 const rulesOnly = (k: 'r4' | 'r6' | 'r7' | 'r8') => ({ ...OFF, [k]: true });
@@ -59,5 +59,31 @@ describe('AQL 字码判定:国标查表 vs 位移近似', () => {
     expect(codeIII).toBe('R');
     expect(N_BY_CODE[codeIII]).toBe(2000);
     expect(CODE_LETTER_TABLE[CODE_LETTER_TABLE.length - 1].hi).toBe(Infinity);
+  });
+});
+
+describe('AQL 接收数:国标优先数列(近似主表) vs 二项近似', () => {
+  it('重现已知国标锚点', () => {
+    expect(acceptNumberGB(20, 1.0)).toBe(1);   // F/1.0
+    expect(acceptNumberGB(80, 2.5)).toBe(5);   // J/2.5
+    expect(acceptNumberGB(200, 2.5)).toBe(10); // L/2.5(二项会给 9)
+    expect(acceptNumberGB(315, 2.5)).toBe(14); // M/2.5(二项会给 13)
+    expect(acceptNumberGB(500, 4.0)).toBe(30); // N/4.0(二项会给 27)
+  });
+  it('大样本处 Ac 吸附到优先数列,与二项不同', () => {
+    expect(acceptNumber(200, 2.5)).toBe(9);    // 二项给非标数
+    expect(acceptNumberGB(200, 2.5)).toBe(10); // 国标吸附到优先数
+    // 结果必在优先数列内(或极端回落)
+    for (const [n, a] of [[50, 4.0], [125, 2.5], [500, 1.5]] as [number, number][]) {
+      expect(PREFERRED_AC.includes(acceptNumberGB(n, a))).toBe(true);
+    }
+  });
+  it('aqlPlan 默认走国标优先数列;可切二项', () => {
+    // L(200) 落在字码 III 的某档;直接用大样本档验证方法差异
+    expect(aqlPlan(35000, 'II', 2.5, 'gb', 'gb').ac).toBe(acceptNumberGB(N_BY_CODE[codeLetterGB(35000, 'II')], 2.5));
+    const p1 = aqlPlan(150000, 'III', 4.0, 'gb', 'gb');
+    const p2 = aqlPlan(150000, 'III', 4.0, 'gb', 'binom');
+    expect(PREFERRED_AC.includes(p1.ac)).toBe(true);
+    expect(p1.ac).toBeGreaterThanOrEqual(p2.ac); // 国标吸附 ≥ 二项
   });
 });

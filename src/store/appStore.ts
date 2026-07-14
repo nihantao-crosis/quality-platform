@@ -3,7 +3,7 @@
  */
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import type { NelsonRules, InspectionLevel, CalcState, AnovaMode, AqlMethod } from '../core';
+import type { NelsonRules, InspectionLevel, CalcState, AnovaMode, AqlMethod, AqlAcMethod } from '../core';
 import { calcKey as coreCalcKey, CALC_INIT } from '../core';
 
 export type Page =
@@ -41,7 +41,8 @@ interface AppState {
   aqlLot: number;
   aqlLevel: InspectionLevel;
   aqlAQL: number;
-  aqlMethod: AqlMethod; // 字码判定:'gb' 国标查表(默认) / 'shift' 位移近似
+  aqlMethod: AqlMethod;     // 字码判定:'gb' 国标查表(默认) / 'shift' 位移近似
+  aqlAcMethod: AqlAcMethod; // 接收数:'gb' 国标优先数列(默认) / 'binom' 二项近似
   openMenu: string | null;
   modal: Modal;
   toast: string | null;
@@ -72,7 +73,7 @@ interface AppState {
   setHypoTab(v: HypoTab): void;
   setAnovaSel(patch: Partial<Pick<AppState, 'anovaMode' | 'anovaRespName' | 'anovaFactorName'>>): void;
   setParetoView(v: ParetoView): void;
-  setAql(patch: Partial<Pick<AppState, 'aqlLot' | 'aqlLevel' | 'aqlAQL' | 'aqlMethod'>>): void;
+  setAql(patch: Partial<Pick<AppState, 'aqlLot' | 'aqlLevel' | 'aqlAQL' | 'aqlMethod' | 'aqlAcMethod'>>): void;
   setImportTab(t: ImportTab): void;
   setImportKind(k: ImportKind): void;
   setExportFmt(f: ExportFmt): void;
@@ -110,6 +111,7 @@ export const useApp = create<AppState>()(persist((set, get) => ({
   aqlLevel: 'II',
   aqlAQL: 1.0,
   aqlMethod: 'gb',
+  aqlAcMethod: 'gb',
   openMenu: null,
   modal: null,
   toast: null,
@@ -174,6 +176,7 @@ export const useApp = create<AppState>()(persist((set, get) => ({
     aqlLevel: s.aqlLevel,
     aqlAQL: s.aqlAQL,
     aqlMethod: s.aqlMethod,
+    aqlAcMethod: s.aqlAcMethod,
     spcRules: s.spcRules,
   }) as Partial<AppState>,
   version: 1,

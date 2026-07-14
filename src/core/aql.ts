@@ -5,7 +5,11 @@
 import { binomCdf } from './basicMath';
 
 export type InspectionLevel = 'I' | 'II' | 'III';
-export type AqlMethod = 'shift' | 'gb'; // 字码判定:位移近似 / 国标查表
+export type AqlMethod = 'shift' | 'gb';   // 字码判定:位移近似 / 国标查表
+export type AqlAcMethod = 'binom' | 'gb'; // 接收数判定:二项近似 / 国标优先数列(近似主表)
+
+/** GB/T 2828.1 主表接收数取值来自"优先数列"(不是任意整数):0,1,2,3,5,7,10,14,21,30,44… */
+export const PREFERRED_AC = [0, 1, 2, 3, 5, 7, 10, 14, 21, 30, 44, 63, 91, 127, 182];
 
 export interface SamplingPlan {
   code: string; // 样本字码
@@ -64,7 +68,7 @@ export function codeLetterGB(lot: number, level: InspectionLevel): string {
   return row[level];
 }
 
-/** 满足 binomCdf(c,n,AQL/100) ≥ 0.95 的最小 c */
+/** 满足 binomCdf(c,n,AQL/100) ≥ 0.95 的最小 c(二项近似) */
 export function acceptNumber(n: number, aqlPct: number): number {
   const p = aqlPct / 100;
   let ac = 0;
@@ -78,6 +82,17 @@ export function acceptNumber(n: number, aqlPct: number): number {
   return ac;
 }
 
+/** 国标优先数列(近似主表):在优先数列中取最小满足 binomCdf≥0.95 者。
+ *  与二项近似的差异集中在大样本档——ISO 主表把 Ac 吸附到优先数(如 9→10、13→14、27→30)。
+ *  注:小样本+小 AQL 的"箭头改档"未实现,待原表校准。 */
+export function acceptNumberGB(n: number, aqlPct: number): number {
+  const p = aqlPct / 100;
+  for (const c of PREFERRED_AC) {
+    if (c <= n && binomCdf(c, n, p) >= 0.95) return c;
+  }
+  return acceptNumber(n, aqlPct); // 超出优先数列覆盖范围(极端大样本)时回落二项
+}
+
 /** 位移近似:以水平 II 批量档为基准,水平 I/III 各偏移 ∓2 位字码。 */
 export function codeLetterShift(lot: number, level: InspectionLevel): string {
   let bi = LETTERS.findIndex((r) => lot >= r[1] && lot <= r[2]);
@@ -87,10 +102,13 @@ export function codeLetterShift(lot: number, level: InspectionLevel): string {
   return LETTERS[idx][0];
 }
 
-export function aqlPlan(lot: number, level: InspectionLevel, aql: number, method: AqlMethod = 'gb'): SamplingPlan {
+export function aqlPlan(
+  lot: number, level: InspectionLevel, aql: number,
+  method: AqlMethod = 'gb', acMethod: AqlAcMethod = 'gb',
+): SamplingPlan {
   const code = method === 'gb' ? codeLetterGB(lot, level) : codeLetterShift(lot, level);
   const n = N_BY_CODE[code];
-  const ac = acceptNumber(n, aql);
+  const ac = acMethod === 'gb' ? acceptNumberGB(n, aql) : acceptNumber(n, aql);
   return { code, n, ac, re: ac + 1 };
 }
 

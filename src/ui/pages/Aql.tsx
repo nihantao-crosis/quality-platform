@@ -2,8 +2,8 @@
 import { useState } from 'react';
 import { useApp } from '../../store/appStore';
 import {
-  aqlPlan, rqlFor, producerRiskPct, acceptNumber, N_BY_CODE, LETTERS, CODE_LETTER_TABLE,
-  type InspectionLevel, type AqlMethod,
+  aqlPlan, rqlFor, producerRiskPct, acceptNumber, acceptNumberGB, N_BY_CODE, LETTERS, CODE_LETTER_TABLE,
+  type InspectionLevel, type AqlMethod, type AqlAcMethod,
   recordBatch, plansByState, SWITCH_INIT, type SwitchStatus, type InspState,
 } from '../../core';
 import type { ChartTokens } from '../tokens';
@@ -22,10 +22,10 @@ const fmtLot = (lo: number, hi: number) => (hi === Infinity ? `${lo.toLocaleStri
 
 /** 按当前检验水平 + 字码判定法生成批量范围 → 字码方案表。
  *  gb:真实 GB/T 2828.1 字码表(覆盖到 50 万+);shift:水平 II 基准 ∓2 位位移近似。 */
-function planTableRows(level: InspectionLevel, aqlPct: number, lot: number, method: AqlMethod) {
+function planTableRows(level: InspectionLevel, aqlPct: number, lot: number, method: AqlMethod, acMethod: AqlAcMethod) {
   const mk = (lo: number, hi: number, code: string) => {
     const n = N_BY_CODE[code];
-    const ac = acceptNumber(n, aqlPct);
+    const ac = acMethod === 'gb' ? acceptNumberGB(n, aqlPct) : acceptNumber(n, aqlPct);
     return { label: fmtLot(lo, hi), code, n, ac, active: lot >= lo && lot <= hi };
   };
   if (method === 'gb') {
@@ -39,13 +39,13 @@ function planTableRows(level: InspectionLevel, aqlPct: number, lot: number, meth
 }
 
 export function Aql({ T }: { T: ChartTokens }) {
-  const { aqlLot, aqlLevel, aqlAQL, aqlMethod, setAql } = useApp();
+  const { aqlLot, aqlLevel, aqlAQL, aqlMethod, aqlAcMethod, setAql } = useApp();
   const [sw, setSw] = useState<SwitchStatus>(SWITCH_INIT);
-  const plan = aqlPlan(aqlLot, aqlLevel, aqlAQL, aqlMethod);
+  const plan = aqlPlan(aqlLot, aqlLevel, aqlAQL, aqlMethod, aqlAcMethod);
   const aqlP = aqlAQL / 100;
   const rqlP = rqlFor(plan);
   const prodRisk = producerRiskPct(plan, aqlAQL);
-  const statePlans = plansByState(aqlLot, aqlLevel, aqlAQL, aqlMethod);
+  const statePlans = plansByState(aqlLot, aqlLevel, aqlAQL, aqlMethod, aqlAcMethod);
   const meta = STATE_META[sw.state];
 
   const fmtAql = (a: number) => 'AQL ' + a.toFixed(2).replace(/0$/, '').replace(/\.$/, '.0');
@@ -88,6 +88,14 @@ export function Aql({ T }: { T: ChartTokens }) {
             <div key={m} style={tabStyle(aqlMethod === m)}
               title={m === 'gb' ? '按 GB/T 2828.1 样本量字码表(批量×水平)直接查字码' : '以水平 II 为基准,水平 I/III 各偏移 ∓2 位字码(近似)'}
               onClick={() => setAql({ aqlMethod: m })}>{label}</div>
+          ))}
+        </div>
+        <span style={{ fontSize: 12, color: '#8a929d', fontWeight: 600 }}>接收数 Ac</span>
+        <div style={{ display: 'flex', gap: 6 }}>
+          {([['gb', '国标数列'], ['binom', '二项近似']] as [AqlAcMethod, string][]).map(([m, label]) => (
+            <div key={m} style={tabStyle(aqlAcMethod === m)}
+              title={m === 'gb' ? '接收数取 GB/T 2828.1 主表优先数列(0,1,2,3,5,7,10,14,21…);近似,小样本箭头改档暂未实现' : '取最小满足 95% 接收概率的接收数(二项)'}
+              onClick={() => setAql({ aqlAcMethod: m })}>{label}</div>
           ))}
         </div>
       </Card>
@@ -207,7 +215,7 @@ export function Aql({ T }: { T: ChartTokens }) {
             </tr>
           </thead>
           <tbody>
-            {planTableRows(aqlLevel, aqlAQL, aqlLot, aqlMethod).map((row) => (
+            {planTableRows(aqlLevel, aqlAQL, aqlLot, aqlMethod, aqlAcMethod).map((row) => (
               <tr key={row.label} style={{ borderTop: '1px solid #f0f2f5', ...(row.active ? { background: '#e7f0f9' } : {}) }}>
                 <td className="mono" style={{ padding: '8px 16px', color: '#33404f' }}>{row.label}</td>
                 <td className="mono" style={{ padding: '8px 8px', color: '#5b6472' }}>{row.code}</td>
