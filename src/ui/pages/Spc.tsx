@@ -164,6 +164,40 @@ export function Spc({ T }: { T: ChartTokens }) {
     }));
   }
 
+  // 离散图(R/S/MR)判异——准则 1:点超出各自控制限。反馈要求"先看极差图":极差失控会使
+  // X̄ 控制限失真,故极差/标准差图也须判异、显示红点并计入检验结果(而非仅绘制不检测)。
+  // 分阶段模式下用段内判异结果 staged.r(否则会因固定控制限而漏判/误判)。
+  const dispViolByChart = new Map<string, Set<number>>();
+  const dispItems: { i: number; rule: number; desc: string; chartLabel: string }[] = [];
+  if (spec.shewhart) {
+    for (const ch of spec.charts) {
+      if (ch.main) continue;
+      const clLabel = ch.props.clLabel ?? '离散';
+      if (staged && effType === 'xbar-r') {
+        // 分阶段极差图:采用段内准则判异(否则整段被跳过、极差失控不显示)
+        if (staged.r.viol.size) {
+          dispViolByChart.set(ch.t, staged.r.viol);
+          staged.r.list.forEach((o) => dispItems.push({ i: o.i, rule: o.rule, desc: `${clLabel} 图:${o.desc}`, chartLabel: clLabel }));
+        }
+      } else if (!spec.coreViol && ch.props.ucl != null) {
+        const { ucl, lcl, data: cdata } = ch.props;
+        const dv = new Set<number>();
+        (cdata as number[]).forEach((v, i) => {
+          if (v > ucl || (lcl != null && v < lcl)) dv.add(i);
+        });
+        if (dv.size) {
+          dispViolByChart.set(ch.t, dv);
+          [...dv].sort((a, b) => a - b).forEach((i) =>
+            dispItems.push({ i, rule: 1, desc: `${clLabel} 图点超出控制限`, chartLabel: clLabel }));
+        }
+      }
+    }
+  }
+  const allViolItems = [
+    ...violList.map((o) => ({ ...o, chartLabel: '' })),
+    ...dispItems,
+  ];
+
   const sel = selSub != null && selSub < main.props.data.length ? selSub : null;
   const labWord = { 'xbar-r': '子组', 'xbar-s': '子组', 'i-mr': '观测', ewma: '点', cusum: '点', p: '样本', c: '单位' }[effType];
   const ptLab = (i: number) => labWord + ' ' + (i + 1);
@@ -338,7 +372,7 @@ export function Spc({ T }: { T: ChartTokens }) {
                   T={T}
                   {...ch.props}
                   dec={ch.dec}
-                  violations={ch.main ? viol : undefined}
+                  violations={ch.main ? viol : dispViolByChart.get(ch.t)}
                   sel={ch.main ? sel : null}
                   onPoint={ch.main ? (i) => setSelSub(i) : undefined}
                   ptLabel={ptLab}
@@ -375,19 +409,19 @@ export function Spc({ T }: { T: ChartTokens }) {
           <div style={{ background: '#fff', border: '1px solid #f0d3d3', borderRadius: 5, padding: '15px 16px', boxShadow: '0 1px 2px rgba(20,30,50,0.04)' }}>
             <div style={{ fontWeight: 600, color: '#c22f2f', marginBottom: 6, display: 'flex', alignItems: 'center' }}>
               检验结果
-              <span className="mono" style={{ marginLeft: 8, background: '#e23b3b', color: '#fff', fontSize: 11, padding: '1px 7px', borderRadius: 9 }}>{violList.length}</span>
+              <span className="mono" style={{ marginLeft: 8, background: '#e23b3b', color: '#fff', fontSize: 11, padding: '1px 7px', borderRadius: 9 }}>{allViolItems.length}</span>
             </div>
-            {violList.length === 0 && (
+            {allViolItems.length === 0 && (
               <div style={{ padding: '8px 0', fontSize: 12.5, color: '#2c8a45', fontWeight: 500 }}>✓ 未检出失控点，过程受控</div>
             )}
-            {violList.slice(0, 12).map((o) => (
-              <div key={o.rule + '-' + o.i} style={{ padding: '8px 0', borderTop: '1px solid #f6eaea', fontSize: 12.5 }}>
-                <div style={{ color: '#c22f2f', fontWeight: 600 }}>点 {o.i + 1}{spec.shewhart ? ` · 准则 ${o.rule}` : ''}</div>
+            {allViolItems.slice(0, 12).map((o) => (
+              <div key={(o.chartLabel || 'main') + '-' + o.rule + '-' + o.i} style={{ padding: '8px 0', borderTop: '1px solid #f6eaea', fontSize: 12.5 }}>
+                <div style={{ color: '#c22f2f', fontWeight: 600 }}>{o.chartLabel ? `${o.chartLabel} 图 · ` : ''}点 {o.i + 1}{spec.shewhart ? ` · 准则 ${o.rule}` : ''}</div>
                 <div style={{ color: '#8a929d', marginTop: 2 }}>{o.desc}</div>
               </div>
             ))}
-            {violList.length > 12 && (
-              <div style={{ padding: '8px 0', fontSize: 12, color: '#9aa2ad' }}>… 共 {violList.length} 项</div>
+            {allViolItems.length > 12 && (
+              <div style={{ padding: '8px 0', fontSize: 12, color: '#9aa2ad' }}>… 共 {allViolItems.length} 项</div>
             )}
           </div>
         </div>

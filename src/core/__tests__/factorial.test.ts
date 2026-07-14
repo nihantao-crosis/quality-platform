@@ -113,17 +113,41 @@ describe('analyzeFactorial 中心点给出曲率检验且残差回归纯误差',
   });
 });
 
-describe('analyzeFactorial 分数/不完整设计剔除别名项而不崩溃', () => {
-  it('3 因子仅 4 run(半分数,C=AB)→ 高阶项被剔除,droppedTerms 非空', () => {
-    // 半分数:A,B 全因子,C=A*B;只有 4 个 run
-    const A = [0, 1, 0, 1]; const B = [0, 0, 1, 1]; const C = [1, 0, 0, 1]; // C=1 当 A==B
+describe('analyzeFactorial 分数/不完整设计:保留主效应,剔除别名交互', () => {
+  it('3 因子仅 4 run(半分数,C=AB)→ 保留主效应 C,丢弃交互 A×B(低阶优先)', () => {
+    // 半分数:A,B 全因子,C=A*B;只有 4 个 run。C 与 A×B 别名。
+    const A = [0, 1, 0, 1]; const B = [0, 0, 1, 1]; const C = [1, 0, 0, 1]; // C=1 当 A==B(即 C=A·B)
     const y = [20, 30, 26, 40];
     const r = detectFactorial([{ name: 'A', values: A }, { name: 'B', values: B }, { name: 'C', values: C }], y);
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const fr = analyzeFactorial(r.design);
-    expect(fr.droppedTerms && fr.droppedTerms.length).toBeGreaterThan(0);
+    const names = fr.terms.map((t) => t.name);
+    expect(names).toContain('C');        // 主效应 C 被保留(修复前会被丢弃)
+    expect(names).not.toContain('A×B');  // 别名交互 A×B 被剔除
+    expect(fr.droppedTerms).toContain('A×B');
     expect(fr.terms.every((t) => Number.isFinite(t.effect))).toBe(true); // 无 NaN
+  });
+});
+
+describe('analyzeFactorial 零残差(完美拟合)下非零效应判为显著', () => {
+  it('单元内零变异、单元间有差异 → MSE=0;非零效应显著(p=0),零效应不显著', () => {
+    const A = [0, 1, 0, 1, 0, 1, 0, 1];
+    const B = [0, 0, 1, 1, 0, 0, 1, 1];
+    const y = [10, 20, 10, 20, 10, 20, 10, 20]; // A 效应=10;每个单元两次完全相同
+    const r = detectFactorial([{ name: 'A', values: A }, { name: 'B', values: B }], y);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const fr = analyzeFactorial(r.design);
+    expect(fr.method).toBe('ttest');
+    expect(fr.mse!).toBeCloseTo(0, 12);
+    const a = fr.terms.find((t) => t.name === 'A')!;
+    expect(a.effect).toBeCloseTo(10, 6);
+    expect(a.sig).toBe(true);   // 修复前:seEff=0→tStat=0→p=1→误判不显著
+    expect(a.p).toBe(0);
+    const b = fr.terms.find((t) => t.name === 'B')!;
+    expect(b.effect).toBeCloseTo(0, 6);
+    expect(b.sig).toBe(false);  // 零效应仍不显著
   });
 });
 

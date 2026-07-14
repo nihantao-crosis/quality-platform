@@ -2,7 +2,7 @@
 import { useState } from 'react';
 import { useApp } from '../../store/appStore';
 import {
-  aqlPlan, rqlFor, producerRiskPct, acceptNumber, N_BY_CODE, type InspectionLevel,
+  aqlPlan, rqlFor, producerRiskPct, acceptNumber, N_BY_CODE, LETTERS, type InspectionLevel,
   recordBatch, plansByState, SWITCH_INIT, type SwitchStatus, type InspState,
 } from '../../core';
 import type { ChartTokens } from '../tokens';
@@ -16,11 +16,20 @@ const STATE_META: Record<InspState, { label: string; bg: string; color: string }
 };
 
 const AQL_OPTIONS = [0.65, 1.0, 1.5, 2.5, 4.0];
-/** 方案表展示前 10 档批量范围 */
-const TABLE_ROWS: Array<[string, string]> = [
-  ['2–8', 'A'], ['9–15', 'B'], ['16–25', 'C'], ['26–50', 'D'], ['51–90', 'E'],
-  ['91–150', 'F'], ['151–280', 'G'], ['281–500', 'H'], ['501–1200', 'J'], ['1201–3200', 'K'],
-];
+const LEVEL_SHIFT: Record<InspectionLevel, number> = { I: -2, II: 0, III: 2 };
+const fmtLot = (lo: number, hi: number) => `${lo.toLocaleString()}–${hi.toLocaleString()}`;
+
+/** 按当前检验水平生成完整批量范围 → 字码方案表(与 aqlPlan 的水平位移口径一致,覆盖到 15 万)。 */
+function planTableRows(level: InspectionLevel, aqlPct: number, lot: number) {
+  const shift = LEVEL_SHIFT[level];
+  return LETTERS.map(([, lo, hi], i) => {
+    const idx = Math.max(0, Math.min(LETTERS.length - 1, i + shift));
+    const code = LETTERS[idx][0];
+    const n = N_BY_CODE[code];
+    const ac = acceptNumber(n, aqlPct);
+    return { label: fmtLot(lo, hi), code, n, ac, active: lot >= lo && lot <= hi };
+  });
+}
 
 export function Aql({ T }: { T: ChartTokens }) {
   const { aqlLot, aqlLevel, aqlAQL, setAql } = useApp();
@@ -41,10 +50,11 @@ export function Aql({ T }: { T: ChartTokens }) {
           批量 N
           <input
             type="number"
+            min={2}
             value={aqlLot}
             onChange={(e) => {
               const v = parseInt(e.target.value);
-              if (!isNaN(v)) setAql({ aqlLot: v });
+              if (!isNaN(v)) setAql({ aqlLot: Math.max(2, Math.min(150000, v)) }); // 批量须 ≥2、≤15 万,避免 0/负数静默回落
             }}
             className="mono"
             style={{ width: 96, padding: '6px 9px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12.5, color: '#2a333f' }}
@@ -181,19 +191,15 @@ export function Aql({ T }: { T: ChartTokens }) {
             </tr>
           </thead>
           <tbody>
-            {TABLE_ROWS.map(([lot, code]) => {
-              const n = N_BY_CODE[code];
-              const ac = acceptNumber(n, aqlAQL);
-              return (
-                <tr key={code} style={{ borderTop: '1px solid #f0f2f5', ...(code === plan.code ? { background: '#e7f0f9' } : {}) }}>
-                  <td className="mono" style={{ padding: '8px 16px', color: '#33404f' }}>{lot}</td>
-                  <td className="mono" style={{ padding: '8px 8px', color: '#5b6472' }}>{code}</td>
-                  <td className="mono" style={{ padding: '8px 8px', color: '#2a333f', textAlign: 'right', fontWeight: 600 }}>{n}</td>
-                  <td className="mono" style={{ padding: '8px 8px', color: '#2c8a45', textAlign: 'right', fontWeight: 600 }}>{ac}</td>
-                  <td className="mono" style={{ padding: '8px 16px', color: '#c22f2f', textAlign: 'right', fontWeight: 600 }}>{ac + 1}</td>
-                </tr>
-              );
-            })}
+            {planTableRows(aqlLevel, aqlAQL, aqlLot).map((row) => (
+              <tr key={row.label} style={{ borderTop: '1px solid #f0f2f5', ...(row.active ? { background: '#e7f0f9' } : {}) }}>
+                <td className="mono" style={{ padding: '8px 16px', color: '#33404f' }}>{row.label}</td>
+                <td className="mono" style={{ padding: '8px 8px', color: '#5b6472' }}>{row.code}</td>
+                <td className="mono" style={{ padding: '8px 8px', color: '#2a333f', textAlign: 'right', fontWeight: 600 }}>{row.n}</td>
+                <td className="mono" style={{ padding: '8px 8px', color: '#2c8a45', textAlign: 'right', fontWeight: 600 }}>{row.ac}</td>
+                <td className="mono" style={{ padding: '8px 16px', color: '#c22f2f', textAlign: 'right', fontWeight: 600 }}>{row.ac + 1}</td>
+              </tr>
+            ))}
           </tbody>
         </table>
       </Card>

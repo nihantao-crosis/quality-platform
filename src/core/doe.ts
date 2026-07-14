@@ -118,6 +118,7 @@ export interface FactorialResult {
   curvature?: { coef: number; tStat?: number; p?: number; sig: boolean }; // 中心点时的曲率(弯曲)检验
   droppedTerms?: string[];       // 因设计不完整/别名而无法估计的项(如分数因子)
   fits: number[]; residuals: number[];
+  stdResiduals?: number[];       // 标准化残差 r/(s·√(1−h)),t 检验路径给出,对标 Minitab 四合一
   grand: number;
   factorNames: string[];
   nRuns: number;
@@ -158,7 +159,7 @@ export function detectFactorial(
   return { ok: true, design: { factorNames: factors.map((f) => f.name), coded, response, levels } };
 }
 
-/** 枚举 1..k 阶所有项(位掩码);返回每项涉及的因子索引数组 */
+/** 枚举 1..k 阶所有项(位掩码);按阶数升序返回(低阶优先),使别名剔除时保留主效应而非交互。 */
 function termSubsets(k: number): number[][] {
   const out: number[][] = [];
   for (let mask = 1; mask < (1 << k); mask++) {
@@ -166,7 +167,9 @@ function termSubsets(k: number): number[][] {
     for (let j = 0; j < k; j++) if (mask & (1 << j)) sub.push(j);
     out.push(sub);
   }
-  return out;
+  // 稳定排序:阶数(主效应<两因子<三因子…)升序;同阶保持位掩码原序。
+  // estimableColumns 优先保留靠前列 → 分数/别名设计里保住低阶主效应,丢弃高阶交互。
+  return out.sort((a, b) => a.length - b.length);
 }
 
 const termName = (sub: number[], names: string[]): string => sub.map((j) => names[j]).join('×');
@@ -210,7 +213,7 @@ function estimableColumns(XtX: number[][], tol: number): number[] {
 
 /** 普通最小二乘:返回全长系数(秩亏列=0)、(XᵀX)⁻¹ 对角(秩亏列=NaN,用于系数标准误)、秩、拟合与残差。
  * 不假设正交,可正确处理不平衡/非正交设计;别名列自动剔除,支持分数因子。 */
-function olsFit(X: number[][], y: number[]): { beta: number[]; invDiag: number[]; rank: number; fits: number[]; residuals: number[] } {
+function olsFit(X: number[][], y: number[]): { beta: number[]; invDiag: number[]; rank: number; fits: number[]; residuals: number[]; leverage: number[] } {
   const N = X.length, p = X[0].length;
   const XtX: number[][] = Array.from({ length: p }, () => new Array(p).fill(0));
   const Xty = new Array(p).fill(0);
@@ -235,7 +238,14 @@ function olsFit(X: number[][], y: number[]): { beta: number[]; invDiag: number[]
   });
   const fits = X.map((xi) => xi.reduce((s, v, j) => s + v * beta[j], 0));
   const residuals = y.map((v, i) => v - fits[i]);
-  return { beta, invDiag, rank: kept.length, fits, residuals };
+  // 杠杆值 h_ii = x_i·(XᵀX)⁻¹·x_iᵀ(仅取可估计列),用于标准化残差
+  const leverage = X.map((xi) => {
+    const xk = kept.map((c) => xi[c]);
+    let h = 0;
+    for (let a = 0; a < kept.length; a++) for (let b = 0; b < kept.length; b++) h += xk[a] * subInv[a][b] * xk[b];
+    return h;
+  });
+  return { beta, invDiag, rank: kept.length, fits, residuals, leverage };
 }
 
 type ColMeta = { kind: 'intercept' } | { kind: 'term'; name: string } | { kind: 'curv' };
@@ -265,7 +275,7 @@ export function analyzeFactorial(design: CodedDesign): FactorialResult {
     ...(hasCenter ? [coded.map((row) => (isCenter(row) ? 1 : 0))] : []),
   ];
   const X = y.map((_, i) => colX.map((c) => c[i]));
-  const { beta, invDiag, rank, fits, residuals } = olsFit(X, y);
+  const { beta, invDiag, rank, fits, residuals, leverage } = olsFit(X, y);
   const grand = beta[0];
   const dfResid = N - rank;
 
@@ -282,22 +292,32 @@ export function analyzeFactorial(design: CodedDesign): FactorialResult {
   let method: 'lenth' | 'ttest';
   let me: number | undefined, pse: number | undefined, mse: number | undefined;
   let curvature: FactorialResult['curvature'];
+  let stdResiduals: number[] | undefined;
   const terms: FactorialTerm[] = [];
 
   if (dfResid >= 1) {
     method = 'ttest';
     mse = residuals.reduce((a, r) => a + r * r, 0) / dfResid;
+    if (mse > 1e-12) {
+      const s = Math.sqrt(mse);
+      stdResiduals = residuals.map((r, i) => {
+        const denom = s * Math.sqrt(Math.max(1e-9, 1 - leverage[i]));
+        return denom > 0 ? r / denom : 0;
+      });
+    }
     for (const t of estTerms) {
       const seEff = 2 * Math.sqrt(mse * invDiag[t.j]);
-      const tStat = seEff > 0 ? t.effect / seEff : 0;
-      const p = 2 * (1 - tCdf(Math.abs(tStat), dfResid));
+      // 零残差(完美拟合)时:非零效应 → 无穷显著(p→0),而非误判为不显著;零效应 → 无信息(p=1)
+      const tStat = seEff > 0 ? t.effect / seEff : (t.effect === 0 ? 0 : Math.sign(t.effect) * Infinity);
+      const p = seEff > 0 ? 2 * (1 - tCdf(Math.abs(tStat), dfResid)) : (t.effect === 0 ? 1 : 0);
       terms.push({ name: t.name, effect: t.effect, coef: t.coef, tStat, p, sig: p < 0.05 });
     }
     if (curvJ >= 0) {
       const seCoef = Math.sqrt(mse * invDiag[curvJ]);
-      const tStat = seCoef > 0 ? beta[curvJ] / seCoef : 0;
-      const p = 2 * (1 - tCdf(Math.abs(tStat), dfResid));
-      curvature = { coef: beta[curvJ], tStat, p, sig: p < 0.05 };
+      const cf = beta[curvJ];
+      const tStat = seCoef > 0 ? cf / seCoef : (cf === 0 ? 0 : Math.sign(cf) * Infinity);
+      const p = seCoef > 0 ? 2 * (1 - tCdf(Math.abs(tStat), dfResid)) : (cf === 0 ? 1 : 0);
+      curvature = { coef: cf, tStat, p, sig: p < 0.05 };
     }
   } else {
     method = 'lenth';
@@ -313,7 +333,7 @@ export function analyzeFactorial(design: CodedDesign): FactorialResult {
   return {
     terms, method, me, pse, mse, dfResid, curvature,
     droppedTerms: dropped.length ? dropped : undefined,
-    fits, residuals, grand, factorNames, nRuns: N,
+    fits, residuals, stdResiduals, grand, factorNames, nRuns: N,
   };
 }
 

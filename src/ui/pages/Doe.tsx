@@ -140,6 +140,21 @@ function AnalyzeDesign({ T }: { T: ChartTokens }) {
     );
   }
 
+  // 响应尚未录入(全为占位 0 或无变异):不产出正式结论,引导先录入(否则会把"未采集"当成"实测为 0")
+  if (!isDemo && design && new Set(design.response).size < 2) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+        {picker}
+        <Card style={{ padding: '18px 20px', fontSize: 13, color: '#8a6520', background: '#fffdf7', lineHeight: 1.7 }}>
+          <b>响应列「{M.colNames[respIdx]}」尚未录入:</b>该列所有值相同(如刚生成设计时的占位 0),无变异,无法估计效应。
+          <div style={{ fontSize: 12, color: '#9aa2ad', marginTop: 8 }}>
+            请到「数据工作表」按运行序逐行录入实测响应后再回此分析——否则会把"尚未采集"误当成"实测值为 0"并给出无意义的结论。
+          </div>
+        </Card>
+      </div>
+    );
+  }
+
   // ── 渲染结果(演示或真实) ──
   const respName = isDemo ? '抗拉强度 (MPa)' : M.colNames[respIdx];
   const factorNames = isDemo ? ['A 温度', 'B 压力', 'C 时间'] : design!.factorNames;
@@ -163,7 +178,13 @@ function AnalyzeDesign({ T }: { T: ChartTokens }) {
     : real!;
   // 效应帕累托:饱和/演示用 |效应|+ME 线;t 检验用 |t| + t 临界线
   const isT = res.method === 'ttest';
-  const barTerms = res.terms.map((t) => ({ name: t.name, abs: isT ? Math.abs(t.tStat ?? 0) : Math.abs(t.effect) }));
+  // 零残差时 |t| 可为 Infinity(完美拟合下非零效应),给帕累托条一个有限上限避免图崩
+  const finiteT = res.terms.map((t) => Math.abs(t.tStat ?? 0)).filter((v) => Number.isFinite(v));
+  const capT = (finiteT.length ? Math.max(...finiteT) : 1) * 1.5 + 1;
+  const barTerms = res.terms.map((t) => ({
+    name: t.name,
+    abs: isT ? (Number.isFinite(t.tStat) ? Math.abs(t.tStat as number) : capT) : Math.abs(t.effect),
+  }));
   const barRef = isT ? tInv(0.975, res.dfResid ?? 1) : (res.me ?? 0);
 
   // 立方图(仅 3 因子):角点响应均值
@@ -267,17 +288,23 @@ function AnalyzeDesign({ T }: { T: ChartTokens }) {
         </Card>
       </div>
 
-      {!isDemo && (
-        <Card>
-          <CardHeader title="残差诊断(四合一)" right={<span style={{ fontSize: 11.5, color: '#98a1ac' }}>残差 = 观测 − 模型拟合值</span>} />
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, padding: '10px 12px 12px' }}>
-            <NormalProbPlot T={T} data={res.residuals} h={220} />
-            <ScatterPlot T={T} xs={res.fits} ys={res.residuals} slope={0} intercept={0} xLabel="拟合值" yLabel="残差" h={220} />
-            <MiniHist T={T} data={res.residuals} h={220} xLabel="残差分布" />
-            <ScatterPlot T={T} xs={res.residuals.map((_, i) => i + 1)} ys={res.residuals} slope={0} intercept={0} xLabel="运行序" yLabel="残差" h={220} />
-          </div>
-        </Card>
-      )}
+      {!isDemo && (() => {
+        // 有标准化残差(t 检验路径)则用之,对标 Minitab 四合一;否则回落原始残差
+        const rr = res.stdResiduals ?? res.residuals;
+        const std = res.stdResiduals != null;
+        const yl = std ? '标准化残差' : '残差';
+        return (
+          <Card>
+            <CardHeader title="残差诊断(四合一)" right={<span style={{ fontSize: 11.5, color: '#98a1ac' }}>{std ? '标准化残差 = 残差 /(s·√(1−杠杆))' : '残差 = 观测 − 模型拟合值'}</span>} />
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, padding: '10px 12px 12px' }}>
+              <NormalProbPlot T={T} data={rr} h={220} />
+              <ScatterPlot T={T} xs={res.fits} ys={rr} slope={0} intercept={0} xLabel="拟合值" yLabel={yl} h={220} />
+              <MiniHist T={T} data={rr} h={220} xLabel={`${yl}分布`} />
+              <ScatterPlot T={T} xs={rr.map((_, i) => i + 1)} ys={rr} slope={0} intercept={0} xLabel="运行序" yLabel={yl} h={220} />
+            </div>
+          </Card>
+        );
+      })()}
 
       <Card>
         <CardHeader title={isDemo ? '设计矩阵 · 2³ 全因子 (8 运行)' : `设计矩阵 · ${design!.factorNames.length} 因子 (${design!.response.length} 运行)`} />

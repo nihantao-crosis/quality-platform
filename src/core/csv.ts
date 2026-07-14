@@ -106,7 +106,7 @@ export interface CategoryCounts {
 }
 
 const CAT_HEADER_RE = /^(类别|名称|缺陷|项目|原因|category|name|defect|item)$/i;
-const CNT_HEADER_RE = /^(count|counts|频数|数量|次数|频次|frequency|freq)$/i;
+const CNT_HEADER_RE = /^(count|counts|频数|频率|数量|次数|频次|frequency|freq)$/i;
 
 /** 解析「缺陷类别 + 频数」数据(帕累托)。与 parseMatrix 完全独立,规则:
  *  1. 横向 2×N(类别一行/频数一行)→ 自动转置;
@@ -123,11 +123,14 @@ function detectCatDelimiter(lines: string[]): string {
   return spaceLike >= Math.ceil(lines.length * 0.6) ? ' ' : ',';
 }
 
-/** 一列是否为「序号列」:全为整数且严格递增(常见 1..N 序号)。 */
+/** 一列是否为「序号列」:从 0 或 1 起、步长 1 的连续整数(如 1,2,3,…N)。
+ *  仅"递增整数"不够——10,20,30 也递增但那是频数;须为真正的连续序号才剔除。 */
 function isIndexColumn(vals: string[]): boolean {
   if (vals.length < 2 || !vals.every((v) => /^\d+$/.test(v))) return false;
   const nums = vals.map(Number);
-  for (let i = 1; i < nums.length; i++) if (nums[i] <= nums[i - 1]) return false;
+  const start = nums[0];
+  if (start !== 0 && start !== 1) return false;
+  for (let i = 1; i < nums.length; i++) if (nums[i] !== start + i) return false;
   return true;
 }
 
@@ -158,9 +161,10 @@ export function parseCategoryCounts(text: string): CategoryCounts | { error: str
     }
   }
 
-  // 关键词表头剥离(仅纵向、明确命中时)
+  // 关键词表头剥离(仅纵向、明确命中时):首行同时含类别关键词与频数关键词即视为表头,
+  // 关键词可在任意列(兼容「序号,类别,频数」这类带序号前缀的表头,序号本身不是类别词)。
   if (cells.length >= 2 && cells[0].length >= 2
-      && CAT_HEADER_RE.test(cells[0][0]) && cells[0].slice(1).some((c) => CNT_HEADER_RE.test(c))) {
+      && cells[0].some((c) => CAT_HEADER_RE.test(c)) && cells[0].some((c) => CNT_HEADER_RE.test(c))) {
     cells = cells.slice(1);
     notes.push('已识别并跳过表头行');
   } else if (cells.length >= 2 && cells[0].length === 1 && CAT_HEADER_RE.test(cells[0][0])) {
@@ -183,12 +187,21 @@ export function parseCategoryCounts(text: string): CategoryCounts | { error: str
     cells.forEach((r) => add(r[0], 1));
     notes.push('单列标签已按出现次数自动计数');
   } else {
-    // 多列:先识别「序号列」以免把行号当频数(常见 Excel 序号,类别,频数)
+    // 多列:先识别「序号列」以免把行号当频数(常见 Excel 序号,类别,频数)。
+    // 关键:仅当存在 ≥2 个完整数值列时,才允许把某个严格递增整数列当序号剔除——
+    // 否则会把唯一的频数列(恰好是 1,2,3…)误当序号删掉,导致"找不到频数"。
     const maxLen = Math.max(...cells.map((r) => r.length));
-    let indexCol = -1;
+    const numericCols: number[] = [];
     for (let j = 0; j < maxLen; j++) {
       const col = cells.map((r) => r[j]).filter((c): c is string => c != null);
-      if (col.length === cells.length && isIndexColumn(col)) { indexCol = j; break; }
+      if (col.length === cells.length && col.every(isNum)) numericCols.push(j);
+    }
+    let indexCol = -1;
+    if (numericCols.length >= 2) {
+      for (const j of numericCols) {
+        const col = cells.map((r) => r[j]).filter((c): c is string => c != null);
+        if (isIndexColumn(col)) { indexCol = j; break; }
+      }
     }
     for (const [li, r] of cells.entries()) {
       const name = r.find((c) => !isNum(c));

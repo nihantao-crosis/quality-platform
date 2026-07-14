@@ -6,8 +6,8 @@ import { ReportCard } from '../ReportCard';
 import { gageReport, anovaReport, tReport, regReport } from '../reportData';
 import {
   nf, anovaGroups, DEFECTS, gageStudyData, GAGE_TOLERANCE,
-  computeGageRR, oneWayAnova, anovaResiduals, oneSampleT, twoSampleT, linearRegression,
-  type GageObservation, type TTestResult,
+  computeGageRR, oneWayAnova, anovaResiduals, buildAnovaGroups, wideScaleDisparate, oneSampleT, twoSampleT, linearRegression,
+  type GageObservation, type TTestResult, type AnovaMode,
 } from '../../core';
 import { ScatterPlot } from '../charts/ScatterPlot';
 import { NormalProbPlot } from '../charts/NormalProbPlot';
@@ -408,42 +408,28 @@ function TwoSampleTPanel({ T }: { T: ChartTokens }) {
 
 function AnovaInner({ T }: { T: ChartTokens }) {
   const { model, textCols, stackColumns } = useData();
-  const { openModal, showToast } = useApp();
+  const { openModal, showToast, anovaMode, anovaRespName, anovaFactorName, setAnovaSel } = useApp();
   const canStacked = textCols.length >= 1 && model.colNames.length >= 1;
   const canWide = model.colNames.length >= 2 && model.k >= 2;
-  const [mode, setMode] = useState<'stacked' | 'wide'>(canStacked ? 'stacked' : 'wide');
+  const canNumFactor = model.colNames.length >= 2; // 一列作因子 + 一列作响应
   const [showDemo, setShowDemo] = useState(false);
-  const [respCol, setRespCol] = useState(0);
-  const [grpCol, setGrpCol] = useState(0);
   const [chartKind, setChartKind] = useState<'box' | 'interval'>('box');
 
   // 出厂演示集(直径1..5 是同一量的子组位置,不是「分组」)不作为真实宽表数据,直接走演示研究
   const isDemoDataset = model.isDemo;
-  // 数据集变化后当前模式可能失效 → 回落到可用模式;都不可用为 null(空态)
-  const effMode: 'stacked' | 'wide' | null = isDemoDataset ? null
-    : mode === 'stacked' && canStacked ? 'stacked'
-    : mode === 'wide' && canWide ? 'wide'
-    : canStacked ? 'stacked' : canWide ? 'wide' : null;
+  const dataRows = useMemo(() => model.subs.map((s) => s.vals), [model]);
 
-  const stackedGroups = useMemo(() => {
-    if (effMode !== 'stacked') return null;
-    const labels = textCols[Math.min(grpCol, textCols.length - 1)].values;
-    const vals = model.subs.map((sub) => sub.vals[Math.min(respCol, model.colNames.length - 1)]);
-    const byLabel = new Map<string, number[]>();
-    labels.forEach((l, i) => {
-      if (!byLabel.has(l)) byLabel.set(l, []);
-      byLabel.get(l)!.push(vals[i]);
-    });
-    const gs = [...byLabel.entries()].map(([name, v]) => ({ name, vals: v }));
-    if (gs.length < 2 || gs.some((g) => g.vals.length < 2)) return null;
-    return gs;
-  }, [effMode, model, textCols, respCol, grpCol]);
+  // 有效模式:store 里的模式若当前数据集不支持则回落;都不可用为 null(空态)
+  const modeOk = (m: AnovaMode) => (m === 'stacked' ? canStacked : m === 'wide' ? canWide : canNumFactor);
+  const effMode: AnovaMode | null = isDemoDataset ? null
+    : modeOk(anovaMode) ? anovaMode
+    : canStacked ? 'stacked' : canWide ? 'wide' : canNumFactor ? 'numfactor' : null;
 
-  const wideGroups = useMemo(() => {
-    if (effMode !== 'wide') return null;
-    return model.colNames.map((name, j) => ({ name, vals: model.subs.map((sub) => sub.vals[j]) }));
-  }, [effMode, model]);
-
+  // 页面与项目汇总共用 buildAnovaGroups,保证界面/卡片一致
+  const builtGroups = useMemo(
+    () => (effMode === null ? null : buildAnovaGroups(effMode, model.colNames, dataRows, textCols, anovaRespName, anovaFactorName)),
+    [effMode, model.colNames, dataRows, textCols, anovaRespName, anovaFactorName],
+  );
   const demoGroups = useMemo(() => anovaGroups(), []);
 
   // 空态:非演示集、无任何可分析形态、未显式要求示例
@@ -451,7 +437,7 @@ function AnovaInner({ T }: { T: ChartTokens }) {
     return (
       <EmptyStateCard
         title="单因子方差分析需要可比较的分组数据"
-        need="两种形态之一:① 1 个文本分组列 + 1 个数值响应列(长表,每组 ≥2 观测);② ≥2 个同量纲数值列(宽表,各列作为一组)。"
+        need="三种形态之一:① 1 个文本分组列 + 1 个数值响应列(长表);② 用一个数值列作因子(按取值分组)+ 1 个数值响应列;③ ≥2 个同量纲数值列(宽表,各列一组)。各组需 ≥2 观测。"
         current={`${model.colNames.length} 个数值列 · ${textCols.length} 个分组列 · ${model.k} 行`}
         actions={[{ label: '导入数据', primary: true, onClick: () => openModal('import') }]}
         onDemo={() => setShowDemo(true)}
@@ -460,12 +446,25 @@ function AnovaInner({ T }: { T: ChartTokens }) {
   }
 
   const isDemo = effMode === null; // 含出厂演示集与「查看示例」
-  const groups = isDemo ? demoGroups : (effMode === 'stacked' ? stackedGroups : wideGroups);
+  const groups = isDemo ? demoGroups : builtGroups;
+
+  // 选择器解析索引(与 buildAnovaGroups 默认口径一致)
+  const idxOf = (name: string | null, fb: number) => { const i = name ? model.colNames.indexOf(name) : -1; return i >= 0 ? i : fb; };
+  const factorNumIdx = idxOf(anovaFactorName, 0);
+  const respIdx = idxOf(anovaRespName, effMode === 'numfactor' && factorNumIdx === 0 ? 1 : 0);
+  const grpTextIdx = Math.max(0, textCols.findIndex((t) => t.name === anovaFactorName));
+
   const factorName = isDemo ? '设备'
-    : effMode === 'stacked' ? textCols[Math.min(grpCol, textCols.length - 1)].name
+    : effMode === 'stacked' ? (textCols[grpTextIdx]?.name ?? '分组')
+    : effMode === 'numfactor' ? model.colNames[factorNumIdx]
     : '测量列';
+  const respLabel = (effMode === 'stacked' || effMode === 'numfactor') ? model.colNames[respIdx] : '';
 
   // 工具条:提为普通 JSX 变量(不作为组件类型),避免每次渲染重建导致 <select> 焦点丢失
+  const tab = (m: AnovaMode, label: string, can: boolean, tip: string) => (
+    <div style={{ ...tabStyle(effMode === m), ...(can ? {} : { opacity: 0.45, cursor: 'not-allowed' }) }}
+      title={tip} onClick={() => can && setAnovaSel({ anovaMode: m })}>{label}</div>
+  );
   const modeBar = (
     <Card style={{ padding: '10px 16px', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', fontSize: 12 }}>
       {isDemo ? (
@@ -474,24 +473,33 @@ function AnovaInner({ T }: { T: ChartTokens }) {
         <>
           <span style={{ color: '#8a929d', fontWeight: 600 }}>数据形态</span>
           <div style={{ display: 'flex', gap: 6 }}>
-            <div style={{ ...tabStyle(effMode === 'stacked'), ...(canStacked ? {} : { opacity: 0.45, cursor: 'not-allowed' }) }}
-              title={canStacked ? '文本分组列 + 数值响应列' : '当前数据集没有文本分组列'}
-              onClick={() => canStacked && setMode('stacked')}>分组列(长表)</div>
-            <div style={{ ...tabStyle(effMode === 'wide'), ...(canWide ? {} : { opacity: 0.45, cursor: 'not-allowed' }) }}
-              title={canWide ? '每个数值列作为一组(Minitab unstacked)' : '需要 ≥2 个数值列'}
-              onClick={() => canWide && setMode('wide')}>宽表(各列一组)</div>
+            {tab('stacked', '分组列(长表)', canStacked, canStacked ? '文本分组列 + 数值响应列' : '当前数据集没有文本分组列')}
+            {tab('numfactor', '数值因子', canNumFactor, canNumFactor ? '一个数值列作因子(按取值分组)+ 一个数值响应列' : '需要 ≥2 个数值列')}
+            {tab('wide', '宽表(各列一组)', canWide, canWide ? '每个数值列作为一组(Minitab unstacked)' : '需要 ≥2 个数值列')}
           </div>
         </>
       )}
       {effMode === 'stacked' && (
         <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, color: '#5b6472' }}>
           响应
-          <select style={selStyle} value={respCol} onChange={(e) => setRespCol(+e.target.value)}>
+          <select style={selStyle} value={respIdx} onChange={(e) => setAnovaSel({ anovaRespName: model.colNames[+e.target.value] })}>
             {model.colNames.map((n, i) => <option key={n} value={i}>{n}</option>)}
           </select>
           分组
-          <select style={selStyle} value={grpCol} onChange={(e) => setGrpCol(+e.target.value)}>
+          <select style={selStyle} value={grpTextIdx} onChange={(e) => setAnovaSel({ anovaFactorName: textCols[+e.target.value].name })}>
             {textCols.map((c, i) => <option key={c.name} value={i}>{c.name}</option>)}
+          </select>
+        </div>
+      )}
+      {effMode === 'numfactor' && (
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, color: '#5b6472' }}>
+          因子
+          <select style={selStyle} value={factorNumIdx} onChange={(e) => setAnovaSel({ anovaFactorName: model.colNames[+e.target.value] })}>
+            {model.colNames.map((n, i) => <option key={n} value={i}>{n}</option>)}
+          </select>
+          响应
+          <select style={selStyle} value={respIdx} onChange={(e) => setAnovaSel({ anovaRespName: model.colNames[+e.target.value] })}>
+            {model.colNames.map((n, i) => <option key={n} value={i}>{n}</option>)}
           </select>
         </div>
       )}
@@ -499,14 +507,15 @@ function AnovaInner({ T }: { T: ChartTokens }) {
     </Card>
   );
 
-  // 所选分组列不满足要求(仅堆叠模式可能发生)
+  // 模式已选但当前列选不成有效分组
   if (!groups) {
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
         {modeBar}
         <Card style={{ padding: '18px 20px', fontSize: 12.5, color: '#d98324', background: '#fffdf7' }}>
-          所选分组列不满足要求:需要 ≥2 个组且每组 ≥2 个观测。请换一个分组/响应列
-          {canWide ? ',或切换到「宽表(各列一组)」模式' : ''}。
+          {effMode === 'numfactor'
+            ? '所选因子列无法构成有效分组:需要 ≥2 个不同取值、且每个取值 ≥2 个观测。请选一个「水平较少」的列作因子(如 2–3 水平的设定值),或换用其他模式。'
+            : `所选分组列不满足要求:需要 ≥2 个组且每组 ≥2 个观测。请换一个分组/响应列${canWide ? ',或切换到「宽表(各列一组)」模式' : ''}。`}
         </Card>
       </div>
     );
@@ -534,18 +543,20 @@ function AnovaInner({ T }: { T: ChartTokens }) {
   const conclusion = a.significant
     ? `P = ${nf(a.pValue, 3)} < 0.05，在 95% 置信水平下拒绝原假设：各「${factorName}」组均值存在显著差异。「${hi}」组均值最高，建议优先排查。`
     : `P = ${nf(a.pValue, 3)} ≥ 0.05，无充分证据表明各「${factorName}」组均值存在显著差异，可视为同一总体。`;
+  const wideDisparate = effMode === 'wide' && wideScaleDisparate(groups);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <ReportCard data={anovaReport({ p: a.pValue, significant: a.significant, groups: groups.map((g) => ({ name: g.name, n: g.vals.length })), wideCaution: effMode === 'wide' })} />
       {modeBar}
       {effMode === 'wide' && (
-        <div style={{ padding: '9px 14px', background: '#fcf3e3', border: '1px solid #f0e0c8', borderRadius: 5, fontSize: 12, color: '#8a6520', lineHeight: 1.6, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+        <div style={{ padding: '9px 14px', background: wideDisparate ? '#fdecec' : '#fcf3e3', border: `1px solid ${wideDisparate ? '#eecccc' : '#f0e0c8'}`, borderRadius: 5, fontSize: 12, color: wideDisparate ? '#b03030' : '#8a6520', lineHeight: 1.6, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
           <span style={{ flex: '1 1 420px' }}>
-            宽表模式把每个数值列当作一组。仅当各列是<b>同一响应量(同量纲)</b>在不同条件下的观测时,比较均值才有统计意义;
-            若各列是不同物理量(如 过盈量/轴硬度/压入力),请改用因子实验思路分析。
+            {wideDisparate
+              ? <><b>各列量纲悬殊(均值相差 &gt; 100 倍),把它们当三组比较没有统计意义。</b>这类"因子 + 响应"数据应改用「数值因子」模式(选一列作因子、另一列作响应)或用 DOE/回归分析。下方 F/P 仅为形式计算,请勿据此下结论。</>
+              : <>宽表模式把每个数值列当作一组。仅当各列是<b>同一响应量(同量纲)</b>在不同条件下的观测时,比较均值才有统计意义;若各列是不同物理量(如 过盈量/轴硬度/压入力),请改用「数值因子」模式或因子实验思路。</>}
           </span>
-          <div className="hov-act" onClick={() => { try { stackColumns(); setMode('stacked'); showToast('已堆叠为「测量值+来源列」长表并切换到分组列模式'); } catch (e) { showToast('堆叠失败:' + (e as Error).message); } }}
+          <div className="hov-act" onClick={() => { try { stackColumns(); setAnovaSel({ anovaMode: 'stacked' }); showToast('已堆叠为「测量值+来源列」长表并切换到分组列模式'); } catch (e) { showToast('堆叠失败:' + (e as Error).message); } }}
             style={{ padding: '5px 12px', border: '1px solid #d9b96a', borderRadius: 4, cursor: 'pointer', color: '#8a6520', background: '#fff', fontWeight: 600, flex: 'none' }}>
             一键堆叠为长表
           </div>
@@ -555,7 +566,7 @@ function AnovaInner({ T }: { T: ChartTokens }) {
       <Card>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 16px', borderBottom: '1px solid #edf0f3', flexWrap: 'wrap' }}>
           <div style={{ fontWeight: 600, color: '#33404f' }}>
-            单因子方差分析 · {isDemo ? '直径 vs 设备' : effMode === 'stacked' ? `${model.colNames[Math.min(respCol, model.colNames.length - 1)]} vs ${factorName}` : `各测量列比较(${groups.length} 组)`}
+            单因子方差分析 · {isDemo ? '直径 vs 设备' : effMode === 'wide' ? `各测量列比较(${groups.length} 组)` : `${respLabel} vs ${factorName}`}
           </div>
           <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
             <div style={tabStyle(chartKind === 'box')} onClick={() => setChartKind('box')}>箱线图</div>
@@ -675,11 +686,19 @@ function ParetoInner({ T }: { T: ChartTokens }) {
   const topN = Math.min(2, sorted.length);
   const topShare = Math.round((sorted.slice(0, topN).reduce((a, d) => a + d.count, 0) / total0) * 100);
   const topNames = sorted.slice(0, topN).map((d) => `「${d.name}」`).join('与');
+  // 帕累托(80/20)判定:统计"累计达 80% 所需的类别数 k80"占全部类别的比例——
+  // 真正的"关键少数"是少数类别(≤~1/4)贡献 80% 缺陷,且类别数需足够多(≥5)才有意义。
+  // 旧逻辑"前两类≥60% 即判 80/20"会把 3 类里 2 类占 61% 也误判为符合,已废弃。
+  const nCats = sorted.length;
+  let k80 = 0; let run = 0;
+  for (const d of sorted) { run += d.count; k80++; if (run / total0 >= 0.8) break; }
+  const vitalPct = Math.round((k80 / nCats) * 100);
+  const isPareto = nCats >= 5 && k80 / nCats <= 0.25;
   const conclusion = topN < 2
     ? `${topNames}占缺陷总数的 ${topShare}%。`
-    : topShare >= 60
-      ? `${topNames}合计占缺陷总数的 ${topShare}%(符合 80/20 分布)。优先针对这${topN === 2 ? '两' : ''}类缺陷改善,可消除大部分不良。`
-      : `前 ${topN} 类(${topNames})合计占 ${topShare}%,缺陷较为分散、未呈明显 80/20 集中,建议扩大改善范围或细分类别。`;
+    : isPareto
+      ? `前 ${k80} 类(仅占 ${nCats} 类中的 ${vitalPct}%)即累计贡献 80% 的缺陷,呈典型帕累托「关键少数」集中——优先改善这几类可消除大部分不良。`
+      : `前 ${topN} 类(${topNames})合计占 ${topShare}%;需前 ${k80}/${nCats} 类才累计达 80%,集中度不足以称"80/20",建议扩大改善范围或细分类别。`;
 
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '1fr 300px', gap: 16 }}>

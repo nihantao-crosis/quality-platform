@@ -6,7 +6,8 @@
 import { create } from 'zustand';
 import {
   nf, computeCapability, evalRules, computeGageRR, gageStudyData, GAGE_TOLERANCE,
-  oneWayAnova, anovaGroups, analyzeDoe, detectFactorial, analyzeFactorial, resolveDoeColumns, aqlPlan, computeDescriptive, type InspectionLevel,
+  oneWayAnova, anovaGroups, buildAnovaGroups, wideScaleDisparate, analyzeDoe, detectFactorial, analyzeFactorial, resolveDoeColumns, aqlPlan, computeDescriptive,
+  type InspectionLevel, type AnovaMode,
 } from '../core';
 import { useApp, type SpcType, type DoeView, type HypoTab, type ParetoView } from './appStore';
 import { useData } from './dataStore';
@@ -19,6 +20,9 @@ export interface AnalysisSnapshot {
   lsl?: number; usl?: number; tgt?: number; lslOn?: boolean; uslOn?: boolean;
   aqlLot?: number; aqlLevel?: InspectionLevel; aqlAQL?: number;
   doeView?: DoeView; hypoTab?: HypoTab; paretoView?: ParetoView;
+  // 列选择随分析记录一起快照,保证回看时"页面所见 = 保存时"(否则重算会用当前选择)
+  doeFactorCols?: string[] | null; doeRespCol?: string | null;
+  anovaMode?: AnovaMode; anovaRespName?: string | null; anovaFactorName?: string | null;
 }
 
 export interface SavedAnalysis {
@@ -95,25 +99,29 @@ function buildSummary(kind: AnalysisKind): Omit<SavedAnalysis, 'id' | 'createdAt
     case 'anova': {
       const tab = app.hypoTab;
       if (tab === 'anova') {
-        // 与 ANOVA 页默认模式一致:出厂演示集→演示;有文本分组列按首列分组;否则宽表(各数值列一组)
-        const { textCols } = useData.getState();
-        let groups: number[][] | null = null;
+        // 与 ANOVA 页共用 buildAnovaGroups + store 选择,保证摘要=页面所见;真实数据不回落演示
         if (M.isDemo) {
-          groups = anovaGroups().map((x) => x.vals);
-        } else if (textCols.length >= 1 && M.colNames.length >= 1) {
-          const byLabel = new Map<string, number[]>();
-          textCols[0].values.forEach((l, i) => {
-            if (!byLabel.has(l)) byLabel.set(l, []);
-            byLabel.get(l)!.push(M.subs[i].vals[0]);
-          });
-          const gs = [...byLabel.values()];
-          if (gs.length >= 2 && gs.every((g) => g.length >= 2)) groups = gs;
+          const a = oneWayAnova(anovaGroups().map((x) => x.vals));
+          return { kind, title: `${HYPO_TITLE.anova}(示例)`, metric: `P ${nf(a.pValue, 3)}`, status: '演示', ...pick(INFO) };
         }
-        if (!groups && M.colNames.length >= 2 && M.k >= 2) {
-          groups = M.colNames.map((_, j) => M.subs.map((sub) => sub.vals[j]));
+        const { textCols } = useData.getState();
+        const rows = M.subs.map((s) => s.vals);
+        const canStacked = textCols.length >= 1 && M.colNames.length >= 1;
+        const canWide = M.colNames.length >= 2 && M.k >= 2;
+        const canNumFactor = M.colNames.length >= 2;
+        const modeOk = (m: AnovaMode) => (m === 'stacked' ? canStacked : m === 'wide' ? canWide : canNumFactor);
+        const effMode: AnovaMode | null = modeOk(app.anovaMode) ? app.anovaMode
+          : canStacked ? 'stacked' : canWide ? 'wide' : canNumFactor ? 'numfactor' : null;
+        const groups = effMode ? buildAnovaGroups(effMode, M.colNames, rows, textCols, app.anovaRespName, app.anovaFactorName) : null;
+        if (!groups) {
+          return { kind, title: HYPO_TITLE.anova, metric: '数据不足(无有效分组)', status: '未分析', ...pick(WARN) };
+        }
+        // 宽表各列量纲悬殊:不把无意义的"显著"固化进摘要,给存疑标记(页面另有强告警与「数值因子」引导)
+        if (effMode === 'wide' && wideScaleDisparate(groups)) {
+          return { kind, title: HYPO_TITLE.anova, metric: '各列量纲悬殊·慎比', status: '存疑', ...pick(WARN) };
         }
         try {
-          const a = oneWayAnova(groups ?? anovaGroups().map((x) => x.vals));
+          const a = oneWayAnova(groups.map((g) => g.vals));
           return {
             kind, title: HYPO_TITLE.anova, metric: `P ${nf(a.pValue, 3)}`,
             status: a.significant ? '显著' : '不显著', ...pick(a.significant ? INFO : OK),
@@ -154,16 +162,21 @@ function buildSummary(kind: AnalysisKind): Omit<SavedAnalysis, 'id' | 'createdAt
         const { factorIdx, respIdx } = resolveDoeColumns(M.colNames, app.doeFactorCols, app.doeRespCol);
         const facs = factorIdx.map((i) => ({ name: M.colNames[i], values: M.subs.map((s) => s.vals[i]) }));
         const resp = M.subs.map((s) => s.vals[respIdx]);
+        // 检查顺序与分析页一致:先看因子结构、再看响应是否录入,避免页面与卡片给出不同诊断
         const det = detectFactorial(facs, resp);
-        if (det.ok) {
-          const fr = analyzeFactorial(det.design);
-          const sig = fr.terms.filter((t) => t.sig).map((t) => t.name);
-          return {
-            kind, title: `实验设计 · ${det.design.factorNames.length} 因子`,
-            metric: sig.length ? `${sig.slice(0, 3).join('、')} 显著` : '无显著项',
-            status: '已分析', ...pick(INFO),
-          };
+        if (!det.ok) {
+          return { kind, title: '实验设计 (DOE)', metric: '数据非因子设计', status: '未分析', ...pick(WARN) };
         }
+        if (new Set(resp).size < 2) {
+          return { kind, title: '实验设计 (DOE)', metric: '响应尚未录入', status: '未分析', ...pick(WARN) };
+        }
+        const fr = analyzeFactorial(det.design);
+        const sig = fr.terms.filter((t) => t.sig).map((t) => t.name);
+        return {
+          kind, title: `实验设计 · ${det.design.factorNames.length} 因子`,
+          metric: sig.length ? `${sig.slice(0, 3).join('、')} 显著` : '无显著项',
+          status: '已分析', ...pick(INFO),
+        };
       }
       return { kind, title: '实验设计 (DOE)', metric: '数据非因子设计', status: '未分析', ...pick(WARN) };
     }
@@ -198,8 +211,8 @@ function snapshotOf(kind: AnalysisKind): AnalysisSnapshot {
   if (kind === 'spc') snap.spcType = a.spcType;
   if (kind === 'capability') { snap.lsl = a.lsl; snap.usl = a.usl; snap.tgt = a.tgt; snap.lslOn = a.lslOn; snap.uslOn = a.uslOn; }
   if (kind === 'aql') { snap.aqlLot = a.aqlLot; snap.aqlLevel = a.aqlLevel; snap.aqlAQL = a.aqlAQL; }
-  if (kind === 'doe') snap.doeView = a.doeView;
-  if (kind === 'anova') snap.hypoTab = a.hypoTab;
+  if (kind === 'doe') { snap.doeView = a.doeView; snap.doeFactorCols = a.doeFactorCols; snap.doeRespCol = a.doeRespCol; }
+  if (kind === 'anova') { snap.hypoTab = a.hypoTab; snap.anovaMode = a.anovaMode; snap.anovaRespName = a.anovaRespName; snap.anovaFactorName = a.anovaFactorName; }
   if (kind === 'pareto') snap.paretoView = a.paretoView;
   return snap;
 }

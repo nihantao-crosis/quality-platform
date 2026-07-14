@@ -108,10 +108,14 @@ export function evalRules(
       const up = w.filter((q) => data[q] - cl > 2 * sigma).length;
       const dn = w.filter((q) => cl - data[q] > 2 * sigma).length;
       if (up >= 2 || dn >= 2) {
+        // 列表记在实际越界的点上(而非窗口末点 i)——否则红点/列表/点击详情三者不一致:
+        // 窗口末点可能并未越 2σ,点击它却显示"受控"。逐个越界点入表(去重键 rule-i 合并重叠窗口)。
         w.forEach((q) => {
-          if (Math.abs(data[q] - cl) > 2 * sigma) viol.add(q);
+          if (Math.abs(data[q] - cl) > 2 * sigma) {
+            viol.add(q);
+            list.push({ i: q, rule: 4, desc: RULE_DEFS[4].def });
+          }
         });
-        list.push({ i, rule: 4, desc: RULE_DEFS[4].def });
       }
     }
   }

@@ -30,17 +30,26 @@ describe('oneWayAnova 防御', () => {
 });
 
 describe('分析摘要与数据对齐(刘润泽场景)', () => {
-  it('导入 3 列纯数值后,ANOVA 摘要按宽表(各列一组)实算,而非演示组', () => {
+  it('导入 3 列异量纲数值后,ANOVA 摘要标"存疑"而非固化无意义的显著 P', () => {
     useData.getState().importMatrix('压装.csv', ['过盈量', '轴硬度', '压入力'], [
       [0.045, 28, 620], [0.0675, 30, 900], [0.09, 32, 1350], [0.045, 32, 700], [0.09, 28, 1200],
     ]);
-    useApp.setState({ page: 'anova', hypoTab: 'anova' });
+    useApp.setState({ page: 'anova', hypoTab: 'anova', anovaMode: 'wide', anovaRespName: null, anovaFactorName: null });
     const saved = useAnalyses.getState().saveCurrent();
-    // 三列量纲悬殊 → 宽表 F 检验必然显著;演示组 P≈0.012 也显著,但数据集名必须是用户的
+    // 摘要来自用户数据集(不回落演示);且因量纲悬殊(0.07 vs 30 vs ~900)不把"极显著"固化,给存疑。
     expect(saved?.datasetName).toBe('压装.csv');
-    expect(saved?.metric).toMatch(/^P /);
-    // 宽表实算的 P 值应远小于演示的 0.012(组间差异巨大)
-    const p = parseFloat(saved!.metric.replace('P ', ''));
-    expect(p).toBeLessThan(0.001);
+    expect(saved?.status).toBe('存疑');
+    expect(saved?.metric).toContain('量纲悬殊');
+  });
+
+  it('数值因子模式:压入力 按 轴硬度 水平分组,给出真实单因子 ANOVA', () => {
+    // 轴硬度 只有 28/32 两水平,每组 ≥2 → 可构成有效分组
+    useData.getState().importMatrix('压装2.csv', ['轴硬度', '压入力'], [
+      [28, 620], [28, 700], [32, 1350], [32, 1200], [28, 640], [32, 1300],
+    ]);
+    useApp.setState({ page: 'anova', hypoTab: 'anova', anovaMode: 'numfactor', anovaFactorName: '轴硬度', anovaRespName: '压入力' });
+    const saved = useAnalyses.getState().saveCurrent();
+    expect(saved?.datasetName).toBe('压装2.csv');
+    expect(saved?.metric).toMatch(/^P /); // 同量纲响应按因子水平分组 → 正当的 P
   });
 });

@@ -3,7 +3,7 @@
  */
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import type { NelsonRules, InspectionLevel, CalcState } from '../core';
+import type { NelsonRules, InspectionLevel, CalcState, AnovaMode } from '../core';
 import { calcKey as coreCalcKey, CALC_INIT } from '../core';
 
 export type Page =
@@ -34,6 +34,9 @@ interface AppState {
   doeFactorCols: string[] | null; // DOE 分析选中的因子列名(null=默认前 k-1 列);按名存储,换数据集自动失效回落默认
   doeRespCol: string | null;      // DOE 分析选中的响应列名(null=默认末列)
   hypoTab: HypoTab;
+  anovaMode: AnovaMode;            // ANOVA 分组形态:长表/宽表/数值因子(按名存,页面与汇总共用)
+  anovaRespName: string | null;   // 数值响应列名(长表/数值因子模式)
+  anovaFactorName: string | null; // 分组列名(长表=文本列;数值因子=数值列)
   paretoView: ParetoView;
   aqlLot: number;
   aqlLevel: InspectionLevel;
@@ -66,6 +69,7 @@ interface AppState {
   setDoeView(v: DoeView): void;
   setDoeCols(factorCols: string[] | null, respCol: string | null): void;
   setHypoTab(v: HypoTab): void;
+  setAnovaSel(patch: Partial<Pick<AppState, 'anovaMode' | 'anovaRespName' | 'anovaFactorName'>>): void;
   setParetoView(v: ParetoView): void;
   setAql(patch: Partial<Pick<AppState, 'aqlLot' | 'aqlLevel' | 'aqlAQL'>>): void;
   setImportTab(t: ImportTab): void;
@@ -96,6 +100,9 @@ export const useApp = create<AppState>()(persist((set, get) => ({
   doeFactorCols: null,
   doeRespCol: null,
   hypoTab: 'anova',
+  anovaMode: 'stacked',
+  anovaRespName: null,
+  anovaFactorName: null,
   paretoView: 'pareto',
   aqlLot: 120,
   aqlLevel: 'II',
@@ -137,6 +144,7 @@ export const useApp = create<AppState>()(persist((set, get) => ({
   setDoeView: (doeView) => set({ doeView }),
   setDoeCols: (doeFactorCols, doeRespCol) => set({ doeFactorCols, doeRespCol }),
   setHypoTab: (hypoTab) => set({ hypoTab }),
+  setAnovaSel: (patch) => set(patch),
   setParetoView: (paretoView) => set({ paretoView }),
   setAql: (patch) => set(patch),
   setImportTab: (importTab) => set({ importTab }),
