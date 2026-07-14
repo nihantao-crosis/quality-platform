@@ -47,6 +47,7 @@ export interface SamplingPlan {
   n: number; // 样本量
   ac: number; // 接收数
   re: number; // 拒收数 = Ac + 1
+  fullInspect?: boolean; // 样本量 ≥ 批量 → 按 GB/T 2828.1 转 100% 全检(n 已夹到批量)
 }
 
 /** 批量范围 → 字码（一般检验水平 II 基准，供位移近似法） */
@@ -127,14 +128,16 @@ export function aqlPlan(
   method: AqlMethod = 'gb', acMethod: AqlAcMethod = 'gb',
 ): SamplingPlan {
   const initialCode = method === 'gb' ? codeLetterGB(lot, level) : codeLetterShift(lot, level);
-  if (acMethod === 'gb') {
-    // 国标主表:整格取(箭头会同时改字码/n/Ac)。表未覆盖该 AQL 时回落二项。
-    const m = masterPlan2A(initialCode, aql);
-    if (m) return m;
-  }
-  const n = N_BY_CODE[initialCode];
-  const ac = acceptNumber(n, aql);
-  return { code: initialCode, n, ac, re: ac + 1 };
+  const binomOf = (code: string): SamplingPlan => {
+    const n = N_BY_CODE[code];
+    const ac = acceptNumber(n, aql);
+    return { code, n, ac, re: ac + 1 };
+  };
+  // 国标主表:整格取(箭头会同时改字码/n/Ac)。表未覆盖该 AQL 时回落二项。
+  const plan = acMethod === 'gb' ? masterPlan2A(initialCode, aql) ?? binomOf(initialCode) : binomOf(initialCode);
+  // GB/T 2828.1:样本量 ≥ 批量时执行 100% 全检(小批量+箭头改档常触发,如批量 8 查表得 n=20)。
+  if (plan.n >= lot) return { ...plan, n: lot, fullInspect: true };
+  return plan;
 }
 
 /** RQL/LTPD：使 Pa ≤ 0.10 的批不良率 p */

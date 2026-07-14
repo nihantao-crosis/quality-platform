@@ -42,7 +42,7 @@ interface AppState {
   aqlLevel: InspectionLevel;
   aqlAQL: number;
   aqlMethod: AqlMethod;     // 字码判定:'gb' 国标查表(默认) / 'shift' 位移近似
-  aqlAcMethod: AqlAcMethod; // 接收数:'gb' 国标优先数列(默认) / 'binom' 二项近似
+  aqlAcMethod: AqlAcMethod; // 接收数:'gb' 国标主表(表 2-A,箭头已解析,默认) / 'binom' 二项近似
   openMenu: string | null;
   modal: Modal;
   toast: string | null;

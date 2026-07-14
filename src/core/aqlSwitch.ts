@@ -7,8 +7,9 @@
  *   正常 → 放宽：连续 10 批接收
  *   放宽 → 正常：任 1 批拒收
  *
- * 方案简化：加严 = 同 n、Ac−1（下限 0）；放宽 = 字码降两档的 n、按同规则求 Ac。
- * 生产环境应使用标准正式表格（见交接文档 §8.6 备注）。
+ * 方案简化：加严 = 同 n、Ac−1（下限 0,Ac 已为 0 时不再减、与正常同）；
+ * 放宽 = 字码降两档取更小 n、二项估 Ac（字码已到最小档 A/B 时触底,退化为与正常相同样本量）。
+ * 生产环境应使用标准正式表格 2-B/2-C（见交接文档 §8.6 备注）。
  */
 import { aqlPlan, acceptNumber, CODE_SEQUENCE, N_BY_CODE, type InspectionLevel, type SamplingPlan, type AqlMethod, type AqlAcMethod } from './aql';
 

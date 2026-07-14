@@ -114,6 +114,12 @@ describe('AQL 转移规则', () => {
     expect(p.tightened.ac).toBeLessThan(p.normal.ac); // 加严 Ac−1 = 2
     expect(p.reduced.n).toBeLessThan(p.normal.n); // 放宽降两档 → H/50
   });
+  it('三态方案 Ac=0 边界:re 不变量守护(正常/加严均 re=ac+1≥1)', () => {
+    const q = plansByState(120, 'II', 1.0); // 正常 = 真表 E/13/Ac0
+    expect(q.normal).toMatchObject({ ac: 0, re: 1 });
+    expect(q.tightened).toMatchObject({ ac: 0, re: 1 }); // Ac 已 0,加严不再减(下限 0)
+    expect(q.reduced.re).toBe(q.reduced.ac + 1);
+  });
 });
 
 describe('Cpm 望目能力', () => {

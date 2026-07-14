@@ -2442,7 +2442,7 @@ dependencies = [
 
 [[package]]
 name = "quality-platform"
-version = "1.29.0"
+version = "1.30.0"
 dependencies = [
  "base64 0.22.1",
  "rusqlite",

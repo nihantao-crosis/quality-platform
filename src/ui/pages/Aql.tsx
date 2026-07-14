@@ -27,7 +27,8 @@ function planTableRows(level: InspectionLevel, aqlPct: number, lot: number, meth
     let code = initialCode; let n = N_BY_CODE[initialCode]; let ac: number;
     const m = acMethod === 'gb' ? masterPlan2A(initialCode, aqlPct) : null;
     if (m) { code = m.code; n = m.n; ac = m.ac; } else { ac = acceptNumber(n, aqlPct); }
-    return { label: fmtLot(lo, hi), code, n, ac, active: lot >= lo && lot <= hi };
+    // 整段批量范围都 ≤ 样本量(n ≥ 范围上限)→ 该档必转 100% 全检
+    return { label: fmtLot(lo, hi), code, n, ac, active: lot >= lo && lot <= hi, fullInspect: n >= hi };
   };
   if (method === 'gb') {
     return CODE_LETTER_TABLE.map((r) => mk(r.lo, r.hi, r[level]));
@@ -115,6 +116,12 @@ export function Aql({ T }: { T: ChartTokens }) {
         ))}
       </div>
 
+      {plan.fullInspect && (
+        <div style={{ padding: '10px 14px', background: '#fff6e6', border: '1px solid #f0d69a', borderRadius: 6, fontSize: 12.5, color: '#8a6414', lineHeight: 1.5 }}>
+          ⚠ <b>100% 全检</b>:按 GB/T 2828.1,查表样本量已 ≥ 批量 N（{aqlLot}）——此时应对整批逐件检验（样本量取 N），而非抽样。上表 n 已夹到批量;OC 曲线仅作参考。
+        </div>
+      )}
+
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 16 }}>
         <Card>
           <CardHeader title="OC 特性曲线 · 接收概率 vs 批质量" />
@@ -195,7 +202,7 @@ export function Aql({ T }: { T: ChartTokens }) {
             </tbody>
           </table>
           <div style={{ padding: '10px 16px', fontSize: 11.5, color: '#9aa2ad', lineHeight: 1.55 }}>
-            简化模型：加严 = 同样本量、Ac−1；放宽 = 字码降两档。生产环境应使用标准正式表格。
+            简化模型（非正式表 2-B/2-C）：加严 = 同样本量、Ac−1（下限 0;Ac 已为 0 时不再减,正式加严应改用主表 2-B 增大样本量）；放宽 = 字码降两档（字码已到最小档 A/B 时无法再降,退化为与正常相同样本量）。生产环境应使用标准正式表格。
           </div>
         </Card>
       </div>
@@ -220,7 +227,7 @@ export function Aql({ T }: { T: ChartTokens }) {
               <tr key={row.label} style={{ borderTop: '1px solid #f0f2f5', ...(row.active ? { background: '#e7f0f9' } : {}) }}>
                 <td className="mono" style={{ padding: '8px 16px', color: '#33404f' }}>{row.label}</td>
                 <td className="mono" style={{ padding: '8px 8px', color: '#5b6472' }}>{row.code}</td>
-                <td className="mono" style={{ padding: '8px 8px', color: '#2a333f', textAlign: 'right', fontWeight: 600 }}>{row.n}</td>
+                <td className="mono" style={{ padding: '8px 8px', color: '#2a333f', textAlign: 'right', fontWeight: 600 }}>{row.fullInspect ? `${row.n} 全检` : row.n}</td>
                 <td className="mono" style={{ padding: '8px 8px', color: '#2c8a45', textAlign: 'right', fontWeight: 600 }}>{row.ac}</td>
                 <td className="mono" style={{ padding: '8px 16px', color: '#c22f2f', textAlign: 'right', fontWeight: 600 }}>{row.ac + 1}</td>
               </tr>

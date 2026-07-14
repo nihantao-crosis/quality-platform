@@ -50,9 +50,10 @@ describe('AQL 字码判定:国标查表 vs 位移近似', () => {
     expect(codeLetterShift(120, 'III')).toBe('H');
     expect(codeLetterGB(120, 'III')).not.toBe(codeLetterShift(120, 'III'));
   });
-  it('初始字码由 codeLetterGB 决定(未解析箭头前)', () => {
-    expect(codeLetterGB(120, 'III')).toBe('G');
-    expect(codeLetterShift(120, 'III')).toBe('H');
+  it('aqlPlan 默认字码法用 codeLetterGB(与 shift 在水平 III 分叉,守护默认不被改回)', () => {
+    // codeLetterGB(120,'III')=G、codeLetterShift(120,'III')=H → 经表 2-A 解析结果不同
+    expect(aqlPlan(120, 'III', 2.5)).toEqual({ code: 'G', n: 32, ac: 2, re: 3 });
+    expect(aqlPlan(120, 'III', 2.5, 'shift')).toEqual({ code: 'H', n: 50, ac: 3, re: 4 });
   });
   it('大批量国标查表可达 P/Q/R,且 N_BY_CODE 有定义', () => {
     const codeIII = codeLetterGB(600000, 'III');
@@ -70,6 +71,18 @@ describe('AQL 接收数·GB/T 2828.1 表 2-A 真查表(箭头已解析)', () => 
     expect(masterPlan2A('G', 2.5)).toEqual({ code: 'G', n: 32, ac: 2, re: 3 });
     expect(masterPlan2A('N', 4.0)).toEqual({ code: 'M', n: 315, ac: 21, re: 22 }); // ↑箭头改档
     expect(masterPlan2A('A', 0.65)).toEqual({ code: 'F', n: 20, ac: 0, re: 1 }); // ↓箭头改档
+    // AQL 1.5 列(此前无覆盖)
+    expect(masterPlan2A('K', 1.5)).toEqual({ code: 'K', n: 125, ac: 5, re: 6 });
+    // AQL 6.5 列(v1.29 新增,direct/↓/↑ 三类)
+    expect(masterPlan2A('K', 6.5)).toEqual({ code: 'K', n: 125, ac: 14, re: 15 });
+    expect(masterPlan2A('C', 6.5)).toEqual({ code: 'D', n: 8, ac: 1, re: 2 }); // ↓箭头改档
+    expect(masterPlan2A('B', 6.5)).toEqual({ code: 'A', n: 2, ac: 0, re: 1 }); // ↑箭头改档
+  });
+  it('样本量 ≥ 批量 → 转 100% 全检(n 夹到批量 + fullInspect 标志)', () => {
+    // 批量 8(水平 II→字码 A),AQL 0.65 查表 n=20 > 8 → 全检
+    expect(aqlPlan(8, 'II', 0.65)).toEqual({ code: 'F', n: 8, ac: 0, re: 1, fullInspect: true });
+    // 批量足够大时不触发
+    expect(aqlPlan(2000, 'II', 1.0).fullInspect).toBeUndefined();
   });
   it('aqlPlan 默认走真表(箭头会改字码/样本量)', () => {
     // N=120·II·AQL1.0:初始 F,↑ 后为 E/13/0/1(旧近似错给 F/20/1/2)
