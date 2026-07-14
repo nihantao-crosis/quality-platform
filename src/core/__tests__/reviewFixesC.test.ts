@@ -2,12 +2,13 @@
 import { describe, it, expect } from 'vitest';
 import { evalRules, parseCategoryCounts, buildAnovaGroups, detectFactorial, analyzeFactorial } from '../index';
 
-describe('A3a · SPC 准则4:结果列表记在实际越界点上', () => {
+describe('A3a · SPC 准则5(2 of 3 越 2σ):结果列表记在实际越界点上', () => {
+  const OFF = { r1: false, r2: false, r3: false, r4: false, r5: false, r6: false, r7: false, r8: false };
   it('[3,3,0] cl=0 σ=1 → 红点与列表都指向点 1、2(索引 0、1),不指向窗口末点', () => {
-    const { viol, list } = evalRules([3, 3, 0], 0, 1, { r1: false, r2: false, r3: false, r4: true });
+    const { viol, list } = evalRules([3, 3, 0], 0, 1, { ...OFF, r5: true });
     expect([...viol].sort((a, b) => a - b)).toEqual([0, 1]); // 实际越界点
     expect(viol.has(2)).toBe(false);                          // 窗口末点未越界,不应标红
-    const idxs = list.filter((x) => x.rule === 4).map((x) => x.i).sort((a, b) => a - b);
+    const idxs = list.filter((x) => x.rule === 5).map((x) => x.i).sort((a, b) => a - b);
     expect(idxs).toEqual([0, 1]);                             // 列表记在越界点(修复前记的是窗口末点 2)
   });
 });

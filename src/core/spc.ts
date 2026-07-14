@@ -3,24 +3,37 @@
  */
 
 export interface NelsonRules {
-  r1: boolean; // 单点超出 3σ
+  r1: boolean; // 1 点超出 3σ
   r2: boolean; // 连续 9 点位于中心线同侧
   r3: boolean; // 连续 6 点持续上升或下降
-  r4: boolean; // 相邻 3 点中 ≥2 点位于同侧 2σ 区外
+  r4: boolean; // 连续 14 点上下交替
+  r5: boolean; // 相邻 3 点中 ≥2 点位于同侧 2σ 区外
+  r6: boolean; // 相邻 5 点中 ≥4 点位于同侧 1σ 区外
+  r7: boolean; // 连续 15 点全在 1σ 区内(中心线附近)
+  r8: boolean; // 连续 8 点全在 1σ 区外(两侧皆可)
 }
 
+export type RuleNo = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
+
+/** 默认判异准则:经典四则(1/2/3 + 5「2 of 3 越 2σ」);4/6/7/8 较敏感,默认关闭。 */
+export const DEFAULT_RULES: NelsonRules = { r1: true, r2: true, r3: true, r4: false, r5: true, r6: false, r7: false, r8: false };
+
 /** Nelson 判异准则静态定义(与是否检出无关)——供 UI 常驻展示与 tooltip。
- * 对齐 Nelson (1984) 与 Minitab「特殊原因检验」;准则 4 对应 Minitab 检验 5。 */
-export const RULE_DEFS: Record<1 | 2 | 3 | 4, { name: string; def: string; points: string; source: string }> = {
+ * 完整对齐 Nelson (1984) 与 Minitab「特殊原因检验」1–8(编号一致)。 */
+export const RULE_DEFS: Record<RuleNo, { name: string; def: string; points: string; source: string }> = {
   1: { name: '准则 1', def: '1 点落在中心线任一侧 3σ 之外', points: '1 点', source: 'Nelson 1984 / Minitab 检验 1' },
   2: { name: '准则 2', def: '连续 9 点落在中心线同一侧', points: '9 点', source: 'Nelson 1984 / Minitab 检验 2' },
   3: { name: '准则 3', def: '连续 6 点持续上升或持续下降', points: '6 点', source: 'Nelson 1984 / Minitab 检验 3' },
-  4: { name: '准则 4', def: '相邻 3 点中有 2 点落在同侧 2σ 区之外', points: '3 中 2', source: 'Nelson 1984 / Minitab 检验 5' },
+  4: { name: '准则 4', def: '连续 14 点上下交替', points: '14 点', source: 'Nelson 1984 / Minitab 检验 4' },
+  5: { name: '准则 5', def: '相邻 3 点中有 2 点落在同侧 2σ 区之外', points: '3 中 2', source: 'Nelson 1984 / Minitab 检验 5' },
+  6: { name: '准则 6', def: '相邻 5 点中有 4 点落在同侧 1σ 区之外', points: '5 中 4', source: 'Nelson 1984 / Minitab 检验 6' },
+  7: { name: '准则 7', def: '连续 15 点全部落在中心线两侧 1σ 区之内', points: '15 点', source: 'Nelson 1984 / Minitab 检验 7' },
+  8: { name: '准则 8', def: '连续 8 点全部落在 1σ 区之外(两侧皆可)', points: '8 点', source: 'Nelson 1984 / Minitab 检验 8' },
 };
 
 export interface RuleViolation {
   i: number; // 0-based 点索引
-  rule: 1 | 2 | 3 | 4;
+  rule: RuleNo;
   desc: string;
 }
 
@@ -103,20 +116,51 @@ export function evalRules(
     }
   }
   if (rules.r4) {
-    for (let i = 2; i < data.length; i++) {
-      const w = [i - 2, i - 1, i];
-      const up = w.filter((q) => data[q] - cl > 2 * sigma).length;
-      const dn = w.filter((q) => cl - data[q] > 2 * sigma).length;
-      if (up >= 2 || dn >= 2) {
-        // 列表记在实际越界的点上(而非窗口末点 i)——否则红点/列表/点击详情三者不一致:
-        // 窗口末点可能并未越 2σ,点击它却显示"受控"。逐个越界点入表(去重键 rule-i 合并重叠窗口)。
-        w.forEach((q) => {
-          if (Math.abs(data[q] - cl) > 2 * sigma) {
-            viol.add(q);
-            list.push({ i: q, rule: 4, desc: RULE_DEFS[4].def });
-          }
-        });
+    // 连续 14 点上下交替(方向逐点反向)
+    let run = 1;
+    let prevDir = 0;
+    for (let i = 1; i < data.length; i++) {
+      const d = Math.sign(data[i] - data[i - 1]);
+      if (d === 0) { prevDir = 0; run = 1; continue; }
+      run = prevDir !== 0 && d === -prevDir ? run + 1 : 2;
+      prevDir = d;
+      if (run >= 14) {
+        for (let q = i - 13; q <= i; q++) viol.add(q);
+        list.push({ i, rule: 4, desc: RULE_DEFS[4].def });
       }
+    }
+  }
+  // 落在同侧 zσ 区外的点入表(准则 5/6 共用):记实际越界点,保证红点/列表/详情一致
+  const zoneCount = (r5: boolean, r6: boolean) => {
+    const flag = (rule: RuleNo, win: number, need: number, z: number) => {
+      for (let i = win - 1; i < data.length; i++) {
+        const w = Array.from({ length: win }, (_, k) => i - win + 1 + k);
+        const up = w.filter((q) => data[q] - cl > z * sigma).length;
+        const dn = w.filter((q) => cl - data[q] > z * sigma).length;
+        if (up >= need || dn >= need) {
+          const side = up >= need ? (q: number) => data[q] - cl > z * sigma : (q: number) => cl - data[q] > z * sigma;
+          w.forEach((q) => { if (side(q)) { viol.add(q); list.push({ i: q, rule, desc: RULE_DEFS[rule].def }); } });
+        }
+      }
+    };
+    if (r5) flag(5, 3, 2, 2); // 相邻 3 点 ≥2 点越 2σ(同侧)
+    if (r6) flag(6, 5, 4, 1); // 相邻 5 点 ≥4 点越 1σ(同侧)
+  };
+  zoneCount(rules.r5, rules.r6);
+  if (rules.r7) {
+    // 连续 15 点全在 1σ 区内(中心线附近,变异异常小)
+    let run = 0;
+    for (let i = 0; i < data.length; i++) {
+      run = Math.abs(data[i] - cl) < sigma ? run + 1 : 0;
+      if (run >= 15) { for (let q = i - 14; q <= i; q++) viol.add(q); list.push({ i, rule: 7, desc: RULE_DEFS[7].def }); }
+    }
+  }
+  if (rules.r8) {
+    // 连续 8 点全在 1σ 区外(两侧皆可)
+    let run = 0;
+    for (let i = 0; i < data.length; i++) {
+      run = Math.abs(data[i] - cl) > sigma ? run + 1 : 0;
+      if (run >= 8) { for (let q = i - 7; q <= i; q++) viol.add(q); list.push({ i, rule: 8, desc: RULE_DEFS[8].def }); }
     }
   }
   const seen = new Set<string>();

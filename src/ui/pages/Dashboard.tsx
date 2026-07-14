@@ -3,7 +3,7 @@ import { useMemo } from 'react';
 import { useApp } from '../../store/appStore';
 import { useData } from '../../store/dataStore';
 import {
-  nf, DEFECTS, evalRules, computeCapability, oneWayAnova, anovaGroups,
+  nf, DEFECTS, evalRules, DEFAULT_RULES, computeCapability, oneWayAnova, anovaGroups,
 } from '../../core';
 import type { ChartTokens } from '../tokens';
 import { Card, Badge } from '../common';
@@ -20,7 +20,7 @@ export function Dashboard({ T }: { T: ChartTokens }) {
   // 告警由 X̄ 图判异实时派生（全部准则开启）
   const means = M.subs.map((s) => s.mean);
   const sigX = (M.uclX - M.xbarbar) / 3;
-  const { list: violations } = evalRules(means, M.xbarbar, sigX, { r1: true, r2: true, r3: true, r4: true });
+  const { list: violations } = evalRules(means, M.xbarbar, sigX, DEFAULT_RULES);
   const spcAlerts = violations.slice(0, 2).map((v) => ({
     color: '#c22f2f',
     title: `X̄ 图子组 ${v.i + 1} 违反准则 ${v.rule}`,

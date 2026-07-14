@@ -5,7 +5,7 @@ import { useState } from 'react';
 import type { CSSProperties } from 'react';
 import { useApp, type SpcType } from '../../store/appStore';
 import { useData } from '../../store/dataStore';
-import { nf, evalRules, RULE_DEFS, ewmaSeries, cusumSeries, stagedXbar, stagedRange, splitStages } from '../../core';
+import { nf, evalRules, RULE_DEFS, ewmaSeries, cusumSeries, stagedXbar, stagedRange, splitStages, type RuleNo } from '../../core';
 import { ReportCard } from '../ReportCard';
 import { spcReport } from '../reportData';
 import type { ChartTokens } from '../tokens';
@@ -276,7 +276,7 @@ export function Spc({ T }: { T: ChartTokens }) {
     ['xbar-r', 'X̄-R'], ['xbar-s', 'X̄-S'], ['i-mr', 'I-MR'],
     ['ewma', 'EWMA'], ['cusum', 'CUSUM'], ['p', 'P 图'], ['c', 'C 图'],
   ];
-  const ruleToggles: Array<['r1' | 'r2' | 'r3' | 'r4', string]> = [['r1', '准则 1'], ['r2', '准则 2'], ['r3', '准则 3'], ['r4', '准则 4']];
+  const ruleToggles = (['r1', 'r2', 'r3', 'r4', 'r5', 'r6', 'r7', 'r8'] as const).map((k) => [k, `准则 ${k.slice(1)}`] as const);
 
   const report = spcReport({
     violList,
@@ -312,7 +312,7 @@ export function Spc({ T }: { T: ChartTokens }) {
             <span style={{ fontSize: 12, color: '#8a929d', fontWeight: 600 }}>判异准则</span>
             <div style={{ display: 'flex', gap: 7 }}>
               {ruleToggles.map(([k, l]) => {
-                const d = RULE_DEFS[Number(k.slice(1)) as 1 | 2 | 3 | 4];
+                const d = RULE_DEFS[Number(k.slice(1)) as RuleNo];
                 return (
                   <div key={k} style={chipStyle(spcRules[k])} onClick={() => toggleRule(k)} title={`${d.def}(${d.points})· ${d.source}`}>
                     <span style={{ width: 7, height: 7, borderRadius: '50%', background: spcRules[k] ? '#1f6fb2' : '#c8cfd8' }} />
@@ -350,12 +350,12 @@ export function Spc({ T }: { T: ChartTokens }) {
       {spec.shewhart && (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 22px', padding: '7px 16px', background: '#fbfcfd', border: '1px solid #e6e9ee', borderRadius: 5, fontSize: 11.5, color: '#7a828d', lineHeight: 1.6 }}>
           <span style={{ fontWeight: 700, color: '#98a1ac' }}>判异准则说明</span>
-          {([1, 2, 3, 4] as const).map((n) => (
+          {([1, 2, 3, 4, 5, 6, 7, 8] as const).map((n) => (
             <span key={n}>
               <b style={{ color: '#5b6472' }}>{RULE_DEFS[n].name}</b>:{RULE_DEFS[n].def}({RULE_DEFS[n].points})
             </span>
           ))}
-          <span style={{ color: '#a3abb5' }}>依据:Nelson (1984) / Minitab 特殊原因检验 1·2·3·5</span>
+          <span style={{ color: '#a3abb5' }}>依据:Nelson (1984) / Minitab 特殊原因检验 1–8</span>
         </div>
       )}
 

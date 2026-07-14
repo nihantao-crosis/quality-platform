@@ -3,7 +3,7 @@
  */
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import type { NelsonRules, InspectionLevel, CalcState, AnovaMode } from '../core';
+import type { NelsonRules, InspectionLevel, CalcState, AnovaMode, AqlMethod } from '../core';
 import { calcKey as coreCalcKey, CALC_INIT } from '../core';
 
 export type Page =
@@ -41,6 +41,7 @@ interface AppState {
   aqlLot: number;
   aqlLevel: InspectionLevel;
   aqlAQL: number;
+  aqlMethod: AqlMethod; // 字码判定:'gb' 国标查表(默认) / 'shift' 位移近似
   openMenu: string | null;
   modal: Modal;
   toast: string | null;
@@ -71,7 +72,7 @@ interface AppState {
   setHypoTab(v: HypoTab): void;
   setAnovaSel(patch: Partial<Pick<AppState, 'anovaMode' | 'anovaRespName' | 'anovaFactorName'>>): void;
   setParetoView(v: ParetoView): void;
-  setAql(patch: Partial<Pick<AppState, 'aqlLot' | 'aqlLevel' | 'aqlAQL'>>): void;
+  setAql(patch: Partial<Pick<AppState, 'aqlLot' | 'aqlLevel' | 'aqlAQL' | 'aqlMethod'>>): void;
   setImportTab(t: ImportTab): void;
   setImportKind(k: ImportKind): void;
   setExportFmt(f: ExportFmt): void;
@@ -88,7 +89,8 @@ let toastTimer: ReturnType<typeof setTimeout> | undefined;
 export const useApp = create<AppState>()(persist((set, get) => ({
   page: 'dashboard',
   spcType: 'xbar-r',
-  spcRules: { r1: true, r2: true, r3: true, r4: true },
+  // 默认开启经典四则(1/2/3 + 5「2 of 3 越 2σ」);4/6/7/8 较敏感,默认关闭供按需开启
+  spcRules: { r1: true, r2: true, r3: true, r4: false, r5: true, r6: false, r7: false, r8: false },
   selSub: null,
   projectName: '质检项目 2026-Q2',
   lsl: 24.9,
@@ -107,6 +109,7 @@ export const useApp = create<AppState>()(persist((set, get) => ({
   aqlLot: 120,
   aqlLevel: 'II',
   aqlAQL: 1.0,
+  aqlMethod: 'gb',
   openMenu: null,
   modal: null,
   toast: null,
@@ -170,6 +173,21 @@ export const useApp = create<AppState>()(persist((set, get) => ({
     aqlLot: s.aqlLot,
     aqlLevel: s.aqlLevel,
     aqlAQL: s.aqlAQL,
+    aqlMethod: s.aqlMethod,
     spcRules: s.spcRules,
   }) as Partial<AppState>,
+  version: 1,
+  // v0→v1:判异准则从 4 条扩为 8 条,旧「准则4(2 of 3 越 2σ)」实为标准检验 5,迁移到 r5;
+  // 补齐缺失的 r4/r6/r7/r8(默认关),避免旧偏好把 r4 误当"14 点交替"。
+  migrate: (persisted: unknown, version: number) => {
+    const p = { ...(persisted as Record<string, unknown> | null ?? {}) };
+    if (version < 1 && p.spcRules) {
+      const old = p.spcRules as Record<string, boolean>;
+      p.spcRules = {
+        r1: old.r1 ?? true, r2: old.r2 ?? true, r3: old.r3 ?? true,
+        r4: false, r5: old.r4 ?? true, r6: false, r7: false, r8: false,
+      } satisfies NelsonRules;
+    }
+    return p as Partial<AppState>;
+  },
 }));

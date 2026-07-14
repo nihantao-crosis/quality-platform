@@ -4,7 +4,7 @@
  */
 import * as XLSX from 'xlsx';
 import {
-  nf, computeCapability, evalRules, type VarModel,
+  nf, computeCapability, evalRules, DEFAULT_RULES, type VarModel,
 } from '../core';
 import type { ReportSpec } from './report';
 
@@ -48,7 +48,7 @@ export function buildXlsx(M: VarModel, spec: ReportSpec): Uint8Array {
   // Sheet 3: 失控点（X̄ 图 Nelson 全准则）
   const means = M.subs.map((s) => s.mean);
   const sig = (M.uclX - M.xbarbar) / 3;
-  const { list } = evalRules(means, M.xbarbar, sig, { r1: true, r2: true, r3: true, r4: true });
+  const { list } = evalRules(means, M.xbarbar, sig, DEFAULT_RULES);
   const violRows: (string | number)[][] = [['点号', 'Nelson 准则', '描述']];
   list.forEach((v) => violRows.push([v.i + 1, v.rule, v.desc]));
   if (list.length === 0) violRows.push(['—', '—', '未检出失控点，过程受控']);

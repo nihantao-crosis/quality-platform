@@ -4,7 +4,7 @@
  */
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
-  nf, fmtCap, computeCapability, evalRules, andersonDarling, type VarModel,
+  nf, fmtCap, computeCapability, evalRules, DEFAULT_RULES, andersonDarling, type VarModel,
 } from '../core';
 import { chartTokens } from '../ui/tokens';
 import { ControlChart } from '../ui/charts/ControlChart';
@@ -36,7 +36,7 @@ export function buildHtmlReport(M: VarModel, spec: ReportSpec): string {
   const cap = computeCapability(M.all, M.sigmaWithin, spec);
   const means = M.subs.map((s) => s.mean);
   const sig = (M.uclX - M.xbarbar) / 3;
-  const { list: viol } = evalRules(means, M.xbarbar, sig, { r1: true, r2: true, r3: true, r4: true });
+  const { list: viol } = evalRules(means, M.xbarbar, sig, DEFAULT_RULES);
   const ad = M.all.length >= 8 ? andersonDarling(M.all) : null;
 
   const xbarSvg = renderToStaticMarkup(

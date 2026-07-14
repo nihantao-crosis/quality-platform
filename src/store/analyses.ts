@@ -7,7 +7,7 @@ import { create } from 'zustand';
 import {
   nf, computeCapability, evalRules, computeGageRR, gageStudyData, GAGE_TOLERANCE,
   oneWayAnova, anovaGroups, buildAnovaGroups, wideScaleDisparate, analyzeDoe, detectFactorial, analyzeFactorial, resolveDoeColumns, aqlPlan, computeDescriptive,
-  type InspectionLevel, type AnovaMode,
+  type InspectionLevel, type AnovaMode, type AqlMethod,
 } from '../core';
 import { useApp, type SpcType, type DoeView, type HypoTab, type ParetoView } from './appStore';
 import { useData } from './dataStore';
@@ -18,7 +18,7 @@ export type AnalysisKind = 'spc' | 'capability' | 'gagerr' | 'anova' | 'pareto' 
 export interface AnalysisSnapshot {
   spcType?: SpcType;
   lsl?: number; usl?: number; tgt?: number; lslOn?: boolean; uslOn?: boolean;
-  aqlLot?: number; aqlLevel?: InspectionLevel; aqlAQL?: number;
+  aqlLot?: number; aqlLevel?: InspectionLevel; aqlAQL?: number; aqlMethod?: AqlMethod;
   doeView?: DoeView; hypoTab?: HypoTab; paretoView?: ParetoView;
   // 列选择随分析记录一起快照,保证回看时"页面所见 = 保存时"(否则重算会用当前选择)
   doeFactorCols?: string[] | null; doeRespCol?: string | null;
@@ -181,7 +181,7 @@ function buildSummary(kind: AnalysisKind): Omit<SavedAnalysis, 'id' | 'createdAt
       return { kind, title: '实验设计 (DOE)', metric: '数据非因子设计', status: '未分析', ...pick(WARN) };
     }
     case 'aql': {
-      const plan = aqlPlan(app.aqlLot, app.aqlLevel, app.aqlAQL);
+      const plan = aqlPlan(app.aqlLot, app.aqlLevel, app.aqlAQL, app.aqlMethod);
       return {
         kind, title: '抽样检验 · AQL 方案', metric: `n=${plan.n} Ac=${plan.ac}`,
         status: '已生成', ...pick(INFO),
@@ -210,7 +210,7 @@ function snapshotOf(kind: AnalysisKind): AnalysisSnapshot {
   const snap: AnalysisSnapshot = {};
   if (kind === 'spc') snap.spcType = a.spcType;
   if (kind === 'capability') { snap.lsl = a.lsl; snap.usl = a.usl; snap.tgt = a.tgt; snap.lslOn = a.lslOn; snap.uslOn = a.uslOn; }
-  if (kind === 'aql') { snap.aqlLot = a.aqlLot; snap.aqlLevel = a.aqlLevel; snap.aqlAQL = a.aqlAQL; }
+  if (kind === 'aql') { snap.aqlLot = a.aqlLot; snap.aqlLevel = a.aqlLevel; snap.aqlAQL = a.aqlAQL; snap.aqlMethod = a.aqlMethod; }
   if (kind === 'doe') { snap.doeView = a.doeView; snap.doeFactorCols = a.doeFactorCols; snap.doeRespCol = a.doeRespCol; }
   if (kind === 'anova') { snap.hypoTab = a.hypoTab; snap.anovaMode = a.anovaMode; snap.anovaRespName = a.anovaRespName; snap.anovaFactorName = a.anovaFactorName; }
   if (kind === 'pareto') snap.paretoView = a.paretoView;

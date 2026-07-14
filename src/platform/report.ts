@@ -4,7 +4,7 @@
  */
 import type { ExportFmt } from '../store/appStore';
 import {
-  nf, fmtCap, computeCapability, evalRules, oneWayAnova, computeGageRR,
+  nf, fmtCap, computeCapability, evalRules, DEFAULT_RULES, oneWayAnova, computeGageRR,
   anovaGroups, gageStudyData, GAGE_TOLERANCE, type VarModel,
 } from '../core';
 
@@ -34,7 +34,7 @@ export function textReport(M: VarModel, spec: ReportSpec): string {
   const cap = computeCapability(M.all, M.sigmaWithin, spec);
   const means = M.subs.map((s) => s.mean);
   const sig = (M.uclX - M.xbarbar) / 3;
-  const { list } = evalRules(means, M.xbarbar, sig, { r1: true, r2: true, r3: true, r4: true });
+  const { list } = evalRules(means, M.xbarbar, sig, DEFAULT_RULES);
   const anova = oneWayAnova(anovaGroups().map((g) => g.vals));
   const gage = computeGageRR(gageStudyData(), GAGE_TOLERANCE);
   const L: string[] = [];

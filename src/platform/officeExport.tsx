@@ -8,7 +8,7 @@ import {
 } from 'docx';
 import PptxGenJS from 'pptxgenjs';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { nf, fmtCap, computeCapability, evalRules, andersonDarling, type VarModel } from '../core';
+import { nf, fmtCap, computeCapability, evalRules, DEFAULT_RULES, andersonDarling, type VarModel } from '../core';
 import { chartTokens } from '../ui/tokens';
 import { ControlChart } from '../ui/charts/ControlChart';
 import { Histogram } from '../ui/charts/Histogram';
@@ -32,7 +32,7 @@ function collectStats(M: VarModel, spec: ReportSpec): ReportStats {
   const cap = computeCapability(M.all, M.sigmaWithin, spec);
   const means = M.subs.map((s) => s.mean);
   const sig = (M.uclX - M.xbarbar) / 3;
-  const { list: viol } = evalRules(means, M.xbarbar, sig, { r1: true, r2: true, r3: true, r4: true });
+  const { list: viol } = evalRules(means, M.xbarbar, sig, DEFAULT_RULES);
   let adText = '样本量不足,未执行正态性检验';
   if (M.all.length >= 8) {
     const ad = andersonDarling(M.all);
@@ -46,7 +46,7 @@ export async function renderReportImages(M: VarModel, spec: ReportSpec): Promise
   const T = chartTokens('经典', true);
   const means = M.subs.map((s) => s.mean);
   const sig = (M.uclX - M.xbarbar) / 3;
-  const { viol } = evalRules(means, M.xbarbar, sig, { r1: true, r2: true, r3: true, r4: true });
+  const { viol } = evalRules(means, M.xbarbar, sig, DEFAULT_RULES);
   const mk = (el: React.ReactElement, w: number, h: number) =>
     svgMarkupToPng(renderToStaticMarkup(el), w, h, 2);
   return {

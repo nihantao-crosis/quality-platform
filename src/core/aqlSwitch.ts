@@ -10,7 +10,7 @@
  * 方案简化：加严 = 同 n、Ac−1（下限 0）；放宽 = 字码降两档的 n、按同规则求 Ac。
  * 生产环境应使用标准正式表格（见交接文档 §8.6 备注）。
  */
-import { aqlPlan, acceptNumber, LETTERS, N_BY_CODE, type InspectionLevel, type SamplingPlan } from './aql';
+import { aqlPlan, acceptNumber, CODE_SEQUENCE, N_BY_CODE, type InspectionLevel, type SamplingPlan, type AqlMethod } from './aql';
 
 export type InspState = 'normal' | 'tightened' | 'reduced';
 export type BatchResult = 'A' | 'R'; // 接收 / 拒收
@@ -60,13 +60,13 @@ export function recordBatch(s: SwitchStatus, r: BatchResult): SwitchStatus {
 }
 
 /** 三种状态下的抽样方案（简化模型） */
-export function plansByState(lot: number, level: InspectionLevel, aql: number): Record<InspState, SamplingPlan> {
-  const normal = aqlPlan(lot, level, aql);
+export function plansByState(lot: number, level: InspectionLevel, aql: number, method: AqlMethod = 'gb'): Record<InspState, SamplingPlan> {
+  const normal = aqlPlan(lot, level, aql, method);
   const tightened: SamplingPlan = { ...normal, ac: Math.max(0, normal.ac - 1), re: Math.max(1, normal.ac) };
-  // 放宽：字码降两档
-  const idx = LETTERS.findIndex((l) => l[0] === normal.code);
-  const rIdx = Math.max(0, idx - 2);
-  const rCode = LETTERS[rIdx][0];
+  // 放宽：字码降两档(用完整字码序列,兼容国标查表可能出现的 P/Q/R)
+  const idx = CODE_SEQUENCE.indexOf(normal.code);
+  const rIdx = Math.max(0, (idx < 0 ? 0 : idx) - 2);
+  const rCode = CODE_SEQUENCE[rIdx];
   const rN = N_BY_CODE[rCode];
   const rAc = acceptNumber(rN, aql);
   const reduced: SamplingPlan = { code: rCode, n: rN, ac: rAc, re: rAc + 1 };

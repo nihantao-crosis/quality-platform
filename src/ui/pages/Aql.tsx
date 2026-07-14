@@ -2,7 +2,8 @@
 import { useState } from 'react';
 import { useApp } from '../../store/appStore';
 import {
-  aqlPlan, rqlFor, producerRiskPct, acceptNumber, N_BY_CODE, LETTERS, type InspectionLevel,
+  aqlPlan, rqlFor, producerRiskPct, acceptNumber, N_BY_CODE, LETTERS, CODE_LETTER_TABLE,
+  type InspectionLevel, type AqlMethod,
   recordBatch, plansByState, SWITCH_INIT, type SwitchStatus, type InspState,
 } from '../../core';
 import type { ChartTokens } from '../tokens';
@@ -17,28 +18,34 @@ const STATE_META: Record<InspState, { label: string; bg: string; color: string }
 
 const AQL_OPTIONS = [0.65, 1.0, 1.5, 2.5, 4.0];
 const LEVEL_SHIFT: Record<InspectionLevel, number> = { I: -2, II: 0, III: 2 };
-const fmtLot = (lo: number, hi: number) => `${lo.toLocaleString()}–${hi.toLocaleString()}`;
+const fmtLot = (lo: number, hi: number) => (hi === Infinity ? `${lo.toLocaleString()}+` : `${lo.toLocaleString()}–${hi.toLocaleString()}`);
 
-/** 按当前检验水平生成完整批量范围 → 字码方案表(与 aqlPlan 的水平位移口径一致,覆盖到 15 万)。 */
-function planTableRows(level: InspectionLevel, aqlPct: number, lot: number) {
-  const shift = LEVEL_SHIFT[level];
-  return LETTERS.map(([, lo, hi], i) => {
-    const idx = Math.max(0, Math.min(LETTERS.length - 1, i + shift));
-    const code = LETTERS[idx][0];
+/** 按当前检验水平 + 字码判定法生成批量范围 → 字码方案表。
+ *  gb:真实 GB/T 2828.1 字码表(覆盖到 50 万+);shift:水平 II 基准 ∓2 位位移近似。 */
+function planTableRows(level: InspectionLevel, aqlPct: number, lot: number, method: AqlMethod) {
+  const mk = (lo: number, hi: number, code: string) => {
     const n = N_BY_CODE[code];
     const ac = acceptNumber(n, aqlPct);
     return { label: fmtLot(lo, hi), code, n, ac, active: lot >= lo && lot <= hi };
+  };
+  if (method === 'gb') {
+    return CODE_LETTER_TABLE.map((r) => mk(r.lo, r.hi, r[level]));
+  }
+  const shift = LEVEL_SHIFT[level];
+  return LETTERS.map(([, lo, hi], i) => {
+    const idx = Math.max(0, Math.min(LETTERS.length - 1, i + shift));
+    return mk(lo, hi, LETTERS[idx][0]);
   });
 }
 
 export function Aql({ T }: { T: ChartTokens }) {
-  const { aqlLot, aqlLevel, aqlAQL, setAql } = useApp();
+  const { aqlLot, aqlLevel, aqlAQL, aqlMethod, setAql } = useApp();
   const [sw, setSw] = useState<SwitchStatus>(SWITCH_INIT);
-  const plan = aqlPlan(aqlLot, aqlLevel, aqlAQL);
+  const plan = aqlPlan(aqlLot, aqlLevel, aqlAQL, aqlMethod);
   const aqlP = aqlAQL / 100;
   const rqlP = rqlFor(plan);
   const prodRisk = producerRiskPct(plan, aqlAQL);
-  const statePlans = plansByState(aqlLot, aqlLevel, aqlAQL);
+  const statePlans = plansByState(aqlLot, aqlLevel, aqlAQL, aqlMethod);
   const meta = STATE_META[sw.state];
 
   const fmtAql = (a: number) => 'AQL ' + a.toFixed(2).replace(/0$/, '').replace(/\.$/, '.0');
@@ -72,6 +79,15 @@ export function Aql({ T }: { T: ChartTokens }) {
         <div style={{ display: 'flex', gap: 6 }}>
           {AQL_OPTIONS.map((a) => (
             <div key={a} style={tabStyle(aqlAQL === a)} onClick={() => setAql({ aqlAQL: a })}>{fmtAql(a)}</div>
+          ))}
+        </div>
+        <span style={{ width: 1, height: 22, background: '#e5e9ee' }} />
+        <span style={{ fontSize: 12, color: '#8a929d', fontWeight: 600 }}>字码判定</span>
+        <div style={{ display: 'flex', gap: 6 }}>
+          {([['gb', '国标查表'], ['shift', '位移近似']] as [AqlMethod, string][]).map(([m, label]) => (
+            <div key={m} style={tabStyle(aqlMethod === m)}
+              title={m === 'gb' ? '按 GB/T 2828.1 样本量字码表(批量×水平)直接查字码' : '以水平 II 为基准,水平 I/III 各偏移 ∓2 位字码(近似)'}
+              onClick={() => setAql({ aqlMethod: m })}>{label}</div>
           ))}
         </div>
       </Card>
@@ -191,7 +207,7 @@ export function Aql({ T }: { T: ChartTokens }) {
             </tr>
           </thead>
           <tbody>
-            {planTableRows(aqlLevel, aqlAQL, aqlLot).map((row) => (
+            {planTableRows(aqlLevel, aqlAQL, aqlLot, aqlMethod).map((row) => (
               <tr key={row.label} style={{ borderTop: '1px solid #f0f2f5', ...(row.active ? { background: '#e7f0f9' } : {}) }}>
                 <td className="mono" style={{ padding: '8px 16px', color: '#33404f' }}>{row.label}</td>
                 <td className="mono" style={{ padding: '8px 8px', color: '#5b6472' }}>{row.code}</td>

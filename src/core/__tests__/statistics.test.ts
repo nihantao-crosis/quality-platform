@@ -4,7 +4,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { phi, invNorm, binomCdf, median, quantile } from '../basicMath';
-import { evalRules } from '../spc';
+import { evalRules, DEFAULT_RULES } from '../spc';
 import { computeCapability } from '../capability';
 import { analyzeDoe, mainEffectMeans, interactionMeans } from '../doe';
 import { aqlPlan, rqlFor, producerRiskPct } from '../aql';
@@ -47,7 +47,7 @@ describe('样本数据（种子 20260601）与 SPC', () => {
   });
   it('注入的偏移被判异检出（子组 16–18 上移、22 下移 → 有失控点）', () => {
     const sig = (M.uclX - M.xbarbar) / 3;
-    const { list } = evalRules(M.means, M.xbarbar, sig, { r1: true, r2: true, r3: true, r4: true });
+    const { list } = evalRules(M.means, M.xbarbar, sig, DEFAULT_RULES);
     expect(list.length).toBeGreaterThan(0);
     const r1Points = list.filter((v) => v.rule === 1).map((v) => v.i + 1);
     // 原型仪表盘/告警描述：16–18 段与 22 附近越限
@@ -56,7 +56,7 @@ describe('样本数据（种子 20260601）与 SPC', () => {
   });
   it('关闭全部准则 → 无失控点', () => {
     const sig = (M.uclX - M.xbarbar) / 3;
-    const { list } = evalRules(M.means, M.xbarbar, sig, { r1: false, r2: false, r3: false, r4: false });
+    const { list } = evalRules(M.means, M.xbarbar, sig, { r1: false, r2: false, r3: false, r4: false, r5: false, r6: false, r7: false, r8: false });
     expect(list.length).toBe(0);
   });
 });
@@ -109,9 +109,14 @@ describe('AQL 抽样方案', () => {
   it('N=120, 水平 II, AQL=1.0 → 字码 F, n=20, Ac=1, Re=2（关键校验值）', () => {
     expect(aqlPlan(120, 'II', 1.0)).toEqual({ code: 'F', n: 20, ac: 1, re: 2 });
   });
-  it('水平 I / III 字码偏移 ∓2', () => {
+  it('位移近似:水平 I / III 字码偏移 ∓2', () => {
+    expect(aqlPlan(120, 'I', 1.0, 'shift').code).toBe('D');
+    expect(aqlPlan(120, 'III', 1.0, 'shift').code).toBe('H');
+  });
+  it('国标查表(默认):N=120 水平 I=D / II=F / III=G(非均匀位移)', () => {
     expect(aqlPlan(120, 'I', 1.0).code).toBe('D');
-    expect(aqlPlan(120, 'III', 1.0).code).toBe('H');
+    expect(aqlPlan(120, 'II', 1.0).code).toBe('F');
+    expect(aqlPlan(120, 'III', 1.0).code).toBe('G');
   });
   it('RQL 处 Pa ≤ 10%，生产方风险 α < 5%', () => {
     const plan = aqlPlan(120, 'II', 1.0);

@@ -14,7 +14,7 @@ describe('RULE_DEFS', () => {
   it('判异命中的 desc 与定义表一致(准则 1)', () => {
     // 构造一个明显超 3σ 的点
     const data = [0, 0, 0, 0, 10];
-    const { list } = evalRules(data, 0, 1, { r1: true, r2: false, r3: false, r4: false });
+    const { list } = evalRules(data, 0, 1, { r1: true, r2: false, r3: false, r4: false, r5: false, r6: false, r7: false, r8: false });
     expect(list.length).toBeGreaterThan(0);
     expect(list[0].desc).toBe(RULE_DEFS[1].def);
   });

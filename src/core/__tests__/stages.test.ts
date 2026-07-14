@@ -3,9 +3,9 @@
  */
 import { describe, it, expect } from 'vitest';
 import { splitStages, stagedXbar, stagedRange } from '../stages';
-import { CONTROL_CONSTANTS } from '../spc';
+import { CONTROL_CONSTANTS, DEFAULT_RULES } from '../spc';
 
-const RULES = { r1: true, r2: true, r3: true, r4: true };
+const RULES = DEFAULT_RULES;
 
 describe('splitStages', () => {
   it('连续段切分与不连续同名标签', () => {
