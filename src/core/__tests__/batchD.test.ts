@@ -1,6 +1,6 @@
 /** 批次D:Nelson 判异准则 4/6/7/8 + AQL 国标查表 / 位移近似。 */
 import { describe, it, expect } from 'vitest';
-import { evalRules, aqlPlan, codeLetterGB, codeLetterShift, CODE_LETTER_TABLE, N_BY_CODE, acceptNumber, acceptNumberGB, PREFERRED_AC } from '../index';
+import { evalRules, aqlPlan, masterPlan2A, codeLetterGB, codeLetterShift, CODE_LETTER_TABLE, N_BY_CODE } from '../index';
 
 const OFF = { r1: false, r2: false, r3: false, r4: false, r5: false, r6: false, r7: false, r8: false };
 const rulesOnly = (k: 'r4' | 'r6' | 'r7' | 'r8') => ({ ...OFF, [k]: true });
@@ -50,9 +50,9 @@ describe('AQL 字码判定:国标查表 vs 位移近似', () => {
     expect(codeLetterShift(120, 'III')).toBe('H');
     expect(codeLetterGB(120, 'III')).not.toBe(codeLetterShift(120, 'III'));
   });
-  it('aqlPlan 默认走国标查表', () => {
-    expect(aqlPlan(120, 'III', 1.0).code).toBe('G');
-    expect(aqlPlan(120, 'III', 1.0, 'shift').code).toBe('H');
+  it('初始字码由 codeLetterGB 决定(未解析箭头前)', () => {
+    expect(codeLetterGB(120, 'III')).toBe('G');
+    expect(codeLetterShift(120, 'III')).toBe('H');
   });
   it('大批量国标查表可达 P/Q/R,且 N_BY_CODE 有定义', () => {
     const codeIII = codeLetterGB(600000, 'III');
@@ -62,33 +62,26 @@ describe('AQL 字码判定:国标查表 vs 位移近似', () => {
   });
 });
 
-describe('AQL 接收数·优先数近似(非国标查表)', () => {
-  // 注:这是"二项 + 吸附到优先数列"的近似,不是 GB/T 2828.1 表 2-A 逐格查表。
-  // 外部审核(Codex/Grok)对拍真表:部分格巧合一致,部分格不符。此处如实记录,不再谎称"国标锚点"。
-  it('与真表一致的格(巧合)', () => {
-    expect(acceptNumberGB(80, 2.5)).toBe(5);   // J/2.5 真表=5
-    expect(acceptNumberGB(200, 2.5)).toBe(10); // L/2.5 真表=10
-    expect(acceptNumberGB(315, 2.5)).toBe(14); // M/2.5 真表=14
+describe('AQL 接收数·GB/T 2828.1 表 2-A 真查表(箭头已解析)', () => {
+  it('masterPlan2A 关键锚点(Codex 转录 / Grok 复核)', () => {
+    expect(masterPlan2A('F', 1.0)).toEqual({ code: 'E', n: 13, ac: 0, re: 1 }); // ↑箭头改档
+    expect(masterPlan2A('K', 1.0)).toEqual({ code: 'K', n: 125, ac: 3, re: 4 });
+    expect(masterPlan2A('L', 2.5)).toEqual({ code: 'L', n: 200, ac: 10, re: 11 });
+    expect(masterPlan2A('G', 2.5)).toEqual({ code: 'G', n: 32, ac: 2, re: 3 });
+    expect(masterPlan2A('N', 4.0)).toEqual({ code: 'M', n: 315, ac: 21, re: 22 }); // ↑箭头改档
+    expect(masterPlan2A('A', 0.65)).toEqual({ code: 'F', n: 20, ac: 0, re: 1 }); // ↓箭头改档
   });
-  it('与真表不符的格(近似的已知偏差,待真表 2-A 落地修正)', () => {
-    expect(acceptNumberGB(20, 1.0)).toBe(1);   // 近似=1,但真表 F/1.0=0(↑箭头→E 档 n=13)
-    expect(acceptNumberGB(500, 4.0)).toBe(30); // 近似=30,但真表 N/4.0=21
-    expect(acceptNumberGB(32, 2.5)).toBe(2);   // 近似=2,但真表 G/2.5=3
+  it('aqlPlan 默认走真表(箭头会改字码/样本量)', () => {
+    // N=120·II·AQL1.0:初始 F,↑ 后为 E/13/0/1(旧近似错给 F/20/1/2)
+    expect(aqlPlan(120, 'II', 1.0)).toEqual({ code: 'E', n: 13, ac: 0, re: 1 });
+    expect(aqlPlan(2000, 'II', 1.0)).toEqual({ code: 'K', n: 125, ac: 3, re: 4 });
+    expect(aqlPlan(5000, 'II', 2.5)).toEqual({ code: 'L', n: 200, ac: 10, re: 11 });
   });
-  it('大样本处 Ac 吸附到优先数列,与二项不同', () => {
-    expect(acceptNumber(200, 2.5)).toBe(9);    // 二项给非标数
-    expect(acceptNumberGB(200, 2.5)).toBe(10); // 国标吸附到优先数
-    // 结果必在优先数列内(或极端回落)
-    for (const [n, a] of [[50, 4.0], [125, 2.5], [500, 1.5]] as [number, number][]) {
-      expect(PREFERRED_AC.includes(acceptNumberGB(n, a))).toBe(true);
-    }
+  it('二项近似模式仍可切换(与真表不同)', () => {
+    expect(aqlPlan(120, 'II', 1.0, 'gb', 'binom')).toEqual({ code: 'F', n: 20, ac: 1, re: 2 });
   });
-  it('aqlPlan 默认走国标优先数列;可切二项', () => {
-    // L(200) 落在字码 III 的某档;直接用大样本档验证方法差异
-    expect(aqlPlan(35000, 'II', 2.5, 'gb', 'gb').ac).toBe(acceptNumberGB(N_BY_CODE[codeLetterGB(35000, 'II')], 2.5));
-    const p1 = aqlPlan(150000, 'III', 4.0, 'gb', 'gb');
-    const p2 = aqlPlan(150000, 'III', 4.0, 'gb', 'binom');
-    expect(PREFERRED_AC.includes(p1.ac)).toBe(true);
-    expect(p1.ac).toBeGreaterThanOrEqual(p2.ac); // 国标吸附 ≥ 二项
+  it('AQL 不在主表覆盖范围 → masterPlan2A 返回 null(aqlPlan 回落二项)', () => {
+    expect(masterPlan2A('F', 10.0)).toBeNull();
+    expect(aqlPlan(120, 'II', 10.0).code).toBe('F'); // 回落用初始字码 + 二项
   });
 });

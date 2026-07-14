@@ -6,10 +6,41 @@ import { binomCdf } from './basicMath';
 
 export type InspectionLevel = 'I' | 'II' | 'III';
 export type AqlMethod = 'shift' | 'gb';   // 字码判定:位移近似 / 国标查表
-export type AqlAcMethod = 'binom' | 'gb'; // 接收数判定:二项近似 / 国标优先数列(近似主表)
+export type AqlAcMethod = 'binom' | 'gb'; // 接收数判定:二项近似 / 国标主表(表 2-A,箭头已解析)
 
-/** GB/T 2828.1 主表接收数取值来自"优先数列"(不是任意整数):0,1,2,3,5,7,10,14,21,30,44… */
-export const PREFERRED_AC = [0, 1, 2, 3, 5, 7, 10, 14, 21, 30, 44, 63, 91, 127, 182];
+/** 主表覆盖的常用 AQL 列(%)。 */
+export const AQL_COLS = [0.65, 1.0, 1.5, 2.5, 4.0, 6.5];
+
+/** GB/T 2828.1-2012 表 2-A(正常检验一次抽样)——箭头(↑↓)已解析成最终执行方案。
+ *  来源:Codex 依国标原页逐格核定、Grok 独立复核;每格 "最终字码 n Ac"(Re=Ac+1),
+ *  列顺序同 AQL_COLS。箭头改档会同时改变字码/样本量/Ac,故整格一起取。 */
+const MASTER_2A_RAW: Record<string, string> = {
+  A: 'F 20 0|E 13 0|D 8 0|C 5 0|B 3 0|A 2 0',
+  B: 'F 20 0|E 13 0|D 8 0|C 5 0|B 3 0|A 2 0',
+  C: 'F 20 0|E 13 0|D 8 0|C 5 0|B 3 0|D 8 1',
+  D: 'F 20 0|E 13 0|D 8 0|C 5 0|E 13 1|D 8 1',
+  E: 'F 20 0|E 13 0|D 8 0|F 20 1|E 13 1|E 13 2',
+  F: 'F 20 0|E 13 0|G 32 1|F 20 1|F 20 2|F 20 3',
+  G: 'F 20 0|H 50 1|G 32 1|G 32 2|G 32 3|G 32 5',
+  H: 'J 80 1|H 50 1|H 50 2|H 50 3|H 50 5|H 50 7',
+  J: 'J 80 1|J 80 2|J 80 3|J 80 5|J 80 7|J 80 10',
+  K: 'K 125 2|K 125 3|K 125 5|K 125 7|K 125 10|K 125 14',
+  L: 'L 200 3|L 200 5|L 200 7|L 200 10|L 200 14|L 200 21',
+  M: 'M 315 5|M 315 7|M 315 10|M 315 14|M 315 21|L 200 21',
+  N: 'N 500 7|N 500 10|N 500 14|N 500 21|M 315 21|L 200 21',
+  P: 'P 800 10|P 800 14|P 800 21|N 500 21|M 315 21|L 200 21',
+  Q: 'Q 1250 14|Q 1250 21|P 800 21|N 500 21|M 315 21|L 200 21',
+  R: 'R 2000 21|Q 1250 21|P 800 21|N 500 21|M 315 21|L 200 21',
+};
+
+/** 国标主表查表:初始字码 + AQL → 表 2-A 箭头解析后的最终方案。不在覆盖范围返回 null。 */
+export function masterPlan2A(initialCode: string, aqlPct: number): SamplingPlan | null {
+  const row = MASTER_2A_RAW[initialCode];
+  const ci = AQL_COLS.indexOf(aqlPct);
+  if (!row || ci < 0) return null;
+  const [code, n, ac] = row.split('|')[ci].split(' ');
+  return { code, n: Number(n), ac: Number(ac), re: Number(ac) + 1 };
+}
 
 export interface SamplingPlan {
   code: string; // 样本字码
@@ -82,19 +113,6 @@ export function acceptNumber(n: number, aqlPct: number): number {
   return ac;
 }
 
-/** 优先数近似(⚠ 非国标查表):在优先数列中取最小满足 binomCdf≥0.95 者。
- *  这是"二项 + 吸附到优先数"的近似,不是 GB/T 2828.1 表 2-A 逐格查表——
- *  部分格巧合一致(J/2.5=5、L/2.5=10、M/2.5=14),但部分格与真表不符
- *  (如 F/1.0 近似=1 真表=0↑箭头→E;N/4.0 近似=30 真表=21;G/2.5 近似=2 真表=3),
- *  且未做小样本+严 AQL 的"箭头改档"。真国标查表待表 2-A 原图逐格转录后替换。 */
-export function acceptNumberGB(n: number, aqlPct: number): number {
-  const p = aqlPct / 100;
-  for (const c of PREFERRED_AC) {
-    if (c <= n && binomCdf(c, n, p) >= 0.95) return c;
-  }
-  return acceptNumber(n, aqlPct); // 超出优先数列覆盖范围(极端大样本)时回落二项
-}
-
 /** 位移近似:以水平 II 批量档为基准,水平 I/III 各偏移 ∓2 位字码。 */
 export function codeLetterShift(lot: number, level: InspectionLevel): string {
   let bi = LETTERS.findIndex((r) => lot >= r[1] && lot <= r[2]);
@@ -108,10 +126,15 @@ export function aqlPlan(
   lot: number, level: InspectionLevel, aql: number,
   method: AqlMethod = 'gb', acMethod: AqlAcMethod = 'gb',
 ): SamplingPlan {
-  const code = method === 'gb' ? codeLetterGB(lot, level) : codeLetterShift(lot, level);
-  const n = N_BY_CODE[code];
-  const ac = acMethod === 'gb' ? acceptNumberGB(n, aql) : acceptNumber(n, aql);
-  return { code, n, ac, re: ac + 1 };
+  const initialCode = method === 'gb' ? codeLetterGB(lot, level) : codeLetterShift(lot, level);
+  if (acMethod === 'gb') {
+    // 国标主表:整格取(箭头会同时改字码/n/Ac)。表未覆盖该 AQL 时回落二项。
+    const m = masterPlan2A(initialCode, aql);
+    if (m) return m;
+  }
+  const n = N_BY_CODE[initialCode];
+  const ac = acceptNumber(n, aql);
+  return { code: initialCode, n, ac, re: ac + 1 };
 }
 
 /** RQL/LTPD：使 Pa ≤ 0.10 的批不良率 p */

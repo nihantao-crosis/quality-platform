@@ -109,10 +109,10 @@ describe('AQL 转移规则', () => {
     expect(recordBatch(relaxed, 'R').state).toBe('normal');
   });
   it('三态方案：加严 Ac 更小,放宽 n 更小', () => {
-    const p = plansByState(120, 'II', 1.0);
-    expect(p.normal).toMatchObject({ code: 'F', n: 20, ac: 1 });
-    expect(p.tightened.ac).toBe(0);
-    expect(p.reduced.n).toBeLessThan(p.normal.n);
+    const p = plansByState(2000, 'II', 1.0); // 正常 = 真表 K/125/3/4(直取,无箭头)
+    expect(p.normal).toMatchObject({ code: 'K', n: 125, ac: 3 });
+    expect(p.tightened.ac).toBeLessThan(p.normal.ac); // 加严 Ac−1 = 2
+    expect(p.reduced.n).toBeLessThan(p.normal.n); // 放宽降两档 → H/50
   });
 });
 

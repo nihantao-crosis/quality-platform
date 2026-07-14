@@ -2,7 +2,7 @@
 import { useState } from 'react';
 import { useApp } from '../../store/appStore';
 import {
-  aqlPlan, rqlFor, producerRiskPct, acceptNumber, acceptNumberGB, N_BY_CODE, LETTERS, CODE_LETTER_TABLE,
+  aqlPlan, rqlFor, producerRiskPct, acceptNumber, masterPlan2A, N_BY_CODE, LETTERS, CODE_LETTER_TABLE,
   type InspectionLevel, type AqlMethod, type AqlAcMethod,
   recordBatch, plansByState, SWITCH_INIT, type SwitchStatus, type InspState,
 } from '../../core';
@@ -16,16 +16,17 @@ const STATE_META: Record<InspState, { label: string; bg: string; color: string }
   reduced: { label: '放宽检验', bg: '#e8f4ea', color: '#2c8a45' },
 };
 
-const AQL_OPTIONS = [0.65, 1.0, 1.5, 2.5, 4.0];
+const AQL_OPTIONS = [0.65, 1.0, 1.5, 2.5, 4.0, 6.5];
 const LEVEL_SHIFT: Record<InspectionLevel, number> = { I: -2, II: 0, III: 2 };
 const fmtLot = (lo: number, hi: number) => (hi === Infinity ? `${lo.toLocaleString()}+` : `${lo.toLocaleString()}–${hi.toLocaleString()}`);
 
 /** 按当前检验水平 + 字码判定法生成批量范围 → 字码方案表。
  *  gb:真实 GB/T 2828.1 字码表(覆盖到 50 万+);shift:水平 II 基准 ∓2 位位移近似。 */
 function planTableRows(level: InspectionLevel, aqlPct: number, lot: number, method: AqlMethod, acMethod: AqlAcMethod) {
-  const mk = (lo: number, hi: number, code: string) => {
-    const n = N_BY_CODE[code];
-    const ac = acMethod === 'gb' ? acceptNumberGB(n, aqlPct) : acceptNumber(n, aqlPct);
+  const mk = (lo: number, hi: number, initialCode: string) => {
+    let code = initialCode; let n = N_BY_CODE[initialCode]; let ac: number;
+    const m = acMethod === 'gb' ? masterPlan2A(initialCode, aqlPct) : null;
+    if (m) { code = m.code; n = m.n; ac = m.ac; } else { ac = acceptNumber(n, aqlPct); }
     return { label: fmtLot(lo, hi), code, n, ac, active: lot >= lo && lot <= hi };
   };
   if (method === 'gb') {
@@ -92,9 +93,9 @@ export function Aql({ T }: { T: ChartTokens }) {
         </div>
         <span style={{ fontSize: 12, color: '#8a929d', fontWeight: 600 }}>接收数 Ac</span>
         <div style={{ display: 'flex', gap: 6 }}>
-          {([['gb', '优先数近似'], ['binom', '二项近似']] as [AqlAcMethod, string][]).map(([m, label]) => (
+          {([['gb', '国标主表'], ['binom', '二项近似']] as [AqlAcMethod, string][]).map(([m, label]) => (
             <div key={m} style={tabStyle(aqlAcMethod === m)}
-              title={m === 'gb' ? '把二项接收数吸附到优先数列(0,1,2,3,5,7,10,14,21…);仅为近似,尚未按 GB/T 2828.1 主表逐格查表,部分格(如 F/1.0)与真表不符,更未做箭头改档' : '取最小满足 95% 接收概率的接收数(二项)'}
+              title={m === 'gb' ? '按 GB/T 2828.1 表 2-A(正常检验一次抽样主表)逐格查表,含 ↑↓ 箭头改档(会同时改字码/样本量/Ac);覆盖常用 AQL 0.65–6.5' : '取最小满足 95% 接收概率的接收数(二项近似)'}
               onClick={() => setAql({ aqlAcMethod: m })}>{label}</div>
           ))}
         </div>
@@ -202,7 +203,7 @@ export function Aql({ T }: { T: ChartTokens }) {
       <Card>
         <div style={{ display: 'flex', alignItems: 'center', padding: '11px 16px', borderBottom: '1px solid #edf0f3' }}>
           <div style={{ fontWeight: 600, color: '#33404f' }}>抽样方案表 (当前检验水平与 AQL，高亮为当前批量)</div>
-          <div style={{ marginLeft: 'auto', fontSize: 11.5, color: '#8a929d' }}>依据 GB/T 2828.1 · ≈95% 接收于 AQL</div>
+          <div style={{ marginLeft: 'auto', fontSize: 11.5, color: '#8a929d' }}>{aqlAcMethod === 'gb' ? '依据 GB/T 2828.1 表 2-A(箭头已解析)' : '二项近似 · ≈95% 接收于 AQL'}</div>
         </div>
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
           <thead>

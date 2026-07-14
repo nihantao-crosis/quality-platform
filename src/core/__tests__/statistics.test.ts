@@ -7,7 +7,7 @@ import { phi, invNorm, binomCdf, median, quantile } from '../basicMath';
 import { evalRules, DEFAULT_RULES } from '../spc';
 import { computeCapability } from '../capability';
 import { analyzeDoe, mainEffectMeans, interactionMeans } from '../doe';
-import { aqlPlan, rqlFor, producerRiskPct } from '../aql';
+import { aqlPlan, rqlFor, producerRiskPct, codeLetterGB, codeLetterShift } from '../aql';
 import { buildData, anovaGroups } from '../sampleData';
 import { calcKey, CALC_INIT, type CalcState } from '../calculator';
 
@@ -106,20 +106,21 @@ describe('DOE 2³ 全因子 + Lenth', () => {
 });
 
 describe('AQL 抽样方案', () => {
-  it('N=120, 水平 II, AQL=1.0 → 字码 F, n=20, Ac=1, Re=2（关键校验值）', () => {
-    expect(aqlPlan(120, 'II', 1.0)).toEqual({ code: 'F', n: 20, ac: 1, re: 2 });
+  it('N=120, 水平 II, AQL=1.0 → 真表:初始 F,↑箭头改档为 E/n=13/Ac=0/Re=1', () => {
+    expect(aqlPlan(120, 'II', 1.0)).toEqual({ code: 'E', n: 13, ac: 0, re: 1 });
   });
-  it('位移近似:水平 I / III 字码偏移 ∓2', () => {
-    expect(aqlPlan(120, 'I', 1.0, 'shift').code).toBe('D');
-    expect(aqlPlan(120, 'III', 1.0, 'shift').code).toBe('H');
+  it('初始字码(未解析箭头前):位移近似 I/III 偏移 ∓2', () => {
+    expect(codeLetterShift(120, 'I')).toBe('D');
+    expect(codeLetterShift(120, 'III')).toBe('H');
   });
-  it('国标查表(默认):N=120 水平 I=D / II=F / III=G(非均匀位移)', () => {
-    expect(aqlPlan(120, 'I', 1.0).code).toBe('D');
-    expect(aqlPlan(120, 'II', 1.0).code).toBe('F');
-    expect(aqlPlan(120, 'III', 1.0).code).toBe('G');
+  it('初始字码:国标字码表 N=120 I=D / II=F / III=G', () => {
+    expect(codeLetterGB(120, 'I')).toBe('D');
+    expect(codeLetterGB(120, 'II')).toBe('F');
+    expect(codeLetterGB(120, 'III')).toBe('G');
   });
-  it('RQL 处 Pa ≤ 10%，生产方风险 α < 5%', () => {
-    const plan = aqlPlan(120, 'II', 1.0);
+  it('RQL 处 Pa ≤ 10%,生产方风险 α < 5%(以 K 方案 N=2000/II/1.0)', () => {
+    const plan = aqlPlan(2000, 'II', 1.0); // K/125/3/4(直取,无箭头)
+    expect(plan).toEqual({ code: 'K', n: 125, ac: 3, re: 4 });
     const rql = rqlFor(plan);
     expect(binomCdf(plan.ac, plan.n, rql)).toBeLessThanOrEqual(0.1);
     expect(producerRiskPct(plan, 1.0)).toBeLessThan(5);
