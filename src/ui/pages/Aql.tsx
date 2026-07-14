@@ -92,9 +92,9 @@ export function Aql({ T }: { T: ChartTokens }) {
         </div>
         <span style={{ fontSize: 12, color: '#8a929d', fontWeight: 600 }}>接收数 Ac</span>
         <div style={{ display: 'flex', gap: 6 }}>
-          {([['gb', '国标数列'], ['binom', '二项近似']] as [AqlAcMethod, string][]).map(([m, label]) => (
+          {([['gb', '优先数近似'], ['binom', '二项近似']] as [AqlAcMethod, string][]).map(([m, label]) => (
             <div key={m} style={tabStyle(aqlAcMethod === m)}
-              title={m === 'gb' ? '接收数取 GB/T 2828.1 主表优先数列(0,1,2,3,5,7,10,14,21…);近似,小样本箭头改档暂未实现' : '取最小满足 95% 接收概率的接收数(二项)'}
+              title={m === 'gb' ? '把二项接收数吸附到优先数列(0,1,2,3,5,7,10,14,21…);仅为近似,尚未按 GB/T 2828.1 主表逐格查表,部分格(如 F/1.0)与真表不符,更未做箭头改档' : '取最小满足 95% 接收概率的接收数(二项)'}
               onClick={() => setAql({ aqlAcMethod: m })}>{label}</div>
           ))}
         </div>

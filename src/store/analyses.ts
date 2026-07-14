@@ -70,7 +70,13 @@ function buildSummary(kind: AnalysisKind): Omit<SavedAnalysis, 'id' | 'createdAt
       const means = M.subs.map((s) => s.mean);
       const sig = (M.uclX - M.xbarbar) / 3;
       const { list } = evalRules(means, M.xbarbar, sig, app.spcRules);
-      const n = list.length;
+      // 离散图(R/S/MR)超限点也计入——否则"Xbar 受控、R 图失控"时摘要会错报"受控"
+      let dispViol = 0;
+      if (app.spcType === 'xbar-r') dispViol = M.subs.filter((s) => s.range > M.uclR || s.range < M.lclR).length;
+      else if (app.spcType === 'xbar-s') dispViol = M.svals.filter((v) => v > M.uclS || v < M.lclS).length;
+      else if (app.spcType === 'i-mr') dispViol = (M.mr.slice(1) as number[]).filter((v) => v > M.mrUcl).length;
+      // 按点去重(与顶部结论卡口径一致):不同准则命中同一点算 1 个失控点,再加离散图失控点
+      const n = new Set(list.map((v) => v.i)).size + dispViol;
       return {
         kind, title: SPC_TITLE[app.spcType],
         metric: n > 0 ? `${n} 失控点` : '过程受控',
@@ -167,8 +173,10 @@ function buildSummary(kind: AnalysisKind): Omit<SavedAnalysis, 'id' | 'createdAt
         if (!det.ok) {
           return { kind, title: '实验设计 (DOE)', metric: '数据非因子设计', status: '未分析', ...pick(WARN) };
         }
-        if (new Set(resp).size < 2) {
-          return { kind, title: '实验设计 (DOE)', metric: '响应尚未录入', status: '未分析', ...pick(WARN) };
+        const respName = M.colNames[respIdx];
+        const pendingRows = /待录入/.test(respName) ? resp.filter((v) => v === 0).length : 0;
+        if (new Set(resp).size < 2 || pendingRows > 0) {
+          return { kind, title: '实验设计 (DOE)', metric: pendingRows > 0 ? `尚有 ${pendingRows} 行未录入` : '响应尚未录入', status: '未分析', ...pick(WARN) };
         }
         const fr = analyzeFactorial(det.design);
         const sig = fr.terms.filter((t) => t.sig).map((t) => t.name);

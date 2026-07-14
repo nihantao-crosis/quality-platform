@@ -30,8 +30,18 @@ export function oneWayAnova(groups: number[][]): AnovaResult {
   }, 0);
   const factorDf = k - 1;
   const errorDf = N - k;
-  const fStat = factorSS / factorDf / (errorSS / errorDf);
-  const pValue = 1 - fCdf(fStat, factorDf, errorDf);
+  const errorMS = errorSS / errorDf;
+  // 组内零方差(完美一致):组间有差异 → 无穷显著(p=0);组间也无差异 → 无信息(p=1)。
+  // 否则会得到 F=∞、p=NaN 而被误判为"不显著"。
+  let fStat: number;
+  let pValue: number;
+  if (errorMS <= 1e-12) {
+    fStat = factorSS > 1e-12 ? Infinity : 0;
+    pValue = factorSS > 1e-12 ? 0 : 1;
+  } else {
+    fStat = (factorSS / factorDf) / errorMS;
+    pValue = 1 - fCdf(fStat, factorDf, errorDf);
+  }
   return {
     factorDf,
     errorDf,

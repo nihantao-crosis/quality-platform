@@ -521,6 +521,24 @@ function AnovaInner({ T }: { T: ChartTokens }) {
     );
   }
 
+  // 宽表各列量纲悬殊(均值相差 >100 倍):不是同一响应量,把它们当组比较没有统计意义。
+  // 不再"警告 + 照出 P",直接拦到变量角色选择,引导改用「数值因子」模式或换同量纲数据。
+  if (!isDemo && effMode === 'wide' && wideScaleDisparate(groups)) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        {modeBar}
+        <Card style={{ padding: '18px 20px', fontSize: 13, color: '#b03030', background: '#fdecec', lineHeight: 1.7 }}>
+          <b>各列量纲悬殊,不能当组比较:</b>所选各数值列均值相差 100 倍以上(如 过盈量≈0.07 / 轴硬度≈30 / 压入力≈900),
+          多半不是"同一响应量在不同条件下的观测",把它们当三组做单因子 ANOVA 没有统计意义,故此处不出 F/P。
+          <div style={{ fontSize: 12, color: '#8a929d', marginTop: 8 }}>
+            正确做法:这类"因子 + 响应"数据请切到上方<b>「数值因子」</b>模式(选一列作因子、另一列作响应),或改用 DOE / 回归分析;
+            若各列确为同一量纲的不同条件,请改用同量纲数据。
+          </div>
+        </Card>
+      </div>
+    );
+  }
+
   let a; let resid;
   try {
     a = oneWayAnova(groups.map((g) => g.vals));
@@ -543,18 +561,17 @@ function AnovaInner({ T }: { T: ChartTokens }) {
   const conclusion = a.significant
     ? `P = ${nf(a.pValue, 3)} < 0.05，在 95% 置信水平下拒绝原假设：各「${factorName}」组均值存在显著差异。「${hi}」组均值最高，建议优先排查。`
     : `P = ${nf(a.pValue, 3)} ≥ 0.05，无充分证据表明各「${factorName}」组均值存在显著差异，可视为同一总体。`;
-  const wideDisparate = effMode === 'wide' && wideScaleDisparate(groups);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <ReportCard data={anovaReport({ p: a.pValue, significant: a.significant, groups: groups.map((g) => ({ name: g.name, n: g.vals.length })), wideCaution: effMode === 'wide' })} />
       {modeBar}
       {effMode === 'wide' && (
-        <div style={{ padding: '9px 14px', background: wideDisparate ? '#fdecec' : '#fcf3e3', border: `1px solid ${wideDisparate ? '#eecccc' : '#f0e0c8'}`, borderRadius: 5, fontSize: 12, color: wideDisparate ? '#b03030' : '#8a6520', lineHeight: 1.6, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+        // 量纲悬殊的宽表已在上游拦截;此处仅对"同量纲宽表"给温和提示(可选堆叠为长表)。
+        <div style={{ padding: '9px 14px', background: '#fcf3e3', border: '1px solid #f0e0c8', borderRadius: 5, fontSize: 12, color: '#8a6520', lineHeight: 1.6, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
           <span style={{ flex: '1 1 420px' }}>
-            {wideDisparate
-              ? <><b>各列量纲悬殊(均值相差 &gt; 100 倍),把它们当三组比较没有统计意义。</b>这类"因子 + 响应"数据应改用「数值因子」模式(选一列作因子、另一列作响应)或用 DOE/回归分析。下方 F/P 仅为形式计算,请勿据此下结论。</>
-              : <>宽表模式把每个数值列当作一组。仅当各列是<b>同一响应量(同量纲)</b>在不同条件下的观测时,比较均值才有统计意义;若各列是不同物理量(如 过盈量/轴硬度/压入力),请改用「数值因子」模式或因子实验思路。</>}
+            宽表模式把每个数值列当作一组。仅当各列是<b>同一响应量(同量纲)</b>在不同条件下的观测时,比较均值才有统计意义;
+            若各列是不同物理量,请改用「数值因子」模式或因子实验思路。
           </span>
           <div className="hov-act" onClick={() => { try { stackColumns(); setAnovaSel({ anovaMode: 'stacked' }); showToast('已堆叠为「测量值+来源列」长表并切换到分组列模式'); } catch (e) { showToast('堆叠失败:' + (e as Error).message); } }}
             style={{ padding: '5px 12px', border: '1px solid #d9b96a', borderRadius: 4, cursor: 'pointer', color: '#8a6520', background: '#fff', fontWeight: 600, flex: 'none' }}>

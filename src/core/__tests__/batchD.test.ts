@@ -62,13 +62,18 @@ describe('AQL 字码判定:国标查表 vs 位移近似', () => {
   });
 });
 
-describe('AQL 接收数:国标优先数列(近似主表) vs 二项近似', () => {
-  it('重现已知国标锚点', () => {
-    expect(acceptNumberGB(20, 1.0)).toBe(1);   // F/1.0
-    expect(acceptNumberGB(80, 2.5)).toBe(5);   // J/2.5
-    expect(acceptNumberGB(200, 2.5)).toBe(10); // L/2.5(二项会给 9)
-    expect(acceptNumberGB(315, 2.5)).toBe(14); // M/2.5(二项会给 13)
-    expect(acceptNumberGB(500, 4.0)).toBe(30); // N/4.0(二项会给 27)
+describe('AQL 接收数·优先数近似(非国标查表)', () => {
+  // 注:这是"二项 + 吸附到优先数列"的近似,不是 GB/T 2828.1 表 2-A 逐格查表。
+  // 外部审核(Codex/Grok)对拍真表:部分格巧合一致,部分格不符。此处如实记录,不再谎称"国标锚点"。
+  it('与真表一致的格(巧合)', () => {
+    expect(acceptNumberGB(80, 2.5)).toBe(5);   // J/2.5 真表=5
+    expect(acceptNumberGB(200, 2.5)).toBe(10); // L/2.5 真表=10
+    expect(acceptNumberGB(315, 2.5)).toBe(14); // M/2.5 真表=14
+  });
+  it('与真表不符的格(近似的已知偏差,待真表 2-A 落地修正)', () => {
+    expect(acceptNumberGB(20, 1.0)).toBe(1);   // 近似=1,但真表 F/1.0=0(↑箭头→E 档 n=13)
+    expect(acceptNumberGB(500, 4.0)).toBe(30); // 近似=30,但真表 N/4.0=21
+    expect(acceptNumberGB(32, 2.5)).toBe(2);   // 近似=2,但真表 G/2.5=3
   });
   it('大样本处 Ac 吸附到优先数列,与二项不同', () => {
     expect(acceptNumber(200, 2.5)).toBe(9);    // 二项给非标数

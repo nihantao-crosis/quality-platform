@@ -42,6 +42,18 @@ describe('分析摘要与数据对齐(刘润泽场景)', () => {
     expect(saved?.metric).toContain('量纲悬殊');
   });
 
+  it('DOE 部分录入(响应待录入列仍有占位 0)→ 摘要判"未录入"而非出显著结论', () => {
+    // 生成设计:2 因子 + 中心点,响应列名含"待录入",只录第一行、其余为 0
+    useData.getState().importMatrix('DOE部分录入', ['过盈量', '轴硬度', '响应(待录入)'], [
+      [0.045, 28, 620], [0.09, 28, 0], [0.045, 32, 0], [0.09, 32, 0],
+      [0.0675, 30, 0], [0.0675, 30, 0], [0.0675, 30, 0],
+    ]);
+    useApp.setState({ page: 'doe', doeFactorCols: ['过盈量', '轴硬度'], doeRespCol: '响应(待录入)' });
+    const saved = useAnalyses.getState().saveCurrent();
+    expect(saved?.status).toBe('未分析');
+    expect(saved?.metric).toContain('未录入');
+  });
+
   it('数值因子模式:压入力 按 轴硬度 水平分组,给出真实单因子 ANOVA', () => {
     // 轴硬度 只有 28/32 两水平,每组 ≥2 → 可构成有效分组
     useData.getState().importMatrix('压装2.csv', ['轴硬度', '压入力'], [

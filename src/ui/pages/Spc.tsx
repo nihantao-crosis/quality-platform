@@ -279,7 +279,7 @@ export function Spc({ T }: { T: ChartTokens }) {
   const ruleToggles = (['r1', 'r2', 'r3', 'r4', 'r5', 'r6', 'r7', 'r8'] as const).map((k) => [k, `准则 ${k.slice(1)}`] as const);
 
   const report = spcReport({
-    violList,
+    violList: allViolItems, // 含 R/S/MR 离散图失控点——顶部结论卡与右侧列表口径一致
     k: main.props.data.length,
     n: M.n,
     hasSubgroups: M.hasSubgroups,

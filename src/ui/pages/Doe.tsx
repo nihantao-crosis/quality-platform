@@ -140,19 +140,30 @@ function AnalyzeDesign({ T }: { T: ChartTokens }) {
     );
   }
 
-  // 响应尚未录入(全为占位 0 或无变异):不产出正式结论,引导先录入(否则会把"未采集"当成"实测为 0")
-  if (!isDemo && design && new Set(design.response).size < 2) {
-    return (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-        {picker}
-        <Card style={{ padding: '18px 20px', fontSize: 13, color: '#8a6520', background: '#fffdf7', lineHeight: 1.7 }}>
-          <b>响应列「{M.colNames[respIdx]}」尚未录入:</b>该列所有值相同(如刚生成设计时的占位 0),无变异,无法估计效应。
-          <div style={{ fontSize: 12, color: '#9aa2ad', marginTop: 8 }}>
-            请到「数据工作表」按运行序逐行录入实测响应后再回此分析——否则会把"尚未采集"误当成"实测值为 0"并给出无意义的结论。
-          </div>
-        </Card>
-      </div>
-    );
+  // 响应尚未录入完成:①全为占位 0/无变异;②「响应(待录入)」列里仍有占位 0(部分录入)。
+  // 后者更隐蔽——录了第一行、其余仍为 0 也会算出"全 p=0 显著",故一并拦截。
+  if (!isDemo && design) {
+    const respName0 = M.colNames[respIdx];
+    const noVariance = new Set(design.response).size < 2;
+    const isPlaceholderCol = /待录入/.test(respName0);
+    const pendingRows = isPlaceholderCol ? design.response.filter((v) => v === 0).length : 0;
+    if (noVariance || pendingRows > 0) {
+      return (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          {picker}
+          <Card style={{ padding: '18px 20px', fontSize: 13, color: '#8a6520', background: '#fffdf7', lineHeight: 1.7 }}>
+            <b>响应列「{respName0}」尚未录入完成:</b>
+            {noVariance
+              ? '该列所有值相同(如刚生成设计时的占位 0),无变异,无法估计效应。'
+              : `还有 ${pendingRows} 行为占位 0(尚未录入实测响应),此时分析会把"未采集"当成"实测=0"、给出无意义的强显著结论。`}
+            <div style={{ fontSize: 12, color: '#9aa2ad', marginTop: 8 }}>
+              请到「数据工作表」按运行序逐行录满实测响应后再回此分析。
+              {isPlaceholderCol ? '若某运行实测值确为 0,请先双击列名去掉「待录入」再分析。' : ''}
+            </div>
+          </Card>
+        </div>
+      );
+    }
   }
 
   // ── 渲染结果(演示或真实) ──

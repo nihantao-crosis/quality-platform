@@ -23,14 +23,15 @@ const worst = (...ls: Level[]): Level => (ls.includes('bad') ? 'bad' : ls.includ
 
 // ---------- SPC ----------
 export function spcReport(args: {
-  violList: { i: number; rule: number; desc: string }[];
+  violList: { i: number; rule: number; desc: string; chartLabel?: string }[];
   k: number;            // 点数(子组/观测)
   n: number;            // 子组大小
   hasSubgroups: boolean;
   typeLabel: string;    // 如 X̄-R
 }): ReportData {
   const { violList, k, n, hasSubgroups, typeLabel } = args;
-  const nViol = new Set(violList.map((v) => v.i)).size;
+  // 按(图 × 点)去重——同一子组在 X̄ 图与 R 图同时失控应计 2,否则顶部卡会比右侧列表/摘要少数
+  const nViol = new Set(violList.map((v) => `${v.chartLabel ?? ''}:${v.i}`)).size;
   const byRule = new Map<number, number>();
   violList.forEach((v) => byRule.set(v.rule, (byRule.get(v.rule) ?? 0) + 1));
   const ruleTxt = [...byRule.entries()].sort((a, b) => a[0] - b[0]).map(([r, c]) => `准则${r}×${c}`).join('、');

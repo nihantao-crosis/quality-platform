@@ -82,9 +82,11 @@ export function acceptNumber(n: number, aqlPct: number): number {
   return ac;
 }
 
-/** 国标优先数列(近似主表):在优先数列中取最小满足 binomCdf≥0.95 者。
- *  与二项近似的差异集中在大样本档——ISO 主表把 Ac 吸附到优先数(如 9→10、13→14、27→30)。
- *  注:小样本+小 AQL 的"箭头改档"未实现,待原表校准。 */
+/** 优先数近似(⚠ 非国标查表):在优先数列中取最小满足 binomCdf≥0.95 者。
+ *  这是"二项 + 吸附到优先数"的近似,不是 GB/T 2828.1 表 2-A 逐格查表——
+ *  部分格巧合一致(J/2.5=5、L/2.5=10、M/2.5=14),但部分格与真表不符
+ *  (如 F/1.0 近似=1 真表=0↑箭头→E;N/4.0 近似=30 真表=21;G/2.5 近似=2 真表=3),
+ *  且未做小样本+严 AQL 的"箭头改档"。真国标查表待表 2-A 原图逐格转录后替换。 */
 export function acceptNumberGB(n: number, aqlPct: number): number {
   const p = aqlPct / 100;
   for (const c of PREFERRED_AC) {
