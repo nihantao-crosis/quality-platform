@@ -162,9 +162,13 @@ export function Worksheet() {
         return;
       }
       e.preventDefault();
-      importMatrix('剪贴板数据', r.colNames, r.rows, r.textCols);
+      const outcome = importMatrix('剪贴板数据', r.colNames, r.rows, r.textCols);
       const note = r.textCols.length > 0 ? ` · 含 ${r.textCols.length} 个分组列` : '';
-      showToast(`已粘贴导入 · ${r.rows.length} 行 × ${r.colNames.length} 个数值列${note}`);
+      if (outcome.persisted || outcome.archiving) {
+        showToast(`已粘贴导入 · ${r.rows.length} 行 × ${r.colNames.length} 个数值列${note}`);
+      } else {
+        showToast('⚠ 粘贴数据已导入到内存,但浏览器存储空间不足,尚未持久化——刷新将丢失！请立即「文件 → 导出项目」备份');
+      }
     };
     window.addEventListener('paste', onPaste);
     return () => window.removeEventListener('paste', onPaste);

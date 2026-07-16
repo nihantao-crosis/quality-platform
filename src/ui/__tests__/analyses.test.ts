@@ -200,12 +200,14 @@ describe('保存分析', () => {
     });
   });
 
-  it('过程能力页保存:Cpk 指标与能力判定', () => {
+  it('过程能力页保存:Cpk 指标与能力判定(P0-4:演示集有失控点,不得给绿色「能力充足」)', () => {
     useApp.setState({ page: 'capability' });
     const a = useAnalyses.getState().saveCurrent()!;
     expect(a.title).toBe('过程能力分析');
     expect(a.metric).toMatch(/^Cpk /);
-    expect(['能力充足', '能力临界', '能力不足']).toContain(a.status);
+    // 演示数据集控制图有已知失控点(子组16–18、22),保存记录必须与能力页同口径。
+    expect(a.status).toContain('过程不稳定');
+    expect(a.statusColor).not.toBe('#2c8a45'); // 不得绿色
   });
 
   it('持久化到 localStorage', () => {

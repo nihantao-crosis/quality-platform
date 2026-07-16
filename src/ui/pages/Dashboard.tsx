@@ -3,7 +3,7 @@ import { useMemo } from 'react';
 import { useApp } from '../../store/appStore';
 import { useData } from '../../store/dataStore';
 import {
-  nf, DEFECTS, evalRules, evalLimitedRules, capabilityInputError, computeCapability, oneWayAnova, anovaGroups,
+  nf, DEFECTS, evalRules, evalLimitedRules, capabilityInputError, computeCapability, oneWayAnova, anovaGroups, andersonDarling,
   prepareSpcData,
 } from '../../core';
 import type { ChartTokens } from '../tokens';
@@ -60,8 +60,21 @@ export function Dashboard({ T }: { T: ChartTokens }) {
   ];
 
   const cpkGood = cap != null && cap.cpk >= 1.33;
+  // P0-4:过程失控/非正态时 Cpk 卡不得给绿色「达标」——与能力页/保存记录同一口径。
+  const dashSpcViol = (dispersion?.viol.size ?? 0) + (mainRules?.viol.size ?? 0);
+  const cpkStable = dashSpcViol === 0;
+  const dashAd = cap && SM && SM.all.length >= 8 ? andersonDarling(SM.all) : null;
+  const dashNonNormal = dashAd != null && !dashAd.normal;
   const kpis = [
-    { label: '过程能力 Cpk', value: cap ? nf(cap.cpk, 2) : '—', tag: cap ? (cpkGood ? '达标' : '预警') : '未运行', color: cap ? (cpkGood ? '#2c8a45' : '#e0902a') : '#8a929d', sub: cap ? '目标 ≥ 1.33' : capError ?? '能力输入无效' },
+    {
+      label: '过程能力 Cpk', value: cap ? nf(cap.cpk, 2) : '—',
+      tag: cap ? (!cpkStable ? '不稳定' : dashNonNormal ? '非正态' : cpkGood ? '达标' : '预警') : '未运行',
+      color: cap ? (!cpkStable || dashNonNormal ? '#e0902a' : cpkGood ? '#2c8a45' : '#e0902a') : '#8a929d',
+      sub: cap
+        ? (!cpkStable ? `控制图 ${dashSpcViol} 个失控点,Cpk 仅描述当前样本`
+          : dashNonNormal ? '数据偏离正态,Cpk 需谨慎解释' : '目标 ≥ 1.33')
+        : capError ?? '能力输入无效',
+    },
     M.isDemo
       ? { label: '一次合格率', value: '98.6%', tag: '演示', color: '#2c8a45', sub: '内置看板示例，不代表当前生产批次' }
       : { label: '一次合格率', value: '—', tag: '', color: '#8a929d', sub: '当前工作表没有批次一次合格数据' },

@@ -172,6 +172,26 @@ function nextUniqueColumnName(base: string, used: Iterable<string>): string {
 }
 
 let storageWarned = false;
+/** P0-5:持久化结果契约——只有 persisted=true 才允许 UI 显示绿色成功。 */
+export interface PersistOutcome { persisted: boolean; archiving: boolean }
+
+let activeUnpersistedFlag = false;
+function setActiveUnpersisted(v: boolean) {
+  if (activeUnpersistedFlag === v) return;
+  activeUnpersistedFlag = v;
+  try { useData.setState({ activeUnpersisted: v }); } catch { /* store 尚未就绪时忽略 */ }
+}
+/** 项目导入成功后旧内存数据注定被替换——上遮罩重载前清除未持久化标记,避免 beforeunload 拦截自动重载。 */
+export function markActiveDataReplaced(): void { setActiveUnpersisted(false); }
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('beforeunload', (e) => {
+    if (!activeUnpersistedFlag) return;
+    e.preventDefault();
+    e.returnValue = '当前数据尚未持久化，离开将丢失；请先「文件 → 导出项目」备份。';
+  });
+}
+
 function saveJson(key: string, v: unknown, silent = false): boolean {
   let encoded: string;
   try { encoded = JSON.stringify(v); } catch { return false; }
@@ -251,6 +271,8 @@ function allocateWorksheetName(currentNames: Iterable<string>): string {
 }
 
 interface DataState {
+  /** P0-5:活动数据仅存在内存、未成功持久化(刷新会丢)。 */
+  activeUnpersisted: boolean;
   model: VarModel;
   textCols: TextColumn[];
   pModel: PChartModel;
@@ -271,15 +293,15 @@ interface DataState {
     textCols?: TextColumn[],
     pendingCells?: PendingCell[],
     modelOptions?: DatasetModelOptions,
-  ): void;
+  ): PersistOutcome;
   /** 追加或覆盖分析输出列；数值列与文本列均按当前工作表行对齐并纳入撤销/持久化。 */
   writeAnalysisColumns(
     numericColumns: { name: string; values: number[] }[],
     textColumns?: TextColumn[],
   ): void;
-  importCounts(kind: 'p' | 'c', name: string, counts: number[], sampleSize?: number | number[]): void;
+  importCounts(kind: 'p' | 'c', name: string, counts: number[], sampleSize?: number | number[]): PersistOutcome;
   /** 导入帕累托「类别+频数」数据并持久化 */
-  importPareto(name: string, rows: ParetoRow[]): void;
+  importPareto(name: string, rows: ParetoRow[]): PersistOutcome;
   /** 清除活动帕累托数据（旧分析记录无法重建时用于避免误显当前数据）。 */
   clearPareto(): void;
   /** 加载成功返回 true；异步库读取会丢弃过期响应，避免后完成的旧请求覆盖新工作。 */
@@ -510,8 +532,8 @@ if (storedAttr?.c) {
   } catch { /* 保留演示 */ }
 }
 
-function persistAttr(p: PChartModel, c: CChartModel) {
-  saveJson(LS_ATTR, {
+function persistAttr(p: PChartModel, c: CChartModel): boolean {
+  return saveJson(LS_ATTR, {
     p: p.isDemo
       ? undefined
       : p.pVariableN
@@ -706,14 +728,15 @@ export function archiveToVault(data: StoredDataset) {
 
 /** 活动数据集落盘。localStorage 写不下时(超 ~5MB):桌面端即时归档到 SQLite
  * 并留恢复标记(重启自动恢复),Web 端沿用原有超限提示。 */
-function persistActive(data: StoredDataset) {
+function persistActive(data: StoredDataset): PersistOutcome {
   const db = platform.datasetDb;
   if (saveJson(LS_DATASET, data, db != null)) {
     pendingOversizeActive = null;
     try { localStorage.removeItem(LS_ACTIVE_REF); } catch { /* 忽略 */ }
-    return;
+    setActiveUnpersisted(false);
+    return { persisted: true, archiving: false };
   }
-  if (!db) return; // Web 端:saveJson 已提示
+  if (!db) { setActiveUnpersisted(true); return { persisted: false, archiving: false }; } // Web 端:仅内存,未落盘
   pendingOversizeActive = data;
   const prev = vaultTimers.get(data.name); // 绕过防抖,立即归档,避免窗口期丢数据
   if (prev) { clearTimeout(prev.timer); vaultTimers.delete(data.name); }
@@ -723,6 +746,7 @@ function persistActive(data: StoredDataset) {
     // 配额已满时先移除旧的活动矩阵副本，再写极小的 SQLite 恢复引用。
     establishActiveRef(data.name);
     pendingOversizeActive = null;
+    setActiveUnpersisted(false);
     sessionLog(`数据集 ${data.name} 超浏览器配额,已存入本机数据集库(重启自动恢复)`);
     try {
       useApp.getState().showToast('数据集超出浏览器存储配额,已安全存入本机数据集库,重启自动恢复');
@@ -732,9 +756,14 @@ function persistActive(data: StoredDataset) {
     // 只有成功写库后才建立 active-ref；失败时绝不能让旧同名库数据冒充本次活动表。
     try {
       if (localStorage.getItem(LS_ACTIVE_REF) === data.name) localStorage.removeItem(LS_ACTIVE_REF);
+      // 与成功回调同一守卫:过期失败不得把「已被替换且已持久化」的当前数据集误标为未持久化。
+      if (!isCurrentDatasetIntent(revision) || useData.getState().model.name !== data.name) return;
+      setActiveUnpersisted(true);
       useApp.getState().showToast('数据集过大且归档失败,当前数据尚未持久化；请释放空间后重试');
     } catch { /* 忽略 */ }
   });
+  setActiveUnpersisted(true); // 归档完成前视为未持久化;成功回调会清除
+  return { persisted: false, archiving: true };
 }
 
 /** 最近列表落盘。写不下时桌面端把条目瘦身(仅名称/时间,数据在 SQLite 库)再写一次。 */
@@ -798,6 +827,7 @@ export const useData = create<DataState>((set, get) => ({
   paretoModel: loadValidatedStoreJson<ParetoModel>(LS_PARETO),
   pendingCells: initPending,
   recents: storedRecents,
+  activeUnpersisted: false,
   mesRunning: false,
   undoStack: [],
   redoStack: [],
@@ -828,7 +858,7 @@ export const useData = create<DataState>((set, get) => ({
     if (!modelOptions.preserveSpecs) forgetSpecsForDataset(name);
     useApp.setState({ anovaShowDemo: false });
     knownDatasetNames.add(name);
-    persistActive(data);
+    const outcome = persistActive(data);
     persistRecents(recents);
     archiveToVault(data);
     if (!modelOptions.preserveSpecs) suggestSpec(model, normalized.textCols);
@@ -837,6 +867,7 @@ export const useData = create<DataState>((set, get) => ({
       try { useApp.getState().showToast('导入列名存在空值或重复，已稳定规范化（重名列追加序号）'); } catch { /* 非 UI 环境忽略 */ }
     }
     sessionLog(`导入变量数据 ${name} · ${rows.length} 行 × ${normalized.colNames.length} 个数值列`);
+    return outcome;
   },
 
   writeAnalysisColumns: (numericColumns, textColumns = []) => {
@@ -886,25 +917,28 @@ export const useData = create<DataState>((set, get) => ({
   },
 
   importCounts: (kind, name, counts, sampleSize: number | number[] = 50) => {
+    let persisted: boolean;
     if (kind === 'p') {
       const pModel = computePChart(counts, sampleSize, name);
       set({ pModel });
-      persistAttr(pModel, get().cModel);
+      persisted = persistAttr(pModel, get().cModel);
     } else {
       const cModel = computeCChart(counts, name);
       set({ cModel });
-      persistAttr(get().pModel, cModel);
+      persisted = persistAttr(get().pModel, cModel);
     }
     useApp.setState({ selSub: null, spcType: kind });
     sessionLog(`导入计数数据 ${name} · ${counts.length} 个${kind === 'p' ? '样本(P图)' : '单位(C图)'}`);
+    return { persisted, archiving: false };
   },
 
   importPareto: (name, rows) => {
     const paretoModel: ParetoModel = { name, rows };
     set({ paretoModel });
     useApp.setState({ paretoShowDemo: false });
-    saveJson(LS_PARETO, paretoModel);
+    const persisted = saveJson(LS_PARETO, paretoModel);
     sessionLog(`导入帕累托数据 ${name} · ${rows.length} 个类别`);
+    return { persisted, archiving: false };
   },
 
   clearPareto: () => {

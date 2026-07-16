@@ -1,7 +1,7 @@
 /** 过程能力分析 ★深度实现 — 可编辑规格限实时重算 + 直方图 + PPM 性能表。 */
 import { useApp } from '../../store/appStore';
 import { useData, suggestedSpec, rememberSpecForActiveMeasurement, resolveActiveMeasurementData } from '../../store/dataStore';
-import { nf, fmtCap, capabilityInputError, computeCapability, andersonDarling, bestLambda, transformWithSpec, stdev, evalLimitedRules, evalRules } from '../../core';
+import { nf, fmtCap, capabilityInputError, computeCapability, andersonDarling, bestLambda, transformWithSpec, stdev, countCapabilityViolations } from '../../core';
 import { ReportCard } from '../ReportCard';
 import { capabilityReport } from '../reportData';
 import type { ChartTokens } from '../tokens';
@@ -155,14 +155,8 @@ export function Capability({ T }: { T: ChartTokens }) {
     { k: '整体 (实际)', lsl: cap.ppm.overall.belowLsl == null ? '—' : Math.round(cap.ppm.overall.belowLsl).toLocaleString(), usl: cap.ppm.overall.aboveUsl == null ? '—' : Math.round(cap.ppm.overall.aboveUsl).toLocaleString(), ppm: Math.round(cap.ppm.overall.total).toLocaleString() },
   ];
 
-  // 能力结论必须先同时检查位置图与离散图；R/MR 失控时不能宣称过程稳定。
-  const locationEval = M.hasSubgroups
-    ? evalRules(M.subs.map((s) => s.mean), M.xbarbar, (M.uclX - M.xbarbar) / 3, spcRules)
-    : evalRules(M.indiv, M.indMean, M.iSig, spcRules);
-  const dispersionEval = M.hasSubgroups
-    ? evalLimitedRules(M.subs.map((s) => s.range), M.rbar, M.uclR, M.lclR, spcRules)
-    : evalLimitedRules(M.mr.slice(1) as number[], M.mrbar, M.mrUcl, 0, spcRules);
-  const spcViol = locationEval.viol.size + dispersionEval.viol.size;
+  // 能力结论必须先同时检查位置图与离散图;计数逻辑收敛在 countCapabilityViolations(与保存记录/专项报告共用)。
+  const spcViol = countCapabilityViolations(M, spcRules);
   const report = capabilityReport({
     cpk: cap.cpk, verdict: cap.verdict,
     adP: ad ? ad.p : null, n: M.all.length, spcViolations: spcViol,

@@ -150,7 +150,7 @@ export function SideNav() {
                 type="button"
                 className="rc-del"
                 aria-label={`删除分析记录：${a.title}`}
-                onClick={() => { removeAnalysis(a.id); showToast('已删除分析记录 ' + a.title); }}
+                onClick={() => { if (removeAnalysis(a.id)) showToast('已删除分析记录 ' + a.title); }}
                 style={{ display: focusedRow === `analysis:${a.id}` ? 'inline' : undefined, border: 0, background: 'transparent', color: '#c22f2f', fontWeight: 700, padding: '0 6px', fontFamily: 'inherit', cursor: 'pointer' }}
               >
                 ×

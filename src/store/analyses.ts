@@ -6,6 +6,7 @@
 import { create } from 'zustand';
 import {
   nf, capabilityInputError, computeCapability, evalRules, evalLimitedRules, prepareSpcData, computeGageRR, gageStudyData, GAGE_TOLERANCE,
+  andersonDarling, assessCapability, countCapabilityViolations,
   prepareGageStudy, resolveNumericColumn,
   oneWayAnova, oneSampleT, twoSampleT, linearRegression, anovaGroups, buildAnovaGroups, wideScaleDisparate, resolveAnovaMode, countAnovaPendingCells, isDoeAnalysisColumn, analyzeDoe, detectFactorial, analyzeFactorial, factorialModelTerms, resolveDoeColumns, resolveDoeBlockValues, plansByState, computeDescriptive,
   ewmaSeries, cusumSeries, stagedXbar, stagedRange, stageValidationError, normalizeSwitchStatus,
@@ -393,11 +394,16 @@ function buildSummary(kind: AnalysisKind): Omit<SavedAnalysis, 'id' | 'createdAt
         return { kind, title: '过程能力分析', metric: inputError, status: '未分析', ...pick(WARN) };
       }
       const cap = computeCapability(CM.all, CM.sigmaWithin, spec);
-      const good = cap.verdict === 'sufficient';
-      const mid = cap.verdict === 'marginal';
+      // P0-4:与能力页/专项报告共用唯一判定器——过程失控时保存记录不得给绿色「能力充足」。
+      const ad = CM.all.length >= 8 ? andersonDarling(CM.all) : null;
+      const assessment = assessCapability({
+        cpk: cap.cpk, verdict: cap.verdict, adP: ad ? ad.p : null, n: CM.all.length,
+        spcViolations: countCapabilityViolations(CM, app.spcRules),
+      });
       return {
         kind, title: '过程能力分析', metric: `Cpk ${nf(cap.cpk, 2)}`,
-        status: good ? '能力充足' : mid ? '能力临界' : '能力不足', ...pick(good ? OK : mid ? WARN : BAD),
+        status: assessment.status,
+        ...pick(assessment.level === 'ok' ? OK : assessment.level === 'warn' ? WARN : BAD),
       };
     }
     case 'gagerr': {
@@ -777,7 +783,7 @@ interface AnalysesState {
   lastError: string | null;
   /** 保存当前页的分析为一条记录;非分析页返回 null */
   saveCurrent(): SavedAnalysis | null;
-  remove(id: string): void;
+  remove(id: string): boolean;
   /** 精确恢复历史分析；异步数据集读取失败时返回 false，且不回放参数或跳页。 */
   restore(id: string): Promise<boolean>;
 }
@@ -847,13 +853,15 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
   remove: (id) => {
     const saved = get().saved.filter((a) => a.id !== id);
     if (!persist(saved)) {
+      // P1-6:删除未落盘时保留记录并如实报告失败,调用方不得提示「已删除」。
       const lastError = '本地存储空间不足，无法更新分析记录；请先导出项目后重试';
       set({ lastError });
       useApp.getState().showToast(lastError);
-      return;
+      return false;
     }
     set({ saved, lastError: null });
     pruneAnalysisDataLibrary(saved);
+    return true;
   },
 
   restore: async (id) => {

@@ -6,6 +6,7 @@ import type { ExportFmt } from '../store/appStore';
 import {
   nf, fmtCap, computeCapability, evalRules, DEFAULT_RULES, oneWayAnova, computeGageRR,
   anovaGroups, gageStudyData, GAGE_TOLERANCE, type VarModel,
+  assessCapability, countCapabilityViolations, andersonDarling,
 } from '../core';
 
 const OPS = ['张伟', '李娜', '王强'];
@@ -68,7 +69,16 @@ export function textReport(M: VarModel, spec: ReportSpec): string {
   L.push(`  Cp ${fmtCap(cap.cp)} · Cpk ${nf(cap.cpk, 2)} · Pp ${fmtCap(cap.pp)} · Ppk ${nf(cap.ppk, 2)}`);
   L.push(`  CPU ${fmtCap(cap.cpu)} · CPL ${fmtCap(cap.cpl)} · Z.bench ${nf(cap.zBench, 2)} · 西格玛水平 ${nf(cap.sigmaLevel, 2)}σ`);
   L.push(`  PPM 合计（整体）${Math.round(cap.ppm.overall.total).toLocaleString()}`);
-  L.push(`  判定: ${cap.verdict === 'sufficient' ? '能力充足 (Cpk ≥ 1.33)' : cap.verdict === 'marginal' ? '能力临界 (1.0 ≤ Cpk < 1.33)' : '能力不足 (Cpk < 1.0)'}`);
+  {
+    // P0-4:判定必须消费唯一判定器——失控时不得写无警示的「能力充足」。
+    const capAd = M.all.length >= 8 ? andersonDarling(M.all) : null;
+    const capAssessment = assessCapability({
+      cpk: cap.cpk, verdict: cap.verdict, adP: capAd ? capAd.p : null, n: M.all.length,
+      spcViolations: countCapabilityViolations(M, DEFAULT_RULES),
+    });
+    L.push(`  判定: ${capAssessment.status}`);
+    if (capAssessment.spcViolations > 0) L.push(`  ⚠ ${capAssessment.headline}`);
+  }
   L.push('');
   if (gage && anova) {
     L.push('【测量系统 Gage R&R · 演示研究】');

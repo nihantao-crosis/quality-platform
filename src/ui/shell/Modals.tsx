@@ -1,7 +1,7 @@
 /** 四个弹窗：导入 / 导出 / 计算器 / 关于 + Toast。 */
 import { useState, useEffect, useRef } from 'react';
 import { useApp, type ImportTab, type ExportFmt } from '../../store/appStore';
-import { prepareVaultDatasetRemoval, useData } from '../../store/dataStore';
+import { markActiveDataReplaced, prepareVaultDatasetRemoval, useData } from '../../store/dataStore';
 import { parseMatrix, parseCategoryCounts, extractPChartColumns, evalFormula, truthy, arrMin, arrMax, FormulaError, type ParsedMatrix } from '../../core';
 import { platform } from '../../platform/adapter';
 import { buildExportJob } from '../../platform/report';
@@ -115,13 +115,17 @@ function ImportModal() {
     const f = await platform.pickImportFile();
     if (!f) return;
     if (isProjectFile(f.name)) {
+      // P0-3:导入期间锁死整个界面(遮罩层 zIndex 高于弹窗),失败才解锁;成功保持锁定直至 reload。
+      useApp.getState().setBusyOverlay('正在导入项目，请勿操作…（完成后将自动重载）');
       const r = await applyProjectText(f.contents ?? '');
       if (r.error) {
+        useApp.getState().setBusyOverlay(null);
         showToast('打开项目失败：' + r.error);
         return;
       }
       sessionLog('打开项目文件 ' + f.name + (r.note ? ' · ' + r.note : '') + ' · 即将重载');
       showToast(r.note ? `项目已恢复(${r.note}),正在重载…` : '项目已恢复,正在重载…');
+      markActiveDataReplaced(); // 旧内存数据即将被新项目替换,不再触发 beforeunload 拦截
       setTimeout(() => location.reload(), 900);
       return;
     }
@@ -135,13 +139,23 @@ function ImportModal() {
     const file = e.dataTransfer.files?.[0];
     if (!file) return;
     if (isProjectFile(file.name)) {
-      const r = await applyProjectText(await file.text());
+      let text: string;
+      try {
+        text = await file.text(); // 拖放源文件可能已被移动/删除;必须在上锁之前读取
+      } catch {
+        showToast('打开项目失败：无法读取拖入的文件（源文件可能已被移动或删除）');
+        return;
+      }
+      useApp.getState().setBusyOverlay('正在导入项目，请勿操作…（完成后将自动重载）');
+      const r = await applyProjectText(text);
       if (r.error) {
+        useApp.getState().setBusyOverlay(null);
         showToast('打开项目失败：' + r.error);
         return;
       }
       sessionLog('打开项目文件 ' + file.name + (r.note ? ' · ' + r.note : '') + ' · 即将重载');
       showToast(r.note ? `项目已恢复(${r.note}),正在重载…` : '项目已恢复,正在重载…');
+      markActiveDataReplaced();
       setTimeout(() => location.reload(), 900);
       return;
     }
@@ -150,6 +164,13 @@ function ImportModal() {
     } else {
       handlePicked(file.name, await file.text());
     }
+  };
+
+  // P0-5:只有真正落盘才显示绿色成功;未持久化时给高优先级警告(刷新会丢数据)。
+  const persistAwareToast = (outcome: { persisted: boolean; archiving: boolean }, successMsg: string) => {
+    if (outcome.persisted) { showToast(successMsg); return; }
+    if (outcome.archiving) { showToast(successMsg + '；数据集较大,正在归档到本机数据集库…'); return; }
+    showToast('⚠ 数据已导入到内存,但浏览器存储空间不足,尚未持久化——刷新将丢失！请立即「文件 → 导出项目」备份,或在「工具 → 选项」清理本地数据');
   };
 
   const applyJob = (name: string, raw: string) => {
@@ -162,9 +183,9 @@ function ImportModal() {
         showToast('导入失败：' + r.error);
         return false;
       }
-      importPareto(name, r.rows);
+      const paretoOutcome = importPareto(name, r.rows);
       goTo('pareto');
-      showToast(`已导入帕累托数据 ${name} · ${r.rows.length} 个类别${r.note ? ' · ' + r.note : ''}`);
+      persistAwareToast(paretoOutcome, `已导入帕累托数据 ${name} · ${r.rows.length} 个类别${r.note ? ' · ' + r.note : ''}`);
       return true;
     }
     const parsed = parseMatrix(raw);
@@ -174,12 +195,12 @@ function ImportModal() {
     }
     const p = parsed;
     if (dataKind === 'var') {
-      importMatrix(name, p.colNames, p.rows, p.textCols);
+      const varOutcome = importMatrix(name, p.colNames, p.rows, p.textCols);
       goTo('worksheet');
       const notes: string[] = [];
       if (p.skippedRows > 0) notes.push(`跳过 ${p.skippedRows} 行非法值`);
       if (p.textCols.length > 0) notes.push(`含 ${p.textCols.length} 个分组列（可用于 ANOVA / Gage）`);
-      showToast(`已导入 ${name} · ${p.rows.length} 行 × ${p.colNames.length} 个数值列；请在 SPC 页确认数据角色${notes.length ? ' · ' + notes.join(' · ') : ''}`);
+      persistAwareToast(varOutcome, `已导入 ${name} · ${p.rows.length} 行 × ${p.colNames.length} 个数值列；请在 SPC 页确认数据角色${notes.length ? ' · ' + notes.join(' · ') : ''}`);
       return true;
     }
     if (dataKind === 'p') {
@@ -188,14 +209,15 @@ function ImportModal() {
         showToast('导入失败：' + extracted.error);
         return false;
       }
+      let pOutcome: { persisted: boolean; archiving: boolean };
       try {
-        importCounts('p', name, extracted.counts, extracted.sampleSizes);
+        pOutcome = importCounts('p', name, extracted.counts, extracted.sampleSizes);
       } catch (e) {
         showToast('导入失败：' + (e as Error).message);
         return false;
       }
       goTo('spc');
-      showToast(`已导入 ${name} · ${extracted.counts.length} 个样本不良数（P 图）${extracted.variableSampleSizes ? ' · 使用逐批样本量' : ''}`);
+      persistAwareToast(pOutcome, `已导入 ${name} · ${extracted.counts.length} 个样本不良数（P 图）${extracted.variableSampleSizes ? ' · 使用逐批样本量' : ''}`);
       return true;
     }
     // C 图只能接受一列计数；不能静默丢弃多余列。
@@ -208,14 +230,15 @@ function ImportModal() {
       showToast('导入失败：计数必须为非负整数');
       return false;
     }
+    let cOutcome: { persisted: boolean; archiving: boolean };
     try {
-      importCounts('c', name, counts);
+      cOutcome = importCounts('c', name, counts);
     } catch (e) {
       showToast('导入失败：' + (e as Error).message);
       return false;
     }
     goTo('spc');
-    showToast(`已导入 ${name} · ${counts.length} 个单位缺陷数（C 图）`);
+    persistAwareToast(cOutcome, `已导入 ${name} · ${counts.length} 个单位缺陷数（C 图）`);
     return true;
   };
 
@@ -966,6 +989,7 @@ export function Modals() {
   useEffect(() => {
     if (!modal) return;
     const closeOnEscape = (event: KeyboardEvent) => {
+      if (useApp.getState().busyOverlay) return; // P0-3:导入事务期间禁止关闭
       if (event.key === 'Escape') closeModal();
     };
     window.addEventListener('keydown', closeOnEscape);

@@ -5,6 +5,7 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
   nf, fmtCap, computeCapability, evalRules, DEFAULT_RULES, andersonDarling, type VarModel,
+  assessCapability, countCapabilityViolations,
 } from '../core';
 import { chartTokens } from '../ui/tokens';
 import { ControlChart } from '../ui/charts/ControlChart';
@@ -88,8 +89,13 @@ export function buildHtmlReport(M: VarModel, spec: ReportSpec, analysis?: Analys
   );
   const probSvg = renderToStaticMarkup(<NormalProbPlot T={T} data={M.all} h={280} />);
 
-  const verdictCls = cap.verdict === 'sufficient' ? 'verdict-ok' : cap.verdict === 'marginal' ? 'verdict-warn' : 'verdict-bad';
-  const verdictTxt = cap.verdict === 'sufficient' ? '能力充足' : cap.verdict === 'marginal' ? '能力临界' : '能力不足';
+  // P0-4:判定消费唯一判定器(含位置+离散图稳定性与正态性),失控时不得绿色「能力充足」。
+  const capAssessment = assessCapability({
+    cpk: cap.cpk, verdict: cap.verdict, adP: ad ? ad.p : null, n: M.all.length,
+    spcViolations: countCapabilityViolations(M, DEFAULT_RULES),
+  });
+  const verdictCls = capAssessment.level === 'ok' ? 'verdict-ok' : capAssessment.level === 'warn' ? 'verdict-warn' : 'verdict-bad';
+  const verdictTxt = capAssessment.status;
 
   const capRows: Array<[string, string]> = [
     ['Cp', fmtCap(cap.cp)], ['Cpk', nf(cap.cpk, 2)], ['Pp', fmtCap(cap.pp)], ['Ppk', nf(cap.ppk, 2)],
@@ -141,7 +147,7 @@ ${violHtml}
 <h2>4. 正态性检验</h2>
 <div class="chart">${probSvg}</div>
 ${ad
-  ? `<p>Anderson-Darling：A²* = ${nf(ad.a2star, 3)}，P ${ad.p < 0.005 ? '&lt; 0.005' : '= ' + nf(ad.p, 3)} → <span class="${ad.normal ? 'verdict-ok' : 'verdict-bad'}">${ad.normal ? '服从正态分布,能力指标可直接使用' : '显著偏离正态,建议 Box-Cox 变换后评估能力'}</span></p>`
+  ? `<p>Anderson-Darling：A²* = ${nf(ad.a2star, 3)}，P ${ad.p < 0.005 ? '&lt; 0.005' : '= ' + nf(ad.p, 3)} → <span class="${ad.normal ? 'verdict-ok' : 'verdict-bad'}">${ad.normal ? '未拒绝正态假设(现有样本未发现显著偏离正态的证据),能力指标可使用' : '显著偏离正态,建议 Box-Cox 变换后评估能力'}</span></p>`
   : '<p>样本量不足（N &lt; 8），未执行检验。</p>'}
 
 <div class="footer">本报告由质量分析平台自动生成 · 所有统计量实时计算 · 打印本页（⌘/Ctrl+P）即可保存为 PDF</div>

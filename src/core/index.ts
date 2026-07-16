@@ -2,6 +2,7 @@ export * from './basicMath';
 export * from './spc';
 export * from './spcData';
 export * from './capability';
+export * from './capabilityAssessment';
 export * from './doe';
 export * from './aql';
 export * from './anova';

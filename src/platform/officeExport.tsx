@@ -8,7 +8,7 @@ import {
 } from 'docx';
 import PptxGenJS from 'pptxgenjs';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { nf, fmtCap, computeCapability, evalRules, DEFAULT_RULES, andersonDarling, type VarModel } from '../core';
+import { nf, fmtCap, computeCapability, evalRules, DEFAULT_RULES, andersonDarling, type VarModel, assessCapability, countCapabilityViolations } from '../core';
 import { chartTokens } from '../ui/tokens';
 import { ControlChart } from '../ui/charts/ControlChart';
 import { Histogram } from '../ui/charts/Histogram';
@@ -40,7 +40,7 @@ function collectStats(M: VarModel, spec: ReportSpec): ReportStats {
   let adText = '样本量不足,未执行正态性检验';
   if (M.all.length >= 8) {
     const ad = andersonDarling(M.all);
-    adText = `Anderson-Darling A²* = ${nf(ad.a2star, 3)}, P ${ad.p < 0.005 ? '< 0.005' : '= ' + nf(ad.p, 3)} → ${ad.normal ? '服从正态分布' : '显著偏离正态,建议 Box-Cox'}`;
+    adText = `Anderson-Darling A²* = ${nf(ad.a2star, 3)}, P ${ad.p < 0.005 ? '< 0.005' : '= ' + nf(ad.p, 3)} → ${ad.normal ? '未拒绝正态假设' : '显著偏离正态,建议 Box-Cox'}`;
   }
   return { cap, viol, adText };
 }
@@ -84,8 +84,15 @@ const capPairs = (cap: ReportStats['cap']): Array<[string, string]> => [
   ['PPM(整体)', String(Math.round(cap.ppm.overall.total))],
 ];
 
-const verdictText = (cap: ReportStats['cap']) =>
-  cap.verdict === 'sufficient' ? '能力充足' : cap.verdict === 'marginal' ? '能力临界' : '能力不足';
+// P0-4:判定消费唯一判定器,失控时不得写无警示的「能力充足」。
+const capabilityVerdictText = (M: VarModel, cap: ReportStats['cap']) => {
+  const ad = M.all.length >= 8 ? andersonDarling(M.all) : null;
+  const a = assessCapability({
+    cpk: cap.cpk, verdict: cap.verdict, adP: ad ? ad.p : null, n: M.all.length,
+    spcViolations: countCapabilityViolations(M, DEFAULT_RULES),
+  });
+  return a.spcViolations > 0 ? `${a.status}（${a.headline}）` : a.status;
+};
 
 // ============================== Word ==============================
 
@@ -158,7 +165,7 @@ export async function buildDocx(
     h('1. 过程概览'),
     kvTable([
       ['均值', nf(M.oMean, 4)], ['σ 组内', nf(M.sigmaWithin, 4)], ['σ 整体', nf(M.oSd, 4)],
-      ['规格', `${nf(spec.lsl, 2)} / ${nf(spec.tgt, 2)} / ${nf(spec.usl, 2)}`], ['判定', `${verdictText(cap)} (Cpk ${nf(cap.cpk, 2)})`],
+      ['规格', `${nf(spec.lsl, 2)} / ${nf(spec.tgt, 2)} / ${nf(spec.usl, 2)}`], ['判定', `${capabilityVerdictText(M, cap)} (Cpk ${nf(cap.cpk, 2)})`],
     ]),
     h('2. SPC 控制图与判异'),
     ...img(images.xbar),
@@ -279,7 +286,7 @@ export async function buildPptx(
       { text: '均值', options: { bold: true } }, { text: 'σ 组内', options: { bold: true } },
       { text: 'σ 整体', options: { bold: true } }, { text: '规格 L/T/U', options: { bold: true } }, { text: '判定', options: { bold: true } },
     ],
-    [nf(M.oMean, 4), nf(M.sigmaWithin, 4), nf(M.oSd, 4), `${nf(spec.lsl, 2)} / ${nf(spec.tgt, 2)} / ${nf(spec.usl, 2)}`, `${verdictText(cap)} (Cpk ${nf(cap.cpk, 2)})`].map((t) => ({ text: t })),
+    [nf(M.oMean, 4), nf(M.sigmaWithin, 4), nf(M.oSd, 4), `${nf(spec.lsl, 2)} / ${nf(spec.tgt, 2)} / ${nf(spec.usl, 2)}`, `${capabilityVerdictText(M, cap)} (Cpk ${nf(cap.cpk, 2)})`].map((t) => ({ text: t })),
   ];
   s2.addTable(rows, { x: 0.6, y: 1.1, w: 12.1, fontSize: 14, border: { type: 'solid', color: 'E2E5EA', pt: 1 }, fill: { color: 'FFFFFF' } });
   const capRows: PptxGenJS.TableRow[] = [

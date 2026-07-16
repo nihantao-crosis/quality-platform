@@ -99,6 +99,9 @@ interface AppState {
 
   goTo(page: Page): void;
   showToast(msg: string): void;
+  /** P0-3:全屏事务遮罩(项目导入等不可打断操作);非空时 UI 应拒绝一切交互。 */
+  busyOverlay: string | null;
+  setBusyOverlay(msg: string | null): void;
   openModal(m: Exclude<Modal, null>): void;
   closeModal(): void;
   setOpenMenu(m: string | null): void;
@@ -266,14 +269,19 @@ interface PersistedAqlState {
 }
 
 let aqlStateCorrupt = false;
+let aqlStateQuarantined = false;
 
 function loadPersistedAqlState(): PersistedAqlState | null {
+  let text: string | null = null;
   try {
-    const text = localStorage.getItem(AQL_STATE_STORAGE_KEY);
+    text = localStorage.getItem(AQL_STATE_STORAGE_KEY);
     if (!text) return null;
     const raw = JSON.parse(text) as PersistedAqlState;
-    if (projectStoreValidationError(AQL_STATE_STORAGE_KEY, raw)) {
+    const detail = projectStoreValidationError(AQL_STATE_STORAGE_KEY, raw);
+    if (detail) {
       aqlStateCorrupt = true;
+      // P1-4:声明「已隔离」前必须真的把原文复制进隔离区;失败则如实说明。
+      aqlStateQuarantined = preserveCorruptStore(AQL_STATE_STORAGE_KEY, text, detail);
       return null;
     }
     return {
@@ -282,6 +290,7 @@ function loadPersistedAqlState(): PersistedAqlState | null {
     };
   } catch {
     aqlStateCorrupt = true;
+    if (text != null) aqlStateQuarantined = preserveCorruptStore(AQL_STATE_STORAGE_KEY, text, 'JSON 解析失败或写入被截断');
     return null;
   }
 }
@@ -353,6 +362,8 @@ export const useApp = create<AppState>()(persist((set, get) => ({
   calc: CALC_INIT,
 
   goTo: (page) => set({ page, openMenu: null, varOpen: false }),
+  busyOverlay: null,
+  setBusyOverlay: (msg) => set({ busyOverlay: msg }),
   showToast: (msg) => {
     clearTimeout(toastTimer);
     set({ toast: msg, openMenu: null, varOpen: false });
@@ -582,10 +593,16 @@ useApp.subscribe((state, previous) => {
 
 // 首次加载即把旧 qp-prefs-v1 中的 AQL 业务状态迁出；损坏的新账本必须原样保留以便恢复。
 if (!aqlStateCorrupt) savePersistedAqlState(useApp.getState());
-else useApp.getState().showToast('检测到损坏的 AQL 责任账本，已隔离且未覆盖；请导入有效项目备份或清除业务数据');
+else useApp.getState().showToast(aqlStateQuarantined
+  ? '检测到损坏的 AQL 责任账本，原文已复制到隔离区且未被覆盖；请导入有效项目备份或清除业务数据'
+  : '检测到损坏的 AQL 责任账本（隔离区写入失败，原文仍保留在原位置、未被覆盖）；请勿清除浏览器数据，可通过导入有效项目备份恢复');
 
 function requirePersistedAqlState(): void {
-  if (aqlStateCorrupt) throw new Error('AQL 责任账本已损坏且被隔离；请先导入有效项目备份或清除业务数据');
+  if (aqlStateCorrupt) {
+    throw new Error(aqlStateQuarantined
+      ? 'AQL 责任账本已损坏（原文已复制到隔离区）；请先导入有效项目备份或清除业务数据'
+      : 'AQL 责任账本已损坏（隔离区写入失败，原文仍保留在原位置）；请先导入有效项目备份或清除业务数据');
+  }
   if (!savePersistedAqlState(useApp.getState())) {
     throw new Error('AQL 责任账本无法写入本地存储；请释放空间后重试');
   }

@@ -52,6 +52,7 @@ import {
   type AnovaGroup,
   type DoeRunMetadata,
   type VarModel,
+  assessCapability, countCapabilityViolations,
 } from '../core';
 import { useApp } from '../store/appStore';
 import { useData } from '../store/dataStore';
@@ -702,7 +703,12 @@ function buildCapabilityPayload(): AnalysisReportPayload {
   if (inputError) return unrunPayload('capability', '过程能力分析专项报告', data.model.name, inputError, true);
   const cap = computeCapability(M.all, M.sigmaWithin, spec);
   const ad = M.all.length >= 8 ? andersonDarling(M.all) : null;
-  const verdict = cap.verdict === 'sufficient' ? '能力充足' : cap.verdict === 'marginal' ? '能力临界' : '能力不足';
+  // P0-4:与能力页/保存记录共用唯一判定器,失控时专项报告不得写「能力充足」而无警告。
+  const assessment = assessCapability({
+    cpk: cap.cpk, verdict: cap.verdict, adP: ad ? ad.p : null, n: M.all.length,
+    spcViolations: countCapabilityViolations(M, app.spcRules),
+  });
+  const verdict = assessment.status;
   const sourceTable = M.hasSubgroups
     ? {
         title: '用于能力分析的解析子组数据',
@@ -723,11 +729,12 @@ function buildCapabilityPayload(): AnalysisReportPayload {
     subtitle: `${prepared.variableName} · ${prepared.layoutLabel} · N=${M.all.length}`,
     generatedAt: now(),
     summary: [
-      `Cpk=${fmt(cap.cpk, 4)}，Ppk=${fmt(cap.ppk, 4)}，${verdict}。`,
+      `Cpk=${fmt(cap.cpk, 4)}，Ppk=${fmt(cap.ppk, 4)}，${verdict}。${assessment.spcViolations > 0 ? assessment.headline : ''}`,
       `规格：${app.lslOn ? `LSL=${fmt(app.lsl, 6)}` : '无下限'} / Target=${fmt(app.tgt, 6)} / ${app.uslOn ? `USL=${fmt(app.usl, 6)}` : '无上限'}；${prepared.note}。`,
       ad ? `Anderson-Darling A²*=${fmt(ad.a2star, 4)}，P=${fmt(ad.p, 6)}，${ad.normal ? '未拒绝正态性' : '显著偏离正态分布'}。` : '样本量不足 8，未执行 Anderson-Darling 正态性检验。',
     ],
     warnings: [
+      assessment.spcViolations > 0 ? `控制图检出 ${assessment.spcViolations} 个失控点——过程不稳定，能力指标只描述当前样本，不能预测未来质量。` : '',
       !app.lslOn || !app.uslOn ? '当前为单侧规格，Cp/Pp/Cpm 不适用；Cpk 退化为启用一侧的 CPU 或 CPL。' : '',
       ad && !ad.normal ? '数据显著偏离正态，正态分布能力指标需谨慎解释，并考虑 Box-Cox 或非正态能力方法。' : '',
     ].filter(Boolean),

@@ -525,6 +525,12 @@ function analysesValidationError(raw: unknown): string | null {
     for (const key of ['id', 'title', 'datasetName', 'metric', 'status', 'statusColor', 'statusBg'] as const) {
       if (typeof analysis[key] !== 'string') return `分析历史 ${key} 不是字符串`;
     }
+    // P1-3:颜色字段会拼进导出 HTML 的 style 属性,必须是严格 hex,阻断事件属性注入。
+    for (const key of ['statusColor', 'statusBg'] as const) {
+      if (!/^#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(analysis[key] as string)) {
+        return `分析历史 ${key} 不是合法十六进制颜色`;
+      }
+    }
     if (typeof analysis.kind !== 'string' || !kinds.has(analysis.kind)) return '分析历史 kind 无效';
     if (typeof analysis.createdAt !== 'number' || !Number.isFinite(analysis.createdAt)) return '分析历史 createdAt 无效';
     const detail = snapshotValidationError(analysis.snapshot);

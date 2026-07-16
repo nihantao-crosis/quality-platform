@@ -3,7 +3,7 @@
  * 红绿灯结论:一句人话 headline + 逐项体检 checks。各分析页用手头已算好的
  * 结果就地构建;不读 store,便于单测。
  */
-import { nf } from '../core';
+import { nf, assessCapability } from '../core';
 
 export type Level = 'ok' | 'warn' | 'bad';
 
@@ -221,6 +221,8 @@ export function capabilityReport(args: {
   spcViolations: number;
 }): ReportData {
   const { cpk, verdict, adP, n, spcViolations } = args;
+  // P0-4:总体等级与结论句来自唯一判定器,保证页面/保存记录/汇总/专项报告口径一致。
+  const assessment = assessCapability({ cpk, verdict, adP, n, spcViolations });
   const capLevel: Level = verdict === 'sufficient' ? 'ok' : verdict === 'marginal' ? 'warn' : 'bad';
   const cap: CheckItem = {
     name: '过程能力',
@@ -230,7 +232,7 @@ export function capabilityReport(args: {
   const norm: CheckItem = adP == null
     ? { name: '正态性', level: 'warn', note: '样本不足 8 个,无法做 AD 正态检验' }
     : adP >= 0.05
-      ? { name: '正态性', level: 'ok', note: `AD 检验 P=${adP >= 0.999 ? '>0.999' : nf(adP, 3)} ≥ 0.05,正态假设成立` }
+      ? { name: '正态性', level: 'ok', note: `AD 检验 P=${adP >= 0.999 ? '>0.999' : nf(adP, 3)} ≥ 0.05,未拒绝正态假设(现有样本未发现显著偏离正态的证据)` }
       : { name: '正态性', level: 'bad', note: `AD 检验 P=${nf(adP, 3)} < 0.05,偏离正态——Cpk 可能失真,建议 Box-Cox 变换` };
   const amount: CheckItem = n >= 100
     ? { name: '样本量', level: 'ok', note: `${n} 个观测 ≥ 100,能力估计稳定` }
@@ -242,14 +244,8 @@ export function capabilityReport(args: {
     : { name: '过程稳定性', level: 'warn', note: `控制图有 ${spcViolations} 个失控点——过程不稳定时能力数值只描述过去,不能预测未来` };
 
   return {
-    verdict: worst(worst(capLevel, norm.level === 'bad' ? 'warn' : 'ok'), stable.level),
-    headline: spcViolations > 0
-      ? `控制图检出 ${spcViolations} 个失控点；Cpk=${nf(cpk, 2)} 只能描述现有样本，过程稳定前不得用于预测未来质量。`
-      : capLevel === 'ok'
-      ? `过程能力充足(Cpk=${nf(cpk, 2)}),按当前受控状态可满足规格要求。`
-      : capLevel === 'warn'
-        ? `过程能力临界(Cpk=${nf(cpk, 2)}),建议减少变异或居中过程后复评。`
-        : `过程能力不足(Cpk=${nf(cpk, 2)}),预期将产出超差品——优先减少变异/对中,并加严检验。`,
+    verdict: assessment.level,
+    headline: assessment.headline,
     checks: [cap, norm, amount, stable],
   };
 }

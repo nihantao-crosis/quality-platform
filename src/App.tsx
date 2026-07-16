@@ -30,7 +30,7 @@ import { Aql } from './ui/pages/Aql';
 
 export default function App() {
   const {
-    page, openMenu, varOpen, setOpenMenu, setVarOpen, openModal, showToast, chartStyle, showGrid, lsl, usl, tgt, lslOn, uslOn,
+    page, openMenu, varOpen, setOpenMenu, setVarOpen, openModal, showToast, chartStyle, showGrid, lsl, usl, tgt, lslOn, busyOverlay, uslOn,
     spcType, spcDataLayout, spcValueCol, spcSubgroupCol, hypoTab, aqlLevel, aqlAQL,
     gageUseReal, gageValueName, gagePartName, gageOperatorName, activeVar,
   } = useApp();
@@ -65,6 +65,7 @@ export default function App() {
   // 全局快捷键（菜单栏标注的 Ctrl+S/O/P/N;输入控件聚焦时不劫持）
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (useApp.getState().busyOverlay) { e.preventDefault(); return; } // 事务遮罩期间禁用全部快捷键
       if (e.key === 'F1') {
         e.preventDefault();
         useApp.getState().openModal('help');
@@ -203,6 +204,13 @@ export default function App() {
 
       <Modals />
       <Toast />
+      {busyOverlay && (
+        <div role="alert" aria-busy="true" tabIndex={-1} ref={(el) => el?.focus()} onKeyDown={(e) => e.preventDefault()} style={{ position: 'fixed', inset: 0, zIndex: 1000, outline: 'none', background: 'rgba(20,28,40,0.62)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <div style={{ background: '#fff', borderRadius: 8, padding: '22px 34px', fontSize: 14, color: '#33404f', fontWeight: 600, boxShadow: '0 8px 30px rgba(0,0,0,0.25)' }}>
+            {busyOverlay}
+          </div>
+        </div>
+      )}
       <SessionPanel />
       <StatusBar cpk={cap?.cpk ?? null} gageRR={gageRR} gageDemo={!requestedRealGage} wsName={M.name} rows={M.k} cols={wsCols} />
     </div>

@@ -21,7 +21,9 @@ const CSS = `
   @media print { body { padding: 0; } tr { break-inside: avoid; } }
 `;
 
-const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+/** P1-3:颜色只放行严格 hex;其余一律回退中性色,杜绝 style 属性注入。 */
+const safeColor = (s: string, fallback: string) => /^#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(s) ? s : fallback;
 
 const KIND_LABEL: Record<string, string> = {
   spc: 'SPC 控制图', capability: '过程能力', gagerr: '测量系统', anova: '假设检验',
@@ -50,7 +52,7 @@ export function buildProjectSummary(projectName: string, saved: SavedAnalysis[])
         <td>${esc(KIND_LABEL[a.kind] ?? a.kind)}</td>
         <td class="mono">${esc(a.datasetName)}</td>
         <td class="mono">${esc(a.metric)}</td>
-        <td><span class="badge" style="background:${a.statusBg};color:${a.statusColor}">${esc(a.status)}</span></td>
+        <td><span class="badge" style="background:${safeColor(a.statusBg, '#eef1f4')};color:${safeColor(a.statusColor, '#5b6472')}">${esc(a.status)}</span></td>
         <td class="mono">${fmt(a.createdAt)}</td>
       </tr>`,
     )

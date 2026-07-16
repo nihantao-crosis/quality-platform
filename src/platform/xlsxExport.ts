@@ -5,6 +5,7 @@
 import * as XLSX from 'xlsx';
 import {
   nf, computeCapability, evalRules, DEFAULT_RULES, type VarModel,
+  assessCapability, countCapabilityViolations, andersonDarling,
 } from '../core';
 import type { ReportSpec } from './report';
 import { safeSheetName, type AnalysisReportPayload } from './analysisReportModel';
@@ -56,6 +57,11 @@ export function buildXlsx(M: VarModel, spec: ReportSpec, analysis?: AnalysisRepo
 
   // Sheet 2: 统计摘要
   const cap = computeCapability(M.all, M.sigmaWithin, spec);
+  const xlsxAd = M.all.length >= 8 ? andersonDarling(M.all) : null;
+  const capAssessment = assessCapability({
+    cpk: cap.cpk, verdict: cap.verdict, adP: xlsxAd ? xlsxAd.p : null, n: M.all.length,
+    spcViolations: countCapabilityViolations(M, DEFAULT_RULES),
+  });
   const summary: (string | number)[][] = [
     ['质量分析平台 · 统计摘要', ''],
     ['工作表', M.name],
@@ -75,7 +81,8 @@ export function buildXlsx(M: VarModel, spec: ReportSpec, analysis?: AnalysisRepo
     ['Z.bench', Number(nf(cap.zBench, 3))],
     ['西格玛水平', Number(nf(cap.sigmaLevel, 3))],
     ['PPM 合计（整体）', Math.round(cap.ppm.overall.total)],
-    ['判定', cap.verdict === 'sufficient' ? '能力充足' : cap.verdict === 'marginal' ? '能力临界' : '能力不足'],
+    ['判定', capAssessment.status],
+    ['过程稳定性', capAssessment.spcViolations > 0 ? `控制图 ${capAssessment.spcViolations} 个失控点——能力值仅描述当前样本` : '控制图无失控信号'],
   ];
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(summary), '统计摘要');
 
