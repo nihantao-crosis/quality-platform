@@ -15,7 +15,7 @@ import { paretoReport } from '../reportData';
 
 export function Dashboard({ T }: { T: ChartTokens }) {
   const {
-    goTo, lsl, usl, tgt, lslOn, uslOn, spcRules, spcDataLayout, spcValueCol, spcSubgroupCol,
+    goTo, lsl, usl, tgt, lslOn, uslOn, spcRules, spcRuleK, spcDataLayout, spcValueCol, spcSubgroupCol,
     paretoMergeOther, paretoThreshold,
   } = useApp();
   const { model: M, textCols, pendingCells } = useData();
@@ -32,11 +32,11 @@ export function Dashboard({ T }: { T: ChartTokens }) {
   // 与 SPC 页共用数据角色和判异口径。离散图失控时先告警，不把均值图单独解释为“受控”。
   const means = SM?.subs.map((s) => s.mean) ?? [];
   const dispersion = !SM ? null : SM.hasSubgroups
-    ? evalLimitedRules(SM.subs.map((s) => s.range), SM.rbar, SM.uclR, SM.lclR, spcRules)
-    : evalLimitedRules(SM.mr.slice(1) as number[], SM.mrbar, SM.mrUcl, 0, spcRules);
+    ? evalLimitedRules(SM.subs.map((s) => s.range), SM.rbar, SM.uclR, SM.lclR, spcRules, spcRuleK)
+    : evalLimitedRules(SM.mr.slice(1) as number[], SM.mrbar, SM.mrUcl, 0, spcRules, spcRuleK);
   const mainRules = !SM ? null : SM.hasSubgroups
-    ? evalRules(means, SM.xbarbar, (SM.uclX - SM.xbarbar) / 3, spcRules)
-    : evalRules(SM.indiv, SM.indMean, SM.iSig, spcRules);
+    ? evalRules(means, SM.xbarbar, (SM.uclX - SM.xbarbar) / 3, spcRules, spcRuleK)
+    : evalRules(SM.indiv, SM.indMean, SM.iSig, spcRules, spcRuleK);
   const spcAlerts = (dispersion?.list.length
     ? dispersion.list.map((v) => ({
         color: '#c22f2f',

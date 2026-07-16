@@ -5,6 +5,8 @@ import {
   generateFactorialDesign, resolveDoeColumns, DOE_DESIGN, analyzeDoe,
   factorialModelTerms, buildDoeStructuredReport, buildDoeWorksheetOutput,
 } from '../doe';
+// 批次新增(只加不改):未编码回归方程锚点用
+import { uncodedEquation } from '../doe';
 
 // 用演示 2³ 数据(A/B/C 标准序)构造「宽表」因子列验证与 analyzeDoe 一致
 const demo = DOE_DESIGN;
@@ -551,5 +553,39 @@ describe('人工反馈 DOE 精确 7 行闭环', () => {
     expect(output.numericColumns.find((column) => column.name === 'DOE残差')?.values).toEqual(result.residuals);
     expect(output.numericColumns.find((column) => column.name === 'DOE标准化残差')?.values).toEqual(result.stdResiduals);
     expect(output.textColumns.find((column) => column.name === 'DOE模型项')?.values.slice(0, 4)).toEqual(['常量', ...result.terms.map((term) => term.name), '曲率']);
+  });
+});
+
+// ==================== 批次新增(只加不改):未编码回归方程 Minitab 锚点 ====================
+describe('未编码回归方程:PPT 第 17 页压装数据 Minitab 锚点', () => {
+  it('7 行(4 角 + 3 中心)设计:945.0 / 335.0 / 90.0 / 10.0 / 18.3(容差 0.1)', () => {
+    // 与上方「人工反馈 DOE 精确 7 行闭环」同一套压装数据:工作表按编码单位
+    // (−1/0/+1)录入时,Minitab 的方程系数即 945.0 + 335.0 过盈量 + 90.0 轴硬度
+    // + 10.0 过盈量*轴硬度 + 18.3 Ct Pt;此时低/高水平就是 ±1,未编码换算应原样保持。
+    const detected = detectFactorial(
+      [
+        { name: '过盈量', values: [1, 1, 0, 0, -1, -1, 0] },
+        { name: '轴硬度', values: [-1, 1, 0, 0, -1, 1, 0] },
+      ],
+      [1180, 1380, 980, 940, 530, 690, 970],
+    );
+    expect(detected.ok).toBe(true);
+    if (!detected.ok) return;
+    const result = analyzeFactorial(detected.design);
+    const eq = uncodedEquation(
+      result,
+      detected.design.factorNames.map((name, index) => ({
+        name, low: detected.design.levels[index].low, high: detected.design.levels[index].high,
+      })),
+      '压入力',
+    );
+    expect(eq).not.toBeNull();
+    const coef = (label: string) => eq!.terms.find((term) => term.label === label)!.coef;
+    expect(Math.abs(coef('常量') - 945.0)).toBeLessThan(0.1);
+    expect(Math.abs(coef('过盈量') - 335.0)).toBeLessThan(0.1);
+    expect(Math.abs(coef('轴硬度') - 90.0)).toBeLessThan(0.1);
+    expect(Math.abs(coef('过盈量*轴硬度') - 10.0)).toBeLessThan(0.1);
+    expect(Math.abs(coef('Ct Pt') - 18.3)).toBeLessThan(0.1);
+    expect(eq!.text).toBe('压入力 = 945.0 + 335.0 过盈量 + 90.00 轴硬度 + 10.00 过盈量*轴硬度 + 18.33 Ct Pt');
   });
 });

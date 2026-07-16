@@ -5,7 +5,7 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 import type { CSSProperties } from 'react';
 import { useApp } from '../../store/appStore';
 import { useData } from '../../store/dataStore';
-import { nf, evalRules, parseMatrix, arrMin, arrMax, prepareSpcData } from '../../core';
+import { nf, evalRules, parseMatrix, arrMin, arrMax, prepareSpcData, columnDisplayDp } from '../../core';
 import { Card, KvRows } from '../common';
 import { Icon, type IconName } from '../icons';
 
@@ -113,7 +113,7 @@ function HeaderCell({ name, canDelete, onRename, onDelete }: {
 
 export function Worksheet() {
   const {
-    openModal, setImportTab, showToast, spcRules, selSub,
+    openModal, setImportTab, showToast, spcRules, spcRuleK, selSub,
     spcDataLayout, spcValueCol, spcSubgroupCol,
   } = useApp();
   const { model: M, textCols, pendingCells, updateCell, addSubgroupRow, deleteRow, renameColumn, deleteColumn, insertColumn } = useData();
@@ -178,7 +178,7 @@ export function Worksheet() {
   const means = rowSpc?.subs.map((s) => s.mean) ?? [];
   const sig = rowSpc ? (rowSpc.uclX - rowSpc.xbarbar) / 3 : Number.NaN;
   const { viol } = rowSpc
-    ? evalRules(means, rowSpc.xbarbar, sig, spcRules)
+    ? evalRules(means, rowSpc.xbarbar, sig, spcRules, spcRuleK)
     : { viol: new Set<number>() };
 
   // 列统计(大数组安全 min/max)
@@ -186,15 +186,14 @@ export function Worksheet() {
   const allMin = analysisValues.length ? arrMin(analysisValues) : Number.NaN;
   const allMax = analysisValues.length ? arrMax(analysisValues) : Number.NaN;
 
-  // 显示精度:按「列」量级自适应(3–6 位)——混合量纲数据(如 过盈量 0.0675 与 压入力 1350 同表)
-  // 不能用全局 σ,否则小量纲列被压到 3 位显示成 0.068,造成"数据被改"的误解
-  const colDp = useMemo(() => M.colNames.map((_, j) => {
-    let lo = Infinity, hi = -Infinity, sum = 0;
-    for (const sub of M.subs) { const v = sub.vals[j]; if (v < lo) lo = v; if (v > hi) hi = v; sum += Math.abs(v); }
-    const scale = Math.max(hi - lo, sum / M.k * 0.01, 1e-9); // 列内变差,退化时用量级的 1%
-    return Math.max(3, Math.min(6, 2 - Math.floor(Math.log10(scale))));
-  }), [M]);
-  const meanDp = colDp.length ? Math.max(...colDp) : 3;
+  // 显示精度:按「列」量级自适应(3–6 位;全整数列如部件/操作员 ID 显示 0 位,即 1/2/3 而非 1.000)
+  // 逻辑抽为纯函数 columnDisplayDp(core/gageData),可单测;悬停提示仍显示全精度原值
+  const colDp = useMemo(
+    () => M.colNames.map((_, j) => columnDisplayDp(M.subs.map((sub) => sub.vals[j]))),
+    [M],
+  );
+  // 均值/极差列保持 ≥3 位:整数 ID 列的 dp=0 不应连带压缩统计列精度
+  const meanDp = colDp.length ? Math.max(3, ...colDp) : 3;
   const pendingSet = useMemo(() => new Set(pendingCells.map((p) => `${p.row}:${p.col}`)), [pendingCells]);
 
   // 虚拟窗口边界

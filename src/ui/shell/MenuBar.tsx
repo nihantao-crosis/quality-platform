@@ -229,7 +229,11 @@ export function MenuBar({ wsName }: { wsName: string }) {
       showToast('图表风格已切换为「' + act.style + '」');
     } else if (act.grid) {
       toggleGrid();
-      showToast(useApp.getState().showGrid ? '网格线已显示' : '网格线已隐藏');
+      const s = useApp.getState();
+      // 经典主题按 Minitab 惯例不画网格线;开关仍记忆设置,但只在现代/高对比主题下可见
+      showToast(s.chartStyle === '经典'
+        ? '经典主题不显示网格线(Minitab 风格);此设置将在现代/高对比主题下生效'
+        : s.showGrid ? '网格线已显示' : '网格线已隐藏');
     } else if (act.resetData) {
       import('../../platform/mes').then((m) => m.mesStop());
       useData.getState().resetDemo();

@@ -8,11 +8,13 @@ import {
   analyzeDoe, mainEffectMeans, interactionMeans, DOE_DESIGN,
   detectFactorial, analyzeFactorial, factorialAdjustedMainMeans, factorialAdjustedInteractionMeans, factorialCornerPredictions, generateFactorialDesign,
   resolveDoeColumns, resolveDoeBlockValues, factorialModelTerms, factorialOptimizationDecision, isDoeAnalysisColumn, buildDoeWorksheetOutput,
+  uncodedEquation, lenthPseFromEffects, studentizedDeletedResiduals,
   type CodedDesign, type FactorialResult, type FactorDef,
 } from '../../core';
 import type { ChartTokens } from '../tokens';
 import { Card, CardHeader, tabStyle, EmptyStateCard, DemoBadge, numInput } from '../common';
 import { NormalProbPlot } from '../charts/NormalProbPlot';
+import { EffectsNormalPlot } from '../charts/EffectsNormalPlot';
 import { ScatterPlot } from '../charts/ScatterPlot';
 import { MiniHist } from '../charts/misc';
 import { MainEffects, InteractionPlot, EffectsBar, CubePlot } from '../charts/doe';
@@ -85,6 +87,13 @@ function AnalyzeDesign({ T }: { T: ChartTokens }) {
   };
   const [pairA, setPairA] = useState(0);
   const [pairB, setPairB] = useState(1);
+  // 本轮 DOE 新增的纯展示状态:效应图页签/残差类型/残差布局与单图页签/残差 vs 变量的因子。
+  // 按批次约定只放页面内部 useState,不进全局 store/项目快照。
+  const [effView, setEffView] = useState<'pareto' | 'normal' | 'half'>('pareto');
+  const [residType, setResidType] = useState<'raw' | 'std' | 'del'>('std');
+  const [residLayout, setResidLayout] = useState<'grid' | 'single'>('grid');
+  const [residPane, setResidPane] = useState<'normal' | 'fits' | 'hist' | 'order'>('normal');
+  const [residFactorIdx, setResidFactorIdx] = useState(0);
 
   const detect = useMemo(() => {
     if (isDemo) return null;
@@ -325,9 +334,20 @@ function AnalyzeDesign({ T }: { T: ChartTokens }) {
           <div style={{ fontWeight: 600, color: '#33404f' }}>
             {doeView === 'main' && `主效应图 · 响应 = ${respName}`}
             {doeView === 'interact' && `交互作用图 · ${factorNames[pa]} × ${factorNames[pb]}`}
-            {doeView === 'pareto' && `${isT ? '标准化效应' : '效应'}帕累托 · ${isDemo ? 'Lenth 显著界限' : isT ? 't 临界线' : 'Lenth 显著界限'}`}
+            {doeView === 'pareto' && (effView === 'pareto'
+              ? `${isT ? '标准化效应' : '效应'}帕累托 · ${isDemo ? 'Lenth 显著界限' : isT ? 't 临界线' : 'Lenth 显著界限'}`
+              : effView === 'normal'
+                ? '效应正态图 · 显著项红点标注'
+                : '效应半正态图 · 显著项红点标注')}
             {doeView === 'cube' && `立方图 · ${k === 3 ? '8 顶点响应' : '仅 3 因子适用'}`}
           </div>
+          {doeView === 'pareto' && (
+            <div style={{ display: 'flex', gap: 6 }}>
+              {([['pareto', '帕累托'], ['normal', '正态'], ['half', '半正态']] as const).map(([key, label]) => (
+                <button type="button" key={key} aria-pressed={effView === key} style={tabStyle(effView === key)} onClick={() => setEffView(key)}>{label}</button>
+              ))}
+            </div>
+          )}
           {doeView === 'interact' && !isDemo && k > 2 && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#5b6472' }}>
               <select style={selStyle} value={pairA} onChange={(e) => setPairA(+e.target.value)}>
@@ -347,7 +367,12 @@ function AnalyzeDesign({ T }: { T: ChartTokens }) {
         <div style={{ padding: '16px 16px 8px' }}>
           {doeView === 'main' && <MainEffects T={T} factors={mainData} />}
           {doeView === 'interact' && <InteractionPlot T={T} {...interData} labelA={factorNames[pa]} labelB={factorNames[pb]} />}
-          {doeView === 'pareto' && <EffectsBar T={T} terms={barTerms} refLine={barRef} />}
+          {doeView === 'pareto' && effView === 'pareto' && <EffectsBar T={T} terms={barTerms} refLine={barRef} />}
+          {doeView === 'pareto' && effView !== 'pareto' && (
+            <EffectsNormalPlot T={T} half={effView === 'half'}
+              pse={res.pse ?? lenthPseFromEffects(res.terms.map((t) => t.effect))}
+              terms={res.terms.map((t) => ({ name: t.name, effect: t.effect, sig: t.sig }))} />
+          )}
           {doeView === 'cube' && k === 3 && <CubePlot T={T} y={(a, b, c) => cornerMean(a, b, c)} labels={[factorNames[0], factorNames[1], factorNames[2]] as [string, string, string]} />}
           {doeView === 'cube' && k !== 3 && <div style={{ padding: 20, color: '#9aa2ad', fontSize: 12.5 }}>立方图仅适用于 3 因子设计,当前为 {k} 因子。</div>}
         </div>
@@ -413,20 +438,140 @@ function AnalyzeDesign({ T }: { T: ChartTokens }) {
       </div>
 
       {!isDemo && (() => {
-        // 有标准化残差(t 检验路径)则用之,对标 Minitab 四合一;否则回落原始残差
-        const rr = res.stdResiduals ?? res.residuals;
-        const std = res.stdResiduals != null;
-        const yl = std ? '标准化残差' : '残差';
+        const eq = uncodedEquation(
+          res,
+          design!.factorNames.map((name, index) => ({ name, low: design!.levels[index].low, high: design!.levels[index].high })),
+          respName,
+        );
         return (
-          <Card>
-            <CardHeader title="残差诊断(四合一)" right={<span style={{ fontSize: 11.5, color: '#98a1ac' }}>{std ? '标准化残差 = 残差 /(s·√(1−杠杆))' : '残差 = 观测 − 模型拟合值'}</span>} />
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, padding: '10px 12px 12px' }}>
-              <NormalProbPlot T={T} data={rr} h={220} />
-              <ScatterPlot T={T} xs={res.fits} ys={rr} slope={0} intercept={0} xLabel="拟合值" yLabel={yl} h={220} />
-              <MiniHist T={T} data={rr} h={220} xLabel={`${yl}分布`} />
-              <ScatterPlot T={T} xs={rr.map((_, i) => i + 1)} ys={rr} slope={0} intercept={0} xLabel="运行序" yLabel={yl} h={220} />
+          <Card style={{ padding: 16 }}>
+            <div style={{ fontWeight: 600, color: '#33404f', marginBottom: 8 }}>回归方程(未编码单位)</div>
+            {eq ? (
+              <div className="mono" style={{ fontSize: 13, color: '#2a333f', lineHeight: 1.7, wordBreak: 'break-all' }}>{eq.text}</div>
+            ) : (
+              <div style={{ fontSize: 12.5, color: '#8a6520', lineHeight: 1.6 }}>
+                当前模型包含三因子及以上交互项:未编码方程本版只支持「常数 + 主效应 + 两因子交互 + Ct Pt」的乘积展开,暂不展示。
+                可在上方「模型项」中去掉高阶交互后查看。
+              </div>
+            )}
+            <div style={{ fontSize: 11.5, color: '#9aa2ad', lineHeight: 1.6, marginTop: 8 }}>
+              由编码系数(基于 −1/+1)按 x编码 = (x − 中心)/半量程 换算为实际单位;系数取 4 位有效数字。
+              Ct Pt 为中心点指示项(中心点行=1、角点行=0),其系数不随单位变换。
+              {res.block ? '区组系数已按各区组等权平均并入常数项。' : ''}
             </div>
           </Card>
+        );
+      })()}
+
+      {!isDemo && (() => {
+        // 残差类型:正规(观测−拟合)/ 标准化(已有)/ 删后(学生化删除);
+        // 不可用的类型禁用并说明,当前选择不可用时向可用类型回落。
+        const deleted = studentizedDeletedResiduals(res);
+        const hasStd = res.stdResiduals != null;
+        const type: 'raw' | 'std' | 'del' = residType === 'del' && deleted == null
+          ? (hasStd ? 'std' : 'raw')
+          : residType === 'std' && !hasStd ? 'raw' : residType;
+        const rrAll = type === 'del' ? deleted! : type === 'std' ? res.stdResiduals! : res.residuals;
+        const yl = type === 'del' ? '删后残差' : type === 'std' ? '标准化残差' : '残差';
+        // 删后残差在 r²=ν 边界可为 ±∞;图形只画有限值,数量差单独说明
+        const finiteRows = rrAll.map((value, row) => ({ value, row })).filter((p) => Number.isFinite(p.value));
+        const rr = finiteRows.map((p) => p.value);
+        const runOrder = finiteRows.map((p) => p.row + 1);
+        const fitsF = finiteRows.map((p) => res.fits[p.row]);
+        const infCount = rrAll.length - rr.length;
+        const rf = Math.min(residFactorIdx, k - 1);
+        const lv = design!.levels[rf];
+        const factorVals = finiteRows.map((p) => {
+          const c = design!.coded[p.row][rf];
+          return c < 0 ? lv.low : c > 0 ? lv.high : lv.low / 2 + lv.high / 2;
+        });
+        const typeOptions: Array<{ key: 'raw' | 'std' | 'del'; label: string; why?: string }> = [
+          { key: 'raw', label: '正规' },
+          { key: 'std', label: '标准化', why: hasStd ? undefined : '饱和设计无残差自由度,无法标准化' },
+          {
+            key: 'del', label: '删后',
+            why: deleted != null ? undefined
+              : hasStd ? `删后残差需要残差自由度 ν≥2(当前 ν=${res.dfResid ?? 0})` : '饱和设计无残差自由度,无法计算删后残差',
+          },
+        ];
+        const PANES: Array<['normal' | 'fits' | 'hist' | 'order', string]> = [
+          ['normal', '正态图'], ['fits', 'vs 拟合值'], ['hist', '直方图'], ['order', 'vs 顺序'],
+        ];
+        const paneChart = (pane: 'normal' | 'fits' | 'hist' | 'order', height: number) =>
+          pane === 'normal' ? <NormalProbPlot T={T} data={rr} h={height} />
+            : pane === 'fits' ? <ScatterPlot T={T} xs={fitsF} ys={rr} slope={0} intercept={0} xLabel="拟合值" yLabel={yl} h={height} />
+              : pane === 'hist' ? <MiniHist T={T} data={rr} h={height} xLabel={`${yl}分布`} />
+                : <ScatterPlot T={T} xs={runOrder} ys={rr} slope={0} intercept={0} xLabel="运行序" yLabel={yl} h={height} />;
+        return (
+          <>
+            <Card>
+              <CardHeader title={residLayout === 'grid' ? '残差诊断(四合一)' : '残差诊断(单独放大)'}
+                right={<span style={{ fontSize: 11.5, color: '#98a1ac' }}>{
+                  type === 'del'
+                    ? '删后残差 t = r·√((ν−1)/(ν−r²)),r 为标准化残差'
+                    : type === 'std' ? '标准化残差 = 残差 /(s·√(1−杠杆))' : '残差 = 观测 − 模型拟合值'
+                }</span>} />
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 12px 0', flexWrap: 'wrap', fontSize: 12, color: '#5b6472' }}>
+                <span style={{ fontWeight: 600, color: '#8a929d' }}>残差类型</span>
+                {typeOptions.map((option) => (
+                  <button type="button" key={option.key} disabled={option.why != null} title={option.why}
+                    aria-pressed={type === option.key}
+                    style={option.why != null ? { ...tabStyle(false), opacity: 0.45, cursor: 'not-allowed' } : tabStyle(type === option.key)}
+                    onClick={() => setResidType(option.key)}>{option.label}</button>
+                ))}
+                <span style={{ fontWeight: 600, color: '#8a929d', marginLeft: 10 }}>布局</span>
+                {([['grid', '四合一'], ['single', '单独']] as const).map(([key, label]) => (
+                  <button type="button" key={key} aria-pressed={residLayout === key} style={tabStyle(residLayout === key)} onClick={() => setResidLayout(key)}>{label}</button>
+                ))}
+                {residLayout === 'single' && (
+                  <div style={{ display: 'flex', gap: 6, marginLeft: 10 }}>
+                    {PANES.map(([key, label]) => (
+                      <button type="button" key={key} aria-pressed={residPane === key} style={tabStyle(residPane === key)} onClick={() => setResidPane(key)}>{label}</button>
+                    ))}
+                  </div>
+                )}
+                <span style={{ marginLeft: 'auto', color: '#98a1ac' }}>ν(残差自由度)= {res.dfResid ?? 0}</span>
+              </div>
+              {typeOptions.some((option) => option.why != null) && (
+                <div style={{ padding: '6px 12px 0', fontSize: 11.5, color: '#9aa2ad' }}>
+                  {typeOptions.filter((option) => option.why != null).map((option) => `${option.label}:${option.why}`).join('；')}
+                </div>
+              )}
+              {infCount > 0 && (
+                <div style={{ padding: '6px 12px 0', fontSize: 11.5, color: '#b0620f' }}>
+                  有 {infCount} 个删后残差为 ±∞(删除该点后其余数据完美拟合),未绘出。
+                </div>
+              )}
+              {rr.length === 0 ? (
+                <div style={{ padding: 20, color: '#9aa2ad', fontSize: 12.5 }}>当前残差类型下没有可绘制的有限值。</div>
+              ) : residLayout === 'grid' ? (
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, padding: '10px 12px 12px' }}>
+                  {paneChart('normal', 220)}
+                  {paneChart('fits', 220)}
+                  {paneChart('hist', 220)}
+                  {paneChart('order', 220)}
+                </div>
+              ) : (
+                <div style={{ padding: '10px 12px 12px' }}>{paneChart(residPane, 320)}</div>
+              )}
+            </Card>
+            <Card>
+              <CardHeader title={`残差 vs 变量 · ${design!.factorNames[rf]}`}
+                right={(
+                  <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#5b6472', fontWeight: 400 }}>
+                    因子
+                    <select style={selStyle} value={rf} onChange={(e) => setResidFactorIdx(+e.target.value)}>
+                      {design!.factorNames.map((n, i) => <option key={i} value={i}>{n}</option>)}
+                    </select>
+                  </label>
+                )} />
+              <div style={{ padding: '10px 12px 12px' }}>
+                {rr.length === 0
+                  ? <div style={{ padding: 20, color: '#9aa2ad', fontSize: 12.5 }}>当前残差类型下没有可绘制的有限值。</div>
+                  : <ScatterPlot T={T} xs={factorVals} ys={rr} slope={0} intercept={0} xLabel={`${design!.factorNames[rf]}(实际水平)`} yLabel={yl} h={240} />}
+              </div>
+            </Card>
+          </>
         );
       })()}
 
@@ -466,10 +611,14 @@ function AnalyzeDesign({ T }: { T: ChartTokens }) {
 }
 
 // ---------- 创建因子设计 ----------
+/** 随机化种子默认值:沿用原实现的固定 LCG 种子,保证默认行为不变。 */
+const DEFAULT_DOE_SEED = 20260713;
+
 function CreateDesign() {
   const { importMatrix } = useData();
   const { goTo, showToast } = useApp();
-  const [k, setK] = useState(2);
+  // 因子数改为手动数字输入:文本态允许自由编辑,实际生效值钳制在 2–4 并给出提示。
+  const [kText, setKText] = useState('2');
   const [factors, setFactors] = useState<FactorDef[]>([
     { name: '过盈量', low: 0.045, high: 0.09 },
     { name: '轴硬度', low: 28, high: 32 },
@@ -480,9 +629,17 @@ function CreateDesign() {
   const [reps, setReps] = useState(1);
   const [blocks, setBlocks] = useState(1);
   const [randomize, setRandomize] = useState(true);
+  const [seedText, setSeedText] = useState(String(DEFAULT_DOE_SEED));
+
+  const parsedK = Number.parseInt(kText, 10);
+  const kOutOfRange = !(Number.isInteger(parsedK) && parsedK >= 2 && parsedK <= 4);
+  const k = Number.isInteger(parsedK) ? Math.max(2, Math.min(4, parsedK)) : 2;
+  const parsedSeed = Number.parseInt(seedText, 10);
+  const seed = Number.isFinite(parsedSeed) ? parsedSeed : DEFAULT_DOE_SEED;
 
   const maxBlocks = 1 << (k - 1);
-  const runs = (1 << k) * reps + center * blocks;
+  const blocksEff = Math.min(blocks, maxBlocks);
+  const runs = (1 << k) * reps + center * blocksEff;
   const setF = (i: number, patch: Partial<FactorDef>) =>
     setFactors((prev) => prev.map((f, j) => (j === i ? { ...f, ...patch } : f)));
 
@@ -492,7 +649,7 @@ function CreateDesign() {
     if (new Set(facs.map((f) => f.name.trim())).size !== facs.length) { showToast('因子名不能重复'); return; }
     if (facs.some((f) => !(f.low < f.high))) { showToast('每个因子必须满足低水平 < 高水平'); return; }
     const d = generateFactorialDesign(facs.map((f) => ({ name: f.name.trim(), low: f.low, high: f.high })),
-      { centerPoints: center, replicates: reps, blocks, randomize, seed: 20260713 });
+      { centerPoints: center, replicates: reps, blocks: blocksEff, randomize, seed });
     const stamp = new Date().toLocaleTimeString('zh-CN', { hour12: false }).replace(/:/g, '');
     const pending = d.rows.map((_, row) => ({ row, col: d.responseCol }));
     importMatrix(`DOE设计_${stamp}`, d.colNames, d.rows, d.textCols, pending);
@@ -507,15 +664,10 @@ function CreateDesign() {
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14, fontSize: 12.5, color: '#5b6472', maxWidth: 620 }}>
         <label style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           因子数
-          <select style={selStyle} value={k} onChange={(e) => {
-            const next = +e.target.value;
-            setK(next);
-            setBlocks((current) => Math.min(current, 1 << (next - 1)));
-          }}>
-            <option value={2}>2 因子(4 角)</option>
-            <option value={3}>3 因子(8 角)</option>
-            <option value={4}>4 因子(16 角)</option>
-          </select>
+          <input type="number" min={2} max={4} step={1} value={kText}
+            onChange={(e) => setKText(e.target.value)} style={{ ...inp, width: 64 }} />
+          <span style={{ color: '#8a929d' }}>({1 << k} 角点/仿行)</span>
+          {kOutOfRange && <span style={{ color: '#b0620f', fontWeight: 600 }}>本版支持 2–4 因子</span>}
         </label>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {factors.slice(0, k).map((f, i) => (
@@ -535,13 +687,13 @@ function CreateDesign() {
             每区组中心点数
             <input type="number" min={0} max={10} value={center} onChange={(e) => setCenter(Math.max(0, Math.min(10, parseInt(e.target.value) || 0)))} style={{ ...inp, width: 64 }} />
           </label>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            重复数
+          <label title="每个角点组合的完整重复运行次数;中心点数按「每区组中心点数」单独设置,不计入仿行" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            仿行数(角点重复)
             <input type="number" min={1} max={10} value={reps} onChange={(e) => setReps(Math.max(1, Math.min(10, parseInt(e.target.value) || 1)))} style={{ ...inp, width: 64 }} />
           </label>
           <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             区组数
-            <select style={selStyle} value={blocks} onChange={(e) => setBlocks(+e.target.value)}>
+            <select style={selStyle} value={blocksEff} onChange={(e) => setBlocks(+e.target.value)}>
               {Array.from({ length: Math.log2(maxBlocks) + 1 }, (_, index) => 1 << index)
                 .map((value) => <option key={value} value={value}>{value}</option>)}
             </select>
@@ -549,11 +701,17 @@ function CreateDesign() {
           <label style={{ display: 'inline-flex', alignItems: 'center', gap: 5, cursor: 'pointer' }}>
             <input type="checkbox" checked={randomize} onChange={(e) => setRandomize(e.target.checked)} /> 随机化运行序
           </label>
+          <label title="随机化使用确定性 LCG 伪随机数:种子相同 → 打乱后的运行序完全相同,便于复现与审计;默认沿用平台固定种子" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            随机化种子
+            <input type="number" value={seedText} onChange={(e) => setSeedText(e.target.value)} disabled={!randomize}
+              style={{ ...inp, width: 100, ...(randomize ? {} : { opacity: 0.5 }) }} />
+          </label>
           <span style={{ color: '#1c4e7a' }}>共 <b className="mono">{runs}</b> 次试验</span>
         </div>
         <div style={{ fontSize: 11.5, color: '#9aa2ad', lineHeight: 1.6 }}>
           生成后进入工作表：标准序保留未随机化顺序，运行序为实际执行顺序，区组用 A×B、A×C…生成元保持主效应与区组可分离，
           点类型标明因子点/中心点；末列「响应(待录入)」逐行录入。中心点用于检验曲率并提供纯误差估计。
+          随机化由确定性伪随机数(LCG)驱动，同一种子重新生成会得到完全相同的运行序。
         </div>
         <div>
           <button type="button" className="hov-act-primary" onClick={create}

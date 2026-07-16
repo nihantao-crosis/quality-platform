@@ -4,7 +4,7 @@
  */
 import { create } from 'zustand';
 import {
-  buildData, computeVarModel, computePChart, computeCChart, evalFormula, truthy, FormulaError, prepareSpcData,
+  buildData, computeVarModel, computePChart, computeCChart, evalFormula, truthy, FormulaError, prepareSpcData, isDoeAnalysisColumn,
   type VarModel, type PChartModel, type CChartModel, type TextColumn, type SpcPreparedData,
 } from '../core';
 import { useApp } from './appStore';
@@ -378,6 +378,61 @@ export function resolveActiveMeasurementData(model: VarModel, textCols: TextColu
   });
 }
 
+/**
+ * 能力分析的数据口径(批次716-N):默认沿用 SPC 角色;可在能力页改为
+ * 「单列+子组大小常量」(按行序顺序分组,末尾不足一组的观测不参与并明示)或「单列+子组 ID 列」。
+ * 能力页、保存记录与专项报告共用本解析,保证同一数据只有一个能力口径。
+ */
+export function resolveCapabilityMeasurementData(model: VarModel, textCols: TextColumn[]): SpcPreparedData {
+  const app = useApp.getState();
+  const pendingCells = useData.getState().pendingCells;
+  if (app.capSubgroupMode === 'stacked') {
+    // 子组 ID 存角色引用(numeric:/text:,与 SPC 页同约定);兼容旧的裸列名写法
+    const rawId = app.capSubgroupIdCol;
+    const idRef = rawId && !/^(numeric|text):/.test(rawId)
+      ? (textCols.some((t) => t.name === rawId) ? `text:${rawId}` : model.colNames.includes(rawId) ? `numeric:${rawId}` : rawId)
+      : rawId;
+    return prepareSpcData(model, textCols, {
+      layout: 'stacked',
+      valueColumn: app.capValueCol ?? app.spcValueCol,
+      subgroupColumn: idRef,
+      pendingCells,
+    });
+  }
+  if (app.capSubgroupMode === 'const') {
+    const valueCol = app.capValueCol ?? app.spcValueCol;
+    if (!valueCol) {
+      return { ...prepareSpcData(model, textCols, { layout: 'individuals', valueColumn: null, subgroupColumn: null, pendingCells }), model: null, error: '「单列 + 子组大小」模式请先选择测量列;系统不会静默取第一个数值列' };
+    }
+    const idx = model.colNames.indexOf(valueCol);
+    if (idx < 0) {
+      return { ...prepareSpcData(model, textCols, { layout: 'individuals', valueColumn: null, subgroupColumn: null, pendingCells }), model: null, error: `能力子组配置的测量列「${valueCol}」不存在,请重新选择` };
+    }
+    if (!isDoeAnalysisColumn(valueCol)) {
+      return { ...prepareSpcData(model, textCols, { layout: 'individuals', valueColumn: null, subgroupColumn: null, pendingCells }), model: null, error: `「${valueCol}」是设计元数据或分析输出列,不能作为能力分析测量值` };
+    }
+    if (pendingCells.some((c) => c.col === idx)) {
+        return { ...prepareSpcData(model, textCols, { layout: 'individuals', valueColumn: null, subgroupColumn: null, pendingCells }), model: null, error: `测量列「${valueCol}」仍有待录入单元格,不能用于能力分析` };
+    }
+    const z = Math.max(2, Math.min(10, Math.round(app.capSubgroupSize)));
+    const values = model.subs.map((row) => row.vals[idx]);
+    const full = Math.floor(values.length / z);
+    const dropped = values.length - full * z;
+    if (full < 2) {
+      return { ...prepareSpcData(model, textCols, { layout: 'individuals', valueColumn: null, subgroupColumn: null, pendingCells }), model: null, error: `按子组大小 ${z} 顺序分组后完整子组不足 2 个(共 ${values.length} 个观测),无法估计组内变差` };
+    }
+    const rows = Array.from({ length: full }, (_, i) => values.slice(i * z, (i + 1) * z));
+    const temp = computeVarModel(model.name, Array.from({ length: z }, (_, j) => `${valueCol}_${j + 1}`), rows);
+    const prepared = prepareSpcData(temp, [], { layout: 'rows', valueColumn: null, subgroupColumn: null, pendingCells: [] });
+    return {
+      ...prepared,
+      variableName: valueCol ?? prepared.variableName,
+      note: `能力子组:单列「${valueCol}」按行序每 ${z} 个一组,共 ${full} 个子组${dropped > 0 ? `;末尾 ${dropped} 个观测不足一个子组,未参与本次估计` : ''}`,
+    };
+  }
+  return resolveActiveMeasurementData(model, textCols);
+}
+
 const LS_SPECS = 'qp-specs-v1';
 interface StoredSpec { lsl: number; tgt: number; usl: number; lslOn?: boolean; uslOn?: boolean }
 type SpecMap = Record<string, StoredSpec>;
@@ -456,6 +511,8 @@ function resetDatasetSpcRoles(): void {
     selSub: null,
     // Gage 下拉框不能视觉回退到新列、计算却继续提交旧列名。
     gageValueName: null, gagePartName: null, gageOperatorName: null,
+    // 能力子组配置同属列角色:跨数据集沿用会把上一张表的口径静默套在新表同名列上。
+    capSubgroupMode: 'spc', capSubgroupSize: 5, capValueCol: null, capSubgroupIdCol: null,
   });
 }
 

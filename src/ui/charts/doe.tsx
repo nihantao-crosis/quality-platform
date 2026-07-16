@@ -41,7 +41,8 @@ function MainEffectsImpl({ T, factors }: { T: ChartTokens; factors: { name: stri
         const xH = x0 + panelW * 0.75;
         return (
           <Fragment key={f.name}>
-            <Ln x1={x0} y1={Y(grand)} x2={x0 + panelW} y2={Y(grand)} stroke={T.grid} sw={1} dash="4 3" />
+            {/* 总均值参考线是语义线,不能随经典主题的网格一起透明 */}
+            <Ln x1={x0} y1={Y(grand)} x2={x0 + panelW} y2={Y(grand)} stroke={T.classic ? '#ccd2d9' : T.grid} sw={1} dash="4 3" />
             <Ln x1={xL} y1={Y(f.lo)} x2={xH} y2={Y(f.hi)} stroke={T.point} sw={T.sw + 0.6} />
             <circle cx={xL} cy={Y(f.lo)} r={T.r + 0.5} fill={T.point} />
             <circle cx={xH} cy={Y(f.hi)} r={T.r + 0.5} fill={T.point} />
@@ -52,7 +53,7 @@ function MainEffectsImpl({ T, factors }: { T: ChartTokens; factors: { name: stri
           </Fragment>
         );
       })}
-      <Ln x1={0} y1={m.t + ph} x2={W} y2={m.t + ph} stroke={T.grid} sw={1} />
+      <Ln x1={0} y1={m.t + ph} x2={W} y2={m.t + ph} stroke={T.axis} sw={1} />
     </Svg>
   );
 }

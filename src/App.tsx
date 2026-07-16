@@ -139,7 +139,7 @@ export default function App() {
         ? `导入数据 · ${preparedGage.study.operatorLabels.length} 操作员 × ${preparedGage.study.partLabels.length} 部件 × ${preparedGage.study.repeats} 次`
         : `尚未运行 · ${preparedGage.reason}`
       : '演示研究 · 交叉设计 · ANOVA 法',
-    aql: `GB/T 2828.1 · 一般检验水平 ${aqlLevel} · AQL ${aqlAQL}`,
+    aql: `GB/T 2828.1 · ${aqlLevel.startsWith('S-') ? '特殊' : '一般'}检验水平 ${aqlLevel} · AQL ${aqlAQL}`,
   };
   const subtitle = dynSub[page] ?? cur.sub;
 

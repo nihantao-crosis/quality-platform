@@ -716,6 +716,122 @@ export function interactionMeansFrom(design: CodedDesign, i: number, j: number) 
   return { c00: cell(-1, -1), c10: cell(1, -1), c01: cell(-1, 1), c11: cell(1, 1) };
 }
 
+// ==================== DOE 增强:未编码回归方程 / Lenth PSE 辅助 / 删后残差 ====================
+
+export interface UncodedEquationTerm {
+  label: string; // 「常量」/ 因子名 / 「因子1*因子2」/ 「Ct Pt」
+  coef: number;  // 实际单位系数
+}
+
+export interface UncodedEquation {
+  terms: UncodedEquationTerm[];
+  text: string;
+}
+
+/** 系数取 4 位有效数字;过大/过小时避免 toPrecision 的科学计数法直接进方程文本。 */
+function formatCoef4(value: number): string {
+  if (!Number.isFinite(value)) return String(value);
+  if (value === 0) return '0.000';
+  const text = value.toPrecision(4);
+  return text.includes('e') ? String(Number(text)) : text;
+}
+
+/**
+ * 未编码(实际单位)回归方程:由编码系数(β,基于 -1/+1)与各因子低/高水平换算。
+ * x_coded = (x − center)/halfRange,center=(低+高)/2,halfRange=(高−低)/2;
+ * 两因子交互按乘积展开,常数与一次项吸收展开出的中心平移;Ct Pt(中心点指示,
+ * 中心点行=1、角点行=0)系数不做变换。只支持「常数 + 主效应 + 两因子交互 + Ct Pt」:
+ * 模型含三因子及以上交互,或项名与因子定义对不上时返回 null,由调用方注明原因。
+ * 有区组时把区组系数按等权平均并入常数项(与 factorialCornerPredictions 的 LS 均值同口径)。
+ */
+export function uncodedEquation(
+  fit: FactorialResult,
+  factors: FactorDef[],
+  responseName?: string,
+): UncodedEquation | null {
+  if (!factors.length) return null;
+  if (factors.some((factor) => !factor.name.trim() || !Number.isFinite(factor.low)
+    || !Number.isFinite(factor.high) || !(factor.low < factor.high))) return null;
+  if (new Set(factors.map((factor) => factor.name)).size !== factors.length) return null;
+  const byName = new Map<string, number[]>();
+  factors.forEach((factor, index) => byName.set(factor.name, [index]));
+  for (let i = 0; i < factors.length; i++) {
+    for (let j = i + 1; j < factors.length; j++) {
+      byName.set(`${factors[i].name}×${factors[j].name}`, [i, j]);
+      byName.set(`${factors[j].name}×${factors[i].name}`, [j, i]);
+    }
+  }
+  const center = factors.map((factor) => factor.low / 2 + factor.high / 2);
+  const half = factors.map((factor) => (factor.high - factor.low) / 2);
+  const mains = factors.map(() => 0);
+  const usedFactors = new Set<number>();
+  const pairs: { i: number; j: number; coef: number }[] = [];
+  let constant = fit.grand + (fit.block
+    ? fit.block.coefficients.reduce((sum, block) => sum + block.coef, 0) / fit.block.levels.length
+    : 0);
+  for (const term of fit.terms) {
+    const subset = byName.get(term.name);
+    if (!subset) return null; // 三因子及以上交互或未知项:未编码展开不在本版支持范围
+    if (subset.length === 1) {
+      const i = subset[0];
+      usedFactors.add(i);
+      mains[i] += term.coef / half[i];
+      constant -= (term.coef * center[i]) / half[i];
+    } else {
+      const [i, j] = subset;
+      usedFactors.add(i);
+      usedFactors.add(j);
+      const cross = term.coef / (half[i] * half[j]);
+      pairs.push({ i: Math.min(i, j), j: Math.max(i, j), coef: cross });
+      mains[i] -= cross * center[j];
+      mains[j] -= cross * center[i];
+      constant += cross * center[i] * center[j];
+    }
+  }
+  pairs.sort((a, b) => (a.i - b.i) || (a.j - b.j));
+  const terms: UncodedEquationTerm[] = [{ label: '常量', coef: constant }];
+  factors.forEach((factor, index) => {
+    if (usedFactors.has(index)) terms.push({ label: factor.name, coef: mains[index] });
+  });
+  for (const pair of pairs) {
+    terms.push({ label: `${factors[pair.i].name}*${factors[pair.j].name}`, coef: pair.coef });
+  }
+  if (fit.curvature) terms.push({ label: 'Ct Pt', coef: fit.curvature.coef });
+  let text = formatCoef4(constant);
+  for (const term of terms.slice(1)) {
+    text += term.coef < 0
+      ? ` - ${formatCoef4(-term.coef)} ${term.label}`
+      : ` + ${formatCoef4(term.coef)} ${term.label}`;
+  }
+  return { terms, text: responseName ? `${responseName} = ${text}` : text };
+}
+
+/** 从效应列表计算 Lenth PSE(与效应同单位),供正态/半正态效应图做过原点参考线的斜率。
+ * 中位数与 2.5·s0 截尾都是尺度等变的,直接在原单位上算与「先无量纲化再换回」一致。 */
+export function lenthPseFromEffects(effects: number[]): number {
+  const finite = effects.filter((value) => Number.isFinite(value));
+  if (!finite.length) return 0;
+  return lenthScale(finite.map(Math.abs)).pse;
+}
+
+/** 删后(学生化删除)残差:t_i = r_i·√((ν−1)/(ν−r_i²)),r_i 为标准化残差,ν 为残差自由度。
+ * 等价于用「删除第 i 个观测后重估的 MSE」学生化,离群运行不会稀释自己的判定尺度。
+ * ν≤1(删除一个观测后自由度耗尽)或无标准化残差(饱和设计)时返回 null,调用方应禁用该选项;
+ * r_i² = ν 的边界(删除该点后完美拟合)给 ±Infinity,方向信息保留,由调用方决定呈现方式。 */
+export function studentizedDeletedResiduals(
+  result: Pick<FactorialResult, 'stdResiduals' | 'dfResid'>,
+): number[] | null {
+  const nu = result.dfResid;
+  const std = result.stdResiduals;
+  if (nu === undefined || nu <= 1 || !std) return null;
+  return std.map((r) => {
+    if (!Number.isFinite(r)) return r;
+    const slack = nu - r * r;
+    if (slack <= 0) return r === 0 ? 0 : Math.sign(r) * Infinity;
+    return r * Math.sqrt((nu - 1) / slack);
+  });
+}
+
 export const DOE_METADATA_COLUMNS = ['标准序', '运行序', '区组', '中心点', '点类型'] as const;
 export const DOE_OUTPUT_COLUMNS = ['DOE拟合值', 'DOE残差', 'DOE标准化残差', 'DOE模型项', 'DOE效应', 'DOE系数'] as const;
 

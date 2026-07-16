@@ -1,0 +1,20 @@
+# source=GB/T 2828.1-2012 表 1 样本量字码(含特殊检验水平 S-1~S-4)
+# pdf_sha256=7a336944db23d14cf23fe007b0cfe2dffa5d5bef434767d2b1300ffaa35e5a37
+# transcription_source=人工审核716/AQL表格（第一次修改）.xlsx · transcription_sha256=8bbc4bd6198d51d72c73e2ece44b438460921fd02ab78f22a7176258ccee6a3d
+# verification=I/II/III 三列与代码内已验 CODE_LETTER_TABLE 15/15 行一致(该表历经 v1.26 验证)
+lot_range	s1	s2	s3	s4	I	II	III
+2~8	A	A	A	A	A	A	B
+9~15	A	A	A	A	A	B	C
+16~25	A	A	B	B	B	C	D
+26~50	A	B	B	C	C	D	E
+51~90	B	B	C	C	C	E	F
+91~150	B	B	C	D	D	F	G
+151~280	B	C	D	E	E	G	H
+281~500	B	C	D	E	F	H	J
+501~1200	C	C	E	F	G	J	K
+1201~3200	C	D	E	G	H	K	L
+3201~10000	C	D	F	G	J	L	M
+10001~35000	C	D	F	H	K	M	N
+35001~150000	D	E	G	J	L	N	P
+150001~500000	D	E	G	J	M	P	Q
+500001及以上	D	E	H	K	N	Q	R

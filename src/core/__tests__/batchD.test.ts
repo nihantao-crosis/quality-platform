@@ -125,8 +125,9 @@ describe('AQL 接收数·GB/T 2828.1 表 2-A 真查表(箭头已解析)', () => 
   it('二项近似模式仍可切换(与真表不同)', () => {
     expect(aqlPlan(120, 'II', 1.0, 'gb', 'binom')).toEqual({ code: 'F', n: 20, ac: 1, re: 2 });
   });
-  it('AQL 不在主表覆盖范围 → masterPlan2A 返回 null(aqlPlan 回落二项)', () => {
-    expect(masterPlan2A('F', 10.0)).toBeNull();
-    expect(aqlPlan(120, 'II', 10.0).code).toBe('F'); // 回落用初始字码 + 二项
+  it('AQL 不在主表覆盖范围(15=每百单位体系)→ masterPlan2A 返回 null(aqlPlan 回落二项)', () => {
+    expect(masterPlan2A('F', 15)).toBeNull();
+    expect(aqlPlan(120, 'II', 15).code).toBe('F'); // 回落用初始字码 + 二项(遗留兼容路径)
+    expect(masterPlan2A('F', 10.0)).toEqual({ code: 'F', n: 20, ac: 5, re: 6 }); // 10 已是正式档
   });
 });

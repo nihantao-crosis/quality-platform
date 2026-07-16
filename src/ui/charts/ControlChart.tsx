@@ -5,6 +5,7 @@
 import { memo, Fragment } from 'react';
 import { nf, arrMin, arrMax, decimateMinMax } from '../../core';
 import type { ChartTokens } from '../tokens';
+import { niceTicks, tickDecimals } from '../tokens';
 import { Svg, Ln, Txt } from './primitives';
 
 /** 超过该点数即降采样渲染(统计/判异仍基于全量数据) */
@@ -96,16 +97,34 @@ function ControlChartImpl(cfg: ControlChartProps) {
   };
   // 自适应 X 轴刻度密度(全量时保持原每 5 点一签)
   const lblStep = Math.max(5, Math.ceil(data.length / 60) * 5);
+  // Y 轴刻度:经典主题按 Minitab 用 1-2-5 圆整刻度;其余主题保持 5 等分
+  const yTicks: { v: number; s: string }[] = T.classic
+    ? (() => {
+        const tks = niceTicks(ymin, ymax, 5);
+        // 小数位由圆整步长决定(取 min(dec,·) 会把 ppm 级刻度四舍五入成重复标签)
+        const d = tickDecimals(tks);
+        return tks.map((v) => ({ v, s: nf(v, d) }));
+      })()
+    : Array.from({ length: 5 }, (_, g) => {
+        const v = ymax - ((ymax - ymin) * g) / 4;
+        return { v, s: nf(v, dec) };
+      });
+  // σ 分区参考线:经典主题网格透明,需独立浅灰;判异标签(UCL/CL)经典用黑字含等号
+  const zoneStroke = T.classic ? '#ccd2d9' : T.grid;
+  const lblSep = T.classic ? '=' : ' ';
+  const limitLblFill = T.classic ? '#111111' : T.limit;
+  const centerLblFill = T.classic ? '#111111' : T.center;
 
   return (
     <Svg w={W} h={H}>
       <rect x={0} y={0} width={W} height={H} fill={T.bg} />
-      {Array.from({ length: 5 }, (_, g) => {
-        const yy = m.t + (g / 4) * ph;
+      {yTicks.map(({ v, s }, g) => {
+        const yy = Y(v);
         return (
           <Fragment key={'g' + g}>
             <Ln x1={m.l} y1={yy} x2={m.l + pw} y2={yy} stroke={T.grid} sw={1} />
-            <Txt x={m.l - 8} y={yy} s={nf(ymax - ((ymax - ymin) * g) / 4, dec)} fill={T.axis} size={10} anchor="end" />
+            {T.classic && <Ln x1={m.l - 4} y1={yy} x2={m.l} y2={yy} stroke={T.axis} sw={1} />}
+            <Txt x={m.l - 8} y={yy} s={s} fill={T.axis} size={10} anchor="end" />
           </Fragment>
         );
       })}
@@ -113,39 +132,39 @@ function ControlChartImpl(cfg: ControlChartProps) {
         [1, 2].map((z) => (
           <Fragment key={'z' + z}>
             {Y(cfg.cl + z * sigma) > m.t && (
-              <Ln x1={m.l} y1={Y(cfg.cl + z * sigma)} x2={m.l + pw} y2={Y(cfg.cl + z * sigma)} stroke={T.grid} sw={1} dash="2 4" />
+              <Ln x1={m.l} y1={Y(cfg.cl + z * sigma)} x2={m.l + pw} y2={Y(cfg.cl + z * sigma)} stroke={zoneStroke} sw={1} dash="2 4" />
             )}
             {Y(cfg.cl - z * sigma) < m.t + ph && (
-              <Ln x1={m.l} y1={Y(cfg.cl - z * sigma)} x2={m.l + pw} y2={Y(cfg.cl - z * sigma)} stroke={T.grid} sw={1} dash="2 4" />
+              <Ln x1={m.l} y1={Y(cfg.cl - z * sigma)} x2={m.l + pw} y2={Y(cfg.cl - z * sigma)} stroke={zoneStroke} sw={1} dash="2 4" />
             )}
           </Fragment>
         ))}
       {cfg.uclSeries ? (
         <>
-          <polyline points={seriesPts(cfg.uclSeries)} fill="none" stroke={T.limit} strokeWidth={T.sw} strokeDasharray={T.dash} />
-          <polyline points={seriesPts(cfg.lclSeries ?? [])} fill="none" stroke={T.limit} strokeWidth={T.sw} strokeDasharray={T.dash} />
-          <Txt x={m.l + pw + 8} y={Y(cfg.uclSeries[cfg.uclSeries.length - 1])} s={'UCL ' + nf(cfg.uclSeries[cfg.uclSeries.length - 1], dec)} fill={T.limit} size={10} weight={600} />
+          <polyline points={seriesPts(cfg.uclSeries)} fill="none" stroke={T.limit} strokeWidth={T.sw} strokeDasharray={T.limitDash} />
+          <polyline points={seriesPts(cfg.lclSeries ?? [])} fill="none" stroke={T.limit} strokeWidth={T.sw} strokeDasharray={T.limitDash} />
+          <Txt x={m.l + pw + 8} y={Y(cfg.uclSeries[cfg.uclSeries.length - 1])} s={'UCL' + lblSep + nf(cfg.uclSeries[cfg.uclSeries.length - 1], dec)} fill={limitLblFill} size={10} weight={600} />
           {cfg.lclSeries && (
-            <Txt x={m.l + pw + 8} y={Y(cfg.lclSeries[cfg.lclSeries.length - 1])} s={'LCL ' + nf(cfg.lclSeries[cfg.lclSeries.length - 1], dec)} fill={T.limit} size={10} weight={600} />
+            <Txt x={m.l + pw + 8} y={Y(cfg.lclSeries[cfg.lclSeries.length - 1])} s={'LCL' + lblSep + nf(cfg.lclSeries[cfg.lclSeries.length - 1], dec)} fill={limitLblFill} size={10} weight={600} />
           )}
         </>
       ) : (
         <>
-          <Ln x1={m.l} y1={Y(cfg.ucl)} x2={m.l + pw} y2={Y(cfg.ucl)} stroke={T.limit} sw={T.sw} dash={T.dash} />
-          <Ln x1={m.l} y1={Y(cfg.lcl)} x2={m.l + pw} y2={Y(cfg.lcl)} stroke={T.limit} sw={T.sw} dash={T.dash} />
-          <Txt x={m.l + pw + 8} y={Y(cfg.ucl)} s={'UCL ' + nf(cfg.ucl, dec)} fill={T.limit} size={10} weight={600} />
-          <Txt x={m.l + pw + 8} y={Y(cfg.lcl)} s={'LCL ' + nf(cfg.lcl, dec)} fill={T.limit} size={10} weight={600} />
+          <Ln x1={m.l} y1={Y(cfg.ucl)} x2={m.l + pw} y2={Y(cfg.ucl)} stroke={T.limit} sw={T.sw} dash={T.limitDash} />
+          <Ln x1={m.l} y1={Y(cfg.lcl)} x2={m.l + pw} y2={Y(cfg.lcl)} stroke={T.limit} sw={T.sw} dash={T.limitDash} />
+          <Txt x={m.l + pw + 8} y={Y(cfg.ucl)} s={'UCL' + lblSep + nf(cfg.ucl, dec)} fill={limitLblFill} size={10} weight={600} />
+          <Txt x={m.l + pw + 8} y={Y(cfg.lcl)} s={'LCL' + lblSep + nf(cfg.lcl, dec)} fill={limitLblFill} size={10} weight={600} />
         </>
       )}
       {cfg.clSeries ? (
         <>
           <polyline points={seriesPts(cfg.clSeries)} fill="none" stroke={T.center} strokeWidth={T.sw} />
-          <Txt x={m.l + pw + 8} y={Y(cfg.clSeries[cfg.clSeries.length - 1])} s={(cfg.clLabel || 'CL') + ' ' + nf(cfg.clSeries[cfg.clSeries.length - 1], dec)} fill={T.center} size={10} weight={600} />
+          <Txt x={m.l + pw + 8} y={Y(cfg.clSeries[cfg.clSeries.length - 1])} s={(cfg.clLabel || 'CL') + lblSep + nf(cfg.clSeries[cfg.clSeries.length - 1], dec)} fill={centerLblFill} size={10} weight={600} />
         </>
       ) : (
         <>
           <Ln x1={m.l} y1={Y(cfg.cl)} x2={m.l + pw} y2={Y(cfg.cl)} stroke={T.center} sw={T.sw} />
-          <Txt x={m.l + pw + 8} y={Y(cfg.cl)} s={(cfg.clLabel || 'CL') + ' ' + nf(cfg.cl, dec)} fill={T.center} size={10} weight={600} />
+          <Txt x={m.l + pw + 8} y={Y(cfg.cl)} s={(cfg.clLabel || 'CL') + lblSep + nf(cfg.cl, dec)} fill={centerLblFill} size={10} weight={600} />
         </>
       )}
       {cfg.stageBoundaries?.map((b) => (
@@ -212,7 +231,11 @@ function ControlChartImpl(cfg: ControlChartProps) {
       {sampled && (
         <Txt x={m.l + pw} y={m.t - 10} s={`渲染 ${idx.length}/${data.length} 点(统计与判异基于全量)`} fill={T.axis} size={9.5} anchor="end" />
       )}
-      <Ln x1={m.l} y1={m.t + ph} x2={m.l + pw} y2={m.t + ph} stroke={T.axis} sw={1} />
+      {T.classic ? (
+        <rect x={m.l} y={m.t} width={pw} height={ph} fill="none" stroke={T.frame} strokeWidth={1} />
+      ) : (
+        <Ln x1={m.l} y1={m.t + ph} x2={m.l + pw} y2={m.t + ph} stroke={T.axis} sw={1} />
+      )}
     </Svg>
   );
 }

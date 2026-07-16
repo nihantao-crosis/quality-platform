@@ -82,7 +82,9 @@ function roleColumns(model: VarModel, textCols: TextColumn[]): RoleColumn[] {
 
 function resolveRole(roles: RoleColumn[], ref: string | null): RoleColumn | null {
   if (!ref) return null;
-  return roles.find((r) => r.ref === ref) ?? null;
+  // 优先按角色引用(numeric:/text:)精确匹配;裸列名(历史/程序化调用)按列名回落,
+  // 避免"用户明明选了列却解析不到 → 静默换成别的强 ID 列"的错分组。
+  return roles.find((r) => r.ref === ref) ?? roles.find((r) => r.name === ref) ?? null;
 }
 
 function labelOf(v: number | string): string {
@@ -426,6 +428,10 @@ export function prepareSpcData(model: VarModel, textCols: TextColumn[], selectio
     return prepareRows(model, textCols, effectiveSelection, role, numericIds);
   }
   if (layout === 'stacked') {
+    // 显式指定了子组 ID 却解析不到时必须报错;静默回落到别的强 ID 列会按用户没选的列分组。
+    if (selection.subgroupColumn && !selectedRole) {
+      return makeError(selection, `子组 ID 列「${selection.subgroupColumn.replace(/^(numeric|text):/, '')}」在当前工作表中不存在,请重新选择。`);
+    }
     const role = selectedRole ?? idRole ?? strong.find((r) => repeatedGroupShape(r).repeated) ?? null;
     const numericMetadata = new Set(strong
       .filter((candidate) => candidate.kind === 'numeric' && candidate.numericIndex !== role?.numericIndex)

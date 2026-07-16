@@ -3,7 +3,7 @@
  * 必须共用同一份评估结果——过程失控时,任何界面都不得以绿色「能力充足」作为总体状态。
  */
 import type { VarModel } from './model';
-import { evalRules, evalLimitedRules, type NelsonRules } from './spc';
+import { evalRules, evalLimitedRules, DEFAULT_RULE_K, type NelsonRules, type NelsonRuleK } from './spc';
 import { nf } from './basicMath';
 
 export type AssessLevel = 'ok' | 'warn' | 'bad';
@@ -22,14 +22,15 @@ export interface CapabilityAssessment {
   headline: string;
 }
 
-/** 能力分析口径的失控点数:位置图 + 离散图(与能力页 158–165 行历史逻辑一致)。 */
-export function countCapabilityViolations(M: VarModel, rules: NelsonRules): number {
+/** 能力分析口径的失控点数:位置图 + 离散图(与能力页 158–165 行历史逻辑一致)。
+ * K 值需与 SPC 页/报告同源传入,否则同一数据两侧「受控性」结论会分裂。 */
+export function countCapabilityViolations(M: VarModel, rules: NelsonRules, ruleK: NelsonRuleK = DEFAULT_RULE_K): number {
   const location = M.hasSubgroups
-    ? evalRules(M.subs.map((s) => s.mean), M.xbarbar, (M.uclX - M.xbarbar) / 3, rules)
-    : evalRules(M.indiv, M.indMean, M.iSig, rules);
+    ? evalRules(M.subs.map((s) => s.mean), M.xbarbar, (M.uclX - M.xbarbar) / 3, rules, ruleK)
+    : evalRules(M.indiv, M.indMean, M.iSig, rules, ruleK);
   const dispersion = M.hasSubgroups
-    ? evalLimitedRules(M.subs.map((s) => s.range), M.rbar, M.uclR, M.lclR, rules)
-    : evalLimitedRules(M.mr.slice(1) as number[], M.mrbar, M.mrUcl, 0, rules);
+    ? evalLimitedRules(M.subs.map((s) => s.range), M.rbar, M.uclR, M.lclR, rules, ruleK)
+    : evalLimitedRules(M.mr.slice(1) as number[], M.mrbar, M.mrUcl, 0, rules, ruleK);
   return location.viol.size + dispersion.viol.size;
 }
 

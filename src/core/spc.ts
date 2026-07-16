@@ -15,6 +15,60 @@ export interface NelsonRules {
 
 export type RuleNo = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
 
+/** Minitab「Xbar 图选项 → 检验」的可编辑 K 值,与准则 1–8 一一对应。
+ * k1=σ 倍数(1 点 > K1σ);k2=连续 K2 点同侧;k3=连续 K3 点递增/递减;k4=连续 K4 点交替;
+ * k5=「K5+1 点中 K5 点 > 2σ 同侧」;k6=「K6+1 点中 K6 点 > 1σ 同侧」;
+ * k7=连续 K7 点在 1σ 内;k8=连续 K8 点 > 1σ(两侧)。
+ * 注意:k1 只改准则 1 的判异检测阈,绝不改动控制限 UCL/LCL 本身。 */
+export interface NelsonRuleK {
+  k1: number;
+  k2: number;
+  k3: number;
+  k4: number;
+  k5: number;
+  k6: number;
+  k7: number;
+  k8: number;
+}
+
+/** Nelson (1984) / Minitab 特殊原因检验的标准参数。 */
+export const DEFAULT_RULE_K: NelsonRuleK = { k1: 3, k2: 9, k3: 6, k4: 14, k5: 2, k6: 4, k7: 15, k8: 8 };
+
+/** 各 K 的合法域:k1∈[1,6] 允许一位小数;k5/k6 是「K/K+1」联动窗口,其余为普通游程长度。 */
+const RULE_K_LIMITS: Record<keyof NelsonRuleK, { min: number; max: number; integer: boolean }> = {
+  k1: { min: 1, max: 6, integer: false },
+  k2: { min: 2, max: 30, integer: true },
+  k3: { min: 2, max: 30, integer: true },
+  k4: { min: 2, max: 30, integer: true },
+  k5: { min: 2, max: 5, integer: true },
+  k6: { min: 2, max: 6, integer: true },
+  k7: { min: 2, max: 30, integer: true },
+  k8: { min: 2, max: 30, integer: true },
+};
+
+/** 单字段校验;null 即合法。供 normalizeRuleK 与 qp-prefs / 分析快照白名单校验共用同一口径。 */
+export function ruleKValueError(key: keyof NelsonRuleK, value: unknown): string | null {
+  const limit = RULE_K_LIMITS[key];
+  if (typeof value !== 'number' || !Number.isFinite(value)) return `${key} 不是有限数`;
+  if (limit.integer && !Number.isInteger(value)) return `${key} 必须是整数`;
+  if (!limit.integer && Math.round(value * 10) / 10 !== value) return `${key} 最多允许一位小数`;
+  if (value < limit.min || value > limit.max) return `${key} 超出 [${limit.min}, ${limit.max}] 范围`;
+  return null;
+}
+
+/** 逐字段规范化:缺失、越界或非法的字段一律回落 Nelson/Minitab 标准值,不抛错。 */
+export function normalizeRuleK(raw: unknown): NelsonRuleK {
+  const source = raw && typeof raw === 'object' && !Array.isArray(raw)
+    ? raw as Partial<Record<keyof NelsonRuleK, unknown>>
+    : {};
+  const out = { ...DEFAULT_RULE_K };
+  for (const key of Object.keys(DEFAULT_RULE_K) as Array<keyof NelsonRuleK>) {
+    const value = source[key];
+    if (ruleKValueError(key, value) === null) out[key] = value as number;
+  }
+  return out;
+}
+
 /** 默认判异准则:经典四则(1/2/3 + 5「2 of 3 越 2σ」);4/6/7/8 较敏感,默认关闭。 */
 export const DEFAULT_RULES: NelsonRules = { r1: true, r2: true, r3: true, r4: false, r5: true, r6: false, r7: false, r8: false };
 
@@ -37,9 +91,25 @@ export interface RuleViolation {
   desc: string;
 }
 
+/** 判异描述:K 为标准值时逐字沿用 RULE_DEFS(向后兼容),自定义时如实写出实际参数。 */
+function ruleKDesc(rule: RuleNo, K: NelsonRuleK): string {
+  const std = RULE_DEFS[rule].def;
+  switch (rule) {
+    case 1: return K.k1 === DEFAULT_RULE_K.k1 ? std : `1 点落在中心线任一侧 ${K.k1}σ 之外`;
+    case 2: return K.k2 === DEFAULT_RULE_K.k2 ? std : `连续 ${K.k2} 点落在中心线同一侧`;
+    case 3: return K.k3 === DEFAULT_RULE_K.k3 ? std : `连续 ${K.k3} 点持续上升或持续下降`;
+    case 4: return K.k4 === DEFAULT_RULE_K.k4 ? std : `连续 ${K.k4} 点上下交替`;
+    case 5: return K.k5 === DEFAULT_RULE_K.k5 ? std : `相邻 ${K.k5 + 1} 点中有 ${K.k5} 点落在同侧 2σ 区之外`;
+    case 6: return K.k6 === DEFAULT_RULE_K.k6 ? std : `相邻 ${K.k6 + 1} 点中有 ${K.k6} 点落在同侧 1σ 区之外`;
+    case 7: return K.k7 === DEFAULT_RULE_K.k7 ? std : `连续 ${K.k7} 点全部落在中心线两侧 1σ 区之内`;
+    case 8: return K.k8 === DEFAULT_RULE_K.k8 ? std : `连续 ${K.k8} 点全部落在 1σ 区之外(两侧皆可)`;
+  }
+}
+
 /** R/S/MR 与属性图按 Minitab 适用性仅执行准则 1–4；5–8 只用于均值/单值等位置图。 */
 export function evalLimitedRules(
   data: number[], cl: number, ucl: number | number[], lcl: number | number[], rules: NelsonRules,
+  k: Partial<NelsonRuleK> = DEFAULT_RULE_K,
 ): { viol: Set<number>; list: RuleViolation[] } {
   const ucls = Array.isArray(ucl) ? ucl : Array.from({ length: data.length }, () => ucl);
   const lcls = Array.isArray(lcl) ? lcl : Array.from({ length: data.length }, () => lcl);
@@ -49,13 +119,22 @@ export function evalLimitedRules(
   if (ucls.some((value, index) => !Number.isFinite(value) || !Number.isFinite(lcls[index]) || lcls[index] > value)) {
     throw new Error('控制限必须为有限数且 LCL ≤ UCL');
   }
+  const K = normalizeRuleK({ ...DEFAULT_RULE_K, ...k });
   const viol = new Set<number>();
   const list: RuleViolation[] = [];
   if (rules.r1) {
+    // k1 只缩放准则 1 的检测阈(以图上 3σ 限距推 σ̂ 再取 K1σ);UCL/LCL 本身不变。
+    // σ̂ 只能取上侧限距:MR/R/S/P/C 等图 LCL 常被钳位为 0,(cl−lcl)/3 会严重低估 σ 造成下侧误报;
+    // 上侧 UCL 恒为真 3σ 距,两侧共用同一 σ̂ 才与 Minitab「检验 1,K 个标准差」语义一致。
+    const scale = K.k1 / 3;
     data.forEach((v, i) => {
-      if (v > ucls[i] || v < lcls[i]) {
+      const kSigma = (ucls[i] - cl) * scale;
+      const out = K.k1 === 3
+        ? v > ucls[i] || v < lcls[i]
+        : v - cl > kSigma || cl - v > kSigma;
+      if (out) {
         viol.add(i);
-        list.push({ i, rule: 1, desc: '1 点超出该图的 3σ 控制限' });
+        list.push({ i, rule: 1, desc: `1 点超出该图的 ${K.k1}σ 控制限` });
       }
     });
   }
@@ -67,7 +146,7 @@ export function evalLimitedRules(
   // 趋势/游程规则只依赖点序与中心线；可变控制限不改变这些规则。
   const maxDistance = ucls.reduce((value, upper, index) =>
     Math.max(value, Math.abs(upper - cl), Math.abs(cl - lcls[index])), 0);
-  const pattern = evalRules(data, cl, maxDistance / 3 || 1e-12, patternRules);
+  const pattern = evalRules(data, cl, maxDistance / 3 || 1e-12, patternRules, K);
   pattern.viol.forEach((i) => viol.add(i));
   list.push(...pattern.list);
   return { viol, list: list.sort((a, b) => a.i - b.i || a.rule - b.rule) };
@@ -105,14 +184,18 @@ export function evalRules(
   cl: number,
   sigma: number,
   rules: NelsonRules,
+  k: Partial<NelsonRuleK> = DEFAULT_RULE_K,
 ): { viol: Set<number>; list: RuleViolation[] } {
+  // 可选 K 值:省略即 Nelson/Minitab 标准参数,行为与旧签名逐位一致。
+  const K = normalizeRuleK({ ...DEFAULT_RULE_K, ...k });
   const viol = new Set<number>();
   const list: RuleViolation[] = [];
   if (rules.r1)
     data.forEach((v, i) => {
-      if (Math.abs(v - cl) > 3 * sigma) {
+      // k1 只改判异检测阈(K1σ),不改动控制限 UCL/LCL 本身
+      if (Math.abs(v - cl) > K.k1 * sigma) {
         viol.add(i);
-        list.push({ i, rule: 1, desc: RULE_DEFS[1].def });
+        list.push({ i, rule: 1, desc: ruleKDesc(1, K) });
       }
     });
   if (rules.r2) {
@@ -125,9 +208,9 @@ export function evalRules(
         run = 1;
         sign = s;
       }
-      if (run >= 9) {
-        for (let q = i - 8; q <= i; q++) viol.add(q);
-        list.push({ i, rule: 2, desc: RULE_DEFS[2].def });
+      if (run >= K.k2) {
+        for (let q = i - (K.k2 - 1); q <= i; q++) viol.add(q);
+        list.push({ i, rule: 2, desc: ruleKDesc(2, K) });
       }
     });
   }
@@ -145,14 +228,14 @@ export function evalRules(
         inc = 1;
         dec = 1;
       }
-      if (inc >= 6 || dec >= 6) {
-        for (let q = i - 5; q <= i; q++) viol.add(q);
-        list.push({ i, rule: 3, desc: RULE_DEFS[3].def });
+      if (inc >= K.k3 || dec >= K.k3) {
+        for (let q = i - (K.k3 - 1); q <= i; q++) viol.add(q);
+        list.push({ i, rule: 3, desc: ruleKDesc(3, K) });
       }
     }
   }
   if (rules.r4) {
-    // 连续 14 点上下交替(方向逐点反向)
+    // 连续 K4 点上下交替(方向逐点反向)
     let run = 1;
     let prevDir = 0;
     for (let i = 1; i < data.length; i++) {
@@ -160,9 +243,9 @@ export function evalRules(
       if (d === 0) { prevDir = 0; run = 1; continue; }
       run = prevDir !== 0 && d === -prevDir ? run + 1 : 2;
       prevDir = d;
-      if (run >= 14) {
-        for (let q = i - 13; q <= i; q++) viol.add(q);
-        list.push({ i, rule: 4, desc: RULE_DEFS[4].def });
+      if (run >= K.k4) {
+        for (let q = i - (K.k4 - 1); q <= i; q++) viol.add(q);
+        list.push({ i, rule: 4, desc: ruleKDesc(4, K) });
       }
     }
   }
@@ -170,33 +253,33 @@ export function evalRules(
   const zoneCount = (r5: boolean, r6: boolean) => {
     const flag = (rule: RuleNo, win: number, need: number, z: number) => {
       for (let i = win - 1; i < data.length; i++) {
-        const w = Array.from({ length: win }, (_, k) => i - win + 1 + k);
+        const w = Array.from({ length: win }, (_, j) => i - win + 1 + j);
         const up = w.filter((q) => data[q] - cl > z * sigma).length;
         const dn = w.filter((q) => cl - data[q] > z * sigma).length;
         if (up >= need || dn >= need) {
           const side = up >= need ? (q: number) => data[q] - cl > z * sigma : (q: number) => cl - data[q] > z * sigma;
-          w.forEach((q) => { if (side(q)) { viol.add(q); list.push({ i: q, rule, desc: RULE_DEFS[rule].def }); } });
+          w.forEach((q) => { if (side(q)) { viol.add(q); list.push({ i: q, rule, desc: ruleKDesc(rule, K) }); } });
         }
       }
     };
-    if (r5) flag(5, 3, 2, 2); // 相邻 3 点 ≥2 点越 2σ(同侧)
-    if (r6) flag(6, 5, 4, 1); // 相邻 5 点 ≥4 点越 1σ(同侧)
+    if (r5) flag(5, K.k5 + 1, K.k5, 2); // 相邻 K5+1 点 ≥K5 点越 2σ(同侧)
+    if (r6) flag(6, K.k6 + 1, K.k6, 1); // 相邻 K6+1 点 ≥K6 点越 1σ(同侧)
   };
   zoneCount(rules.r5, rules.r6);
   if (rules.r7) {
-    // 连续 15 点全在 1σ 区内(中心线附近,变异异常小)
+    // 连续 K7 点全在 1σ 区内(中心线附近,变异异常小)
     let run = 0;
     for (let i = 0; i < data.length; i++) {
       run = Math.abs(data[i] - cl) < sigma ? run + 1 : 0;
-      if (run >= 15) { for (let q = i - 14; q <= i; q++) viol.add(q); list.push({ i, rule: 7, desc: RULE_DEFS[7].def }); }
+      if (run >= K.k7) { for (let q = i - (K.k7 - 1); q <= i; q++) viol.add(q); list.push({ i, rule: 7, desc: ruleKDesc(7, K) }); }
     }
   }
   if (rules.r8) {
-    // 连续 8 点全在 1σ 区外(两侧皆可)
+    // 连续 K8 点全在 1σ 区外(两侧皆可)
     let run = 0;
     for (let i = 0; i < data.length; i++) {
       run = Math.abs(data[i] - cl) > sigma ? run + 1 : 0;
-      if (run >= 8) { for (let q = i - 7; q <= i; q++) viol.add(q); list.push({ i, rule: 8, desc: RULE_DEFS[8].def }); }
+      if (run >= K.k8) { for (let q = i - (K.k8 - 1); q <= i; q++) viol.add(q); list.push({ i, rule: 8, desc: ruleKDesc(8, K) }); }
     }
   }
   const seen = new Set<string>();

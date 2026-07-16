@@ -2,7 +2,7 @@
 import { useState } from 'react';
 import { useApp } from '../../store/appStore';
 import {
-  rqlForResult, producerRiskPct, masterPlanByState, CODE_LETTER_TABLE, MAX_LOT_SIZE, TABLE_BY_STATE,
+  rqlForResult, producerRiskPct, masterPlanByState, CODE_LETTER_TABLE, MAX_LOT_SIZE, TABLE_BY_STATE, AQL_COLS,
   decideLot, recordInspection, plansByState, normalizeSwitchStatus,
   AQL_TRACE_LIMITS,
   restoreNormalInspection, resumeTightenedInspection, setSwitchConditions,
@@ -18,7 +18,8 @@ const STATE_META: Record<InspState, { label: string; bg: string; color: string }
   reduced: { label: '放宽检验', bg: '#e8f4ea', color: '#2c8a45' },
 };
 
-const AQL_OPTIONS = [0.65, 1.0, 1.5, 2.5, 4.0, 6.5];
+// 全部 16 档(百分不合格品体系,GB/T 2828.1 §5.2:AQL≤10);常用 6 档保留为快捷芯片。
+const AQL_QUICK = [0.65, 1.0, 1.5, 2.5, 4.0, 6.5];
 const DISPOSITION_LABEL: Record<NonconformingDisposition, string> = {
   none: '无不合格品', unrecorded: '未记录处置状态', pending: '已隔离，待负责部门处置', reworked: '已返工并按要求复验',
   replaced: '已替换不合格品', scrapped: '已报废不合格品', concession: '已取得让步接收批准',
@@ -103,7 +104,7 @@ export function Aql({ T }: { T: ChartTokens }) {
     }
   };
 
-  const fmtAql = (a: number) => 'AQL ' + a.toFixed(2).replace(/0$/, '').replace(/\.$/, '.0');
+  const fmtAql = (a: number) => 'AQL ' + (a < 0.1 ? String(a) : a.toFixed(2).replace(/0$/, '').replace(/\.$/, '.0'));
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -140,21 +141,23 @@ export function Aql({ T }: { T: ChartTokens }) {
         <span style={{ width: 1, height: 22, background: '#e5e9ee' }} />
         <span style={{ fontSize: 12, color: '#8a929d', fontWeight: 600 }}>检验水平</span>
         <div style={{ display: 'flex', gap: 6 }}>
-          {(['I', 'II', 'III'] as InspectionLevel[]).map((l) => (
-            <button
-              type="button"
-              key={l}
-              disabled={schemeLocked}
-              title={schemeLocked ? '须按正式转移规则恢复正常检验后才能更改检验体系' : undefined}
-              style={{ ...tabStyle(aqlLevel === l), border: 0, opacity: schemeLocked ? 0.55 : 1, cursor: schemeLocked ? 'not-allowed' : 'pointer' }}
-              onClick={() => setAql({ aqlLevel: l })}
-            >水平 {l}</button>
+          {(['S-1', 'S-2', 'S-3', 'S-4', 'I', 'II', 'III'] as InspectionLevel[]).map((l, idx) => (
+            <span key={l} style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              {idx === 4 && <span style={{ width: 1, height: 16, background: '#e5e9ee' }} />}
+              <button
+                type="button"
+                disabled={schemeLocked}
+                title={schemeLocked ? '须按正式转移规则恢复正常检验后才能更改检验体系' : (idx < 4 ? '特殊检验水平(小样本,判别力较低)' : '一般检验水平')}
+                style={{ ...tabStyle(aqlLevel === l), border: 0, opacity: schemeLocked ? 0.55 : 1, cursor: schemeLocked ? 'not-allowed' : 'pointer' }}
+                onClick={() => setAql({ aqlLevel: l })}
+              >{idx < 4 ? l : `水平 ${l}`}</button>
+            </span>
           ))}
         </div>
         <span style={{ width: 1, height: 22, background: '#e5e9ee' }} />
         <span style={{ fontSize: 12, color: '#8a929d', fontWeight: 600 }}>AQL</span>
-        <div style={{ display: 'flex', gap: 6 }}>
-          {AQL_OPTIONS.map((a) => (
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          {AQL_QUICK.map((a) => (
             <button
               type="button"
               key={a}
@@ -164,6 +167,16 @@ export function Aql({ T }: { T: ChartTokens }) {
               onClick={() => setAql({ aqlAQL: a })}
             >{fmtAql(a)}</button>
           ))}
+          <select
+            aria-label="全部 AQL 档位"
+            disabled={schemeLocked}
+            title={schemeLocked ? '须按正式转移规则恢复正常检验后才能更改检验体系' : '全部 16 档 AQL(0.010–10,百分不合格品体系)'}
+            value={aqlAQL}
+            onChange={(e) => setAql({ aqlAQL: Number(e.target.value) })}
+            style={{ padding: '5px 8px', border: `1px solid ${AQL_QUICK.includes(aqlAQL) ? '#cfd5dd' : '#1f6fb2'}`, borderRadius: 4, fontSize: 12, color: AQL_QUICK.includes(aqlAQL) ? '#5b6472' : '#1f6fb2', background: '#fff', cursor: schemeLocked ? 'not-allowed' : 'pointer' }}
+          >
+            {AQL_COLS.map((a) => <option key={a} value={a}>{fmtAql(a)}</option>)}
+          </select>
         </div>
         <span style={{ width: 1, height: 22, background: '#e5e9ee' }} />
         <span style={{ padding: '5px 9px', borderRadius: 4, background: '#eef5fb', color: '#1f6fb2', fontSize: 11.5, fontWeight: 600 }}>

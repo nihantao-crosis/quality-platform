@@ -1,14 +1,14 @@
 /** SPC 控制图 ★深度实现 — 七种图型（X̄-R/X̄-S/I-MR/EWMA/CUSUM/P/C），
  * Nelson 判异（Shewhart 图）/ 限值判异（EWMA/CUSUM）/ 点选明细 /
  * 分阶段控制限（按分组列分段,Minitab Stages 语义）。 */
-import type { CSSProperties } from 'react';
+import { useState, type CSSProperties } from 'react';
 import { useApp, type SpcType } from '../../store/appStore';
 import { syncSpecForActiveMeasurement, useData } from '../../store/dataStore';
 import { expandSpcRuleItems, uniqueSpcPointCount, type SpcViolationItem } from '../../store/analyses';
 import {
-  nf, evalRules, evalLimitedRules, RULE_DEFS, ewmaSeries, cusumSeries, stagedXbar, stagedRange, stageValidationError,
+  nf, evalRules, evalLimitedRules, RULE_DEFS, DEFAULT_RULE_K, ewmaSeries, cusumSeries, stagedXbar, stagedRange, stageValidationError,
   prepareSpcData, spcMeasurementColumnNames, spcRoleOptions,
-  type RuleNo, type SpcDataLayout, type SpcPreparedData, type VarModel, type TextColumn,
+  type NelsonRuleK, type RuleNo, type SpcDataLayout, type SpcPreparedData, type VarModel, type TextColumn,
 } from '../../core';
 import { ReportCard } from '../ReportCard';
 import { spcReport } from '../reportData';
@@ -20,6 +20,41 @@ const stageSelStyle: CSSProperties = {
   padding: '4px 8px', border: '1px solid #cfd5dd', borderRadius: 4,
   fontSize: 12, color: '#2a333f', background: '#fff', fontFamily: 'IBM Plex Mono,monospace',
 };
+
+const ruleKInputStyle: CSSProperties = {
+  width: 46, padding: '3px 2px', border: '1px solid #cfd5dd', borderRadius: 4, textAlign: 'center',
+  fontSize: 11.5, color: '#2a333f', background: '#fff', fontFamily: 'IBM Plex Mono,monospace',
+};
+
+/** 单个准则的 K 值输入:失焦/回车提交;非法或越界值经 normalizeRuleK 回落后按 store 实际生效值回弹。
+ * 调用方以 key={value} 在 store 值变化时重挂载,编辑态之外无需同步 effect。 */
+function RuleKInput({ ruleKey, value, onCommit, title }: {
+  ruleKey: keyof NelsonRuleK;
+  value: number;
+  onCommit: (patch: Partial<NelsonRuleK>) => void;
+  title: string;
+}) {
+  const [text, setText] = useState(String(value));
+  const commit = () => {
+    const parsed = Number(text.trim());
+    if (text.trim() !== '' && Number.isFinite(parsed)) onCommit({ [ruleKey]: parsed });
+    // zustand set 同步完成;此处读回的即规范化后的生效值(非法输入由此回弹)
+    setText(String(useApp.getState().spcRuleK[ruleKey]));
+  };
+  return (
+    <input
+      type="number"
+      value={text}
+      step={ruleKey === 'k1' ? 0.1 : 1}
+      aria-label={title}
+      title={title}
+      style={ruleKInputStyle}
+      onChange={(e) => setText(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+    />
+  );
+}
 
 interface ChartSpec {
   t: string;
@@ -89,7 +124,7 @@ function SpcRolePanel({
 
 export function Spc({ T }: { T: ChartTokens }) {
   const {
-    spcType, setSpcType, spcRules, toggleRule,
+    spcType, setSpcType, spcRules, toggleRule, spcRuleK, setSpcRuleK,
     spcDataLayout, spcValueCol, spcSubgroupCol, setSpcRoles,
     spcStageCol, setSpcStageCol, selSub, setSelSub, showToast,
   } = useApp();
@@ -283,10 +318,10 @@ export function Spc({ T }: { T: ChartTokens }) {
     violList = spec.coreList;
   } else if (spec.shewhart) {
     const r = effType === 'p'
-      ? evalLimitedRules(main.props.data, main.props.cl, pModel.pUcls, pModel.pLcls, spcRules)
+      ? evalLimitedRules(main.props.data, main.props.cl, pModel.pUcls, pModel.pLcls, spcRules, spcRuleK)
       : effType === 'c'
-        ? evalLimitedRules(main.props.data, main.props.cl, main.props.ucl, main.props.lcl, spcRules)
-      : evalRules(main.props.data, main.props.cl, (main.props.ucl - main.props.cl) / 3, spcRules);
+        ? evalLimitedRules(main.props.data, main.props.cl, main.props.ucl, main.props.lcl, spcRules, spcRuleK)
+      : evalRules(main.props.data, main.props.cl, (main.props.ucl - main.props.cl) / 3, spcRules, spcRuleK);
     viol = r.viol;
     violList = r.list;
   } else {
@@ -316,10 +351,10 @@ export function Spc({ T }: { T: ChartTokens }) {
         }
       } else if (!spec.coreViol && ch.props.ucl != null) {
         const { ucl, lcl, data: cdata } = ch.props;
-        const dr = evalLimitedRules(cdata as number[], ch.props.cl, ucl, lcl, spcRules);
+        const dr = evalLimitedRules(cdata as number[], ch.props.cl, ucl, lcl, spcRules, spcRuleK);
         if (dr.viol.size) {
           dispViolByChart.set(ch.t, dr.viol);
-          expandSpcRuleItems(dr.viol, dr.list, chartLabel).forEach((item) => {
+          expandSpcRuleItems(dr.viol, dr.list, chartLabel, spcRuleK).forEach((item) => {
             // MR 图数组索引 0 对应原始观测 2；结果列表统一映射回原观测索引。
             const i = effType === 'i-mr' ? item.i + 1 : item.i;
             dispItems.push({ ...item, i, desc: `${chartLabel} 图：${item.desc}` });
@@ -332,7 +367,8 @@ export function Spc({ T }: { T: ChartTokens }) {
     'xbar-r': 'X̄', 'xbar-s': 'X̄', 'i-mr': 'I', ewma: 'EWMA', cusum: 'CUSUM', p: 'P', c: 'C',
   };
   const allViolItems = [
-    ...expandSpcRuleItems(viol, violList, mainChartLabel[effType]),
+    // 分阶段/EWMA/CUSUM 的 coreViol 由 core 按标准窗口给出;仅本页 evalRules 结果按自定义 K 展开
+    ...expandSpcRuleItems(viol, violList, mainChartLabel[effType], spec.coreViol ? undefined : spcRuleK),
     ...dispItems,
   ].sort((a, b) => a.i - b.i || a.chartLabel.localeCompare(b.chartLabel) || a.rule - b.rule);
   const uniqueViolCount = uniqueSpcPointCount(allViolItems);
@@ -431,6 +467,8 @@ export function Spc({ T }: { T: ChartTokens }) {
     ['ewma', 'EWMA'], ['cusum', 'CUSUM'], ['p', 'P 图'], ['c', 'C 图'],
   ];
   const ruleToggles = (['r1', 'r2', 'r3', 'r4', 'r5', 'r6', 'r7', 'r8'] as const).map((k) => [k, `准则 ${k.slice(1)}`] as const);
+  const ruleKKeys = Object.keys(DEFAULT_RULE_K) as Array<keyof NelsonRuleK>;
+  const ruleKCustom = ruleKKeys.some((key) => spcRuleK[key] !== DEFAULT_RULE_K[key]);
 
   const report = spcReport({
     violList: allViolItems, // 含 R/S/MR 离散图失控点——顶部结论卡与右侧列表口径一致
@@ -475,25 +513,45 @@ export function Spc({ T }: { T: ChartTokens }) {
         {spec.shewhart ? (
           <>
             <span style={{ fontSize: 12, color: '#8a929d', fontWeight: 600 }}>判异准则</span>
-            <div style={{ display: 'flex', gap: 7 }}>
+            <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap', alignItems: 'center' }}>
               {ruleToggles.map(([k, l]) => {
-                const d = RULE_DEFS[Number(k.slice(1)) as RuleNo];
-                const unavailable = (effType === 'p' || effType === 'c') && Number(k.slice(1)) > 4;
+                const no = Number(k.slice(1)) as RuleNo;
+                const d = RULE_DEFS[no];
+                const unavailable = (effType === 'p' || effType === 'c') && no > 4;
+                const kKey = `k${no}` as keyof NelsonRuleK;
                 return (
-                  <button
-                    type="button"
-                    key={k}
-                    style={{ ...chipStyle(!unavailable && spcRules[k]), fontFamily: 'inherit', ...(unavailable ? { opacity: 0.4, cursor: 'not-allowed' } : {}) }}
-                    disabled={unavailable}
-                    aria-pressed={!unavailable && spcRules[k]}
-                    onClick={() => toggleRule(k)}
-                    title={unavailable ? 'P/C 属性控制图仅适用准则 1–4' : `${d.def}(${d.points})· ${d.source}`}
-                  >
-                    <span style={{ width: 7, height: 7, borderRadius: '50%', background: !unavailable && spcRules[k] ? '#1f6fb2' : '#c8cfd8' }} />
-                    {l}
-                  </button>
+                  <span key={k} style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                    <button
+                      type="button"
+                      style={{ ...chipStyle(!unavailable && spcRules[k]), fontFamily: 'inherit', ...(unavailable ? { opacity: 0.4, cursor: 'not-allowed' } : {}) }}
+                      disabled={unavailable}
+                      aria-pressed={!unavailable && spcRules[k]}
+                      onClick={() => toggleRule(k)}
+                      title={unavailable ? 'P/C 属性控制图仅适用准则 1–4' : `${d.def}(${d.points})· ${d.source}`}
+                    >
+                      <span style={{ width: 7, height: 7, borderRadius: '50%', background: !unavailable && spcRules[k] ? '#1f6fb2' : '#c8cfd8' }} />
+                      {l}
+                    </button>
+                    {!unavailable && spcRules[k] && (
+                      <RuleKInput
+                        key={String(spcRuleK[kKey])}
+                        ruleKey={kKey}
+                        value={spcRuleK[kKey]}
+                        onCommit={setSpcRuleK}
+                        title={`准则 ${no} 参数 K${no}(标准值 ${DEFAULT_RULE_K[kKey]},失焦/回车生效)`}
+                      />
+                    )}
+                  </span>
                 );
               })}
+              <button
+                type="button"
+                onClick={() => setSpcRuleK({ ...DEFAULT_RULE_K })}
+                style={{ ...stageSelStyle, fontSize: 11.5, cursor: 'pointer', color: '#1f6fb2', borderColor: '#bcd6ee', fontWeight: 600 }}
+                title="将全部判异准则 K 值重置为 Nelson/Minitab 标准值"
+              >
+                恢复标准值
+              </button>
             </div>
           </>
         ) : (
@@ -531,11 +589,25 @@ export function Spc({ T }: { T: ChartTokens }) {
       {spec.shewhart && (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 22px', padding: '7px 16px', background: '#fbfcfd', border: '1px solid #e6e9ee', borderRadius: 5, fontSize: 11.5, color: '#7a828d', lineHeight: 1.6 }}>
           <span style={{ fontWeight: 700, color: '#98a1ac' }}>判异准则说明</span>
-          {([1, 2, 3, 4, 5, 6, 7, 8] as const).map((n) => (
-            <span key={n}>
-              <b style={{ color: '#5b6472' }}>{RULE_DEFS[n].name}</b>:{RULE_DEFS[n].def}({RULE_DEFS[n].points})
+          {ruleKCustom && (
+            <span
+              role="alert"
+              style={{ fontWeight: 700, color: '#8a5a00', background: '#fdf3df', border: '1px solid #ecd9ae', borderRadius: 4, padding: '1px 9px' }}
+            >
+              ⚠ 自定义判异参数（非 Nelson/Minitab 标准值）
             </span>
-          ))}
+          )}
+          {([1, 2, 3, 4, 5, 6, 7, 8] as const).map((n) => {
+            const kKey = `k${n}` as keyof NelsonRuleK;
+            return (
+              <span key={n}>
+                <b style={{ color: '#5b6472' }}>{RULE_DEFS[n].name}</b>:{RULE_DEFS[n].def}({RULE_DEFS[n].points})
+                {spcRuleK[kKey] !== DEFAULT_RULE_K[kKey] && (
+                  <b style={{ color: '#8a5a00' }}> [当前 K={spcRuleK[kKey]}]</b>
+                )}
+              </span>
+            );
+          })}
           <span style={{ color: '#a3abb5' }}>
             依据：Nelson (1984) / Minitab 特殊原因检验；R、S、MR、P、C 图仅适用准则 1–4，X̄/I 图适用 1–8
           </span>

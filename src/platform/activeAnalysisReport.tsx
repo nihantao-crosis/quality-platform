@@ -55,7 +55,7 @@ import {
   assessCapability, countCapabilityViolations,
 } from '../core';
 import { useApp } from '../store/appStore';
-import { useData } from '../store/dataStore';
+import { resolveCapabilityMeasurementData, useData } from '../store/dataStore';
 import { expandSpcRuleItems } from '../store/analyses';
 import { paretoReport, spcReport } from '../ui/reportData';
 import { chartTokens } from '../ui/tokens';
@@ -653,7 +653,7 @@ function buildParetoPayload(): AnalysisReportPayload {
         note: report.mergeOther ? `累计阈值 ${fmt(report.threshold * 100, 0)}%，合并 ${report.mergedCategoryCount} 个尾部类别。` : '未启用尾部类别合并。',
       },
     ],
-    charts: [svgChart('帕累托图', <ParetoChart T={T} rows={report.rows.map((row) => ({ name: row.name, count: row.count }))} />, 960, 300)],
+    charts: [svgChart('帕累托图', <ParetoChart T={T} rows={report.rows.map((row) => ({ name: row.name, count: row.count }))} title={`${hasImportedData ? model.name : '示例数据'} 的 Pareto 图`} />, 960, 300)],
   };
 }
 
@@ -684,12 +684,7 @@ function buildFishbonePayload(): AnalysisReportPayload {
 function buildCapabilityPayload(): AnalysisReportPayload {
   const app = useApp.getState();
   const data = useData.getState();
-  const prepared = prepareSpcData(data.model, data.textCols, {
-    layout: app.spcDataLayout,
-    valueColumn: app.spcValueCol,
-    subgroupColumn: app.spcSubgroupCol,
-    pendingCells: data.pendingCells,
-  });
+  const prepared = resolveCapabilityMeasurementData(data.model, data.textCols);
   if (prepared.error || !prepared.model) {
     return unrunPayload('capability', '过程能力分析专项报告', data.model.name, prepared.error ?? '当前测量数据角色无效。', true);
   }
@@ -706,7 +701,7 @@ function buildCapabilityPayload(): AnalysisReportPayload {
   // P0-4:与能力页/保存记录共用唯一判定器,失控时专项报告不得写「能力充足」而无警告。
   const assessment = assessCapability({
     cpk: cap.cpk, verdict: cap.verdict, adP: ad ? ad.p : null, n: M.all.length,
-    spcViolations: countCapabilityViolations(M, app.spcRules),
+    spcViolations: countCapabilityViolations(M, app.spcRules, app.spcRuleK),
   });
   const verdict = assessment.status;
   const sourceTable = M.hasSubgroups
@@ -851,8 +846,9 @@ function buildSpcPayload(): AnalysisReportPayload | undefined {
       isP ? data.pModel.pUcls : ucl,
       isP ? data.pModel.pLcls : lcl,
       app.spcRules,
+      app.spcRuleK,
     );
-    const items = expandSpcRuleItems(evaluated.viol, evaluated.list, isP ? 'P' : 'C');
+    const items = expandSpcRuleItems(evaluated.viol, evaluated.list, isP ? 'P' : 'C', app.spcRuleK);
     const typeLabel = isP ? 'P' : 'C';
     const modelName = isP ? data.pModel.name : data.cModel.name;
     const sampleSize = isP ? data.pModel.pNs : 1;
@@ -943,11 +939,11 @@ function buildSpcPayload(): AnalysisReportPayload | undefined {
       };
 
   if (effectiveType === 'i-mr') {
-    const iEval = evalRules(M.indiv, M.indMean, (M.iUcl - M.indMean) / 3, app.spcRules);
+    const iEval = evalRules(M.indiv, M.indMean, (M.iUcl - M.indMean) / 3, app.spcRules, app.spcRuleK);
     const mr = M.mr.slice(1) as number[];
-    const mrEval = evalLimitedRules(mr, M.mrbar, M.mrUcl, 0, app.spcRules);
-    const iItems = expandSpcRuleItems(iEval.viol, iEval.list, 'I');
-    const mrItems = expandSpcRuleItems(mrEval.viol, mrEval.list, 'MR').map((item) => ({ ...item, i: item.i + 1 }));
+    const mrEval = evalLimitedRules(mr, M.mrbar, M.mrUcl, 0, app.spcRules, app.spcRuleK);
+    const iItems = expandSpcRuleItems(iEval.viol, iEval.list, 'I', app.spcRuleK);
+    const mrItems = expandSpcRuleItems(mrEval.viol, mrEval.list, 'MR', app.spcRuleK).map((item) => ({ ...item, i: item.i + 1 }));
     const report = spcReport({
       violList: [...iItems, ...mrItems], variationViolations: mrItems, variationChartLabel: 'MR',
       k: M.indiv.length, n: 1, hasSubgroups: false, structure: 'individual', typeLabel: 'I-MR',
@@ -1006,10 +1002,10 @@ function buildSpcPayload(): AnalysisReportPayload | undefined {
   }
 
   if (effectiveType === 'xbar-s') {
-    const xEval = evalRules(means, M.xbarbar, (M.uclXs - M.xbarbar) / 3, app.spcRules);
-    const sEval = evalLimitedRules(M.svals, M.sbar, M.uclS, M.lclS, app.spcRules);
-    const xItems = expandSpcRuleItems(xEval.viol, xEval.list, 'X̄');
-    const sItems = expandSpcRuleItems(sEval.viol, sEval.list, 'S');
+    const xEval = evalRules(means, M.xbarbar, (M.uclXs - M.xbarbar) / 3, app.spcRules, app.spcRuleK);
+    const sEval = evalLimitedRules(M.svals, M.sbar, M.uclS, M.lclS, app.spcRules, app.spcRuleK);
+    const xItems = expandSpcRuleItems(xEval.viol, xEval.list, 'X̄', app.spcRuleK);
+    const sItems = expandSpcRuleItems(sEval.viol, sEval.list, 'S', app.spcRuleK);
     const all = [...xItems, ...sItems];
     const report = spcReport({
       violList: all, variationViolations: sItems, variationChartLabel: 'S',
@@ -1048,10 +1044,10 @@ function buildSpcPayload(): AnalysisReportPayload | undefined {
   const useStage = Boolean(stageValues);
   const staged = useStage ? { x: stagedXbar(M.subs.map((sub) => sub.vals), stageValues!, app.spcRules), r: stagedRange(M.subs.map((sub) => sub.vals), stageValues!, app.spcRules) } : null;
   const x = staged ?? null;
-  const xEval = x ? { viol: x.x.viol, list: x.x.list } : evalRules(means, M.xbarbar, (M.uclX - M.xbarbar) / 3, app.spcRules);
-  const rEval = x ? { viol: x.r.viol, list: x.r.list } : evalLimitedRules(ranges, M.rbar, M.uclR, M.lclR, app.spcRules);
-  const xItems = expandSpcRuleItems(xEval.viol, xEval.list, 'X̄');
-  const rItems = expandSpcRuleItems(rEval.viol, rEval.list, 'R');
+  const xEval = x ? { viol: x.x.viol, list: x.x.list } : evalRules(means, M.xbarbar, (M.uclX - M.xbarbar) / 3, app.spcRules, app.spcRuleK);
+  const rEval = x ? { viol: x.r.viol, list: x.r.list } : evalLimitedRules(ranges, M.rbar, M.uclR, M.lclR, app.spcRules, app.spcRuleK);
+  const xItems = expandSpcRuleItems(xEval.viol, xEval.list, 'X̄', app.spcRuleK);
+  const rItems = expandSpcRuleItems(rEval.viol, rEval.list, 'R', app.spcRuleK);
   const all = [...xItems, ...rItems];
   const report = spcReport({
     violList: all,

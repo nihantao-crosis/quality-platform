@@ -4,19 +4,27 @@
  */
 import { binomCdf } from './basicMath';
 
-export type InspectionLevel = 'I' | 'II' | 'III';
+export type InspectionLevel = 'S-1' | 'S-2' | 'S-3' | 'S-4' | 'I' | 'II' | 'III';
+export const SPECIAL_LEVELS: InspectionLevel[] = ['S-1', 'S-2', 'S-3', 'S-4'];
+export const GENERAL_LEVELS: InspectionLevel[] = ['I', 'II', 'III'];
 export type AqlMethod = 'shift' | 'gb';   // 字码判定:位移近似 / 国标查表
 export type AqlAcMethod = 'binom' | 'gb'; // 接收数判定:二项近似 / 国标主表(表 2-A,箭头已解析)
 export type InspectionState = 'normal' | 'tightened' | 'reduced';
 export type AqlMasterTable = '2-A' | '2-B' | '2-C';
 
-/** 主表覆盖的常用 AQL 列(%)。 */
-export const AQL_COLS = [0.65, 1.0, 1.5, 2.5, 4.0, 6.5];
+/** 主表覆盖的 AQL 列(%):百分不合格品体系全部 16 档(GB/T 2828.1 §5.2:该体系 AQL ≤ 10)。
+ * AQL 15–1000 属「每百单位不合格数」体系(泊松计数,d 可大于 n),留待独立批次实现。 */
+export const AQL_COLS = [0.01, 0.015, 0.025, 0.04, 0.065, 0.1, 0.15, 0.25, 0.4, 0.65, 1.0, 1.5, 2.5, 4.0, 6.5, 10];
 
 /**
  * GB/T 2828.1-2012（等同 ISO 2859-1:1999）一次抽样主表。
  *
- * 每格格式为“箭头解析后的最终字码 / n / Ac”，列顺序同 AQL_COLS；Re=Ac+1。
+ * 每格格式为“箭头解析后的最终字码 / n / Ac”，列顺序同 AQL_COLS(16 档);Re=Ac+1;
+ * “-”=国标该格无方案(如 2-B 的 S 行仅 0.025 有方案,其余留白)。
+ * 数据来源:工厂修订版 xlsx(原始↑↓箭头,程序化解析)——解析结果与既有五重互证 6 档夹具
+ * 288/288 一致、0.40 列与既有已验夹具一致(血统见 fixtures/gbt2828-1-2012-tables-2abc-full16.tsv)。
+ * 勘误(对照国标原扫描件逐格核):工厂 xlsx 的 2-C Q/0.025 误作 ↓(下方无方案,结构不可能),
+ * 原表为跨 P/Q/R 的长 ↑,已按国标改为 ↑→N/200/0/1;2-B 的 S 行按国标留白(仅 0.025 有方案)。
  * 2-A、2-B、2-C 已按 GB/T 2828.1-2012 原表物理页 21–23（印刷页 15–17）
  * 逐格核对。尤其注意：
  * 2-C 的字码到样本量映射与 2-A/2-B 不同（例如 K=50），不能复用 N_BY_CODE。
@@ -24,74 +32,67 @@ export const AQL_COLS = [0.65, 1.0, 1.5, 2.5, 4.0, 6.5];
  * 7a336944db23d14cf23fe007b0cfe2dffa5d5bef434767d2b1300ffaa35e5a37。
  */
 const MASTER_2A_RAW: Record<string, string> = {
-  A: 'F 20 0|E 13 0|D 8 0|C 5 0|B 3 0|A 2 0',
-  B: 'F 20 0|E 13 0|D 8 0|C 5 0|B 3 0|A 2 0',
-  C: 'F 20 0|E 13 0|D 8 0|C 5 0|B 3 0|D 8 1',
-  D: 'F 20 0|E 13 0|D 8 0|C 5 0|E 13 1|D 8 1',
-  E: 'F 20 0|E 13 0|D 8 0|F 20 1|E 13 1|E 13 2',
-  F: 'F 20 0|E 13 0|G 32 1|F 20 1|F 20 2|F 20 3',
-  G: 'F 20 0|H 50 1|G 32 1|G 32 2|G 32 3|G 32 5',
-  H: 'J 80 1|H 50 1|H 50 2|H 50 3|H 50 5|H 50 7',
-  J: 'J 80 1|J 80 2|J 80 3|J 80 5|J 80 7|J 80 10',
-  K: 'K 125 2|K 125 3|K 125 5|K 125 7|K 125 10|K 125 14',
-  L: 'L 200 3|L 200 5|L 200 7|L 200 10|L 200 14|L 200 21',
-  M: 'M 315 5|M 315 7|M 315 10|M 315 14|M 315 21|L 200 21',
-  N: 'N 500 7|N 500 10|N 500 14|N 500 21|M 315 21|L 200 21',
-  P: 'P 800 10|P 800 14|P 800 21|N 500 21|M 315 21|L 200 21',
-  Q: 'Q 1250 14|Q 1250 21|P 800 21|N 500 21|M 315 21|L 200 21',
-  R: 'R 2000 21|Q 1250 21|P 800 21|N 500 21|M 315 21|L 200 21',
+  A: 'Q 1250 0|P 800 0|N 500 0|M 315 0|L 200 0|K 125 0|J 80 0|H 50 0|G 32 0|F 20 0|E 13 0|D 8 0|C 5 0|B 3 0|A 2 0|C 5 1',
+  B: 'Q 1250 0|P 800 0|N 500 0|M 315 0|L 200 0|K 125 0|J 80 0|H 50 0|G 32 0|F 20 0|E 13 0|D 8 0|C 5 0|B 3 0|A 2 0|C 5 1',
+  C: 'Q 1250 0|P 800 0|N 500 0|M 315 0|L 200 0|K 125 0|J 80 0|H 50 0|G 32 0|F 20 0|E 13 0|D 8 0|C 5 0|B 3 0|D 8 1|C 5 1',
+  D: 'Q 1250 0|P 800 0|N 500 0|M 315 0|L 200 0|K 125 0|J 80 0|H 50 0|G 32 0|F 20 0|E 13 0|D 8 0|C 5 0|E 13 1|D 8 1|D 8 2',
+  E: 'Q 1250 0|P 800 0|N 500 0|M 315 0|L 200 0|K 125 0|J 80 0|H 50 0|G 32 0|F 20 0|E 13 0|D 8 0|F 20 1|E 13 1|E 13 2|E 13 3',
+  F: 'Q 1250 0|P 800 0|N 500 0|M 315 0|L 200 0|K 125 0|J 80 0|H 50 0|G 32 0|F 20 0|E 13 0|G 32 1|F 20 1|F 20 2|F 20 3|F 20 5',
+  G: 'Q 1250 0|P 800 0|N 500 0|M 315 0|L 200 0|K 125 0|J 80 0|H 50 0|G 32 0|F 20 0|H 50 1|G 32 1|G 32 2|G 32 3|G 32 5|G 32 7',
+  H: 'Q 1250 0|P 800 0|N 500 0|M 315 0|L 200 0|K 125 0|J 80 0|H 50 0|G 32 0|J 80 1|H 50 1|H 50 2|H 50 3|H 50 5|H 50 7|H 50 10',
+  J: 'Q 1250 0|P 800 0|N 500 0|M 315 0|L 200 0|K 125 0|J 80 0|H 50 0|K 125 1|J 80 1|J 80 2|J 80 3|J 80 5|J 80 7|J 80 10|J 80 14',
+  K: 'Q 1250 0|P 800 0|N 500 0|M 315 0|L 200 0|K 125 0|J 80 0|L 200 1|K 125 1|K 125 2|K 125 3|K 125 5|K 125 7|K 125 10|K 125 14|K 125 21',
+  L: 'Q 1250 0|P 800 0|N 500 0|M 315 0|L 200 0|K 125 0|M 315 1|L 200 1|L 200 2|L 200 3|L 200 5|L 200 7|L 200 10|L 200 14|L 200 21|K 125 21',
+  M: 'Q 1250 0|P 800 0|N 500 0|M 315 0|L 200 0|N 500 1|M 315 1|M 315 2|M 315 3|M 315 5|M 315 7|M 315 10|M 315 14|M 315 21|L 200 21|K 125 21',
+  N: 'Q 1250 0|P 800 0|N 500 0|M 315 0|P 800 1|N 500 1|N 500 2|N 500 3|N 500 5|N 500 7|N 500 10|N 500 14|N 500 21|M 315 21|L 200 21|K 125 21',
+  P: 'Q 1250 0|P 800 0|N 500 0|Q 1250 1|P 800 1|P 800 2|P 800 3|P 800 5|P 800 7|P 800 10|P 800 14|P 800 21|N 500 21|M 315 21|L 200 21|K 125 21',
+  Q: 'Q 1250 0|P 800 0|R 2000 1|Q 1250 1|Q 1250 2|Q 1250 3|Q 1250 5|Q 1250 7|Q 1250 10|Q 1250 14|Q 1250 21|P 800 21|N 500 21|M 315 21|L 200 21|K 125 21',
+  R: 'Q 1250 0|P 800 0|R 2000 1|R 2000 2|R 2000 3|R 2000 5|R 2000 7|R 2000 10|R 2000 14|R 2000 21|Q 1250 21|P 800 21|N 500 21|M 315 21|L 200 21|K 125 21',
 };
 
 const MASTER_2B_RAW: Record<string, string> = {
-  A: 'G 32 0|F 20 0|E 13 0|D 8 0|C 5 0|B 3 0',
-  B: 'G 32 0|F 20 0|E 13 0|D 8 0|C 5 0|B 3 0',
-  C: 'G 32 0|F 20 0|E 13 0|D 8 0|C 5 0|E 13 1',
-  D: 'G 32 0|F 20 0|E 13 0|D 8 0|F 20 1|E 13 1',
-  E: 'G 32 0|F 20 0|E 13 0|G 32 1|F 20 1|E 13 1',
-  F: 'G 32 0|F 20 0|H 50 1|G 32 1|F 20 1|F 20 2',
-  G: 'G 32 0|J 80 1|H 50 1|G 32 1|G 32 2|G 32 3',
-  H: 'K 125 1|J 80 1|H 50 1|H 50 2|H 50 3|H 50 5',
-  J: 'K 125 1|J 80 1|J 80 2|J 80 3|J 80 5|J 80 8',
-  K: 'K 125 1|K 125 2|K 125 3|K 125 5|K 125 8|K 125 12',
-  L: 'L 200 2|L 200 3|L 200 5|L 200 8|L 200 12|L 200 18',
-  M: 'M 315 3|M 315 5|M 315 8|M 315 12|M 315 18|L 200 18',
-  N: 'N 500 5|N 500 8|N 500 12|N 500 18|M 315 18|L 200 18',
-  P: 'P 800 8|P 800 12|P 800 18|N 500 18|M 315 18|L 200 18',
-  Q: 'Q 1250 12|Q 1250 18|P 800 18|N 500 18|M 315 18|L 200 18',
-  R: 'R 2000 18|Q 1250 18|P 800 18|N 500 18|M 315 18|L 200 18',
+  A: 'R 2000 0|Q 1250 0|P 800 0|N 500 0|M 315 0|L 200 0|K 125 0|J 80 0|H 50 0|G 32 0|F 20 0|E 13 0|D 8 0|C 5 0|B 3 0|A 2 0',
+  B: 'R 2000 0|Q 1250 0|P 800 0|N 500 0|M 315 0|L 200 0|K 125 0|J 80 0|H 50 0|G 32 0|F 20 0|E 13 0|D 8 0|C 5 0|B 3 0|D 8 1',
+  C: 'R 2000 0|Q 1250 0|P 800 0|N 500 0|M 315 0|L 200 0|K 125 0|J 80 0|H 50 0|G 32 0|F 20 0|E 13 0|D 8 0|C 5 0|E 13 1|D 8 1',
+  D: 'R 2000 0|Q 1250 0|P 800 0|N 500 0|M 315 0|L 200 0|K 125 0|J 80 0|H 50 0|G 32 0|F 20 0|E 13 0|D 8 0|F 20 1|E 13 1|D 8 1',
+  E: 'R 2000 0|Q 1250 0|P 800 0|N 500 0|M 315 0|L 200 0|K 125 0|J 80 0|H 50 0|G 32 0|F 20 0|E 13 0|G 32 1|F 20 1|E 13 1|E 13 2',
+  F: 'R 2000 0|Q 1250 0|P 800 0|N 500 0|M 315 0|L 200 0|K 125 0|J 80 0|H 50 0|G 32 0|F 20 0|H 50 1|G 32 1|F 20 1|F 20 2|F 20 3',
+  G: 'R 2000 0|Q 1250 0|P 800 0|N 500 0|M 315 0|L 200 0|K 125 0|J 80 0|H 50 0|G 32 0|J 80 1|H 50 1|G 32 1|G 32 2|G 32 3|G 32 5',
+  H: 'R 2000 0|Q 1250 0|P 800 0|N 500 0|M 315 0|L 200 0|K 125 0|J 80 0|H 50 0|K 125 1|J 80 1|H 50 1|H 50 2|H 50 3|H 50 5|H 50 8',
+  J: 'R 2000 0|Q 1250 0|P 800 0|N 500 0|M 315 0|L 200 0|K 125 0|J 80 0|L 200 1|K 125 1|J 80 1|J 80 2|J 80 3|J 80 5|J 80 8|J 80 12',
+  K: 'R 2000 0|Q 1250 0|P 800 0|N 500 0|M 315 0|L 200 0|K 125 0|M 315 1|L 200 1|K 125 1|K 125 2|K 125 3|K 125 5|K 125 8|K 125 12|K 125 18',
+  L: 'R 2000 0|Q 1250 0|P 800 0|N 500 0|M 315 0|L 200 0|N 500 1|M 315 1|L 200 1|L 200 2|L 200 3|L 200 5|L 200 8|L 200 12|L 200 18|K 125 18',
+  M: 'R 2000 0|Q 1250 0|P 800 0|N 500 0|M 315 0|P 800 1|N 500 1|M 315 1|M 315 2|M 315 3|M 315 5|M 315 8|M 315 12|M 315 18|L 200 18|K 125 18',
+  N: 'R 2000 0|Q 1250 0|P 800 0|N 500 0|Q 1250 1|P 800 1|N 500 1|N 500 2|N 500 3|N 500 5|N 500 8|N 500 12|N 500 18|M 315 18|L 200 18|K 125 18',
+  P: 'R 2000 0|Q 1250 0|P 800 0|R 2000 1|Q 1250 1|P 800 1|P 800 2|P 800 3|P 800 5|P 800 8|P 800 12|P 800 18|N 500 18|M 315 18|L 200 18|K 125 18',
+  Q: 'R 2000 0|Q 1250 0|S 3150 1|R 2000 1|Q 1250 1|Q 1250 2|Q 1250 3|Q 1250 5|Q 1250 8|Q 1250 12|Q 1250 18|P 800 18|N 500 18|M 315 18|L 200 18|K 125 18',
+  R: 'R 2000 0|Q 1250 0|S 3150 1|R 2000 1|R 2000 2|R 2000 3|R 2000 5|R 2000 8|R 2000 12|R 2000 18|Q 1250 18|P 800 18|N 500 18|M 315 18|L 200 18|K 125 18',
+  S: '-|-|S 3150 1|-|-|-|-|-|-|-|-|-|-|-|-|-',
 };
 
 const MASTER_2C_RAW: Record<string, string> = {
-  A: 'F 8 0|E 5 0|D 3 0|C 2 0|B 2 0|A 2 0',
-  B: 'F 8 0|E 5 0|D 3 0|C 2 0|B 2 0|A 2 0',
-  C: 'F 8 0|E 5 0|D 3 0|C 2 0|B 2 0|E 5 1',
-  D: 'F 8 0|E 5 0|D 3 0|C 2 0|F 8 1|E 5 1',
-  E: 'F 8 0|E 5 0|D 3 0|G 13 1|F 8 1|E 5 1',
-  F: 'F 8 0|E 5 0|H 20 1|G 13 1|F 8 1|F 8 2',
-  G: 'F 8 0|J 32 1|H 20 1|G 13 1|G 13 2|G 13 3',
-  H: 'K 50 1|J 32 1|H 20 1|H 20 2|H 20 3|H 20 5',
-  J: 'K 50 1|J 32 1|J 32 2|J 32 3|J 32 5|J 32 6',
-  K: 'K 50 1|K 50 2|K 50 3|K 50 5|K 50 6|K 50 8',
-  L: 'L 80 2|L 80 3|L 80 5|L 80 6|L 80 8|L 80 10',
-  M: 'M 125 3|M 125 5|M 125 6|M 125 8|M 125 10|L 80 10',
-  N: 'N 200 5|N 200 6|N 200 8|N 200 10|M 125 10|L 80 10',
-  P: 'P 315 6|P 315 8|P 315 10|N 200 10|M 125 10|L 80 10',
-  Q: 'Q 500 8|Q 500 10|P 315 10|N 200 10|M 125 10|L 80 10',
-  R: 'R 800 10|Q 500 10|P 315 10|N 200 10|M 125 10|L 80 10',
+  A: 'Q 500 0|P 315 0|N 200 0|M 125 0|L 80 0|K 50 0|J 32 0|H 20 0|G 13 0|F 8 0|E 5 0|D 3 0|C 2 0|B 2 0|A 2 0|D 3 1',
+  B: 'Q 500 0|P 315 0|N 200 0|M 125 0|L 80 0|K 50 0|J 32 0|H 20 0|G 13 0|F 8 0|E 5 0|D 3 0|C 2 0|B 2 0|A 2 0|D 3 1',
+  C: 'Q 500 0|P 315 0|N 200 0|M 125 0|L 80 0|K 50 0|J 32 0|H 20 0|G 13 0|F 8 0|E 5 0|D 3 0|C 2 0|B 2 0|E 5 1|D 3 1',
+  D: 'Q 500 0|P 315 0|N 200 0|M 125 0|L 80 0|K 50 0|J 32 0|H 20 0|G 13 0|F 8 0|E 5 0|D 3 0|C 2 0|F 8 1|E 5 1|D 3 1',
+  E: 'Q 500 0|P 315 0|N 200 0|M 125 0|L 80 0|K 50 0|J 32 0|H 20 0|G 13 0|F 8 0|E 5 0|D 3 0|G 13 1|F 8 1|E 5 1|E 5 2',
+  F: 'Q 500 0|P 315 0|N 200 0|M 125 0|L 80 0|K 50 0|J 32 0|H 20 0|G 13 0|F 8 0|E 5 0|H 20 1|G 13 1|F 8 1|F 8 2|F 8 3',
+  G: 'Q 500 0|P 315 0|N 200 0|M 125 0|L 80 0|K 50 0|J 32 0|H 20 0|G 13 0|F 8 0|J 32 1|H 20 1|G 13 1|G 13 2|G 13 3|G 13 5',
+  H: 'Q 500 0|P 315 0|N 200 0|M 125 0|L 80 0|K 50 0|J 32 0|H 20 0|G 13 0|K 50 1|J 32 1|H 20 1|H 20 2|H 20 3|H 20 5|H 20 6',
+  J: 'Q 500 0|P 315 0|N 200 0|M 125 0|L 80 0|K 50 0|J 32 0|H 20 0|L 80 1|K 50 1|J 32 1|J 32 2|J 32 3|J 32 5|J 32 6|J 32 8',
+  K: 'Q 500 0|P 315 0|N 200 0|M 125 0|L 80 0|K 50 0|J 32 0|M 125 1|L 80 1|K 50 1|K 50 2|K 50 3|K 50 5|K 50 6|K 50 8|K 50 10',
+  L: 'Q 500 0|P 315 0|N 200 0|M 125 0|L 80 0|K 50 0|N 200 1|M 125 1|L 80 1|L 80 2|L 80 3|L 80 5|L 80 6|L 80 8|L 80 10|K 50 10',
+  M: 'Q 500 0|P 315 0|N 200 0|M 125 0|L 80 0|P 315 1|N 200 1|M 125 1|M 125 2|M 125 3|M 125 5|M 125 6|M 125 8|M 125 10|L 80 10|K 50 10',
+  N: 'Q 500 0|P 315 0|N 200 0|M 125 0|Q 500 1|P 315 1|N 200 1|N 200 2|N 200 3|N 200 5|N 200 6|N 200 8|N 200 10|M 125 10|L 80 10|K 50 10',
+  P: 'Q 500 0|P 315 0|N 200 0|R 800 1|Q 500 1|P 315 1|P 315 2|P 315 3|P 315 5|P 315 6|P 315 8|P 315 10|N 200 10|M 125 10|L 80 10|K 50 10',
+  Q: 'Q 500 0|P 315 0|N 200 0|R 800 1|Q 500 1|Q 500 2|Q 500 3|Q 500 5|Q 500 6|Q 500 8|Q 500 10|P 315 10|N 200 10|M 125 10|L 80 10|K 50 10',
+  R: 'Q 500 0|P 315 0|N 200 0|R 800 1|R 800 2|R 800 3|R 800 5|R 800 6|R 800 8|R 800 10|Q 500 10|P 315 10|N 200 10|M 125 10|L 80 10|K 50 10',
 };
 
 const MASTER_TABLE_RAW: Record<InspectionState, Record<string, string>> = {
   normal: MASTER_2A_RAW,
   tightened: MASTER_2B_RAW,
   reduced: MASTER_2C_RAW,
-};
-
-/** 计算正常检验转移得分时，AQL 0.65 的“严一档”是表 2-A 的 0.40 列。 */
-const MASTER_2A_040_RAW: Record<string, string> = {
-  A: 'G 32 0', B: 'G 32 0', C: 'G 32 0', D: 'G 32 0',
-  E: 'G 32 0', F: 'G 32 0', G: 'G 32 0', H: 'G 32 0',
-  J: 'K 125 1', K: 'K 125 1', L: 'L 200 2', M: 'M 315 3',
-  N: 'N 500 5', P: 'P 800 7', Q: 'Q 1250 10', R: 'R 2000 14',
 };
 
 export const TABLE_BY_STATE: Record<InspectionState, AqlMasterTable> = {
@@ -101,7 +102,9 @@ export const TABLE_BY_STATE: Record<InspectionState, AqlMasterTable> = {
 function parseMasterCell(row: string | undefined, aqlPct: number): SamplingPlan | null {
   const ci = AQL_COLS.indexOf(aqlPct);
   if (!row || ci < 0) return null;
-  const [code, n, ac] = row.split('|')[ci].split(' ');
+  const cell = row.split('|')[ci];
+  if (!cell || cell === '-') return null; // 国标该格无方案(留白)
+  const [code, n, ac] = cell.split(' ');
   return { code, n: Number(n), ac: Number(ac), re: Number(ac) + 1 };
 }
 
@@ -128,19 +131,15 @@ export function masterPlan2C(initialCode: string, aqlPct: number): SamplingPlan 
 export function oneStepTighterAql(aqlPct: number): number | null {
   const ci = AQL_COLS.indexOf(aqlPct);
   if (ci < 0) return null;
-  return ci === 0 ? 0.4 : AQL_COLS[ci - 1];
+  // 0.010 已是最严档:无“严一档”。表 2-A 该列 Ac≥2 的方案不存在,转移得分只会走 +2 分支,
+  // 调用方对 null 按“不可比较”保守处理(有测试锁定该前提)。
+  return ci === 0 ? null : AQL_COLS[ci - 1];
 }
 
-/** 转移得分专用：返回正常检验下比当前 AQL 严一档的正式方案。 */
+/** 转移得分专用：返回正常检验下比当前 AQL 严一档的正式方案(直接查主表相邻列)。 */
 export function normalPlanOneStepTighter(initialCode: string, aqlPct: number): SamplingPlan | null {
   const tighter = oneStepTighterAql(aqlPct);
   if (tighter == null) return null;
-  if (tighter === 0.4) {
-    const cell = MASTER_2A_040_RAW[initialCode];
-    if (!cell) return null;
-    const [code, n, ac] = cell.split(' ');
-    return { code, n: Number(n), ac: Number(ac), re: Number(ac) + 1 };
-  }
   return masterPlan2A(initialCode, tighter);
 }
 
@@ -170,22 +169,22 @@ export const LETTERS: Array<[string, number, number]> = [
 ];
 
 /** GB/T 2828.1 / ISO 2859-1 样本量字码表(一般检验水平 I / II / III,非均匀位移)。 */
-export const CODE_LETTER_TABLE: Array<{ lo: number; hi: number; I: string; II: string; III: string }> = [
-  { lo: 2, hi: 8, I: 'A', II: 'A', III: 'B' },
-  { lo: 9, hi: 15, I: 'A', II: 'B', III: 'C' },
-  { lo: 16, hi: 25, I: 'B', II: 'C', III: 'D' },
-  { lo: 26, hi: 50, I: 'C', II: 'D', III: 'E' },
-  { lo: 51, hi: 90, I: 'C', II: 'E', III: 'F' },
-  { lo: 91, hi: 150, I: 'D', II: 'F', III: 'G' },
-  { lo: 151, hi: 280, I: 'E', II: 'G', III: 'H' },
-  { lo: 281, hi: 500, I: 'F', II: 'H', III: 'J' },
-  { lo: 501, hi: 1200, I: 'G', II: 'J', III: 'K' },
-  { lo: 1201, hi: 3200, I: 'H', II: 'K', III: 'L' },
-  { lo: 3201, hi: 10000, I: 'J', II: 'L', III: 'M' },
-  { lo: 10001, hi: 35000, I: 'K', II: 'M', III: 'N' },
-  { lo: 35001, hi: 150000, I: 'L', II: 'N', III: 'P' },
-  { lo: 150001, hi: 500000, I: 'M', II: 'P', III: 'Q' },
-  { lo: 500001, hi: Infinity, I: 'N', II: 'Q', III: 'R' },
+export const CODE_LETTER_TABLE: Array<{ lo: number; hi: number; 'S-1': string; 'S-2': string; 'S-3': string; 'S-4': string; I: string; II: string; III: string }> = [
+  { lo: 2, hi: 8, 'S-1': 'A', 'S-2': 'A', 'S-3': 'A', 'S-4': 'A', I: 'A', II: 'A', III: 'B' },
+  { lo: 9, hi: 15, 'S-1': 'A', 'S-2': 'A', 'S-3': 'A', 'S-4': 'A', I: 'A', II: 'B', III: 'C' },
+  { lo: 16, hi: 25, 'S-1': 'A', 'S-2': 'A', 'S-3': 'B', 'S-4': 'B', I: 'B', II: 'C', III: 'D' },
+  { lo: 26, hi: 50, 'S-1': 'A', 'S-2': 'B', 'S-3': 'B', 'S-4': 'C', I: 'C', II: 'D', III: 'E' },
+  { lo: 51, hi: 90, 'S-1': 'B', 'S-2': 'B', 'S-3': 'C', 'S-4': 'C', I: 'C', II: 'E', III: 'F' },
+  { lo: 91, hi: 150, 'S-1': 'B', 'S-2': 'B', 'S-3': 'C', 'S-4': 'D', I: 'D', II: 'F', III: 'G' },
+  { lo: 151, hi: 280, 'S-1': 'B', 'S-2': 'C', 'S-3': 'D', 'S-4': 'E', I: 'E', II: 'G', III: 'H' },
+  { lo: 281, hi: 500, 'S-1': 'B', 'S-2': 'C', 'S-3': 'D', 'S-4': 'E', I: 'F', II: 'H', III: 'J' },
+  { lo: 501, hi: 1200, 'S-1': 'C', 'S-2': 'C', 'S-3': 'E', 'S-4': 'F', I: 'G', II: 'J', III: 'K' },
+  { lo: 1201, hi: 3200, 'S-1': 'C', 'S-2': 'D', 'S-3': 'E', 'S-4': 'G', I: 'H', II: 'K', III: 'L' },
+  { lo: 3201, hi: 10000, 'S-1': 'C', 'S-2': 'D', 'S-3': 'F', 'S-4': 'G', I: 'J', II: 'L', III: 'M' },
+  { lo: 10001, hi: 35000, 'S-1': 'C', 'S-2': 'D', 'S-3': 'F', 'S-4': 'H', I: 'K', II: 'M', III: 'N' },
+  { lo: 35001, hi: 150000, 'S-1': 'D', 'S-2': 'E', 'S-3': 'G', 'S-4': 'J', I: 'L', II: 'N', III: 'P' },
+  { lo: 150001, hi: 500000, 'S-1': 'D', 'S-2': 'E', 'S-3': 'G', 'S-4': 'J', I: 'M', II: 'P', III: 'Q' },
+  { lo: 500001, hi: Infinity, 'S-1': 'D', 'S-2': 'E', 'S-3': 'H', 'S-4': 'K', I: 'N', II: 'Q', III: 'R' },
 ];
 
 export const N_BY_CODE: Record<string, number> = {
@@ -221,6 +220,7 @@ export function acceptNumber(n: number, aqlPct: number): number {
 
 /** 位移近似:以水平 II 批量档为基准,水平 I/III 各偏移 ∓2 位字码。 */
 export function codeLetterShift(lot: number, level: InspectionLevel): string {
+  if (level !== 'I' && level !== 'II' && level !== 'III') return codeLetterGB(lot, level); // 特殊水平无位移近似定义
   let bi = LETTERS.findIndex((r) => lot >= r[1] && lot <= r[2]);
   if (bi < 0) bi = lot < 2 ? 0 : LETTERS.length - 1;
   const shift = { I: -2, II: 0, III: 2 }[level] || 0;

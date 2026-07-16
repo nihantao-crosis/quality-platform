@@ -58,7 +58,8 @@ function OcCurveChartImpl(cfg: {
         return <Txt key={'x' + g} x={X(p)} y={H - 18} s={(p * 100).toFixed(1) + '%'} fill={T.axis} size={10} anchor="middle" />;
       })}
       <polyline points={pts.join(' ')} fill="none" stroke={T.point} strokeWidth={T.sw + 1} />
-      {cfg.aqlP != null && mark(cfg.aqlP, T.center, 'AQL')}
+      {/* AQL 点语义是「绿线」(页面文案如此说明),不跟随主题中心线色(经典已改黑) */}
+      {cfg.aqlP != null && mark(cfg.aqlP, '#1a8a3a', 'AQL')}
       {cfg.rqlP != null && mark(cfg.rqlP, T.limit, 'RQL')}
       <Txt x={m.l} y={m.t - 9} s="接收概率 Pa" fill={T.text} size={11} weight={600} />
       <Txt x={m.l + pw} y={H - 2} s="批不良率 p →" fill={T.axis} size={10} anchor="end" />

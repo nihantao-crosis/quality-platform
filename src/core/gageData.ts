@@ -28,6 +28,45 @@ export interface GageCategoryColumn {
   source: 'numeric' | 'text';
 }
 
+/**
+ * 工作表列显示精度（小数位）。
+ * 按「列」量级自适应 3–6 位——混合量纲数据（如 过盈量 0.0675 与 压入力 1350 同表）
+ * 不能用全局 σ，否则小量纲列被压到 3 位显示成 0.068，造成“数据被改”的误解。
+ * 全整数列（部件/操作员等 ID 列，含常数列）返回 0，显示 1/2/3 而非 1.000，
+ * 与 Minitab 一致；悬停提示仍显示全精度原值，不影响存储。
+ */
+export function columnDisplayDp(values: number[]): number {
+  if (values.length === 0) return 3;
+  let lo = Infinity;
+  let hi = -Infinity;
+  let sum = 0;
+  let allInt = true;
+  for (const v of values) {
+    if (v < lo) lo = v;
+    if (v > hi) hi = v;
+    sum += Math.abs(v);
+    if (allInt && !Number.isInteger(v)) allInt = false;
+  }
+  if (allInt) return 0;
+  const scale = Math.max(hi - lo, (sum / values.length) * 0.01, 1e-9); // 列内变差，退化时用量级的 1%
+  return Math.max(3, Math.min(6, 2 - Math.floor(Math.log10(scale))));
+}
+
+/** 众数胞观测次数：缺胞报错时以“其余胞”的典型重复次数说明缺了几次。 */
+function modalCellCount(counts: number[]): number {
+  const freq = new Map<number, number>();
+  for (const count of counts) freq.set(count, (freq.get(count) ?? 0) + 1);
+  let best = 2;
+  let bestFreq = -1;
+  for (const [count, f] of freq) {
+    if (f > bestFreq || (f === bestFreq && count > best)) {
+      best = count;
+      bestFreq = f;
+    }
+  }
+  return best;
+}
+
 interface ResolvedGageCategoryColumn extends GageCategoryColumn {
   values: string[];
   numericIndex: number | null;
@@ -127,8 +166,11 @@ export function prepareGageStudy(
   }
   const partLabels = [...new Set(partValues)];
   const operatorLabels = [...new Set(operatorValues)];
-  if (partLabels.length < 2 || operatorLabels.length < 2) {
-    return { ok: false, reason: '交叉研究至少需要 2 个部件和 2 个操作员' };
+  if (operatorLabels.length < 2) {
+    return { ok: false, reason: `仅检测到 1 个操作员(${operatorLabels[0]}):交叉 Gage R&R 需 ≥2 名操作员对同批部件重复测量;请补充其他操作员数据` };
+  }
+  if (partLabels.length < 2) {
+    return { ok: false, reason: `仅检测到 1 个部件(${partLabels[0]}):交叉 Gage R&R 需 ≥2 个部件供各操作员重复测量;请补充其他部件数据` };
   }
 
   const cellRows = new Map<string, number[]>();
@@ -139,11 +181,42 @@ export function prepareGageStudy(
     cellRows.set(key, rows);
   }
   const expectedCells = partLabels.length * operatorLabels.length;
-  if (cellRows.size !== expectedCells) return { ok: false, reason: '部件×操作员组合不完整，必须是完整交叉设计' };
   const counts = [...cellRows.values()].map((rows) => rows.length);
-  const repeats = counts[0] ?? 0;
-  if (repeats < 2 || counts.some((count) => count !== repeats)) {
-    return { ok: false, reason: '每个部件×操作员组合必须有相同且不少于 2 次的重复测量' };
+  if (cellRows.size !== expectedCells) {
+    // 指名缺失的具体胞:工厂拿到「计算错误」必须能定位到该补哪个部件×操作员
+    const modal = modalCellCount(counts);
+    const missing: string[] = [];
+    for (const part of partLabels) {
+      for (const operator of operatorLabels) {
+        if (!cellRows.has(`${part}\u0000${operator}`)) {
+          missing.push(`部件「${part}」×操作员「${operator}」缺 ${modal} 次测量`);
+        }
+      }
+    }
+    const head = missing.slice(0, 3).join('、');
+    const tail = missing.length > 3 ? `等共 ${missing.length} 个组合缺测` : '';
+    const uniform = counts.every((count) => count === modal);
+    return { ok: false, reason: `交叉设计不完整:${head}${tail}(其余胞${uniform ? '均' : '多'}为 ${modal} 次)` };
+  }
+  const minCount = Math.min(...counts);
+  const maxCount = Math.max(...counts);
+  if (minCount !== maxCount) {
+    // 不等重复:列出最少/最多的具体胞,而不是笼统一句「必须相同」
+    const describeCellWithCount = (target: number) => {
+      for (const part of partLabels) {
+        for (const operator of operatorLabels) {
+          if (cellRows.get(`${part}\u0000${operator}`)!.length === target) {
+            return `部件「${part}」×操作员「${operator}」(${target} 次)`;
+          }
+        }
+      }
+      return `(${target} 次)`;
+    };
+    return { ok: false, reason: `各胞重复测量次数不一致:最少为${describeCellWithCount(minCount)},最多为${describeCellWithCount(maxCount)};交叉 Gage R&R 要求所有部件×操作员组合重复次数相同且 ≥2` };
+  }
+  const repeats = minCount;
+  if (repeats < 2) {
+    return { ok: false, reason: `每个部件×操作员组合仅有 ${repeats} 次测量:交叉 Gage R&R 需每胞 ≥2 次重复测量;请对每个部件×操作员组合补测` };
   }
 
   const observations: GageObservation[] = [];

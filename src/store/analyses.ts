@@ -10,10 +10,11 @@ import {
   prepareGageStudy, resolveNumericColumn,
   oneWayAnova, oneSampleT, twoSampleT, linearRegression, anovaGroups, buildAnovaGroups, wideScaleDisparate, resolveAnovaMode, countAnovaPendingCells, isDoeAnalysisColumn, analyzeDoe, detectFactorial, analyzeFactorial, factorialModelTerms, resolveDoeColumns, resolveDoeBlockValues, plansByState, computeDescriptive,
   ewmaSeries, cusumSeries, stagedXbar, stagedRange, stageValidationError, normalizeSwitchStatus,
-  type InspectionLevel, type AnovaMode, type AqlMethod, type AqlAcMethod, type NelsonRules, type SwitchStatus, type SpcDataLayout,
+  DEFAULT_RULE_K, normalizeRuleK,
+  type InspectionLevel, type AnovaMode, type AqlMethod, type AqlAcMethod, type NelsonRules, type NelsonRuleK, type SwitchStatus, type SpcDataLayout,
 } from '../core';
 import { useApp, DEFAULT_SPC_RULES, type SpcType, type DoeView, type DoeTab, type HypoTab, type ParetoView } from './appStore';
-import { syncSpecForActiveMeasurement, useData, type ParetoModel } from './dataStore';
+import { syncSpecForActiveMeasurement, useData, resolveCapabilityMeasurementData, type ParetoModel } from './dataStore';
 import { loadFishboneState, saveFishboneState, type FishboneData } from './fishboneStore';
 import { sessionLog } from './sessionLog';
 import { projectStoreValidationError, registerProjectLifecycleHooks } from '../platform/project';
@@ -36,6 +37,8 @@ export interface AnalysisSnapshot {
   snapshotVersion?: 2 | 3 | 4 | 5;
   spcType?: SpcType;
   spcRules?: NelsonRules;
+  /** 判异准则可编辑 K 值;缺失即当时的 Nelson/Minitab 标准值(旧记录兼容)。 */
+  spcRuleK?: NelsonRuleK;
   spcStageCol?: string | null;
   spcDataLayout?: SpcDataLayout;
   spcValueCol?: string | null;
@@ -46,6 +49,11 @@ export interface AnalysisSnapshot {
   spcResolvedRoleNote?: string;
   lsl?: number; usl?: number; tgt?: number; lslOn?: boolean; uslOn?: boolean;
   capabilityBins?: number;
+  /** 能力子组口径(批次716-N);缺失即旧记录,回放时回落「沿用 SPC 角色」而非继承当前页面。 */
+  capSubgroupMode?: 'spc' | 'const' | 'stacked';
+  capSubgroupSize?: number;
+  capValueCol?: string | null;
+  capSubgroupIdCol?: string | null;
   gageUseReal?: boolean;
   gageValueName?: string | null;
   gagePartName?: string | null;
@@ -240,17 +248,20 @@ export interface SpcViolationItem {
   chartLabel: string;
 }
 
-const RULE_WINDOW_LENGTH: Partial<Record<number, number>> = { 2: 9, 3: 6, 4: 14, 7: 15, 8: 8 };
-
 export function expandSpcRuleItems(
   viol: ReadonlySet<number>,
   list: ReadonlyArray<{ i: number; rule: number; desc: string }>,
   chartLabel: string,
+  ruleK: NelsonRuleK = DEFAULT_RULE_K,
 ): SpcViolationItem[] {
+  // 游程型准则窗口长度随 K 值变化;准则 1/5/6 的 list 已按实际点逐条记录,窗口恒为 1。
+  const windowLength: Partial<Record<number, number>> = {
+    2: ruleK.k2, 3: ruleK.k3, 4: ruleK.k4, 7: ruleK.k7, 8: ruleK.k8,
+  };
   const out: SpcViolationItem[] = [];
   const seen = new Set<string>();
   for (const item of list) {
-    const len = RULE_WINDOW_LENGTH[item.rule] ?? 1;
+    const len = windowLength[item.rule] ?? 1;
     const start = Math.max(0, item.i - len + 1);
     for (let i = start; i <= item.i; i++) {
       if (!viol.has(i)) continue;
@@ -295,12 +306,12 @@ function buildSummary(kind: AnalysisKind): Omit<SavedAnalysis, 'id' | 'createdAt
       const rows = SM.subs.map((s) => s.vals);
       const means = SM.subs.map((s) => s.mean);
       const ruleItems = (data: number[], cl: number, sigma: number, chartLabel: string) => {
-        const r = evalRules(data, cl, sigma, app.spcRules);
-        return expandSpcRuleItems(r.viol, r.list, chartLabel);
+        const r = evalRules(data, cl, sigma, app.spcRules, app.spcRuleK);
+        return expandSpcRuleItems(r.viol, r.list, chartLabel, app.spcRuleK);
       };
       const limitedItems = (data: number[], cl: number, ucl: number | number[], lcl: number | number[], chartLabel: string, indexOffset = 0) => {
-        const r = evalLimitedRules(data, cl, ucl, lcl, app.spcRules);
-        return expandSpcRuleItems(r.viol, r.list, chartLabel).map((item) => ({ ...item, i: item.i + indexOffset }));
+        const r = evalLimitedRules(data, cl, ucl, lcl, app.spcRules, app.spcRuleK);
+        return expandSpcRuleItems(r.viol, r.list, chartLabel, app.spcRuleK).map((item) => ({ ...item, i: item.i + indexOffset }));
       };
       let items: SpcViolationItem[];
       let stageCount = 0;
@@ -375,10 +386,7 @@ function buildSummary(kind: AnalysisKind): Omit<SavedAnalysis, 'id' | 'createdAt
     }
     case 'capability': {
       const dataState = useData.getState();
-      const prepared = prepareSpcData(M, dataState.textCols, {
-        layout: app.spcDataLayout, valueColumn: app.spcValueCol, subgroupColumn: app.spcSubgroupCol,
-        pendingCells: dataState.pendingCells,
-      });
+      const prepared = resolveCapabilityMeasurementData(M, dataState.textCols);
       if (prepared.error || !prepared.model) {
         return {
           kind, title: '过程能力分析', metric: '数据角色未配置',
@@ -398,7 +406,7 @@ function buildSummary(kind: AnalysisKind): Omit<SavedAnalysis, 'id' | 'createdAt
       const ad = CM.all.length >= 8 ? andersonDarling(CM.all) : null;
       const assessment = assessCapability({
         cpk: cap.cpk, verdict: cap.verdict, adP: ad ? ad.p : null, n: CM.all.length,
-        spcViolations: countCapabilityViolations(CM, app.spcRules),
+        spcViolations: countCapabilityViolations(CM, app.spcRules, app.spcRuleK),
       });
       return {
         kind, title: '过程能力分析', metric: `Cpk ${nf(cap.cpk, 2)}`,
@@ -618,6 +626,7 @@ function snapshotOf(kind: AnalysisKind): AnalysisSnapshot {
   if (kind === 'spc') {
     snap.spcType = a.spcType;
     snap.spcRules = { ...a.spcRules };
+    snap.spcRuleK = { ...a.spcRuleK };
     snap.spcStageCol = a.spcStageCol;
   }
   // 能力指标依赖与 SPC 相同的测量列/子组角色，因此历史回看也必须保存这组参数。
@@ -626,10 +635,13 @@ function snapshotOf(kind: AnalysisKind): AnalysisSnapshot {
     snap.spcValueCol = a.spcValueCol;
     snap.spcSubgroupCol = a.spcSubgroupCol;
     const data = useData.getState();
-    const prepared = prepareSpcData(data.model, data.textCols, {
-      layout: a.spcDataLayout, valueColumn: a.spcValueCol, subgroupColumn: a.spcSubgroupCol,
-      pendingCells: data.pendingCells,
-    });
+    // 能力口径由 capSubgroup* 决定(批次716-N),不入快照则历史记录回放会被当前页面配置静默改口径。
+    const prepared = kind === 'capability'
+      ? resolveCapabilityMeasurementData(data.model, data.textCols)
+      : prepareSpcData(data.model, data.textCols, {
+          layout: a.spcDataLayout, valueColumn: a.spcValueCol, subgroupColumn: a.spcSubgroupCol,
+          pendingCells: data.pendingCells,
+        });
     if (!prepared.error) {
       snap.spcResolvedLayout = prepared.layoutLabel;
       snap.spcResolvedVariableName = prepared.variableName;
@@ -649,6 +661,10 @@ function snapshotOf(kind: AnalysisKind): AnalysisSnapshot {
   if (kind === 'capability') {
     snap.lsl = a.lsl; snap.usl = a.usl; snap.tgt = a.tgt; snap.lslOn = a.lslOn; snap.uslOn = a.uslOn;
     snap.capabilityBins = a.capabilityBins;
+    snap.capSubgroupMode = a.capSubgroupMode;
+    snap.capSubgroupSize = a.capSubgroupSize;
+    snap.capValueCol = a.capValueCol;
+    snap.capSubgroupIdCol = a.capSubgroupIdCol;
   }
   if (kind === 'gagerr') {
     // %公差直接依赖规格宽度；历史研究若只恢复列角色而不恢复当时的规格，
@@ -969,8 +985,17 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
       'activeVar',
     ];
     for (const key of appKeys) if (s[key] !== undefined) patch[key] = s[key];
+    // 能力子组口径随记录还原;旧记录无字段时回落默认「沿用 SPC 角色」,不继承当前页面配置。
+    if (a.kind === 'capability') {
+      patch.capSubgroupMode = s.capSubgroupMode ?? 'spc';
+      patch.capSubgroupSize = typeof s.capSubgroupSize === 'number' && s.capSubgroupSize >= 2 && s.capSubgroupSize <= 10 ? Math.round(s.capSubgroupSize) : 5;
+      patch.capValueCol = s.capValueCol ?? null;
+      patch.capSubgroupIdCol = s.capSubgroupIdCol ?? null;
+    }
     // v1.30 以前的 SPC 记录没有规则/阶段快照：采用当时的产品默认，而非继承当前页面条件。
     if (a.kind === 'spc' && !s.spcRules) patch.spcRules = { ...DEFAULT_SPC_RULES };
+    // K 值随记录还原;旧记录无该字段时回到 Nelson/Minitab 标准值,不继承当前页面设置。
+    if (a.kind === 'spc') patch.spcRuleK = normalizeRuleK(s.spcRuleK);
     if (a.kind === 'spc' && s.spcStageCol === undefined) patch.spcStageCol = null;
     if (a.kind === 'spc' && s.spcDataLayout === undefined) {
       patch.spcDataLayout = 'auto';

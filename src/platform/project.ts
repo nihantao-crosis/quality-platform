@@ -4,7 +4,7 @@
  * 导入:白名单校验后写回并重载,另一台机器打开即完整恢复。
  */
 import { platform } from './adapter';
-import { AQL_COLS, MAX_AQL_RECORDS, MAX_LOT_SIZE, normalizeSwitchStatus, type SwitchStatus } from '../core';
+import { AQL_COLS, MAX_AQL_RECORDS, MAX_LOT_SIZE, normalizeSwitchStatus, ruleKValueError, type NelsonRuleK, type SwitchStatus } from '../core';
 
 /** 允许进出项目文件的存储键；各 store 仍须自行做字段级校验。 */
 export const PROJECT_KEYS = [
@@ -254,6 +254,18 @@ function fishboneValidationError(raw: unknown): string | null {
   return fishboneDataValidationError(raw);
 }
 
+/** spcRuleK 逐字段白名单校验:仅允许 k1–k8,范围与 core normalizeRuleK 同口径。
+ * 运行时(localStorage/快照回放)非法值由 normalizeRuleK 整体回落标准值,不拒绝整份 prefs。 */
+function spcRuleKValidationError(raw: unknown, label: string): string | null {
+  if (!isObject(raw)) return `${label}不是有效对象`;
+  for (const [key, value] of Object.entries(raw)) {
+    if (!/^k[1-8]$/.test(key)) return `${label}含有非白名单字段 ${key}`;
+    const detail = ruleKValueError(key as keyof NelsonRuleK, value);
+    if (detail) return `${label}无效：${detail}`;
+  }
+  return null;
+}
+
 function aqlSwitchValidationError(rawSwitch: unknown): string | null {
   if (!isObject(rawSwitch)) return 'AQL 转移状态无效';
   const candidate = rawSwitch as Partial<SwitchStatus>;
@@ -306,7 +318,7 @@ function aqlStateValidationError(raw: unknown): string | null {
   if (extra) return `AQL 业务状态含有非白名单字段 ${extra}`;
   if (!Number.isSafeInteger(raw.aqlLot) || (raw.aqlLot as number) < 2
     || (raw.aqlLot as number) > MAX_LOT_SIZE) return 'AQL 批量超出允许范围';
-  if (raw.aqlLevel !== 'I' && raw.aqlLevel !== 'II' && raw.aqlLevel !== 'III') {
+  if (!['S-1', 'S-2', 'S-3', 'S-4', 'I', 'II', 'III'].includes(raw.aqlLevel as string)) {
     return 'AQL 检验水平无效';
   }
   if (typeof raw.aqlAQL !== 'number' || !AQL_COLS.includes(raw.aqlAQL)) {
@@ -328,7 +340,7 @@ function prefsValidationError(raw: unknown): string | null {
     'chartStyle', 'showGrid', 'projectName', 'lsl', 'usl', 'tgt', 'lslOn', 'uslOn', 'capabilityBins',
     'gageUseReal', 'gageValueName', 'gagePartName', 'gageOperatorName',
     'aqlLot', 'aqlLevel', 'aqlAQL', 'aqlMethod', 'aqlAcMethod', 'aqlSwitch',
-    'spcRules', 'spcDataLayout', 'spcValueCol', 'spcSubgroupCol', 'spcStageCol',
+    'spcRules', 'spcRuleK', 'spcDataLayout', 'spcValueCol', 'spcSubgroupCol', 'spcStageCol',
     'doeView', 'doeTab', 'doeFactorCols', 'doeRespCol', 'doeModelTerms', 'doeIncludeCurvature',
     't1ColName', 't1Mu0', 't2ColAName', 't2ColBName', 'regXName', 'regYName',
     'paretoView', 'paretoMergeOther', 'paretoThreshold',
@@ -378,6 +390,10 @@ function prefsValidationError(raw: unknown): string | null {
     if (!isObject(state.spcRules) || Object.entries(state.spcRules).some(([key, value]) => !/^r[1-8]$/.test(key)
       || typeof value !== 'boolean')) return 'SPC 判异准则无效';
   }
+  if (state.spcRuleK !== undefined) {
+    const detail = spcRuleKValidationError(state.spcRuleK, 'SPC 判异参数');
+    if (detail) return detail;
+  }
   for (const key of ['showGrid', 'lslOn', 'uslOn', 'gageUseReal', 'doeIncludeCurvature', 'paretoMergeOther'] as const) {
     if (state[key] !== undefined && typeof state[key] !== 'boolean') return `偏好设置 ${key} 不是布尔值`;
   }
@@ -393,7 +409,7 @@ function prefsValidationError(raw: unknown): string | null {
     || (state.aqlLot as number) < 2 || (state.aqlLot as number) > MAX_LOT_SIZE)) {
     return 'AQL 批量超出允许范围';
   }
-  if ('aqlLevel' in state && state.aqlLevel !== 'I' && state.aqlLevel !== 'II' && state.aqlLevel !== 'III') {
+  if ('aqlLevel' in state && !['S-1', 'S-2', 'S-3', 'S-4', 'I', 'II', 'III'].includes(state.aqlLevel as string)) {
     return 'AQL 检验水平无效';
   }
   if ('aqlAQL' in state && (typeof state.aqlAQL !== 'number' || !AQL_COLS.includes(state.aqlAQL))) {
@@ -428,7 +444,7 @@ function snapshotValidationError(raw: unknown): string | null {
   const enums: Array<[string, ReadonlySet<string>]> = [
     ['spcType', new Set(['xbar-r', 'xbar-s', 'i-mr', 'ewma', 'cusum', 'p', 'c'])],
     ['spcDataLayout', new Set(['auto', 'rows', 'stacked', 'columns', 'individuals'])],
-    ['aqlLevel', new Set(['I', 'II', 'III'])],
+    ['aqlLevel', new Set(['S-1', 'S-2', 'S-3', 'S-4', 'I', 'II', 'III'])],
     ['aqlMethod', new Set(['shift', 'gb'])],
     ['aqlAcMethod', new Set(['binom', 'gb'])],
     ['doeView', new Set(['main', 'interact', 'pareto', 'cube'])],
@@ -436,6 +452,7 @@ function snapshotValidationError(raw: unknown): string | null {
     ['hypoTab', new Set(['anova', 't1', 't2', 'reg'])],
     ['paretoView', new Set(['pareto', 'fishbone'])],
     ['anovaMode', new Set(['stacked', 'wide', 'numfactor'])],
+    ['capSubgroupMode', new Set(['spc', 'const', 'stacked'])],
   ];
   for (const [key, allowed] of enums) {
     if (raw[key] !== undefined && (typeof raw[key] !== 'string' || !allowed.has(raw[key]))) {
@@ -450,6 +467,10 @@ function snapshotValidationError(raw: unknown): string | null {
   if (raw.capabilityBins !== undefined && (!Number.isSafeInteger(raw.capabilityBins)
     || (raw.capabilityBins as number) < 5 || (raw.capabilityBins as number) > 40)) {
     return '分析 snapshot.capabilityBins 无效';
+  }
+  if (raw.capSubgroupSize !== undefined && (!Number.isSafeInteger(raw.capSubgroupSize)
+    || (raw.capSubgroupSize as number) < 2 || (raw.capSubgroupSize as number) > 10)) {
+    return '分析 snapshot.capSubgroupSize 无效';
   }
   if (raw.aqlLot !== undefined && (!Number.isSafeInteger(raw.aqlLot)
     || (raw.aqlLot as number) < 2 || (raw.aqlLot as number) > MAX_LOT_SIZE)) return '分析 AQL 批量无效';
@@ -474,7 +495,7 @@ function snapshotValidationError(raw: unknown): string | null {
     if (raw[key] !== undefined && typeof raw[key] !== 'boolean') return `分析 snapshot.${key} 不是布尔值`;
   }
   for (const key of [
-    'spcStageCol', 'spcValueCol', 'spcSubgroupCol', 'gageValueName', 'gagePartName', 'gageOperatorName',
+    'spcStageCol', 'spcValueCol', 'spcSubgroupCol', 'capValueCol', 'capSubgroupIdCol', 'gageValueName', 'gagePartName', 'gageOperatorName',
     'doeRespCol', 'anovaRespName', 'anovaFactorName', 't1ColName', 't2ColAName', 't2ColBName', 'regXName', 'regYName',
   ] as const) {
     if (raw[key] !== undefined && raw[key] !== null && typeof raw[key] !== 'string') {
@@ -487,6 +508,10 @@ function snapshotValidationError(raw: unknown): string | null {
   if (raw.spcRules !== undefined
     && (!isObject(raw.spcRules) || Object.entries(raw.spcRules).some(([key, value]) => !/^r[1-8]$/.test(key)
       || typeof value !== 'boolean'))) return '分析 snapshot.spcRules 无效';
+  if (raw.spcRuleK !== undefined) {
+    const detail = spcRuleKValidationError(raw.spcRuleK, '分析 snapshot.spcRuleK ');
+    if (detail) return detail;
+  }
   if (raw.sourceData !== undefined) {
     const detail = worksheetValidationError(raw.sourceData, false);
     if (detail) return `分析内嵌工作表损坏：${detail}`;

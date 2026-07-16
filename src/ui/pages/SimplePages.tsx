@@ -558,6 +558,8 @@ function AnovaInner({ T }: { T: ChartTokens }) {
     anovaShowDemo: showDemo, setAnovaShowDemo: setShowDemo,
   } = useApp();
   const [chartKind, setChartKind] = useState<'box' | 'individual' | 'interval'>('box');
+  // 残差诊断视图:四合一或四种单独图表(对标 Minitab「残差图」的单独视图选项)
+  const [residView, setResidView] = useState<'four' | 'normal' | 'fits' | 'hist' | 'order'>('four');
 
   // 出厂演示集(直径1..5 是同一量的子组位置,不是「分组」)不作为真实宽表数据,直接走演示研究
   const isDemoDataset = model.isDemo;
@@ -831,13 +833,29 @@ function AnovaInner({ T }: { T: ChartTokens }) {
         </div>
       </Card>
       <Card>
-        <CardHeader title="残差诊断(四合一)" right={<span style={{ fontSize: 11.5, color: '#98a1ac' }}>残差 = 观测 − 组均值 · 用于检查模型假设</span>} />
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, padding: '10px 12px 12px' }}>
-          <NormalProbPlot T={T} data={resid.residuals} h={230} />
-          <ScatterPlot T={T} xs={resid.fits} ys={resid.residuals} slope={0} intercept={0} xLabel="拟合值(组均值)" yLabel="残差" h={230} />
-          <MiniHist T={T} data={resid.residuals} h={230} xLabel="残差分布" />
-          <ScatterPlot T={T} xs={resid.residuals.map((_, i) => i + 1)} ys={resid.residuals} slope={0} intercept={0} xLabel={residualsInWorksheetOrder ? '观测序(工作表行序)' : '观测序(按组)'} yLabel="残差" h={230} />
+        <CardHeader title="残差诊断" right={<span style={{ fontSize: 11.5, color: '#98a1ac' }}>残差 = 观测 − 组均值 · 用于检查模型假设</span>} />
+        <div style={{ display: 'flex', gap: 6, padding: '10px 12px 0', flexWrap: 'wrap' }}>
+          {([
+            ['four', '四合一'], ['normal', '正态概率图'], ['fits', '残差与拟合值'], ['hist', '直方图'], ['order', '残差与顺序'],
+          ] as const).map(([k, label]) => (
+            <button key={k} type="button" aria-pressed={residView === k} style={tabStyle(residView === k)} onClick={() => setResidView(k)}>{label}</button>
+          ))}
         </div>
+        {residView === 'four' ? (
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, padding: '10px 12px 12px' }}>
+            <NormalProbPlot T={T} data={resid.residuals} h={230} />
+            <ScatterPlot T={T} xs={resid.fits} ys={resid.residuals} slope={0} intercept={0} xLabel="拟合值(组均值)" yLabel="残差" h={230} />
+            <MiniHist T={T} data={resid.residuals} h={230} xLabel="残差分布" />
+            <ScatterPlot T={T} xs={resid.residuals.map((_, i) => i + 1)} ys={resid.residuals} slope={0} intercept={0} xLabel={residualsInWorksheetOrder ? '观测序(工作表行序)' : '观测序(按组)'} yLabel="残差" h={230} />
+          </div>
+        ) : (
+          <div style={{ padding: '10px 12px 12px' }}>
+            {residView === 'normal' && <NormalProbPlot T={T} data={resid.residuals} h={340} />}
+            {residView === 'fits' && <ScatterPlot T={T} xs={resid.fits} ys={resid.residuals} slope={0} intercept={0} xLabel="拟合值(组均值)" yLabel="残差" h={340} />}
+            {residView === 'hist' && <MiniHist T={T} data={resid.residuals} h={340} xLabel="残差分布" />}
+            {residView === 'order' && <ScatterPlot T={T} xs={resid.residuals.map((_, i) => i + 1)} ys={resid.residuals} slope={0} intercept={0} xLabel={residualsInWorksheetOrder ? '观测序(工作表行序)' : '观测序(按组)'} yLabel="残差" h={340} />}
+          </div>
+        )}
       </Card>
     </div>
   );
@@ -927,7 +945,7 @@ function ParetoInner({ T }: { T: ChartTokens }) {
           }
         />
         <div style={{ padding: '14px 16px 6px' }}>
-          <ParetoChart T={T} rows={display} w={960} h={340} />
+          <ParetoChart T={T} rows={display} w={960} h={340} title={`${isReal ? pareto!.name : '示例数据'} 的 Pareto 图`} />
         </div>
       </Card>
       <Card>

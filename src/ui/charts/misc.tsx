@@ -20,19 +20,31 @@ function ParetoChartImpl(p: {
   rows: { name: string; count: number }[];
   w?: number;
   h?: number;
+  /** 经典主题标题(Minitab 式「〈列名〉 的 Pareto 图」);其余主题忽略 */
+  title?: string;
 }) {
   const T = p.T;
   const colors = paretoColors(T);
   const rows = p.rows;
   const W = p.w ?? 960;
   const H = p.h ?? 300;
-  const m = { t: 24, r: 66, b: 64, l: 62 };
+  // 经典主题按 Minitab:顶部居中标题 + 底部 类别/频数/百分比/累积% 统计表(高度不足时退回紧凑轴标签)
+  const classic = T.classic;
+  const showTable = classic && H >= 260;
+  const m = {
+    t: classic && p.title ? 36 : 24,
+    r: 66,
+    b: showTable ? 88 : 64,
+    l: 62,
+  };
   const pw = W - m.l - m.r;
   const ph = H - m.t - m.b;
   const total = rows.reduce((a, r) => a + r.count, 0) || 1;
   const maxc = (rows[0]?.count ?? 0) || 1;
   const bw = pw / rows.length;
-  const Yc = (c: number) => m.t + (1 - c / (maxc * 1.05)) * ph;
+  // 经典主题左轴量程 = 累计总数(与右轴 0–100% 逐点对齐);其余主题按最大柱 1.05 倍
+  const yMaxCount = classic ? total : maxc * 1.05;
+  const Yc = (c: number) => m.t + (1 - c / yMaxCount) * ph;
   const Yp = (pc: number) => m.t + (1 - pc / 100) * ph;
   let cum = 0;
   const cumPts: Array<[number, number, number]> = [];
@@ -40,41 +52,81 @@ function ParetoChartImpl(p: {
     cum += r.count;
     cumPts.push([m.l + i * bw + bw / 2, Yp((cum / total) * 100), Math.round((cum / total) * 100)]);
   });
+  const cumLine = classic ? '#1F3864' : T.curve;
+  const barStroke = classic ? '#2A4B8D' : undefined;
+  // 表格行:类别名按柱宽截断(CJK 字宽 ≈ 10px @ size 9.5)
+  const clip = (s: string) => {
+    const maxCh = Math.max(2, Math.floor(bw / 11));
+    return s.length > maxCh ? s.slice(0, maxCh - 1) + '…' : s;
+  };
+  const tableRows: Array<{ label: string; value: (i: number) => string }> = [
+    { label: '类别', value: (i) => clip(rows[i].name) },
+    { label: '频数', value: (i) => String(rows[i].count) },
+    { label: '百分比', value: (i) => Math.round((rows[i].count / total) * 100) + '' },
+    { label: '累积%', value: (i) => String(cumPts[i][2]) },
+  ];
   return (
     <Svg w={W} h={H}>
       <rect x={0} y={0} width={W} height={H} fill={T.bg} />
+      {classic && p.title && (
+        <Txt x={m.l + pw / 2} y={14} s={p.title} fill="#111111" size={13} anchor="middle" weight={700} />
+      )}
       {Array.from({ length: 5 }, (_, g) => {
         const yy = m.t + (g / 4) * ph;
         return (
           <Fragment key={'g' + g}>
             <Ln x1={m.l} y1={yy} x2={m.l + pw} y2={yy} stroke={T.grid} sw={1} />
-            <Txt x={m.l - 6} y={yy} s={String(Math.round(maxc * 1.05 - (maxc * 1.05 * g) / 4))} fill={T.axis} size={9} anchor="end" />
+            <Txt x={m.l - 6} y={yy} s={String(Math.round(yMaxCount - (yMaxCount * g) / 4))} fill={T.axis} size={9} anchor="end" />
             <Txt x={m.l + pw + 6} y={yy} s={100 - (100 * g) / 4 + '%'} fill={T.axis} size={9} />
           </Fragment>
         );
       })}
       {rows.map((r, i) => {
-        const x0 = m.l + i * bw + 6;
-        const x1 = m.l + (i + 1) * bw - 6;
+        // 经典主题零间距(Minitab 柱贴合);其余主题保留 6px 间隙
+        const gap = classic ? 0 : 6;
+        const x0 = m.l + i * bw + gap;
+        const x1 = m.l + (i + 1) * bw - gap;
         return (
           <Fragment key={'b' + i}>
-            <rect x={x0} y={Yc(r.count)} width={x1 - x0} height={m.t + ph - Yc(r.count)} fill={colors[i % colors.length]} opacity={0.9} />
-            <Txt x={(x0 + x1) / 2} y={Yc(r.count) - 8} s={String(r.count)} fill={T.text} size={10} anchor="middle" weight={600} />
-            <Txt x={m.l + i * bw + bw / 2} y={H - 34} s={r.name} fill={T.axis} size={10} anchor="middle" />
+            <rect
+              x={x0} y={Yc(r.count)} width={x1 - x0} height={m.t + ph - Yc(r.count)}
+              fill={colors[i % colors.length]} opacity={classic ? 1 : 0.9}
+              stroke={barStroke} strokeWidth={barStroke ? 1 : 0}
+            />
+            {!classic && <Txt x={(x0 + x1) / 2} y={Yc(r.count) - 8} s={String(r.count)} fill={T.text} size={10} anchor="middle" weight={600} />}
+            {!showTable && <Txt x={m.l + i * bw + bw / 2} y={H - 34} s={r.name} fill={T.axis} size={10} anchor="middle" />}
           </Fragment>
         );
       })}
-      <polyline points={cumPts.map((p) => p[0] + ',' + p[1]).join(' ')} fill="none" stroke={T.curve} strokeWidth={T.sw + 0.4} />
-      {cumPts.map((p, i) => (
+      <polyline points={cumPts.map((pt) => pt[0] + ',' + pt[1]).join(' ')} fill="none" stroke={cumLine} strokeWidth={T.sw + 0.4} />
+      {cumPts.map((pt, i) => (
         <Fragment key={'c' + i}>
-          <circle cx={p[0]} cy={p[1]} r={T.r} fill={T.curve} stroke={T.bg} strokeWidth={1.2} />
-          <Txt x={p[0]} y={p[1] - 11} s={p[2] + '%'} fill={T.curve} size={9.5} anchor="middle" weight={600} />
+          <circle cx={pt[0]} cy={pt[1]} r={T.r} fill={cumLine} stroke={T.bg} strokeWidth={1.2} />
+          {!classic && <Txt x={pt[0]} y={pt[1] - 11} s={pt[2] + '%'} fill={cumLine} size={9.5} anchor="middle" weight={600} />}
         </Fragment>
       ))}
-      <Txt x={m.l + pw / 2} y={H - 10} s="缺陷 / 原因类别（按频数降序）" fill={T.text} size={10.5} anchor="middle" weight={600} />
-      <text x={16} y={m.t + ph / 2} fill={T.text} fontSize={10.5} textAnchor="middle" fontFamily="IBM Plex Mono, monospace" fontWeight={600} transform={`rotate(-90 16 ${m.t + ph / 2})`}>频数</text>
-      <text x={W - 14} y={m.t + ph / 2} fill={T.text} fontSize={10.5} textAnchor="middle" fontFamily="IBM Plex Mono, monospace" fontWeight={600} transform={`rotate(90 ${W - 14} ${m.t + ph / 2})`}>累计百分比</text>
-      <Ln x1={m.l} y1={m.t + ph} x2={m.l + pw} y2={m.t + ph} stroke={T.axis} sw={1} />
+      {showTable ? (
+        tableRows.map((row, ri) => {
+          const yy = m.t + ph + 16 + ri * 15;
+          return (
+            <Fragment key={'tr' + ri}>
+              <Txt x={m.l - 6} y={yy} s={row.label} fill={T.text} size={9.5} anchor="end" weight={600} />
+              {rows.map((_, ci) => (
+                <Txt key={'tc' + ci} x={m.l + ci * bw + bw / 2} y={yy} s={row.value(ci)} fill={T.text} size={9.5} anchor="middle" />
+              ))}
+            </Fragment>
+          );
+        })
+      ) : (
+        <Txt x={m.l + pw / 2} y={H - 10} s="缺陷 / 原因类别（按频数降序）" fill={T.text} size={10.5} anchor="middle" weight={600} />
+      )}
+      <text x={16} y={m.t + ph / 2} fill={T.text} fontSize={10.5} textAnchor="middle" fontFamily="IBM Plex Mono, monospace" fontWeight={600} transform={`rotate(-90 16 ${m.t + ph / 2})`}>{classic ? '计数' : '频数'}</text>
+      <text x={W - 14} y={m.t + ph / 2} fill={T.text} fontSize={10.5} textAnchor="middle" fontFamily="IBM Plex Mono, monospace" fontWeight={600} transform={`rotate(90 ${W - 14} ${m.t + ph / 2})`}>{classic ? '百分比' : '累计百分比'}</text>
+      {classic ? (
+        <rect x={m.l} y={m.t} width={pw} height={ph} fill="none" stroke={T.frame} strokeWidth={1} />
+      ) : (
+        <Ln x1={m.l} y1={m.t + ph} x2={m.l + pw} y2={m.t + ph} stroke={T.axis} sw={1} />
+      )}
     </Svg>
   );
 }
@@ -251,6 +303,10 @@ function IndividualValuePlotImpl({ T, groups, h }: {
   });
   const plotted = prepared.reduce((a, p) => a + p.selected.length, 0);
   const total = prepared.reduce((a, p) => a + p.finite.length, 0);
+  // 组均值连接折线(对标 Minitab 个体值图):空组不参与连线,均值用全量数据。
+  const meanPts = prepared
+    .map(({ finite }, gi) => (finite.length ? `${m.l + gi * gw + gw / 2},${Y(mean(finite.map((p) => p.v)))}` : null))
+    .filter((s): s is string => s != null);
   return (
     <Svg w={W} h={H}>
       <rect x={0} y={0} width={W} height={H} fill={T.bg} />
@@ -263,6 +319,9 @@ function IndividualValuePlotImpl({ T, groups, h }: {
           </Fragment>
         );
       })}
+      {meanPts.length > 1 && (
+        <polyline points={meanPts.join(' ')} fill="none" stroke={T.center} strokeWidth={1.4} opacity={0.85} />
+      )}
       {prepared.map(({ grp, finite, selected }, gi) => {
         const cx = m.l + gi * gw + gw / 2;
         // 大样本时保留首尾与极值，并明确标注渲染数；均值仍使用全量数据。
@@ -337,6 +396,12 @@ function IntervalPlotImpl({ T, groups, h, pooledError }: {
           </Fragment>
         );
       })}
+      {stats.length > 1 && (
+        <polyline
+          points={stats.map((s, i) => `${m.l + i * gw + gw / 2},${Y(s.mu)}`).join(' ')}
+          fill="none" stroke={T.point} strokeWidth={1.4} opacity={0.85}
+        />
+      )}
       {stats.map((s, i) => {
         const cx = m.l + i * gw + gw / 2;
         return (

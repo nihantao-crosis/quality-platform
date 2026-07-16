@@ -1,7 +1,9 @@
 /** 过程能力分析 ★深度实现 — 可编辑规格限实时重算 + 直方图 + PPM 性能表。 */
+import type React from 'react';
+import { useState } from 'react';
 import { useApp } from '../../store/appStore';
-import { useData, suggestedSpec, rememberSpecForActiveMeasurement, resolveActiveMeasurementData } from '../../store/dataStore';
-import { nf, fmtCap, capabilityInputError, computeCapability, andersonDarling, bestLambda, transformWithSpec, stdev, countCapabilityViolations } from '../../core';
+import { useData, suggestedSpec, rememberSpecForActiveMeasurement, resolveCapabilityMeasurementData } from '../../store/dataStore';
+import { nf, fmtCap, capabilityInputError, computeCapability, andersonDarling, bestLambda, transformWithSpec, stdev, countCapabilityViolations, spcMeasurementColumnNames } from '../../core';
 import { ReportCard } from '../ReportCard';
 import { capabilityReport } from '../reportData';
 import type { ChartTokens } from '../tokens';
@@ -9,17 +11,82 @@ import { Card, CardHeader, KvRows, numInput, Badge } from '../common';
 import { Histogram } from '../charts/Histogram';
 import { NormalProbPlot } from '../charts/NormalProbPlot';
 
+/** 子组大小输入:文本态 + 失焦/回车提交(受控即时校验会让 "10" 的首键 '1' 被拒,永远打不出两位数)。 */
+function SubgroupSizeInput({ value, onCommit }: { value: number; onCommit: (z: number) => void }) {
+  const [text, setText] = useState(String(value));
+  const commit = () => {
+    const v = Math.round(Number(text.trim()));
+    if (text.trim() !== '' && Number.isFinite(v) && v >= 2 && v <= 10) onCommit(v);
+    setText(String(useApp.getState().capSubgroupSize));
+  };
+  return (
+    <input type="number" min={2} max={10} step={1} value={text} className="mono" aria-label="子组大小"
+      onChange={(e) => setText(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+      style={{ width: 58, padding: '4px 8px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12.5 }} />
+  );
+}
+
 export function Capability({ T }: { T: ChartTokens }) {
-  const { lsl, usl, tgt, lslOn, uslOn, toggleSide, setSpec: setSpecRaw, spcRules, goTo, capabilityBins: bins, setCapabilityBins: setBins } = useApp();
+  const { lsl, usl, tgt, lslOn, uslOn, toggleSide, setSpec: setSpecRaw, spcRules, spcRuleK, goTo, capabilityBins: bins, setCapabilityBins: setBins,
+    capSubgroupMode, capSubgroupSize, capValueCol, capSubgroupIdCol, setCapabilitySubgroup } = useApp();
   const rawModel = useData((s) => s.model);
   const textCols = useData((s) => s.textCols);
-  const prepared = resolveActiveMeasurementData(rawModel, textCols);
+  const prepared = resolveCapabilityMeasurementData(rawModel, textCols);
   const M = prepared.model;
+  // 批次716-N:能力页显式子组配置(对齐 Minitab 能力分析对话框的「子组大小」)。
+  const modeTab = (on: boolean): React.CSSProperties => ({
+    padding: '4px 11px', borderRadius: 4, fontSize: 12, cursor: 'pointer', border: 0, fontFamily: 'inherit',
+    background: on ? '#1f6fb2' : '#eef1f4', color: on ? '#fff' : '#5b6472', fontWeight: on ? 600 : 500,
+  });
+  const subgroupEditor = (
+    <Card style={{ padding: '11px 16px', display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
+      <span style={{ fontSize: 12, color: '#8a929d', fontWeight: 600 }}>数据排列 · 子组</span>
+      {([['spc', '沿用 SPC 数据角色'], ['const', '单列 + 子组大小'], ['stacked', '单列 + 子组 ID 列']] as const).map(([m, label]) => (
+        <button key={m} type="button" style={modeTab(capSubgroupMode === m)}
+          title={m === 'spc' ? '与控制图共用同一数据口径(默认)' : m === 'const' ? '按行序把单列测量值每 z 个分为一个子组(Minitab「子组大小(使用常量)」)' : '一列测量值 + 一列子组 ID(Minitab「使用 ID 列」)'}
+          onClick={() => setCapabilitySubgroup({ capSubgroupMode: m })}>{label}</button>
+      ))}
+      {capSubgroupMode !== 'spc' && (
+        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12.5, color: '#5b6472' }}>
+          测量列
+          {/* 只列业务测量列:设计元数据/分析输出列(标准序、运行序等)不得作为能力测量值 */}
+          <select value={capValueCol ?? ''} onChange={(e) => setCapabilitySubgroup({ capValueCol: e.target.value || null })}
+            style={{ padding: '4px 8px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12 }}>
+            <option value="">(沿用 SPC 测量列)</option>
+            {spcMeasurementColumnNames(rawModel).map((n) => <option key={n} value={n}>{n}</option>)}
+          </select>
+        </label>
+      )}
+      {capSubgroupMode === 'const' && (
+        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12.5, color: '#5b6472' }}>
+          子组大小
+          <SubgroupSizeInput key={capSubgroupSize} value={capSubgroupSize} onCommit={(z) => setCapabilitySubgroup({ capSubgroupSize: z })} />
+          <span style={{ fontSize: 11, color: '#9aa2ad' }}>(2–10,按行序分组;末尾不足一组不参与)</span>
+        </label>
+      )}
+      {capSubgroupMode === 'stacked' && (
+        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12.5, color: '#5b6472' }}>
+          子组 ID 列
+          {/* option 值使用 numeric:/text: 角色引用(与 SPC 页同约定),裸列名无法被 resolveRole 命中 */}
+          <select value={capSubgroupIdCol ?? ''} onChange={(e) => setCapabilitySubgroup({ capSubgroupIdCol: e.target.value || null })}
+            style={{ padding: '4px 8px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12 }}>
+            <option value="">(未选择)</option>
+            {rawModel.colNames.map((n) => <option key={'n:' + n} value={`numeric:${n}`}>{n}（数值）</option>)}
+            {textCols.map((t) => <option key={'t:' + t.name} value={`text:${t.name}`}>{t.name}（文本）</option>)}
+          </select>
+        </label>
+      )}
+    </Card>
+  );
   // 规格同步只在“导入/切换数据集”和“SPC 明确数据角色”两个入口发生。
   // 能力页不能再按数据集记忆自动覆盖规格，否则历史恢复（包括页面已挂载时）
   // 会把快照中的 LSL/Target/USL 改成今天的规格，导致同一记录回看出不同 Cpk。
   if (!M) {
     return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      {subgroupEditor}
       <Card style={{ padding: 24, borderColor: '#f0caca', color: '#a62b2b', lineHeight: 1.7 }}>
         <b>过程能力分析未运行：</b>{prepared.error ?? '无法确定当前测量数据角色。'}<br />
         能力页与控制图共用同一数据口径，不会把子组 ID 或其他数值字段静默混入计算。
@@ -31,6 +98,7 @@ export function Capability({ T }: { T: ChartTokens }) {
           前往控制图配置数据角色
         </button>
       </Card>
+      </div>
     );
   }
   // 写规格限时同步记忆到当前数据集（切换数据集/重启后恢复）
@@ -101,6 +169,7 @@ export function Capability({ T }: { T: ChartTokens }) {
   if (inputError) {
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        {subgroupEditor}
         <Card style={{ padding: '10px 16px', color: '#5b6472', fontSize: 12.5, lineHeight: 1.6 }}>
           <b style={{ color: '#33404f' }}>能力数据口径：</b>{prepared.note}；变量：{prepared.variableName}；实际观测 N={M.all.length}。
         </Card>
@@ -156,7 +225,7 @@ export function Capability({ T }: { T: ChartTokens }) {
   ];
 
   // 能力结论必须先同时检查位置图与离散图;计数逻辑收敛在 countCapabilityViolations(与保存记录/专项报告共用)。
-  const spcViol = countCapabilityViolations(M, spcRules);
+  const spcViol = countCapabilityViolations(M, spcRules, spcRuleK);
   const report = capabilityReport({
     cpk: cap.cpk, verdict: cap.verdict,
     adP: ad ? ad.p : null, n: M.all.length, spcViolations: spcViol,
@@ -164,6 +233,7 @@ export function Capability({ T }: { T: ChartTokens }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      {subgroupEditor}
       <ReportCard data={report} />
       <Card style={{ padding: '10px 16px', color: '#5b6472', fontSize: 12.5, lineHeight: 1.6 }}>
         <b style={{ color: '#33404f' }}>能力数据口径：</b>{prepared.note}；变量：{prepared.variableName}；实际观测 N={M.all.length}。

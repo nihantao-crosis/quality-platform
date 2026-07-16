@@ -3,10 +3,10 @@
  */
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
-import type { NelsonRules, InspectionLevel, CalcState, AnovaMode, AqlMethod, AqlAcMethod, SwitchStatus, SpcDataLayout } from '../core';
+import type { NelsonRules, NelsonRuleK, InspectionLevel, CalcState, AnovaMode, AqlMethod, AqlAcMethod, SwitchStatus, SpcDataLayout } from '../core';
 import {
   AQL_COLS, MAX_LOT_SIZE, calcKey as coreCalcKey, CALC_INIT,
-  freshSwitchStatus, normalizeSwitchStatus,
+  freshSwitchStatus, normalizeSwitchStatus, DEFAULT_RULE_K, normalizeRuleK,
 } from '../core';
 import { projectStoreValidationError, registerProjectLifecycleHooks } from '../platform/project';
 import { preserveCorruptStore } from './quarantine';
@@ -39,6 +39,8 @@ interface AppState {
   page: Page;
   spcType: SpcType;
   spcRules: NelsonRules;
+  /** 判异准则可编辑 K 值(Minitab Xbar-R 选项→检验);始终经 normalizeRuleK 约束。 */
+  spcRuleK: NelsonRuleK;
   /** SPC 原始工作表到控制图矩阵的数据形态与角色；按列名保存，分析记录也会快照。 */
   spcDataLayout: SpcDataLayout;
   spcValueCol: string | null;
@@ -53,6 +55,11 @@ interface AppState {
   lslOn: boolean; // 单侧规格开关（至少一侧开启）
   uslOn: boolean;
   capabilityBins: number;
+  /** 能力分析子组口径(批次716-N):沿用SPC角色 / 单列+常量子组 / 单列+子组ID列。 */
+  capSubgroupMode: 'spc' | 'const' | 'stacked';
+  capSubgroupSize: number;
+  capValueCol: string | null;
+  capSubgroupIdCol: string | null;
   gageUseReal: boolean;
   gageValueName: string | null;
   gagePartName: string | null;
@@ -109,6 +116,7 @@ interface AppState {
   setActiveVar(v: string): void;
   setSpcType(t: SpcType): void;
   toggleRule(r: keyof NelsonRules): void;
+  setSpcRuleK(patch: Partial<NelsonRuleK>): void;
   setSpcRoles(patch: Partial<Pick<AppState, 'spcDataLayout' | 'spcValueCol' | 'spcSubgroupCol'>>): void;
   setSpcStageCol(name: string | null): void;
   setSelSub(i: number | null): void;
@@ -116,6 +124,7 @@ interface AppState {
   setProjectName(name: string): void;
   toggleSide(side: 'lslOn' | 'uslOn'): void;
   setCapabilityBins(v: number): void;
+  setCapabilitySubgroup(patch: Partial<Pick<AppState, 'capSubgroupMode' | 'capSubgroupSize' | 'capValueCol' | 'capSubgroupIdCol'>>): void;
   setGageOptions(patch: Partial<Pick<AppState, 'gageUseReal' | 'gageValueName' | 'gagePartName' | 'gageOperatorName'>>): void;
   setDoeView(v: DoeView): void;
   setDoeTab(v: DoeTab): void;
@@ -235,6 +244,7 @@ function persistedPrefsOf(s: AppState) {
     gagePartName: s.gagePartName,
     gageOperatorName: s.gageOperatorName,
     spcRules: s.spcRules,
+    spcRuleK: s.spcRuleK,
     spcDataLayout: s.spcDataLayout,
     spcValueCol: s.spcValueCol,
     spcSubgroupCol: s.spcSubgroupCol,
@@ -304,6 +314,7 @@ export const useApp = create<AppState>()(persist((set, get) => ({
   spcType: 'xbar-r',
   // 默认开启经典四则(1/2/3 + 5「2 of 3 越 2σ」);4/6/7/8 较敏感,默认关闭供按需开启
   spcRules: { ...DEFAULT_SPC_RULES },
+  spcRuleK: { ...DEFAULT_RULE_K },
   spcDataLayout: 'auto',
   spcValueCol: null,
   spcSubgroupCol: null,
@@ -316,6 +327,10 @@ export const useApp = create<AppState>()(persist((set, get) => ({
   lslOn: true,
   uslOn: true,
   capabilityBins: 13,
+  capSubgroupMode: 'spc',
+  capSubgroupSize: 5,
+  capValueCol: null,
+  capSubgroupIdCol: null,
   gageUseReal: true,
   gageValueName: null,
   gagePartName: null,
@@ -376,6 +391,8 @@ export const useApp = create<AppState>()(persist((set, get) => ({
   setActiveVar: (activeVar) => set({ activeVar, varOpen: false }),
   setSpcType: (spcType) => set({ spcType, selSub: null }),
   toggleRule: (r) => set((s) => ({ spcRules: { ...s.spcRules, [r]: !s.spcRules[r] } })),
+  // 越界/非法字段由 normalizeRuleK 回落标准值;UI 依据回写后的 store 值回弹输入框
+  setSpcRuleK: (patch) => set((s) => ({ spcRuleK: normalizeRuleK({ ...s.spcRuleK, ...patch }) })),
   setSpcRoles: (patch) => set({ ...patch, selSub: null, spcStageCol: null }),
   setSpcStageCol: (spcStageCol) => set({ spcStageCol, selSub: null }),
   setSelSub: (selSub) => set({ selSub }),
@@ -388,6 +405,7 @@ export const useApp = create<AppState>()(persist((set, get) => ({
     return { [side]: next[side] } as Partial<AppState>;
   }),
   setCapabilityBins: (value) => set({ capabilityBins: Math.max(5, Math.min(40, Math.round(value))) }),
+  setCapabilitySubgroup: (patch) => set(patch),
   setGageOptions: (patch) => set(patch),
   setDoeView: (doeView) => set({ doeView }),
   setDoeTab: (doeTab) => set({ doeTab }),
@@ -515,6 +533,8 @@ export const useApp = create<AppState>()(persist((set, get) => ({
     merged.spcRules = Object.fromEntries((Object.keys(DEFAULT_SPC_RULES) as Array<keyof NelsonRules>).map((key) => [
       key, typeof rules[key] === 'boolean' ? rules[key] : current.spcRules[key],
     ])) as unknown as NelsonRules;
+    // 逐字段规范化:任一 K 越界/非法即回落标准值,不拒绝整份偏好
+    merged.spcRuleK = p.spcRuleK === undefined ? current.spcRuleK : normalizeRuleK(p.spcRuleK);
     merged.spcDataLayout = ['auto', 'rows', 'stacked', 'columns', 'individuals'].includes(p.spcDataLayout as string)
       ? p.spcDataLayout as SpcDataLayout
       : current.spcDataLayout;
@@ -637,7 +657,9 @@ export function resetUiPreferences(): void {
     chartStyle: '经典', showGrid: true, projectName: '质检项目 2026-Q2',
     lsl: 24.9, usl: 25.1, tgt: 25, lslOn: true, uslOn: true, capabilityBins: 13,
     gageUseReal: true, gageValueName: null, gagePartName: null, gageOperatorName: null,
-    spcRules: { ...DEFAULT_SPC_RULES }, spcDataLayout: 'auto', spcValueCol: null, spcSubgroupCol: null, spcStageCol: null,
+    spcRules: { ...DEFAULT_SPC_RULES }, spcRuleK: { ...DEFAULT_RULE_K },
+    spcDataLayout: 'auto', spcValueCol: null, spcSubgroupCol: null, spcStageCol: null,
+    capSubgroupMode: 'spc', capSubgroupSize: 5, capValueCol: null, capSubgroupIdCol: null,
     doeView: 'main', doeTab: 'analyze', doeFactorCols: null, doeRespCol: null, doeModelTerms: null, doeIncludeCurvature: true,
     t1ColName: null, t1Mu0: null, t2ColAName: null, t2ColBName: null, regXName: null, regYName: null,
     paretoView: 'pareto', paretoMergeOther: false, paretoThreshold: 0.95,
