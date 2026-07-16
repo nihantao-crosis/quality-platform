@@ -29,6 +29,20 @@ describe('简单线性回归', () => {
     const r = linearRegression([1, 2, 3, 4], [5, 5, 5, 5]);
     expect(r).toMatchObject({ slope: 0, r: 0, r2: 0, seSlope: 0, t: 0, p: 1, significant: false });
   });
+  it('Y 整体平移不改变斜率、R²、t 与 P（零残差的小斜率边界）', () => {
+    const xs = [1, 2, 3, 4];
+    const unitSlope = 2 ** -30;
+    const base = xs.map((x) => x * unitSlope);
+    const shifted = base.map((y) => y + 2 ** 20);
+    const a = linearRegression(xs, base);
+    const b = linearRegression(xs, shifted);
+    expect(b.slope).toBeCloseTo(a.slope, 20);
+    expect(b.r2).toBeCloseTo(a.r2, 15);
+    expect(a.t).toBe(Infinity);
+    expect(b.t).toBe(Infinity);
+    expect(b.p).toBe(a.p);
+    expect(b.significant).toBe(a.significant);
+  });
   it('X 无变异报错;观测不足报错', () => {
     expect(() => linearRegression([2, 2, 2], [1, 2, 3])).toThrow();
     expect(() => linearRegression([1, 2], [1, 2])).toThrow();

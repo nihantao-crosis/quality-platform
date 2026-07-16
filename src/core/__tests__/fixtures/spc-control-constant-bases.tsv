@@ -1,0 +1,14 @@
+# Independent base values for subgroup sizes n=2..10.
+# Sources: ASTM E2587 control-chart constants; Minitab d2/d3/c4 definitions; NIST control-limit formulas.
+# Derived columns checked in tests: A2=3/(d2*sqrt(n)); A3=3/(c4*sqrt(n));
+# D3/D4=1 +/- 3*d3/d2 (D3 floored at 0); B3/B4=1 +/- 3*sqrt(1-c4^2)/c4 (B3 floored at 0).
+n	d2	d3	c4
+2	1.12838	0.85250	0.79788456
+3	1.69257	0.88837	0.88622693
+4	2.05875	0.87981	0.92131773
+5	2.32593	0.86408	0.93998560
+6	2.53441	0.84804	0.95153286
+7	2.70436	0.83321	0.95936879
+8	2.84720	0.81983	0.96503046
+9	2.97003	0.80818	0.96931070
+10	3.07751	0.79705	0.97265927

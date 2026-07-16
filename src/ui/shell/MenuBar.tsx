@@ -6,7 +6,7 @@ import { platform } from '../../platform/adapter';
 /** 桌面端经 tauri-plugin-updater 检查 GitHub Releases；Web 端不适用。 */
 async function checkForUpdate(toast: (m: string) => void) {
   if (!platform.isDesktop) {
-    toast('Web 端始终为最新版本 · 桌面端可在应用内检查更新');
+    toast('Web 端采用自动更新缓存；联网刷新可获取已部署版本，离线时可能继续使用本地缓存 · 桌面端可在应用内检查更新');
     return;
   }
   toast('正在检查更新…');
@@ -54,6 +54,7 @@ async function downloadPageCharts(toast: (m: string) => void, pageTitle: string)
     return;
   }
   toast(`正在导出 ${svgs.length} 张图表…`);
+  let exported = 0;
   for (let i = 0; i < svgs.length; i++) {
     try {
       const png = await svgElementToPng(svgs[i], 2);
@@ -63,11 +64,16 @@ async function downloadPageCharts(toast: (m: string) => void, pageTitle: string)
       a.download = `${pageTitle}_图${i + 1}.png`;
       a.click();
       URL.revokeObjectURL(url);
+      exported++;
     } catch { /* 单张失败不阻断 */ }
   }
-  toast(`已下载 ${svgs.length} 张图表 PNG`);
+  toast(exported === svgs.length
+    ? `已下载 ${exported} 张图表 PNG`
+    : exported > 0
+      ? `已下载 ${exported}/${svgs.length} 张图表；${svgs.length - exported} 张导出失败`
+      : '图表 PNG 导出失败');
 }
-interface Item { label?: string; kbd?: string; act?: Act; sep?: boolean }
+interface Item { label?: string; kbd?: string; act?: Act; sep?: boolean; unavailable?: string }
 
 const nav = (p: Page): Act => ({ page: p });
 const tst = (m: string): Act => ({ toast: m });
@@ -89,9 +95,9 @@ const MENUS: { name: string; items: Item[] }[] = [
     { label: '撤销编辑', kbd: 'Ctrl+Z', act: { undo: true } },
     { label: '重做编辑', kbd: 'Ctrl+Y', act: { redo: true } },
     { sep: true },
-    { label: '剪切', kbd: 'Ctrl+X', act: tst('已剪切') },
-    { label: '复制', kbd: 'Ctrl+C', act: tst('已复制') },
-    { label: '粘贴', kbd: 'Ctrl+V', act: tst('已粘贴') },
+    { label: '剪切', kbd: 'Ctrl+X', act: tst('请先进入单元格编辑框，再使用 Ctrl+X 剪切文本') },
+    { label: '复制', kbd: 'Ctrl+C', act: tst('请先选中单元格或文本，再使用 Ctrl+C 复制') },
+    { label: '粘贴', kbd: 'Ctrl+V', act: tst('请在单元格编辑框中使用 Ctrl+V；批量数据请用“剪贴板粘贴”导入') },
     { sep: true },
     { label: '查找 / 替换…', kbd: 'Ctrl+F', act: mdl('findreplace') } ] },
   { name: '数据', items: [
@@ -134,8 +140,8 @@ const MENUS: { name: string; items: Item[] }[] = [
     { label: '下载本页图表 PNG', act: { downloadCharts: true } } ] },
   { name: '编辑器', items: [
     { label: '显示会话窗口', act: { session: true } },
-    { label: '显示项目管理器', act: tst('项目管理器已显示') },
-    { label: '列属性…', act: tst('列属性') } ] },
+    { label: '显示项目管理器', act: tst('项目管理器固定显示在左侧导航底部') },
+    { label: '列属性…', unavailable: '列属性编辑器尚未提供；可在工作表表头重命名列' } ] },
   { name: '工具', items: [
     { label: '图表风格：经典', act: { style: '经典' } },
     { label: '图表风格：现代', act: { style: '现代' } },
@@ -143,12 +149,12 @@ const MENUS: { name: string; items: Item[] }[] = [
     { label: '显示 / 隐藏网格线', act: { grid: true } },
     { sep: true },
     { label: '选项 / 本地数据…', act: mdl('options') },
-    { label: '自定义工具栏…', act: tst('工具栏自定义') },
-    { label: '宏 / 脚本…', act: tst('宏管理器') } ] },
+    { label: '自定义工具栏…', unavailable: '当前版本尚未提供工具栏自定义' },
+    { label: '宏 / 脚本…', unavailable: '当前版本尚未提供宏或脚本执行环境' } ] },
   { name: '窗口', items: [
     { label: '质量总览', act: nav('dashboard') },
     { label: '数据工作表', act: nav('worksheet') },
-    { label: '层叠窗口', act: tst('窗口已层叠') } ] },
+    { label: '层叠窗口', unavailable: '当前应用为单窗口工作区，不支持层叠窗口' } ] },
   { name: '帮助', items: [
     { label: '帮助主题 / 统计指南', kbd: 'F1', act: mdl('help') },
     { sep: true },
@@ -180,10 +186,10 @@ export function MenuBar({ wsName }: { wsName: string }) {
         const html = sum.buildProjectSummary(app.projectName, an.useAnalyses.getState().saved);
         const stamp = new Date().toISOString().slice(0, 10);
         const safe = app.projectName.replace(/[\\/:*?"<>|]/g, '_').trim() || '项目';
-        ad.platform.exportFile({ defaultName: `${safe}_汇总_${stamp}`, ext: 'html', filterLabel: '项目汇总报告 (打开后打印为 PDF)', text: html }).then((dest) => {
-          if (dest) showToast('项目汇总已导出: ' + dest);
-        });
-      });
+        return ad.platform.exportFile({ defaultName: `${safe}_汇总_${stamp}`, ext: 'html', filterLabel: '项目汇总报告 (打开后打印为 PDF)', text: html });
+      }).then((dest) => {
+        if (dest) showToast('项目汇总已导出: ' + dest);
+      }).catch((error) => showToast(`项目汇总导出失败：${(error as Error).message}`));
       return;
     }
     if (act.saveProject) {
@@ -192,7 +198,7 @@ export function MenuBar({ wsName }: { wsName: string }) {
         m.exportProject(__APP_VERSION__, useApp.getState().projectName).then((dest) => {
           if (dest) showToast('项目已保存: ' + dest);
         }),
-      );
+      ).catch((error) => showToast(`项目保存失败：${(error as Error).message}`));
       return;
     }
     if (act.saveAs) {
@@ -264,24 +270,41 @@ export function MenuBar({ wsName }: { wsName: string }) {
           const open = openMenu === mu.name;
           return (
             <div key={mu.name} style={{ position: 'relative' }}>
-              <div
+              <button
+                type="button"
                 className={open ? undefined : 'hov-menu-title'}
+                aria-haspopup="menu"
+                aria-expanded={open}
                 onClick={() => setOpenMenu(open ? null : mu.name)}
                 onMouseEnter={() => { if (openMenu && openMenu !== mu.name) setOpenMenu(mu.name); }}
-                style={{ padding: '4px 9px', borderRadius: 3, cursor: 'pointer', ...(open ? { background: '#e7f0f9', color: '#1f6fb2' } : { color: '#3a4350' }) }}
+                style={{ padding: '4px 9px', border: 0, borderRadius: 3, cursor: 'pointer', fontFamily: 'inherit', fontSize: 'inherit', ...(open ? { background: '#e7f0f9', color: '#1f6fb2' } : { background: 'transparent', color: '#3a4350' }) }}
               >
                 {mu.name}
-              </div>
+              </button>
               {open && (
-                <div style={{ position: 'absolute', top: 'calc(100% + 3px)', left: 0, minWidth: 236, background: '#fff', border: '1px solid #d7dbe1', borderRadius: 6, boxShadow: '0 12px 32px rgba(20,30,50,0.17)', padding: 5, zIndex: 200 }}>
+                <div role="menu" style={{ position: 'absolute', top: 'calc(100% + 3px)', left: 0, minWidth: 236, background: '#fff', border: '1px solid #d7dbe1', borderRadius: 6, boxShadow: '0 12px 32px rgba(20,30,50,0.17)', padding: 5, zIndex: 200 }}>
                   {mu.items.map((it, i) =>
                     it.sep ? (
-                      <div key={i} style={{ height: 1, background: '#eef0f3', margin: '5px 8px' }} />
+                      <div role="separator" key={i} style={{ height: 1, background: '#eef0f3', margin: '5px 8px' }} />
                     ) : (
-                      <div key={i} className="hov-menu-item" onClick={() => runCmd(it.act)} style={{ display: 'flex', alignItems: 'center', gap: 20, padding: '7px 12px', borderRadius: 4, cursor: 'pointer', fontSize: 12.5, color: '#3a4350' }}>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        key={i}
+                        className={it.unavailable ? undefined : 'hov-menu-item'}
+                        onClick={() => {
+                          if (it.unavailable) {
+                            setOpenMenu(null);
+                            showToast(it.unavailable);
+                          } else runCmd(it.act);
+                        }}
+                        aria-disabled={it.unavailable ? true : undefined}
+                        title={it.unavailable}
+                        style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 20, padding: '7px 12px', border: 0, background: 'transparent', borderRadius: 4, cursor: it.unavailable ? 'not-allowed' : 'pointer', fontFamily: 'inherit', textAlign: 'left', fontSize: 12.5, color: it.unavailable ? '#a8afb8' : '#3a4350' }}
+                      >
                         <span style={{ flex: 1 }}>{it.label}</span>
-                        <span className="mono" style={{ fontSize: 11, color: '#a3abb5' }}>{it.kbd || ''}</span>
-                      </div>
+                        <span className="mono" style={{ fontSize: 11, color: '#a3abb5' }}>{it.unavailable ? '暂不可用' : it.kbd || ''}</span>
+                      </button>
                     ),
                   )}
                 </div>

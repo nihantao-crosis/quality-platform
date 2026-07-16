@@ -31,7 +31,12 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
-pub fn put_dataset(conn: &Connection, name: &str, json: &str, saved_at: &str) -> rusqlite::Result<()> {
+pub fn put_dataset(
+    conn: &Connection,
+    name: &str,
+    json: &str,
+    saved_at: &str,
+) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT INTO datasets(name, json, saved_at, bytes) VALUES(?1, ?2, ?3, ?4)
          ON CONFLICT(name) DO UPDATE SET json=?2, saved_at=?3, bytes=?4",
@@ -53,7 +58,11 @@ pub fn list_datasets(conn: &Connection) -> rusqlite::Result<Vec<DatasetMeta>> {
     let mut stmt =
         conn.prepare("SELECT name, saved_at, bytes FROM datasets ORDER BY saved_at DESC")?;
     let rows = stmt.query_map([], |r| {
-        Ok(DatasetMeta { name: r.get(0)?, saved_at: r.get(1)?, bytes: r.get(2)? })
+        Ok(DatasetMeta {
+            name: r.get(0)?,
+            saved_at: r.get(1)?,
+            bytes: r.get(2)?,
+        })
     })?;
     rows.collect()
 }
@@ -68,7 +77,11 @@ pub fn stats(conn: &Connection, path: &str) -> rusqlite::Result<DbStats> {
         [],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
-    Ok(DbStats { count, total_bytes, path: path.to_string() })
+    Ok(DbStats {
+        count,
+        total_bytes,
+        path: path.to_string(),
+    })
 }
 
 // ---------- Tauri 命令 ----------
@@ -124,7 +137,13 @@ mod tests {
     #[test]
     fn put_get_roundtrip() {
         let c = mem();
-        put_dataset(&c, "质检数据.mtw", r#"{"rows":[[1,2]]}"#, "2026-07-11T10:00:00Z").unwrap();
+        put_dataset(
+            &c,
+            "质检数据.mtw",
+            r#"{"rows":[[1,2]]}"#,
+            "2026-07-11T10:00:00Z",
+        )
+        .unwrap();
         let got = get_dataset(&c, "质检数据.mtw").unwrap();
         assert_eq!(got.as_deref(), Some(r#"{"rows":[[1,2]]}"#));
     }
@@ -152,7 +171,11 @@ mod tests {
         let c = mem();
         put_dataset(&c, "old", "x", "2026-01-01").unwrap();
         put_dataset(&c, "new", "y", "2026-07-01").unwrap();
-        let names: Vec<String> = list_datasets(&c).unwrap().into_iter().map(|m| m.name).collect();
+        let names: Vec<String> = list_datasets(&c)
+            .unwrap()
+            .into_iter()
+            .map(|m| m.name)
+            .collect();
         assert_eq!(names, vec!["new", "old"]);
     }
 
@@ -183,6 +206,9 @@ mod tests {
         let big = format!(r#"{{"rows":[{}]}}"#, vec![row; 150_000].join(","));
         assert!(big.len() > 5 * 1024 * 1024);
         put_dataset(&c, "大数据集", &big, "t").unwrap();
-        assert_eq!(get_dataset(&c, "大数据集").unwrap().unwrap().len(), big.len());
+        assert_eq!(
+            get_dataset(&c, "大数据集").unwrap().unwrap().len(),
+            big.len()
+        );
     }
 }

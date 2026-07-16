@@ -6,15 +6,17 @@
 import { create } from 'zustand';
 import {
   nf, capabilityInputError, computeCapability, evalRules, evalLimitedRules, prepareSpcData, computeGageRR, gageStudyData, GAGE_TOLERANCE,
-  prepareGageStudy,
+  prepareGageStudy, resolveNumericColumn,
   oneWayAnova, oneSampleT, twoSampleT, linearRegression, anovaGroups, buildAnovaGroups, wideScaleDisparate, resolveAnovaMode, countAnovaPendingCells, isDoeAnalysisColumn, analyzeDoe, detectFactorial, analyzeFactorial, factorialModelTerms, resolveDoeColumns, resolveDoeBlockValues, plansByState, computeDescriptive,
-  ewmaSeries, cusumSeries, stagedXbar, stagedRange, splitStages, normalizeSwitchStatus,
+  ewmaSeries, cusumSeries, stagedXbar, stagedRange, stageValidationError, normalizeSwitchStatus,
   type InspectionLevel, type AnovaMode, type AqlMethod, type AqlAcMethod, type NelsonRules, type SwitchStatus, type SpcDataLayout,
 } from '../core';
 import { useApp, DEFAULT_SPC_RULES, type SpcType, type DoeView, type DoeTab, type HypoTab, type ParetoView } from './appStore';
 import { syncSpecForActiveMeasurement, useData, type ParetoModel } from './dataStore';
 import { loadFishboneState, saveFishboneState, type FishboneData } from './fishboneStore';
 import { sessionLog } from './sessionLog';
+import { projectStoreValidationError, registerProjectLifecycleHooks } from '../platform/project';
+import { preserveCorruptStore } from './quarantine';
 
 export type AnalysisKind = 'spc' | 'capability' | 'gagerr' | 'anova' | 'pareto' | 'doe' | 'aql' | 'summary';
 
@@ -63,12 +65,14 @@ export interface AnalysisSnapshot {
   /** v4/v5 兼容内嵌载荷；新记录优先用 sourceDataKey 去重存储。 */
   sourceData?: AnalysisSourceData;
   sourceDataKey?: string;
-  pChartData?: { name: string; counts: number[]; sampleSize: number };
+  pChartData?: { name: string; counts: number[]; sampleSize: number; sampleSizes?: number[] };
   cChartData?: { name: string; counts: number[] };
   // 列选择随分析记录一起快照,保证回看时"页面所见 = 保存时"(否则重算会用当前选择)
   doeFactorCols?: string[] | null; doeRespCol?: string | null;
   doeModelTerms?: string[] | null; doeIncludeCurvature?: boolean;
   anovaMode?: AnovaMode; anovaRespName?: string | null; anovaFactorName?: string | null;
+  /** 描述性统计一次只分析一个数值列。 */
+  activeVar?: string;
 }
 
 export interface SavedAnalysis {
@@ -87,6 +91,26 @@ export interface SavedAnalysis {
 const LS_KEY = 'qp-analyses-v1';
 const LS_ANALYSIS_DATA = 'qp-analysis-data-v1';
 const MAX_SAVED = 40;
+const protectedCorruptAnalysisStores = new Map<string, { raw: string; detail: string }>();
+
+function quarantineAnalysisStore(key: string, raw: string, detail: string): boolean {
+  const preserved = preserveCorruptStore(key, raw, detail);
+  if (preserved) protectedCorruptAnalysisStores.delete(key);
+  else protectedCorruptAnalysisStores.set(key, { raw, detail });
+  return preserved;
+}
+
+function canReplaceAnalysisStore(key: string): boolean {
+  const blocked = protectedCorruptAnalysisStores.get(key);
+  if (!blocked) return true;
+  let live: string | null = blocked.raw;
+  try { live = localStorage.getItem(key); } catch { /* 使用已捕获原文重试 */ }
+  if (live == null) {
+    protectedCorruptAnalysisStores.delete(key);
+    return true;
+  }
+  return quarantineAnalysisStore(key, live, blocked.detail);
+}
 
 type AnalysisDataLibrary = Record<string, AnalysisSourceData>;
 
@@ -102,10 +126,19 @@ function sourceDataKey(data: AnalysisSourceData): string {
 }
 
 function loadAnalysisDataLibrary(): AnalysisDataLibrary {
+  let raw: string | null = null;
   try {
-    const raw = localStorage.getItem(LS_ANALYSIS_DATA);
-    return raw ? JSON.parse(raw) as AnalysisDataLibrary : {};
+    raw = localStorage.getItem(LS_ANALYSIS_DATA);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as unknown;
+    const detail = projectStoreValidationError(LS_ANALYSIS_DATA, parsed);
+    if (detail) {
+      quarantineAnalysisStore(LS_ANALYSIS_DATA, raw, detail);
+      return {};
+    }
+    return parsed as AnalysisDataLibrary;
   } catch {
+    if (raw) quarantineAnalysisStore(LS_ANALYSIS_DATA, raw, 'JSON 解析失败或写入被截断');
     return {};
   }
 }
@@ -120,6 +153,7 @@ function storeAnalysisSourceData(data: AnalysisSourceData): string | null {
     key = `${baseKey}-${collision++}`;
   }
   if (library[key]) return key;
+  if (!canReplaceAnalysisStore(LS_ANALYSIS_DATA)) return null;
   try {
     localStorage.setItem(LS_ANALYSIS_DATA, JSON.stringify({ ...library, [key]: data }));
     return key;
@@ -138,6 +172,7 @@ function pruneAnalysisDataLibrary(saved: SavedAnalysis[]) {
   const keep = new Set(saved.map((analysis) => analysis.snapshot.sourceDataKey).filter((key): key is string => !!key));
   const library = loadAnalysisDataLibrary();
   const next = Object.fromEntries(Object.entries(library).filter(([key]) => keep.has(key)));
+  if (!canReplaceAnalysisStore(LS_ANALYSIS_DATA)) return;
   try {
     if (Object.keys(next).length > 0) localStorage.setItem(LS_ANALYSIS_DATA, JSON.stringify(next));
     else localStorage.removeItem(LS_ANALYSIS_DATA);
@@ -262,7 +297,7 @@ function buildSummary(kind: AnalysisKind): Omit<SavedAnalysis, 'id' | 'createdAt
         const r = evalRules(data, cl, sigma, app.spcRules);
         return expandSpcRuleItems(r.viol, r.list, chartLabel);
       };
-      const limitedItems = (data: number[], cl: number, ucl: number, lcl: number, chartLabel: string, indexOffset = 0) => {
+      const limitedItems = (data: number[], cl: number, ucl: number | number[], lcl: number | number[], chartLabel: string, indexOffset = 0) => {
         const r = evalLimitedRules(data, cl, ucl, lcl, app.spcRules);
         return expandSpcRuleItems(r.viol, r.list, chartLabel).map((item) => ({ ...item, i: item.i + indexOffset }));
       };
@@ -273,7 +308,18 @@ function buildSummary(kind: AnalysisKind): Omit<SavedAnalysis, 'id' | 'createdAt
         const stageLabels = app.spcStageCol
           ? prepared.textCols.find((c) => c.name === app.spcStageCol)?.values
           : undefined;
-        const canUseStages = stageLabels?.length === SM.k && splitStages(stageLabels).length >= 2;
+        const stageError = app.spcStageCol
+          ? stageLabels
+            ? stageValidationError(stageLabels, SM.k)
+            : `找不到阶段列“${app.spcStageCol}”`
+          : null;
+        if (stageError) {
+          return {
+            kind, title: `${SPC_TITLE[effType]} · 分阶段未运行`, metric: stageError,
+            status: '未分析', ...pick(WARN),
+          };
+        }
+        const canUseStages = Boolean(stageLabels);
         if (canUseStages && stageLabels) {
           const x = stagedXbar(rows, stageLabels, app.spcRules);
           const r = stagedRange(rows, stageLabels, app.spcRules);
@@ -312,7 +358,7 @@ function buildSummary(kind: AnalysisKind): Omit<SavedAnalysis, 'id' | 'createdAt
         const r = cusumSeries(data, mu, sigma, 0.5, SM.hasSubgroups ? 4 : 5);
         items = [...r.viol].map((i) => ({ i, rule: 1, desc: '累积和超出判定限 H', chartLabel: 'CUSUM' }));
       } else if (effType === 'p') {
-        items = limitedItems(pModel.pprop, pModel.pbar, pModel.pUcl, pModel.pLcl, 'P');
+        items = limitedItems(pModel.pprop, pModel.pbar, pModel.pUcls, pModel.pLcls, 'P');
       } else {
         items = limitedItems(cModel.cdata, cModel.cbar, cModel.cUcl, cModel.cLcl, 'C');
       }
@@ -361,7 +407,7 @@ function buildSummary(kind: AnalysisKind): Omit<SavedAnalysis, 'id' | 'createdAt
           return { kind, title: '测量系统分析 Gage R&R', metric: prepared.reason, status: '未分析', ...pick(WARN) };
         }
         const g = requestedReal && prepared.ok
-          ? computeGageRR(prepared.study.observations, Math.abs(app.usl - app.lsl))
+          ? computeGageRR(prepared.study.observations, app.lslOn && app.uslOn ? app.usl - app.lsl : null)
           : computeGageRR(gageStudyData(), GAGE_TOLERANCE);
         const ok = g.verdict === 'acceptable';
         return {
@@ -426,6 +472,11 @@ function buildSummary(kind: AnalysisKind): Omit<SavedAnalysis, 'id' | 'createdAt
         }
         if (tab === 't2') {
           const multi = M.colNames.length >= 2;
+          if (!multi && !M.isDemo) {
+            return {
+              kind, title: HYPO_TITLE.t2, metric: '需要两个不同数值列', status: '未分析', ...pick(WARN),
+            };
+          }
           const first = indexFor(app.t2ColAName, 0);
           const namedSecond = indexFor(app.t2ColBName, multi ? 1 : 0);
           const second = multi && first === namedSecond ? (first === 0 ? 1 : 0) : namedSecond;
@@ -508,6 +559,12 @@ function buildSummary(kind: AnalysisKind): Omit<SavedAnalysis, 'id' | 'createdAt
           terms: selectedTerms && selectedTerms.length > 0 ? selectedTerms : availableTerms,
           includeCurvature: app.doeIncludeCurvature,
         });
+        if (fr.terms.length === 0) {
+          return {
+            kind, title: `实验设计 · ${det.design.factorNames.length} 因子`,
+            metric: '所选模型项全部不可估计', status: '未分析', ...pick(WARN),
+          };
+        }
         const sig = fr.terms.filter((t) => t.sig).map((t) => t.name);
         return {
           kind, title: `实验设计 · ${det.design.factorNames.length} 因子`,
@@ -524,16 +581,17 @@ function buildSummary(kind: AnalysisKind): Omit<SavedAnalysis, 'id' | 'createdAt
       const stateLabel = sw.state === 'tightened' ? '加严' : sw.state === 'reduced' ? '放宽' : '正常';
       return {
         kind,
-        title: sw.suspended ? '抽样检验 · 已暂停' : plan.fullInspect ? '接收检验 · 100% 全检' : `抽样检验 · AQL ${stateLabel}方案`,
-        metric: `${plan.fullInspect ? 'N' : 'n'}=${plan.n} Ac=${plan.ac}`,
-        status: sw.suspended ? '等待纠正措施' : plan.fullInspect ? '100% 全检' : stateLabel,
+        title: sw.suspended ? 'AQL 历史摘要 · 已暂停' : plan.fullInspect ? 'AQL 历史摘要 · 100% 全检' : `AQL 历史摘要 · ${stateLabel}方案`,
+        metric: `保存时 ${plan.fullInspect ? 'N' : 'n'}=${plan.n} Ac=${plan.ac} Re=${plan.re}`,
+        status: sw.suspended ? '保存时：等待纠正' : plan.fullInspect ? '保存时：全检' : `保存时：${stateLabel}`,
         ...pick(sw.suspended ? BAD : plan.fullInspect ? WARN : INFO),
       };
     }
     case 'summary': {
-      const d = computeDescriptive(M.all);
+      const column = resolveNumericColumn(M, app.activeVar);
+      const d = computeDescriptive(column.values);
       return {
-        kind, title: '描述性统计 · 图形化摘要',
+        kind, title: `描述性统计 · ${column.name}`,
         metric: `x̄ ${nf(d.mean, 3)} · s ${nf(d.stdev, 3)}`,
         status: !d.adAvailable ? '已汇总' : d.ad.normal ? '正态' : '非正态',
         ...pick(!d.adAvailable ? INFO : d.ad.normal ? OK : WARN),
@@ -573,7 +631,10 @@ function snapshotOf(kind: AnalysisKind): AnalysisSnapshot {
     }
     if (kind === 'spc' && a.spcType === 'p') {
       snap.pChartData = {
-        name: data.pModel.name, counts: [...data.pModel.pdef], sampleSize: data.pModel.pN,
+        name: data.pModel.name,
+        counts: [...data.pModel.pdef],
+        sampleSize: data.pModel.pN,
+        sampleSizes: data.pModel.pVariableN ? [...data.pModel.pNs] : undefined,
       };
     } else if (kind === 'spc' && a.spcType === 'c') {
       snap.cChartData = { name: data.cModel.name, counts: [...data.cModel.cdata] };
@@ -588,6 +649,8 @@ function snapshotOf(kind: AnalysisKind): AnalysisSnapshot {
     // 同一组量具数据会在回看时得到不同结论。
     snap.lsl = a.lsl;
     snap.usl = a.usl;
+    snap.lslOn = a.lslOn;
+    snap.uslOn = a.uslOn;
     snap.gageUseReal = a.gageUseReal;
     snap.gageValueName = a.gageValueName;
     snap.gagePartName = a.gagePartName;
@@ -599,13 +662,8 @@ function snapshotOf(kind: AnalysisKind): AnalysisSnapshot {
   if (kind === 'aql') {
     snap.aqlLot = a.aqlLot; snap.aqlLevel = a.aqlLevel; snap.aqlAQL = a.aqlAQL;
     snap.aqlMethod = 'gb'; snap.aqlAcMethod = 'gb';
-    const sw = normalizeSwitchStatus(a.aqlSwitch);
-    snap.aqlSwitch = {
-      ...sw,
-      history: [...sw.history],
-      sinceSwitch: [...sw.sinceSwitch],
-      records: sw.records.map((r) => ({ ...r })),
-    };
+    // 标题/指标已经固化保存时的状态摘要；责任账本只保留在活跃 AQL store 中。
+    // 历史卡不再复制整本 records，避免 40 个摘要把同一账本重复存储 40 次。
   }
   if (kind === 'doe') {
     snap.doeView = a.doeView;
@@ -645,20 +703,56 @@ function snapshotOf(kind: AnalysisKind): AnalysisSnapshot {
       if (pm) snap.paretoData = { name: pm.name, rows: pm.rows.map((r) => ({ ...r })) };
     }
   }
+  if (kind === 'summary') {
+    snap.activeVar = resolveNumericColumn(useData.getState().model, a.activeVar).name;
+  }
   if (analysisUsesWorksheet(kind, snap)) attachWorksheetSnapshot(snap);
   return snap;
 }
 
+/** v1.33 起 AQL 历史卡只保留摘要；升级时移除旧卡里从未被回看消费的重复责任账本。 */
+export function normalizeSavedAnalysesForStorage(value: unknown): SavedAnalysis[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is SavedAnalysis => !!item && typeof item === 'object' && !Array.isArray(item))
+    .map((analysis) => {
+      if (analysis.kind !== 'aql' || !analysis.snapshot?.aqlSwitch) return analysis;
+      const snapshot = { ...analysis.snapshot };
+      delete snapshot.aqlSwitch;
+      return { ...analysis, snapshot };
+    })
+    .filter((analysis) => !projectStoreValidationError(LS_KEY, [analysis]));
+}
+
 function load(): SavedAnalysis[] {
+  let parsed: unknown;
+  let normalized: SavedAnalysis[];
+  let text: string | null = null;
   try {
-    const s = localStorage.getItem(LS_KEY);
-    return s ? (JSON.parse(s) as SavedAnalysis[]) : [];
+    text = localStorage.getItem(LS_KEY);
+    if (!text) return [];
+    parsed = JSON.parse(text);
+    const detail = projectStoreValidationError(LS_KEY, parsed);
+    if (detail) {
+      quarantineAnalysisStore(LS_KEY, text, detail);
+      return [];
+    }
+    normalized = normalizeSavedAnalysesForStorage(parsed);
   } catch {
+    if (text) quarantineAnalysisStore(LS_KEY, text, 'JSON 解析失败或写入被截断');
     return [];
   }
+  // 旧 AQL 快照清理只是尽力迁移；写回失败不能让已成功读取的历史在本次会话中消失。
+  try {
+    if (JSON.stringify(parsed) !== JSON.stringify(normalized)) {
+      localStorage.setItem(LS_KEY, JSON.stringify(normalized));
+    }
+  } catch { /* 保留内存中的 normalized，稍后有空间时再迁移 */ }
+  return normalized;
 }
 
 function persist(saved: SavedAnalysis[]): boolean {
+  if (!canReplaceAnalysisStore(LS_KEY)) return false;
   try {
     localStorage.setItem(LS_KEY, JSON.stringify(saved));
     return true;
@@ -666,6 +760,14 @@ function persist(saved: SavedAnalysis[]): boolean {
     return false;
   }
 }
+
+registerProjectLifecycleHooks({
+  beforeExport: () => {
+    if (protectedCorruptAnalysisStores.size > 0) {
+      throw new Error(`损坏的分析存储尚未成功复制到隔离区（${[...protectedCorruptAnalysisStores.keys()].join('、')}），项目未导出`);
+    }
+  },
+});
 
 const ANALYSIS_PAGES: AnalysisKind[] = ['spc', 'capability', 'gagerr', 'anova', 'pareto', 'doe', 'aql', 'summary'];
 
@@ -676,7 +778,8 @@ interface AnalysesState {
   /** 保存当前页的分析为一条记录;非分析页返回 null */
   saveCurrent(): SavedAnalysis | null;
   remove(id: string): void;
-  restore(id: string): void;
+  /** 精确恢复历史分析；异步数据集读取失败时返回 false，且不回放参数或跳页。 */
+  restore(id: string): Promise<boolean>;
 }
 
 export const useAnalyses = create<AnalysesState>((set, get) => ({
@@ -688,10 +791,26 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
     const page = useApp.getState().page;
     if (!ANALYSIS_PAGES.includes(page as AnalysisKind)) return null;
     const kind = page as AnalysisKind;
-    const summary = buildSummary(kind);
-    if (!summary) return null;
     const data = useData.getState();
     const app = useApp.getState();
+    if (kind === 'summary') {
+      const column = resolveNumericColumn(data.model, app.activeVar);
+      const pending = data.pendingCells.filter((cell) => cell.col === column.index).length;
+      if (pending > 0) {
+        const lastError = `「${column.name}」仍有 ${pending} 个待录入单元格，描述性统计未运行，分析未保存`;
+        set({ lastError });
+        sessionLog(`保存分析失败 描述性统计 · ${lastError}`);
+        return null;
+      }
+    }
+    if (kind === 'anova' && app.hypoTab === 't2' && !data.model.isDemo && data.model.n < 2) {
+      const lastError = '双样本 t 检验需要两个不同的数值列；当前真实工作表只有一列，分析未保存';
+      set({ lastError });
+      sessionLog(`保存分析失败 双样本 t 检验 · ${lastError}`);
+      return null;
+    }
+    const summary = buildSummary(kind);
+    if (!summary) return null;
     const datasetName = kind === 'pareto'
       ? app.paretoView === 'fishbone'
         ? `鱼骨图 · ${loadFishboneState().data.problem || '未命名问题'}`
@@ -737,9 +856,9 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
     pruneAnalysisDataLibrary(saved);
   },
 
-  restore: (id) => {
+  restore: async (id) => {
     const a = get().saved.find((x) => x.id === id);
-    if (!a) return;
+    if (!a) return false;
     const s = a.snapshot;
     let restoredEmbeddedData = false;
     const usesWorksheet = analysisUsesWorksheet(a.kind, s);
@@ -755,11 +874,15 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
         {
           isDemo: source.isDemo === true,
           indivSeries: source.indivSeries?.map((value) => value),
+          preserveSpecs: true,
         },
       );
       restoredEmbeddedData = true;
     } else if (a.kind === 'spc' && s.pChartData) {
-      useData.getState().importCounts('p', s.pChartData.name, [...s.pChartData.counts], s.pChartData.sampleSize);
+      useData.getState().importCounts(
+        'p', s.pChartData.name, [...s.pChartData.counts],
+        s.pChartData.sampleSizes ? [...s.pChartData.sampleSizes] : s.pChartData.sampleSize,
+      );
       restoredEmbeddedData = true;
     } else if (a.kind === 'spc' && s.cChartData) {
       useData.getState().importCounts('c', s.cChartData.name, [...s.cChartData.counts]);
@@ -768,7 +891,7 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
     if (a.kind === 'spc' && (s.spcType === 'p' || s.spcType === 'c') && !restoredEmbeddedData) {
       useApp.getState().showToast('旧版 P/C 控制图记录未保存当时计数数据，无法准确重建；当前数据未作更改');
       sessionLog(`无法回看旧版 ${s.spcType.toUpperCase()} 记录 ${a.title} · 快照不含计数数据`);
-      return;
+      return false;
     }
     const missingWorksheetSnapshotMustBlock = usesWorksheet && !restoredEmbeddedData && (
       a.kind === 'anova' || a.kind === 'doe' || a.kind === 'summary'
@@ -777,17 +900,23 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
     if (missingWorksheetSnapshotMustBlock) {
       useApp.getState().showToast('该分析的数据快照缺失，无法准确重建；当前数据未作更改');
       sessionLog(`无法回看分析 ${a.title} · 数据快照缺失`);
-      return;
+      return false;
     }
     // 仅旧版 SPC/能力等兼容记录可回退最近列表；v5 工作表分析一律使用精确快照。
     if (usesWorksheet && !restoredEmbeddedData && a.datasetName !== useData.getState().model.name) {
       const rec = useData.getState().recents.find((r) => r.name === a.datasetName);
       if (rec) {
-        useData.getState().loadRecent(a.datasetName);
-      } else if (a.kind === 'spc' || a.kind === 'capability') {
+        // 旧版快照回落最近列表时，随后会回放该记录自己的 SPC 角色；异步库读取也不能在完成时清掉它。
+        const loaded = await useData.getState().loadRecent(a.datasetName, true);
+        if (!loaded) {
+          useApp.getState().showToast('旧版分析对应的数据集读取失败，无法准确重建；当前数据与分析参数未作更改');
+          sessionLog(`无法回看旧版分析 ${a.title} · 数据集 ${a.datasetName} 读取失败`);
+          return false;
+        }
+      } else {
         useApp.getState().showToast('旧版分析未保存原始数据，且对应数据集已不可用；当前数据未作更改');
         sessionLog(`无法回看旧版分析 ${a.title} · 数据集 ${a.datasetName} 已不可用`);
-        return;
+        return false;
       }
     }
     // 还原分析参数
@@ -796,7 +925,7 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
     if (legacyFishboneMissing) {
       useApp.getState().showToast('旧版鱼骨图记录未保存问题与原因，无法重建；当前鱼骨图未作更改');
       sessionLog(`无法回看旧版鱼骨图记录 ${a.title} · 快照不含鱼骨数据`);
-      return;
+      return false;
     }
     const legacyParetoMissing = a.kind === 'pareto'
       && !s.paretoData && s.snapshotVersion == null && s.paretoShowDemo == null;
@@ -804,7 +933,7 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
       // 无法区分旧记录是示例还是哪份真实数据；保持当前工作不变，只明确告知不能回看。
       useApp.getState().showToast('旧版帕累托记录未保存数据，无法重建原图；当前帕累托数据未作更改');
       sessionLog(`无法回看旧版帕累托记录 ${a.title} · 快照不含数据`);
-      return;
+      return false;
     }
     if (a.kind === 'pareto') {
       if (s.paretoView === 'fishbone' && s.fishboneData) {
@@ -829,6 +958,7 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
       'hypoTab', 'anovaMode', 'anovaRespName', 'anovaFactorName', 'anovaShowDemo',
       't1ColName', 't1Mu0', 't2ColAName', 't2ColBName', 'regXName', 'regYName',
       'paretoView', 'paretoMergeOther', 'paretoThreshold', 'paretoShowDemo',
+      'activeVar',
     ];
     for (const key of appKeys) if (s[key] !== undefined) patch[key] = s[key];
     // v1.30 以前的 SPC 记录没有规则/阶段快照：采用当时的产品默认，而非继承当前页面条件。
@@ -869,6 +999,7 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
     sessionLog(a.kind === 'aql'
       ? `打开当前 AQL（历史摘要未回滚活跃流）· ${a.title}`
       : `恢复分析 ${a.title} · 数据集 ${a.datasetName}`);
+    return true;
   },
 }));
 

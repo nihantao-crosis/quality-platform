@@ -50,12 +50,15 @@ export function oneSampleT(xs: number[], mu0: number): TTestResult {
   const s = stdev(xs, true);
   const se = s / Math.sqrt(n);
   const df = n - 1;
-  const diff = m - mu0;
-  const zeroDiff = Math.abs(diff) <= Number.EPSILON * Math.max(1, Math.abs(m), Math.abs(mu0)) * 8;
-  // 常数样本的标准误为 0：若均值正好等于 μ₀，则没有差异；若不等，则统计量
-  // 沿差异方向趋于无穷且双侧 P=0。不能一律退成 t=0、P=1。
-  const t = se === 0 ? (zeroDiff ? 0 : Math.sign(diff) * Infinity) : diff / se;
-  const p = se === 0 ? (zeroDiff ? 1 : 0) : tTwoSidedP(t, df);
+  // 直接在 H0 的中心坐标中求均值差；先求大基准均值再相减会丢失低位。
+  const diff = mean(xs.map((value) => value - mu0));
+  // t 推断要求可估计的抽样误差。零标准误时 t/P 并非 ±∞/0，而是模型
+  // 不可估计；明确阻断，避免把常数输入伪装成“高度显著”的抽样证据。
+  if (!(se > 0) || !Number.isFinite(se) || xs.every((value) => value === xs[0])) {
+    throw new Error('单样本 t 检验标准误为 0 或不可估计，无法计算 t 统计量与 P 值');
+  }
+  const t = diff / se;
+  const p = tTwoSidedP(t, df);
   const tc = tInv(0.975, df);
   return { t, df, p, significant: p < 0.05, estimate: m, ciLow: m - tc * se, ciHigh: m + tc * se, se };
 }
@@ -66,20 +69,22 @@ export function twoSampleT(xs: number[], ys: number[]): TTestResult {
   if (xs.some((value) => !Number.isFinite(value)) || ys.some((value) => !Number.isFinite(value))) {
     throw new Error('双样本 t 检验只接受有限数值');
   }
-  const m1 = mean(xs);
-  const m2 = mean(ys);
   const v1 = stdev(xs, true) ** 2;
   const v2 = stdev(ys, true) ** 2;
   const n1 = xs.length;
   const n2 = ys.length;
   const se = Math.sqrt(v1 / n1 + v2 / n2);
+  if (!(se > 0) || !Number.isFinite(se)) {
+    throw new Error('双样本 t 检验标准误为 0 或不可估计，无法计算 t 统计量与 P 值');
+  }
   // Welch–Satterthwaite 自由度
-  const df = se === 0 ? n1 + n2 - 2 : (v1 / n1 + v2 / n2) ** 2 / ((v1 / n1) ** 2 / (n1 - 1) + (v2 / n2) ** 2 / (n2 - 1));
-  const diff = m1 - m2;
-  const zeroDiff = Math.abs(diff) <= Number.EPSILON * Math.max(1, Math.abs(m1), Math.abs(m2)) * 8;
-  // 两组都为常数时与单样本边界同理：相同常数 P=1，不同常数 P=0。
-  const t = se === 0 ? (zeroDiff ? 0 : Math.sign(diff) * Infinity) : diff / se;
-  const p = se === 0 ? (zeroDiff ? 1 : 0) : tTwoSidedP(t, df);
+  const df = (v1 / n1 + v2 / n2) ** 2 / ((v1 / n1) ** 2 / (n1 - 1) + (v2 / n2) ** 2 / (n2 - 1));
+  // 用共同原点比较两组，避免两个大而接近的均值相减时发生灾难性消减。
+  const origin = xs[0];
+  const diff = mean(xs.map((value) => value - origin))
+    - mean(ys.map((value) => value - origin));
+  const t = diff / se;
+  const p = tTwoSidedP(t, df);
   const tc = tInv(0.975, df);
   return { t, df, p, significant: p < 0.05, estimate: diff, ciLow: diff - tc * se, ciHigh: diff + tc * se, se };
 }

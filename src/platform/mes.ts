@@ -4,6 +4,7 @@
  */
 import { useData } from '../store/dataStore';
 import { sessionLog } from '../store/sessionLog';
+import { registerProjectLifecycleHooks } from './project';
 
 let timer: ReturnType<typeof setInterval> | null = null;
 
@@ -56,3 +57,6 @@ export function mesStop(): void {
   useData.getState().setMesRunning(false);
   sessionLog(`MES 采集停止 · 共 ${useData.getState().model.k} 子组`);
 }
+
+// 项目导入/导出必须在静止的数据边界上取快照；否则下一次 800ms tick 会覆盖刚导入的 stores。
+registerProjectLifecycleHooks({ beforeMutation: mesStop, beforeExport: mesStop });

@@ -29,24 +29,65 @@ export function oneWayAnova(groups: number[][]): AnovaResult {
   }
   const all = groups.flat();
   const N = all.length;
-  const grand = mean(all);
-  const factorSS = groups.reduce((a, g) => a + g.length * (mean(g) - grand) ** 2, 0);
-  const errorSS = groups.reduce((a, g) => {
-    const m = mean(g);
-    return a + g.reduce((x, v) => x + (v - m) ** 2, 0);
+  // F 是无量纲比值。先减去共同原点，再用“离差尺度”归一化后计算平方和。
+  // 绝对值尺度会把与 ANOVA 无关的平移基准带入舍入误差，使同一组数据仅因加上
+  // 常数就改变 F/P；中心化坐标同时保留小量纲数据和大基准上的组间/组内差异。
+  // 最终平方和再还原到输入单位；极端尺度下即使还原值溢出/下溢，F/P 仍可估计。
+  let origin = all[0];
+  let centered = groups.map((group) => group.map((value) => value - origin));
+  let rawScale = centered.reduce(
+    (maximum, group) => group.reduce((groupMaximum, value) => Math.max(groupMaximum, Math.abs(value)), maximum),
+    0,
+  );
+  // 首点与另一观测异号且都接近 Number.MAX_VALUE 时，相减可能上溢；仅在该边界
+  // 改用安全中点作原点，仍保持所有后续计算在离差坐标内。
+  if (!Number.isFinite(rawScale)) {
+    const minimum = all.reduce((value, observation) => Math.min(value, observation), Infinity);
+    const maximum = all.reduce((value, observation) => Math.max(value, observation), -Infinity);
+    origin = minimum / 2 + maximum / 2;
+    centered = groups.map((group) => group.map((value) => value - origin));
+    rawScale = centered.reduce(
+      (value, group) => group.reduce((groupMaximum, observation) => Math.max(groupMaximum, Math.abs(observation)), value),
+      0,
+    );
+  }
+  // 2 的整数次幂缩放只调整 IEEE-754 指数位，不额外改变有效数字；任意十进制
+  // scale 会在除法时再引入一轮舍入，削弱本应成立的换单位不变量。
+  const scale = rawScale === 0 ? 0 : 2 ** Math.min(1023, Math.floor(Math.log2(rawScale)));
+  const normalized = scale === 0
+    ? groups.map((group) => group.map(() => 0))
+    : centered.map((group) => group.map((value) => value / scale));
+  const normalizedAll = normalized.flat();
+  const normalizedGrand = mean(normalizedAll);
+  const normalizedFactorSS = normalized.reduce(
+    (sum, group) => sum + group.length * (mean(group) - normalizedGrand) ** 2,
+    0,
+  );
+  const normalizedErrorSS = normalized.reduce((sum, group) => {
+    const groupMean = mean(group);
+    return sum + group.reduce((groupSum, value) => groupSum + (value - groupMean) ** 2, 0);
   }, 0);
+  const scaleSquared = scale * scale;
+  // 0 × Infinity 在 JS 中是 NaN；零平方和应保持精确 0，即使原始单位很大。
+  const restoreScale = (sumOfSquares: number) => sumOfSquares === 0 ? 0 : sumOfSquares * scaleSquared;
+  const factorSS = restoreScale(normalizedFactorSS);
+  const errorSS = restoreScale(normalizedErrorSS);
   const factorDf = k - 1;
   const errorDf = N - k;
   const errorMS = errorSS / errorDf;
+  const normalizedFactorMS = normalizedFactorSS / factorDf;
+  const normalizedErrorMS = normalizedErrorSS / errorDf;
   // 组内零方差(完美一致):组间有差异 → 无穷显著(p=0);组间也无差异 → 无信息(p=1)。
   // 否则会得到 F=∞、p=NaN 而被误判为"不显著"。
   let fStat: number;
   let pValue: number;
-  if (errorMS <= 1e-12) {
-    fStat = factorSS > 1e-12 ? Infinity : 0;
-    pValue = factorSS > 1e-12 ? 0 : 1;
+  const noWithinVariation = groups.every((group) => group.every((value) => value === group[0]));
+  if (noWithinVariation || normalizedErrorMS === 0) {
+    const noBetweenVariation = groups.every((group) => group[0] === groups[0][0]);
+    fStat = noBetweenVariation ? 0 : Infinity;
+    pValue = noBetweenVariation ? 1 : 0;
   } else {
-    fStat = (factorSS / factorDf) / errorMS;
+    fStat = normalizedFactorMS / normalizedErrorMS;
     pValue = 1 - fCdf(fStat, factorDf, errorDf);
   }
   return {

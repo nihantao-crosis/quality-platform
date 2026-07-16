@@ -49,7 +49,7 @@ export function Dashboard({ T }: { T: ChartTokens }) {
         title: `${SM?.hasSubgroups ? 'X̄ 图子组' : 'I 图观测'} ${v.i + 1} 违反准则 ${v.rule}`,
         desc: v.desc,
         page: 'spc' as const,
-      }))).slice(0, 2);
+      })));
   // 设备 ANOVA 是随安装包提供的演示研究，只能在演示数据集上形成告警。
   const anovaAlerts = M.isDemo && anova.significant
     ? [{ color: '#e0902a', title: '演示研究：设备间均值差异显著', desc: `演示 ANOVA 显示设备间差异显著 (P=${nf(anova.pValue, 3)})`, page: 'anova' as const }]
@@ -62,13 +62,15 @@ export function Dashboard({ T }: { T: ChartTokens }) {
   const cpkGood = cap != null && cap.cpk >= 1.33;
   const kpis = [
     { label: '过程能力 Cpk', value: cap ? nf(cap.cpk, 2) : '—', tag: cap ? (cpkGood ? '达标' : '预警') : '未运行', color: cap ? (cpkGood ? '#2c8a45' : '#e0902a') : '#8a929d', sub: cap ? '目标 ≥ 1.33' : capError ?? '能力输入无效' },
-    { label: '一次合格率', value: '98.6%', tag: '▲0.4', color: '#2c8a45', sub: '较上月 · 演示指标' },
+    M.isDemo
+      ? { label: '一次合格率', value: '98.6%', tag: '演示', color: '#2c8a45', sub: '内置看板示例，不代表当前生产批次' }
+      : { label: '一次合格率', value: '—', tag: '', color: '#8a929d', sub: '当前工作表没有批次一次合格数据' },
     { label: '不良 PPM', value: cap ? Math.round(cap.ppm.overall.total).toLocaleString() : '—', tag: '', color: cap ? '#c22f2f' : '#8a929d', sub: cap ? '预计缺陷率' : capError ?? '能力输入无效' },
     {
       label: '未处理告警', value: String(alerts.length), tag: '', color: alerts.length > 0 ? '#e0902a' : '#2c8a45',
       sub: alerts.length > 0
         ? `${spcAlerts.length} SPC${anovaAlerts.length ? ` · ${anovaAlerts.length} 演示 ANOVA` : ''}`
-        : '过程受控',
+        : SM ? '过程受控' : 'SPC 未运行',
     },
   ];
 
@@ -176,8 +178,16 @@ export function Dashboard({ T }: { T: ChartTokens }) {
                   <tr
                     key={r.id}
                     className="hov-row"
+                    role="button"
+                    tabIndex={0}
                     title={r.kind === 'aql' ? '历史摘要：点击返回当前 AQL；不会覆盖当前抽样参数、状态或责任账本' : '点击恢复此分析的数据集与参数'}
                     onClick={() => restore(r.id)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        restore(r.id);
+                      }
+                    }}
                     style={{ borderTop: '1px solid #f0f2f5', cursor: 'pointer' }}
                   >
                     <td style={{ padding: '9px 16px', color: '#33404f', fontWeight: 500 }}>{r.title}</td>
@@ -198,17 +208,24 @@ export function Dashboard({ T }: { T: ChartTokens }) {
           </div>
           <div style={{ padding: '6px 0' }}>
             {alerts.length === 0 && (
-              <div style={{ padding: '14px 16px', fontSize: 12.5, color: '#2c8a45', fontWeight: 500 }}>✓ 过程受控，暂无告警</div>
+              <div style={{ padding: '14px 16px', fontSize: 12.5, color: SM ? '#2c8a45' : '#8a929d', fontWeight: 500 }}>
+                {SM ? '✓ 过程受控，暂无告警' : '尚未运行 SPC；完成数据角色配置后再判断过程状态'}
+              </div>
             )}
-            {alerts.map((a) => (
-              <div key={a.title} className="hov-alert" onClick={() => goTo(a.page)} style={{ display: 'flex', gap: 11, padding: '10px 16px', borderTop: '1px solid #f4f6f8', cursor: 'pointer' }}>
+            {alerts.slice(0, 8).map((a) => (
+              <button type="button" key={a.title} className="hov-alert" onClick={() => goTo(a.page)} style={{ width: '100%', display: 'flex', gap: 11, padding: '10px 16px', border: 0, borderTop: '1px solid #f4f6f8', background: 'transparent', fontFamily: 'inherit', textAlign: 'left', cursor: 'pointer' }}>
                 <span style={{ width: 8, height: 8, borderRadius: '50%', background: a.color, marginTop: 5, flex: 'none' }} />
                 <div>
                   <div style={{ fontSize: 12.5, color: '#33404f', fontWeight: 500 }}>{a.title}</div>
                   <div style={{ fontSize: 11.5, color: '#8a929d', marginTop: 2 }}>{a.desc}</div>
                 </div>
-              </div>
+              </button>
             ))}
+            {alerts.length > 8 && (
+              <div style={{ padding: '9px 16px', fontSize: 11.5, color: '#8a929d', borderTop: '1px solid #f4f6f8' }}>
+                另有 {alerts.length - 8} 条告警，请进入控制图查看全部判异明细。
+              </div>
+            )}
           </div>
         </Card>
       </div>

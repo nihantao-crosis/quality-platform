@@ -30,4 +30,13 @@ describe('DOE 常数图形', () => {
     expect(svg).not.toContain('NaN');
     expect(svg).not.toContain('Infinity');
   });
+
+  it('极小非零量纲仍按相对画幅绘制，不被 1e-9 显示下限压扁', () => {
+    const svg = renderToStaticMarkup(createElement(EffectsBar, {
+      T, terms: [{ name: 'A', abs: 2e-18, sig: true }], refLine: 1e-18,
+    }));
+    const width = Number(svg.match(/<rect x="88"[^>]*width="([^"]+)"/)?.[1]);
+    expect(width).toBeGreaterThan(100);
+    expect(svg).not.toContain('NaN');
+  });
 });

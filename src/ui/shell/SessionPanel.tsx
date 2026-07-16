@@ -28,9 +28,9 @@ export function SessionPanel() {
       <div style={{ display: 'flex', alignItems: 'center', padding: '5px 14px', borderBottom: '1px solid #edf0f3', gap: 12 }}>
         <span style={{ fontSize: 12, fontWeight: 600, color: '#33404f' }}>会话窗口</span>
         <span className="mono" style={{ fontSize: 10.5, color: '#a3abb5' }}>{entries.length} 条</span>
-        <span onClick={copyAll} style={{ marginLeft: 'auto', fontSize: 11.5, color: '#1f6fb2', cursor: 'pointer' }}>复制</span>
-        <span onClick={clear} style={{ fontSize: 11.5, color: '#8a929d', cursor: 'pointer' }}>清空</span>
-        <span onClick={toggle} style={{ fontSize: 13, color: '#9aa2ad', cursor: 'pointer' }}>✕</span>
+        <button type="button" onClick={copyAll} style={{ marginLeft: 'auto', padding: 0, border: 0, background: 'transparent', fontFamily: 'inherit', fontSize: 11.5, color: '#1f6fb2', cursor: 'pointer' }}>复制</button>
+        <button type="button" onClick={clear} style={{ padding: 0, border: 0, background: 'transparent', fontFamily: 'inherit', fontSize: 11.5, color: '#8a929d', cursor: 'pointer' }}>清空</button>
+        <button type="button" aria-label="关闭会话窗口" onClick={toggle} style={{ padding: 0, border: 0, background: 'transparent', fontFamily: 'inherit', fontSize: 13, color: '#9aa2ad', cursor: 'pointer' }}>✕</button>
       </div>
       <div ref={bodyRef} className="mono" style={{ flex: 1, overflowY: 'auto', padding: '6px 14px', fontSize: 11.5, lineHeight: 1.7, color: '#3a4350' }}>
         {entries.map((e, i) => (

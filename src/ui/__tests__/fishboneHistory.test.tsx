@@ -26,7 +26,7 @@ beforeEach(() => {
 });
 
 describe('鱼骨图历史同页恢复', () => {
-  it('已挂载当前鱼骨时恢复另一条历史，DOM 与导出存储同步切到历史内容', () => {
+  it('已挂载当前鱼骨时恢复另一条历史，DOM 与导出存储同步切到历史内容', async () => {
     saveFishboneState(fishbone('历史问题'), false);
     const saved = useAnalyses.getState().saveCurrent()!;
     saveFishboneState(fishbone('当前问题'), false);
@@ -35,7 +35,7 @@ describe('鱼骨图历史同页恢复', () => {
     expect(view.container.textContent).toContain('当前问题');
     expect(view.container.textContent).not.toContain('历史问题');
 
-    act(() => useAnalyses.getState().restore(saved.id));
+    await act(async () => { await useAnalyses.getState().restore(saved.id); });
     expect(view.container.textContent).toContain('历史问题');
     expect(view.container.textContent).not.toContain('当前问题');
   });

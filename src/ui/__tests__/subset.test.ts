@@ -26,6 +26,19 @@ describe('公式计算列', () => {
     expect(err).toContain('未知函数');
     expect(useData.getState().model.n).toBe(2); // 未追加
   });
+  it('任一行非有限值即整列原子拒绝，不得把除零落成 0', () => {
+    const before = useData.getState().model;
+    const err = useData.getState().addFormulaColumn('局部除零', '1 / (C1 - 1)');
+    expect(err).toContain('第 1 行');
+    expect(err).toContain('未得到有限数值');
+    expect(useData.getState().model).toBe(before);
+    expect(useData.getState().model.n).toBe(2);
+    expect(useData.getState().model.all).not.toContain(0);
+  });
+  it('公式列名与现有数值/文本列重复时拒绝', () => {
+    expect(useData.getState().addFormulaColumn('x', 'C1 + 1')).toContain('已存在');
+    expect(useData.getState().model.n).toBe(2);
+  });
 });
 
 describe('条件筛选', () => {

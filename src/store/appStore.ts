@@ -2,9 +2,14 @@
  * UI 全局状态（交接文档 §6）。派生数据一律由 /core 纯函数实时计算，不入 store。
  */
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
+import { createJSONStorage, persist } from 'zustand/middleware';
 import type { NelsonRules, InspectionLevel, CalcState, AnovaMode, AqlMethod, AqlAcMethod, SwitchStatus, SpcDataLayout } from '../core';
-import { calcKey as coreCalcKey, CALC_INIT, freshSwitchStatus, normalizeSwitchStatus } from '../core';
+import {
+  AQL_COLS, MAX_LOT_SIZE, calcKey as coreCalcKey, CALC_INIT,
+  freshSwitchStatus, normalizeSwitchStatus,
+} from '../core';
+import { projectStoreValidationError, registerProjectLifecycleHooks } from '../platform/project';
+import { preserveCorruptStore } from './quarantine';
 
 export type Page =
   | 'dashboard' | 'assistant' | 'worksheet' | 'summary' | 'spc' | 'capability' | 'gagerr'
@@ -22,6 +27,12 @@ export type ChartStyle = '经典' | '现代' | '高对比';
 
 export const DEFAULT_SPC_RULES: NelsonRules = {
   r1: true, r2: true, r3: true, r4: false, r5: true, r6: false, r7: false, r8: false,
+};
+
+let aqlSequenceCounter = 0;
+const nextAqlSequenceId = () => {
+  aqlSequenceCounter += 1;
+  return `aql-${Date.now().toString(36)}-${aqlSequenceCounter.toString(36)}`;
 };
 
 interface AppState {
@@ -128,6 +139,155 @@ interface AppState {
 
 const STYLE_ORDER: ChartStyle[] = ['经典', '现代', '高对比'];
 
+let prefsPersistenceDirty = false;
+let prefsStorageWarned = false;
+let prefsPersistenceSuspended = false;
+let protectedCorruptPrefs: { raw: string; detail: string } | null = null;
+
+/**
+ * Zustand 的 merge 会按 partialize 白名单逐字段校验；因此只有 envelope/state
+ * 结构本身损坏时才无法恢复。字段类型错误或额外键仍保留原文到隔离区，
+ * 但应让 merge 提取其中合法的偏好，避免一个坏字段清空整份设置。
+ */
+function isRecoverablePrefsEnvelope(raw: unknown): boolean {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false;
+  const envelope = raw as { state?: unknown; version?: unknown };
+  if (!envelope.state || typeof envelope.state !== 'object' || Array.isArray(envelope.state)) return false;
+  return envelope.version === undefined
+    || (Number.isSafeInteger(envelope.version) && (envelope.version as number) >= 0
+      && (envelope.version as number) <= 3);
+}
+
+const safePrefsStorage = {
+  getItem(name: string): string | null {
+    let raw: string | null = null;
+    try {
+      raw = localStorage.getItem(name);
+      if (raw == null) return null;
+      const parsed = JSON.parse(raw) as unknown;
+      const detail = projectStoreValidationError(name, parsed);
+      if (!detail) return raw;
+      if (!preserveCorruptStore(name, raw, detail)) protectedCorruptPrefs = { raw, detail };
+      else protectedCorruptPrefs = null;
+      // 语义污染交给下方白名单 merge 逐字段回退；结构损坏才整体拒绝。
+      return isRecoverablePrefsEnvelope(parsed) ? raw : null;
+    } catch {
+      if (raw && !preserveCorruptStore(name, raw, 'JSON 解析失败或写入被截断')) {
+        protectedCorruptPrefs = { raw, detail: 'JSON 解析失败或写入被截断' };
+      } else if (raw) protectedCorruptPrefs = null;
+      return null;
+    }
+  },
+  setItem(name: string, value: string): void {
+    if (prefsPersistenceSuspended) return;
+    if (protectedCorruptPrefs) {
+      let live: string | null = protectedCorruptPrefs.raw;
+      try { live = localStorage.getItem(name); } catch { /* 使用已捕获原文重试 */ }
+      if (live == null) protectedCorruptPrefs = null;
+      else if (!preserveCorruptStore(name, live, protectedCorruptPrefs.detail)) {
+        prefsPersistenceDirty = true;
+        return;
+      } else protectedCorruptPrefs = null;
+    }
+    try {
+      localStorage.setItem(name, value);
+      prefsPersistenceDirty = false;
+      prefsStorageWarned = false;
+    } catch {
+      prefsPersistenceDirty = true;
+      // Zustand 已先更新内存；持久层异常不能再从 React 事件冒泡造成“半成功”。
+      if (!prefsStorageWarned) {
+        prefsStorageWarned = true;
+        queueMicrotask(() => {
+          try { useApp.getState().showToast('界面与分析参数尚未写入本地存储；项目导出将使用当前内存中的最新值'); }
+          catch { /* store 初始化期间忽略 */ }
+        });
+      }
+    }
+  },
+  removeItem(name: string): void {
+    if (prefsPersistenceSuspended) return;
+    try {
+      localStorage.removeItem(name);
+      prefsPersistenceDirty = false;
+    } catch {
+      prefsPersistenceDirty = true;
+    }
+  },
+};
+
+function persistedPrefsOf(s: AppState) {
+  return {
+    chartStyle: s.chartStyle,
+    showGrid: s.showGrid,
+    projectName: s.projectName,
+    lsl: s.lsl,
+    usl: s.usl,
+    tgt: s.tgt,
+    lslOn: s.lslOn,
+    uslOn: s.uslOn,
+    capabilityBins: s.capabilityBins,
+    gageUseReal: s.gageUseReal,
+    gageValueName: s.gageValueName,
+    gagePartName: s.gagePartName,
+    gageOperatorName: s.gageOperatorName,
+    spcRules: s.spcRules,
+    spcDataLayout: s.spcDataLayout,
+    spcValueCol: s.spcValueCol,
+    spcSubgroupCol: s.spcSubgroupCol,
+    spcStageCol: s.spcStageCol,
+    doeView: s.doeView,
+    doeTab: s.doeTab,
+    doeFactorCols: s.doeFactorCols,
+    doeRespCol: s.doeRespCol,
+    doeModelTerms: s.doeModelTerms,
+    doeIncludeCurvature: s.doeIncludeCurvature,
+    t1ColName: s.t1ColName,
+    t1Mu0: s.t1Mu0,
+    t2ColAName: s.t2ColAName,
+    t2ColBName: s.t2ColBName,
+    regXName: s.regXName,
+    regYName: s.regYName,
+    paretoView: s.paretoView,
+    paretoMergeOther: s.paretoMergeOther,
+    paretoThreshold: s.paretoThreshold,
+  };
+}
+
+export const AQL_STATE_STORAGE_KEY = 'qp-aql-state-v1';
+
+interface PersistedAqlState {
+  aqlLot: number;
+  aqlLevel: InspectionLevel;
+  aqlAQL: number;
+  aqlMethod: 'gb';
+  aqlAcMethod: 'gb';
+  aqlSwitch: SwitchStatus;
+}
+
+let aqlStateCorrupt = false;
+
+function loadPersistedAqlState(): PersistedAqlState | null {
+  try {
+    const text = localStorage.getItem(AQL_STATE_STORAGE_KEY);
+    if (!text) return null;
+    const raw = JSON.parse(text) as PersistedAqlState;
+    if (projectStoreValidationError(AQL_STATE_STORAGE_KEY, raw)) {
+      aqlStateCorrupt = true;
+      return null;
+    }
+    return {
+      aqlLot: raw.aqlLot, aqlLevel: raw.aqlLevel, aqlAQL: raw.aqlAQL,
+      aqlMethod: 'gb', aqlAcMethod: 'gb', aqlSwitch: normalizeSwitchStatus(raw.aqlSwitch),
+    };
+  } catch {
+    aqlStateCorrupt = true;
+    return null;
+  }
+}
+
+const initialAql = loadPersistedAqlState();
+
 let toastTimer: ReturnType<typeof setTimeout> | undefined;
 
 export const useApp = create<AppState>()(persist((set, get) => ({
@@ -173,16 +333,17 @@ export const useApp = create<AppState>()(persist((set, get) => ({
   paretoThreshold: 0.95,
   paretoShowDemo: false,
   fishboneRevision: 0,
-  aqlLot: 120,
-  aqlLevel: 'II',
-  aqlAQL: 1.0,
+  aqlLot: initialAql?.aqlLot ?? 120,
+  aqlLevel: initialAql?.aqlLevel ?? 'II',
+  aqlAQL: initialAql?.aqlAQL ?? 1.0,
   aqlMethod: 'gb',
   aqlAcMethod: 'gb',
-  aqlSwitch: freshSwitchStatus(),
+  aqlSwitch: initialAql?.aqlSwitch ?? freshSwitchStatus(),
   openMenu: null,
   modal: null,
   toast: null,
-  activeVar: 'C2 直径 (mm)',
+  // 保存真实列名；工具栏按当前工作表动态生成候选，不能残留演示列号。
+  activeVar: '',
   varOpen: false,
   importTab: 'csv',
   importKind: 'var',
@@ -244,12 +405,24 @@ export const useApp = create<AppState>()(persist((set, get) => ({
     ];
     const sequenceChanged = sequenceKeys.some((key) => key in patch && patch[key] !== s[key]);
     const previous = normalizeSwitchStatus(s.aqlSwitch);
+    if (sequenceChanged && previous.state !== 'normal') {
+      throw new Error(previous.suspended
+        ? '抽样检验已暂停；确认纠正措施有效并恢复加严检验前，不能更改 AQL 或检验水平'
+        : `当前处于${previous.state === 'tightened' ? '加严' : '放宽'}检验；须先按正式转移规则恢复正常检验后再更改 AQL 或检验水平`);
+    }
     const reset = freshSwitchStatus();
     return {
       ...patch,
       // 转移历史只对生成它的检验体系有效；换水平/AQL/方法后重新开始。
       // 已归档的批次责任追溯不得随方案参数变更丢失。
-      ...(sequenceChanged ? { aqlSwitch: { ...reset, records: previous.records.map((record) => ({ ...record })) } } : {}),
+      ...(sequenceChanged ? {
+        aqlSwitch: {
+          ...reset,
+          sequenceId: nextAqlSequenceId(),
+          records: previous.records.map((record) => ({ ...record })),
+          note: '检验水平/AQL 已变更；已建立新的正常检验序列，转移得分从 0 开始',
+        },
+      } : {}),
     };
   }),
   setAqlSwitch: (aqlSwitch) => set({ aqlSwitch: normalizeSwitchStatus(aqlSwitch) }),
@@ -263,49 +436,10 @@ export const useApp = create<AppState>()(persist((set, get) => ({
   pressCalc: (k) => set({ calc: coreCalcKey(get().calc, k) }),
 }), {
   name: 'qp-prefs-v1',
+  storage: createJSONStorage(() => safePrefsStorage),
   // 仅持久化用户偏好；导航/弹窗等瞬态不落盘
-  partialize: (s) => ({
-    chartStyle: s.chartStyle,
-    showGrid: s.showGrid,
-    projectName: s.projectName,
-    lsl: s.lsl,
-    usl: s.usl,
-    tgt: s.tgt,
-    lslOn: s.lslOn,
-    uslOn: s.uslOn,
-    capabilityBins: s.capabilityBins,
-    gageUseReal: s.gageUseReal,
-    gageValueName: s.gageValueName,
-    gagePartName: s.gagePartName,
-    gageOperatorName: s.gageOperatorName,
-    aqlLot: s.aqlLot,
-    aqlLevel: s.aqlLevel,
-    aqlAQL: s.aqlAQL,
-    aqlMethod: s.aqlMethod,
-    aqlAcMethod: s.aqlAcMethod,
-    aqlSwitch: s.aqlSwitch,
-    spcRules: s.spcRules,
-    spcDataLayout: s.spcDataLayout,
-    spcValueCol: s.spcValueCol,
-    spcSubgroupCol: s.spcSubgroupCol,
-    spcStageCol: s.spcStageCol,
-    doeView: s.doeView,
-    doeTab: s.doeTab,
-    doeFactorCols: s.doeFactorCols,
-    doeRespCol: s.doeRespCol,
-    doeModelTerms: s.doeModelTerms,
-    doeIncludeCurvature: s.doeIncludeCurvature,
-    t1ColName: s.t1ColName,
-    t1Mu0: s.t1Mu0,
-    t2ColAName: s.t2ColAName,
-    t2ColBName: s.t2ColBName,
-    regXName: s.regXName,
-    regYName: s.regYName,
-    paretoView: s.paretoView,
-    paretoMergeOther: s.paretoMergeOther,
-    paretoThreshold: s.paretoThreshold,
-  }) as Partial<AppState>,
-  version: 2,
+  partialize: (s) => persistedPrefsOf(s) as Partial<AppState>,
+  version: 3,
   // v0→v1:判异准则从 4 条扩为 8 条,旧「准则4(2 of 3 越 2σ)」实为标准检验 5,迁移到 r5;
   // 补齐缺失的 r4/r6/r7/r8(默认关),避免旧偏好把 r4 误当"14 点交替"。
   migrate: (persisted: unknown, version: number) => {
@@ -324,6 +458,183 @@ export const useApp = create<AppState>()(persist((set, get) => ({
       p.aqlAcMethod = 'gb';
       p.aqlSwitch = normalizeSwitchStatus(p.aqlSwitch as Partial<SwitchStatus> | undefined);
     }
+    // v3：AQL 状态加入检验体系序列号和严格记录校验；旧责任记录迁入 legacy 序列。
+    if (version < 3) {
+      p.aqlSwitch = normalizeSwitchStatus(p.aqlSwitch as Partial<SwitchStatus> | undefined);
+    }
     return p as Partial<AppState>;
   },
+  // migrate 只在版本号变化时运行；merge 确保当前版本 localStorage/.qproj 也逐次校验。
+  merge: (persisted: unknown, current) => {
+    const p = persisted && typeof persisted === 'object' && !Array.isArray(persisted)
+      ? persisted as Partial<AppState>
+      : {};
+    // 从干净的当前状态开始，仅在下方逐字段复制 partialize 白名单。
+    // 不能先展开 p：同版本 localStorage/.qproj 可携带 page/modal/calc 或任意额外键，
+    // 即使动作函数被回填，毒化的瞬态枚举仍会让应用进入不可渲染状态。
+    const merged = { ...current } as AppState;
+    const stringOrNull = (value: unknown, fallback: string | null) =>
+      value === null || typeof value === 'string' ? value as string | null : fallback;
+    const stringArrayOrNull = (value: unknown, fallback: string[] | null) =>
+      value === null || (Array.isArray(value) && value.every((item) => typeof item === 'string'))
+        ? value as string[] | null
+        : fallback;
+    const finiteOr = (value: unknown, fallback: number) =>
+      typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+    merged.chartStyle = STYLE_ORDER.includes(p.chartStyle as ChartStyle) ? p.chartStyle as ChartStyle : current.chartStyle;
+    merged.showGrid = typeof p.showGrid === 'boolean' ? p.showGrid : current.showGrid;
+    merged.projectName = typeof p.projectName === 'string' && p.projectName.trim() ? p.projectName : current.projectName;
+    merged.lsl = finiteOr(p.lsl, current.lsl);
+    merged.usl = finiteOr(p.usl, current.usl);
+    merged.tgt = finiteOr(p.tgt, current.tgt);
+    const lslOn = typeof p.lslOn === 'boolean' ? p.lslOn : current.lslOn;
+    const uslOn = typeof p.uslOn === 'boolean' ? p.uslOn : current.uslOn;
+    merged.lslOn = !lslOn && !uslOn ? current.lslOn : lslOn;
+    merged.uslOn = !lslOn && !uslOn ? current.uslOn : uslOn;
+    merged.capabilityBins = Number.isSafeInteger(p.capabilityBins) && p.capabilityBins! >= 5 && p.capabilityBins! <= 40
+      ? p.capabilityBins!
+      : current.capabilityBins;
+    merged.gageUseReal = typeof p.gageUseReal === 'boolean' ? p.gageUseReal : current.gageUseReal;
+    merged.gageValueName = stringOrNull(p.gageValueName, current.gageValueName);
+    merged.gagePartName = stringOrNull(p.gagePartName, current.gagePartName);
+    merged.gageOperatorName = stringOrNull(p.gageOperatorName, current.gageOperatorName);
+    const rules = p.spcRules && typeof p.spcRules === 'object' && !Array.isArray(p.spcRules)
+      ? p.spcRules as Partial<NelsonRules>
+      : {};
+    merged.spcRules = Object.fromEntries((Object.keys(DEFAULT_SPC_RULES) as Array<keyof NelsonRules>).map((key) => [
+      key, typeof rules[key] === 'boolean' ? rules[key] : current.spcRules[key],
+    ])) as unknown as NelsonRules;
+    merged.spcDataLayout = ['auto', 'rows', 'stacked', 'columns', 'individuals'].includes(p.spcDataLayout as string)
+      ? p.spcDataLayout as SpcDataLayout
+      : current.spcDataLayout;
+    merged.spcValueCol = stringOrNull(p.spcValueCol, current.spcValueCol);
+    merged.spcSubgroupCol = stringOrNull(p.spcSubgroupCol, current.spcSubgroupCol);
+    merged.spcStageCol = stringOrNull(p.spcStageCol, current.spcStageCol);
+    merged.doeView = ['main', 'interact', 'pareto', 'cube'].includes(p.doeView as string) ? p.doeView as DoeView : current.doeView;
+    merged.doeTab = p.doeTab === 'analyze' || p.doeTab === 'create' ? p.doeTab : current.doeTab;
+    merged.doeFactorCols = stringArrayOrNull(p.doeFactorCols, current.doeFactorCols);
+    merged.doeRespCol = stringOrNull(p.doeRespCol, current.doeRespCol);
+    merged.doeModelTerms = stringArrayOrNull(p.doeModelTerms, current.doeModelTerms);
+    merged.doeIncludeCurvature = typeof p.doeIncludeCurvature === 'boolean' ? p.doeIncludeCurvature : current.doeIncludeCurvature;
+    merged.t1ColName = stringOrNull(p.t1ColName, current.t1ColName);
+    merged.t1Mu0 = p.t1Mu0 === null || (typeof p.t1Mu0 === 'number' && Number.isFinite(p.t1Mu0)) ? p.t1Mu0 : current.t1Mu0;
+    merged.t2ColAName = stringOrNull(p.t2ColAName, current.t2ColAName);
+    merged.t2ColBName = stringOrNull(p.t2ColBName, current.t2ColBName);
+    merged.regXName = stringOrNull(p.regXName, current.regXName);
+    merged.regYName = stringOrNull(p.regYName, current.regYName);
+    merged.paretoView = p.paretoView === 'pareto' || p.paretoView === 'fishbone' ? p.paretoView : current.paretoView;
+    merged.paretoMergeOther = typeof p.paretoMergeOther === 'boolean' ? p.paretoMergeOther : current.paretoMergeOther;
+    merged.paretoThreshold = typeof p.paretoThreshold === 'number' && Number.isFinite(p.paretoThreshold)
+      && p.paretoThreshold >= 0.5 && p.paretoThreshold <= 1 ? p.paretoThreshold : current.paretoThreshold;
+    const separateAql = loadPersistedAqlState();
+    // 独立账本一旦损坏就保留原文等待导入备份/显式清除，绝不能退回旧 prefs 后覆写坏证据。
+    const aql = aqlStateCorrupt ? current : separateAql ?? p;
+    merged.aqlLot = Number.isSafeInteger(aql.aqlLot) && aql.aqlLot! >= 2 && aql.aqlLot! <= MAX_LOT_SIZE
+      ? aql.aqlLot!
+      : current.aqlLot;
+    merged.aqlLevel = aql.aqlLevel === 'I' || aql.aqlLevel === 'II' || aql.aqlLevel === 'III'
+      ? aql.aqlLevel
+      : current.aqlLevel;
+    merged.aqlAQL = typeof aql.aqlAQL === 'number' && AQL_COLS.includes(aql.aqlAQL)
+      ? aql.aqlAQL
+      : current.aqlAQL;
+    merged.aqlMethod = 'gb';
+    merged.aqlAcMethod = 'gb';
+    merged.aqlSwitch = normalizeSwitchStatus(aql.aqlSwitch ?? current.aqlSwitch);
+    return merged;
+  },
 }));
+
+function persistedAqlOf(state: AppState): PersistedAqlState {
+  return {
+    aqlLot: state.aqlLot, aqlLevel: state.aqlLevel, aqlAQL: state.aqlAQL,
+    aqlMethod: 'gb', aqlAcMethod: 'gb', aqlSwitch: normalizeSwitchStatus(state.aqlSwitch),
+  };
+}
+
+let aqlPersistenceDirty = false;
+
+function savePersistedAqlState(state: AppState): boolean {
+  if (aqlStateCorrupt) {
+    aqlPersistenceDirty = true;
+    return false;
+  }
+  try {
+    localStorage.setItem(AQL_STATE_STORAGE_KEY, JSON.stringify(persistedAqlOf(state)));
+    aqlPersistenceDirty = false;
+    return true;
+  } catch {
+    // 内存中的连续检验流继续可用，但导出/导入前必须重试并 fail-closed，不能静默导出旧账本。
+    aqlPersistenceDirty = true;
+    return false;
+  }
+}
+
+useApp.subscribe((state, previous) => {
+  if (state.aqlLot !== previous.aqlLot || state.aqlLevel !== previous.aqlLevel
+    || state.aqlAQL !== previous.aqlAQL || state.aqlSwitch !== previous.aqlSwitch) {
+    const wasDirty = aqlPersistenceDirty;
+    if (!savePersistedAqlState(state) && !wasDirty) {
+      state.showToast('AQL 责任账本尚未写入本地存储；请释放空间，项目导出会在安全落盘前阻止');
+    }
+  }
+});
+
+// 首次加载即把旧 qp-prefs-v1 中的 AQL 业务状态迁出；损坏的新账本必须原样保留以便恢复。
+if (!aqlStateCorrupt) savePersistedAqlState(useApp.getState());
+else useApp.getState().showToast('检测到损坏的 AQL 责任账本，已隔离且未覆盖；请导入有效项目备份或清除业务数据');
+
+function requirePersistedAqlState(): void {
+  if (aqlStateCorrupt) throw new Error('AQL 责任账本已损坏且被隔离；请先导入有效项目备份或清除业务数据');
+  if (!savePersistedAqlState(useApp.getState())) {
+    throw new Error('AQL 责任账本无法写入本地存储；请释放空间后重试');
+  }
+}
+
+registerProjectLifecycleHooks({
+  // 导入有效项目是损坏账本的恢复路径；仅普通写入失败时要求先落稳当前内存账本。
+  beforeMutation: () => {
+    if (prefsPersistenceDirty) {
+      throw new Error('当前界面/分析参数尚未写入本地存储；请先导出项目或释放空间后再导入其他项目');
+    }
+    if (!aqlStateCorrupt) requirePersistedAqlState();
+  },
+  beforeExport: () => {
+    if (protectedCorruptPrefs) throw new Error('损坏的偏好设置尚未成功复制到隔离区，项目未导出');
+    if (aqlStateCorrupt) requirePersistedAqlState();
+    // 配额不足时允许下面以内存覆盖项导出最新账本；不能退回 localStorage 中的旧值。
+    savePersistedAqlState(useApp.getState());
+  },
+  projectStoreOverrides: () => ({
+    'qp-prefs-v1': JSON.stringify({ state: persistedPrefsOf(useApp.getState()), version: 3 }),
+    [AQL_STATE_STORAGE_KEY]: JSON.stringify(persistedAqlOf(useApp.getState())),
+  }),
+  afterSuccessfulMutation: () => {
+    // applyProjectText 已写入新项目；刷新前任何 toast/modal set 都不能把旧内存偏好写回去。
+    prefsPersistenceSuspended = true;
+  },
+});
+
+export function resetUiPreferences(): void {
+  useApp.setState({
+    chartStyle: '经典', showGrid: true, projectName: '质检项目 2026-Q2',
+    lsl: 24.9, usl: 25.1, tgt: 25, lslOn: true, uslOn: true, capabilityBins: 13,
+    gageUseReal: true, gageValueName: null, gagePartName: null, gageOperatorName: null,
+    spcRules: { ...DEFAULT_SPC_RULES }, spcDataLayout: 'auto', spcValueCol: null, spcSubgroupCol: null, spcStageCol: null,
+    doeView: 'main', doeTab: 'analyze', doeFactorCols: null, doeRespCol: null, doeModelTerms: null, doeIncludeCurvature: true,
+    t1ColName: null, t1Mu0: null, t2ColAName: null, t2ColBName: null, regXName: null, regYName: null,
+    paretoView: 'pareto', paretoMergeOther: false, paretoThreshold: 0.95,
+  });
+}
+
+/** 清业务数据时立即清空内存中的连续检验流，并确保随后普通 UI set 不会把旧账本写回来。 */
+export function clearAqlBusinessState(): void {
+  aqlStateCorrupt = false;
+  aqlPersistenceDirty = false;
+  useApp.setState({
+    aqlLot: 120, aqlLevel: 'II', aqlAQL: 1, aqlMethod: 'gb', aqlAcMethod: 'gb',
+    aqlSwitch: freshSwitchStatus(),
+  });
+  // setState 的订阅会先写入干净空账本；“清业务数据”契约要求最终连该键一起移除。
+  try { localStorage.removeItem(AQL_STATE_STORAGE_KEY); } catch { /* 忽略 */ }
+}

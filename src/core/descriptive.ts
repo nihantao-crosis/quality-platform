@@ -2,7 +2,7 @@
  * 描述性统计（对标 Minitab Basic Statistics → Display / Graphical Summary）。
  * 纯函数,复用 basicMath/normality/ttest 中已有的数值零件。
  */
-import { mean, stdev, median, quantile, invNorm } from './basicMath';
+import { mean, stdev, median, quantile, lgamma } from './basicMath';
 import { andersonDarling, type AdResult } from './normality';
 import { tInv } from './ttest';
 
@@ -12,7 +12,7 @@ export interface Descriptive {
   seMean: number;       // 均值标准误 = s/√n
   stdev: number;        // 样本标准差
   variance: number;
-  cv: number;           // 变异系数 % = 100·s/x̄
+  cv: number | null;    // 变异系数 % = 100·s/|x̄|；均值为 0 时未定义
   min: number;
   q1: number;
   median: number;
@@ -25,16 +25,65 @@ export interface Descriptive {
   sum: number;
   ad: AdResult;         // Anderson-Darling 正态检验（n<8 时为占位,见 adAvailable）
   adAvailable: boolean; // AD 检验需 n≥8
+  adUnavailableReason: string | null;
   ciMean: [number, number];    // 均值 95% 置信区间（t）
   ciMedian: [number, number];  // 中位数 95% 置信区间（次序统计）
-  ciStdev: [number, number];   // 标准差 95% 置信区间（卡方,Wilson–Hilferty）
+  ciStdev: [number, number];   // 标准差 95% 置信区间（精确卡方分位）
 }
 
-/** χ²(p, k) 分位数 —— Wilson–Hilferty 近似(用逆正态),适合中大自由度。 */
+/** 正则化下不完全伽马 P(a,x)，用于 χ² CDF。 */
+function regularizedGammaP(a: number, x: number): number {
+  if (x <= 0) return 0;
+  const EPS = 1e-14;
+  const MAX_ITER = 300;
+  if (x < a + 1) {
+    let term = 1 / a;
+    let sum = term;
+    let ap = a;
+    for (let i = 1; i <= MAX_ITER; i++) {
+      ap += 1;
+      term *= x / ap;
+      sum += term;
+      if (Math.abs(term) <= Math.abs(sum) * EPS) break;
+    }
+    return Math.min(1, Math.max(0, sum * Math.exp(-x + a * Math.log(x) - lgamma(a))));
+  }
+
+  // Lentz 连分式计算 Q(a,x)，再取 P=1-Q。
+  const FPMIN = 1e-300;
+  let b = x + 1 - a;
+  let c = 1 / FPMIN;
+  let d = 1 / Math.max(FPMIN, b);
+  let h = d;
+  for (let i = 1; i <= MAX_ITER; i++) {
+    const an = -i * (i - a);
+    b += 2;
+    d = an * d + b;
+    if (Math.abs(d) < FPMIN) d = FPMIN;
+    c = b + an / c;
+    if (Math.abs(c) < FPMIN) c = FPMIN;
+    d = 1 / d;
+    const delta = d * c;
+    h *= delta;
+    if (Math.abs(delta - 1) <= EPS) break;
+  }
+  const q = Math.exp(-x + a * Math.log(x) - lgamma(a)) * h;
+  return Math.min(1, Math.max(0, 1 - q));
+}
+
+/** χ²(p,k) 分位数：单调括界后二分，覆盖 k=1 的小样本尾部。 */
 function chi2Inv(p: number, k: number): number {
-  const z = invNorm(p);
-  const t = 1 - 2 / (9 * k) + z * Math.sqrt(2 / (9 * k));
-  return k * t * t * t;
+  if (!(p > 0 && p < 1) || !(k > 0)) throw new RangeError('卡方分位要求 0<p<1 且自由度>0');
+  const cdf = (x: number) => regularizedGammaP(k / 2, x / 2);
+  let lo = 0;
+  let hi = Math.max(1, k);
+  while (cdf(hi) < p) hi *= 2;
+  for (let i = 0; i < 160; i++) {
+    const mid = (lo + hi) / 2;
+    if (cdf(mid) < p) lo = mid;
+    else hi = mid;
+  }
+  return (lo + hi) / 2;
 }
 
 /** 中位数的分布无关 95% CI:由二项分布正态近似取次序统计量。 */
@@ -89,18 +138,21 @@ export function computeDescriptive(raw: number[]): Descriptive {
     s * Math.sqrt((n - 1) / chiHi),
   ];
 
-  const adAvailable = n >= 8;
+  const adUnavailableReason = n < 8
+    ? `Anderson-Darling 正态检验至少需要 8 个观测，当前仅 ${n} 个`
+    : s === 0 ? '数据标准差为 0，正态性检验不可估计' : null;
+  const adAvailable = adUnavailableReason == null;
   const ad: AdResult = adAvailable
     ? andersonDarling(xs)
     : { a2: NaN, a2star: NaN, p: NaN, normal: true, n };
 
   return {
     n, mean: m, seMean, stdev: s, variance,
-    cv: m !== 0 ? (s / Math.abs(m)) * 100 : 0,
+    cv: m !== 0 ? (s / Math.abs(m)) * 100 : null,
     min, q1, median: med, q3, max,
     range: max - min, iqr: q3 - q1,
     skewness, kurtosis, sum,
-    ad, adAvailable,
+    ad, adAvailable, adUnavailableReason,
     ciMean, ciMedian: medianCI(sorted), ciStdev,
   };
 }

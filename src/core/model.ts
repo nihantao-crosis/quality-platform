@@ -50,6 +50,31 @@ export interface VarModel {
   iSig: number;
 }
 
+export interface NumericColumnSelection {
+  index: number;
+  name: string;
+  values: number[];
+}
+
+/**
+ * Resolve a user-facing numeric column by its stable worksheet name.
+ *
+ * `VarModel.all` is intentionally not used here: flattening a matrix is valid for
+ * repeated measurements of one characteristic, but is dangerously wrong for a
+ * normal worksheet containing unrelated variables (temperature, pressure, etc.).
+ */
+export function resolveNumericColumn(model: VarModel, requestedName: string | null | undefined): NumericColumnSelection {
+  const requestedIndex = requestedName ? model.colNames.indexOf(requestedName) : -1;
+  const index = requestedIndex >= 0 ? requestedIndex : 0;
+  const name = model.colNames[index];
+  if (name == null) throw new Error('当前工作表没有数值列');
+  return {
+    index,
+    name,
+    values: model.subs.map((row) => row.vals[index]),
+  };
+}
+
 export function computeVarModel(
   name: string,
   colNames: string[],

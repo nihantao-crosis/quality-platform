@@ -45,14 +45,19 @@ export function linearRegression(xs: number[], ys: number[]): RegressionResult {
   const df = n - 2;
   // 残差方差 → 斜率标准误
   const rawSse = syy - slope * sxy;
-  const roundoff = Number.EPSILON * Math.max(1, Math.abs(syy), Math.abs(slope * sxy)) * n * 16;
+  // SSE 与 syy 同量纲，只能按它们自身的尺度吸收浮点舍入；Math.max(1, ...)
+  // 会把小量纲数据的真实残差当成 0，并破坏单位缩放不变性。
+  const sseScale = Math.max(Math.abs(syy), Math.abs(slope * sxy));
+  const roundoff = Number.EPSILON * sseScale * n * 16;
   const sse = Math.abs(rawSse) <= roundoff ? 0 : Math.max(0, rawSse);
   const mse = sse / df;
   const seSlope = Math.sqrt(mse / sxx);
   // 零残差需要区分两种情形：常数 Y 的斜率就是 0（P=1）；完美的非水平
   // 直线则斜率标准误为 0 且斜率非零（|t|=∞, P=0）。
-  const zeroSlope = Math.abs(slope) <= Number.EPSILON * Math.max(1, Math.abs(my), Math.abs(slope)) * 8;
-  const t = seSlope === 0 ? (zeroSlope ? 0 : Math.sign(slope) * Infinity) : slope / seSlope;
-  const p = seSlope === 0 ? (zeroSlope ? 1 : 0) : tTwoSidedP(t, df);
+  // “响应恒定”是数据结构事实，不能拿斜率与 Y 的位置（均值）比较；给 Y 加常数
+  // 不应改变斜率检验。完全拟合且响应并非常数时，非零斜率的 P=0。
+  const constantResponse = y.every((value) => value === y[0]);
+  const t = seSlope === 0 ? (constantResponse ? 0 : Math.sign(slope) * Infinity) : slope / seSlope;
+  const p = seSlope === 0 ? (constantResponse ? 1 : 0) : tTwoSidedP(t, df);
   return { slope, intercept, r, r2, seSlope, t, df, p, significant: p < 0.05, n };
 }

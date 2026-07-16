@@ -12,6 +12,8 @@ export interface ParsedMatrix {
   colNames: string[]; // 数值列名
   rows: number[][];
   textCols: TextColumn[];
+  /** 原始数据区的最大列数；用于专用格式拒绝未识别/被忽略的额外列。 */
+  sourceColumnCount: number;
   totalLines: number; // 数据行总数（不含表头）
   skippedRows: number; // 数值列含缺失/非法值被跳过的行
   droppedCols: number; // 保留的文本列数（向后兼容字段名）
@@ -85,7 +87,7 @@ export function parseMatrix(text: string): ParsedMatrix | { error: string } {
   if (rows.length < 2) return { error: '有效数据行不足 2 行' };
 
   const textCols: TextColumn[] = textColIdx.map((_, t) => ({ name: textNames[t], values: textVals[t] }));
-  return { colNames, rows, textCols, totalLines: body.length, skippedRows: skipped, droppedCols: textCols.length };
+  return { colNames, rows, textCols, sourceColumnCount: nCols, totalLines: body.length, skippedRows: skipped, droppedCols: textCols.length };
 }
 
 /** 单列计数解析：整数列（供 P/C 图导入） */
@@ -96,6 +98,49 @@ export function parseCounts(text: string): { counts: number[]; name: string } | 
   const counts = r.rows.map((row) => row[0]);
   if (counts.some((c) => c < 0 || !Number.isInteger(c))) return { error: '计数必须为非负整数' };
   return { counts, name: r.colNames[0] };
+}
+
+export interface PChartColumns {
+  counts: number[];
+  sampleSizes: number | number[];
+  variableSampleSizes: boolean;
+}
+
+/**
+ * P 图导入列语义：第一列是不良数，第二列（可选）是该批检验数。
+ * 单列文件继续使用界面给出的固定 n；拒绝静默丢弃第三列或文本列。
+ */
+export function extractPChartColumns(parsed: ParsedMatrix, defaultSampleSize: number): PChartColumns | { error: string } {
+  const totalColumns = parsed.sourceColumnCount ?? parsed.colNames.length + parsed.textCols.length;
+  if (totalColumns < 1 || totalColumns > 2 || parsed.textCols.length > 0) {
+    return { error: `P 图数据应为 1 列（不良数）或 2 列（不良数、样本量），检测到 ${totalColumns} 列` };
+  }
+  if (parsed.skippedRows > 0 || parsed.colNames.length !== totalColumns) {
+    return { error: `P 图数据包含 ${parsed.skippedRows || '无法识别'} 行/列非法值；不允许跳过后继续计算` };
+  }
+  if (!Number.isSafeInteger(defaultSampleSize) || defaultSampleSize < 1) {
+    return { error: '默认样本量必须为正整数' };
+  }
+  const counts = parsed.rows.map((row) => row[0]);
+  if (counts.some((count) => !Number.isSafeInteger(count) || count < 0)) {
+    return { error: '不良数必须为非负整数' };
+  }
+  if (parsed.colNames.length === 1) {
+    if (counts.some((count) => count > defaultSampleSize)) return { error: '不良数不能大于默认样本量' };
+    return { counts, sampleSizes: defaultSampleSize, variableSampleSizes: false };
+  }
+  const sampleSizes = parsed.rows.map((row) => row[1]);
+  if (sampleSizes.some((n) => !Number.isSafeInteger(n) || n < 1)) {
+    return { error: '逐批样本量必须为正整数' };
+  }
+  if (counts.some((count, index) => count > sampleSizes[index])) {
+    return { error: '不良数不能大于对应批次样本量' };
+  }
+  return {
+    counts,
+    sampleSizes,
+    variableSampleSizes: sampleSizes.some((n) => n !== sampleSizes[0]),
+  };
 }
 
 // ---------- 帕累托专用:类别 + 频数 ----------

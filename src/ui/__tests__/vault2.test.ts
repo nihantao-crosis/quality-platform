@@ -7,6 +7,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { useData, hydrateActiveFromVault } from '../../store/dataStore';
 import { platform, type DatasetDb } from '../../platform/adapter';
+import { buildProjectJsonFull } from '../../platform/project';
 
 const LS_DATASET = 'qp-dataset-v1';
 const LS_RECENTS = 'qp-recents-v1';
@@ -60,9 +61,10 @@ describe('配额超限兜底(桌面端)', () => {
     useData.getState().importMatrix('大产线.csv', ['a', 'b'], bigRows());
     expect(useData.getState().model.name).toBe('大产线.csv'); // 内存可用
     expect(localStorage.getItem(LS_DATASET)).toBeNull();      // LS 没存下
-    expect(localStorage.getItem(LS_ACTIVE_REF)).toBe('大产线.csv'); // 标记就位
+    expect(localStorage.getItem(LS_ACTIVE_REF)).toBeNull(); // 入库成功前不能留下悬空标记
     await vi.advanceTimersByTimeAsync(10); // persistActive 即时入库(不等防抖)
     expect(fake.store.has('大产线.csv')).toBe(true);
+    expect(localStorage.getItem(LS_ACTIVE_REF)).toBe('大产线.csv'); // 成功后才建立恢复标记
   });
 
   it('重启后 hydrateActiveFromVault 自动恢复活动数据集', async () => {
@@ -107,5 +109,20 @@ describe('配额超限兜底(桌面端)', () => {
     await vi.advanceTimersByTimeAsync(10);
     expect(localStorage.getItem(LS_ACTIVE_REF)).toBeNull();
     expect(useData.getState().model.name).toBe('大产线.csv'); // 内存仍可用
+  });
+
+  it('Web 端落盘超限时 .qproj 使用最新内存表，不静默导出旧同名缓存', async () => {
+    useData.getState().importMatrix('同名.csv', ['x'], [[1], [2]]);
+    expect(JSON.parse(localStorage.getItem(LS_DATASET)!).rows).toEqual([[1], [2]]);
+    platform.datasetDb = null;
+
+    useData.getState().importMatrix('同名.csv', ['a', 'b'], bigRows());
+    expect(useData.getState().model.subs[0].vals[0]).toBe(25);
+    expect(JSON.parse(localStorage.getItem(LS_DATASET)!).rows).toEqual([[1], [2]]);
+
+    const project = JSON.parse(await buildProjectJsonFull('1.34.0'));
+    const exported = JSON.parse(project.stores[LS_DATASET]);
+    expect(exported.rows).toEqual(bigRows());
+    expect(JSON.parse(project.stores[LS_RECENTS])[0].data.rows).toEqual(bigRows());
   });
 });

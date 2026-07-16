@@ -21,7 +21,7 @@ function MainEffectsImpl({ T, factors }: { T: ChartTokens; factors: { name: stri
   let hi = Math.max(...allMeans);
   if (!(hi > lo)) {
     const center = Number.isFinite(lo) ? lo : 0;
-    const half = Math.max(1, Math.abs(center) * 0.1);
+    const half = Math.abs(center) > 0 ? Math.abs(center) * 0.1 || Number.MIN_VALUE : 1;
     lo = center - half;
     hi = center + half;
   } else {
@@ -69,7 +69,7 @@ function InteractionPlotImpl({ T, c00, c10, c01, c11, labelA = 'A', labelB = 'B'
   let hi = Math.max(...vals);
   if (!(hi > lo)) {
     const center = Number.isFinite(lo) ? lo : 0;
-    const half = Math.max(1, Math.abs(center) * 0.1);
+    const half = Math.abs(center) > 0 ? Math.abs(center) * 0.1 || Number.MIN_VALUE : 1;
     lo = center - half;
     hi = center + half;
   } else {
@@ -110,13 +110,15 @@ function InteractionPlotImpl({ T, c00, c10, c01, c11, labelA = 'A', labelB = 'B'
 }
 
 // ---------- 效应帕累托（Lenth 显著界限） ----------
-function EffectsBarImpl({ T, terms, refLine }: { T: ChartTokens; terms: { name: string; abs: number }[]; refLine: number }) {
+function EffectsBarImpl({ T, terms, refLine }: { T: ChartTokens; terms: { name: string; abs: number; sig?: boolean }[]; refLine: number }) {
   const W = 960;
   const H = 290;
   const m = { t: 26, r: 40, b: 26, l: 88 };
   const pw = W - m.l - m.r;
   const ph = H - m.t - m.b;
-  const maxv = Math.max(1e-9, refLine, ...terms.map((t) => t.abs)) * 1.12;
+  const rawMax = Math.max(0, refLine, ...terms.map((t) => t.abs));
+  // 非零效应无论使用何种响应单位都应占满同样的相对画幅；仅全零时使用显示占位尺度。
+  const maxv = (rawMax > 0 ? rawMax : 1) * 1.12;
   const X = (v: number) => m.l + (v / maxv) * pw;
   const bh = (ph / Math.max(1, terms.length)) * 0.6;
   return (
@@ -124,7 +126,7 @@ function EffectsBarImpl({ T, terms, refLine }: { T: ChartTokens; terms: { name: 
       <rect x={0} y={0} width={W} height={H} fill={T.bg} />
       {terms.map((t, i) => {
         const y = m.t + ((i + 0.5) * ph) / terms.length;
-        const sig = t.abs >= refLine;
+        const sig = t.sig ?? (refLine > 0 ? t.abs >= refLine : t.abs > 0);
         return (
           <Fragment key={t.name}>
             <rect x={m.l} y={y - bh / 2} width={Math.max(1, X(t.abs) - m.l)} height={bh} fill={sig ? T.point : T.bar3} />

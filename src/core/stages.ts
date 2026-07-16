@@ -38,10 +38,33 @@ export function splitStages(labels: string[]): Array<{ label: string; start: num
 }
 
 /**
+ * 校验阶段列是否足以独立估计控制限。
+ *
+ * 单点阶段会让中心线和控制限退化到该点本身，从而把任何异常“洗白”。因此阶段
+ * 控制图至少需要两个连续阶段，且每个连续阶段至少包含两个子组/观测。
+ */
+export function stageValidationError(labels: string[], pointCount = labels.length, minPoints = 2): string | null {
+  if (labels.length !== pointCount) return `阶段列有 ${labels.length} 行，但控制图有 ${pointCount} 个点`;
+  const blank = labels.findIndex((label) => typeof label !== 'string' || label.trim() === '');
+  if (blank >= 0) return `阶段列第 ${blank + 1} 行为空`;
+  const segments = splitStages(labels);
+  if (segments.length < 2) return '阶段列只有 1 个连续段';
+  const short = segments.find((segment) => segment.end - segment.start + 1 < minPoints);
+  if (short) {
+    const ordinal = segments.indexOf(short) + 1;
+    return `第 ${ordinal} 个连续阶段“${short.label}”只有 ${short.end - short.start + 1} 个点，至少需要 ${minPoints} 个`;
+  }
+  return null;
+}
+
+/**
  * X̄ 图分阶段：rows 为子组矩阵,labels 与行对齐。
  * 每段：X̿ ± A2·R̄（段内估计）;段长 < 2 时限值退化为段均值（不判异）。
  */
 export function stagedXbar(rows: number[][], labels: string[], rules: NelsonRules): StagedResult {
+  if (rows.length === 0 || rows[0].length < 2) throw new RangeError('分阶段 X̄ 图至少需要一个含 2 个测量值的子组');
+  const validationError = stageValidationError(labels, rows.length);
+  if (validationError) throw new RangeError(validationError);
   const n = rows[0].length;
   const C = CONTROL_CONSTANTS[Math.max(2, Math.min(10, n))];
   return buildStaged(labels, rows.map((r) => r.reduce((a, b) => a + b, 0) / r.length), (seg) => {
@@ -50,12 +73,15 @@ export function stagedXbar(rows: number[][], labels: string[], rules: NelsonRule
     const xbarbar = means.reduce((a, b) => a + b, 0) / means.length;
     const rbar = segRows.map((r) => Math.max(...r) - Math.min(...r)).reduce((a, b) => a + b, 0) / segRows.length;
     const half = C.A2 * rbar;
-    return { cl: xbarbar, ucl: xbarbar + half, lcl: xbarbar - half, sigma: half / 3 || 1e-12 };
+    return { cl: xbarbar, ucl: xbarbar + half, lcl: xbarbar - half, sigma: half / 3 };
   }, rules, false);
 }
 
 /** R 图分阶段：UCL=D4·R̄,LCL=D3·R̄（段内估计） */
 export function stagedRange(rows: number[][], labels: string[], rules: NelsonRules): StagedResult {
+  if (rows.length === 0 || rows[0].length < 2) throw new RangeError('分阶段 R 图至少需要一个含 2 个测量值的子组');
+  const validationError = stageValidationError(labels, rows.length);
+  if (validationError) throw new RangeError(validationError);
   const n = rows[0].length;
   const C = CONTROL_CONSTANTS[Math.max(2, Math.min(10, n))];
   return buildStaged(labels, rows.map((r) => Math.max(...r) - Math.min(...r)), (seg) => {
@@ -63,7 +89,7 @@ export function stagedRange(rows: number[][], labels: string[], rules: NelsonRul
     const rbar = segRanges.reduce((a, b) => a + b, 0) / segRanges.length;
     const ucl = C.D4 * rbar;
     const lcl = C.D3 * rbar;
-    return { cl: rbar, ucl, lcl, sigma: (ucl - rbar) / 3 || 1e-12 };
+    return { cl: rbar, ucl, lcl, sigma: (ucl - rbar) / 3 };
   }, rules, true);
 }
 

@@ -4,7 +4,7 @@
  * @vitest-environment jsdom
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { useData } from '../../store/dataStore';
+import { hydrateActiveFromVault, useData } from '../../store/dataStore';
 import { platform, type DatasetDb } from '../../platform/adapter';
 
 function fakeDb() {
@@ -85,5 +85,55 @@ describe('loadRecent 回落数据集库', () => {
     useData.getState().loadRecent('不存在.csv');
     await vi.advanceTimersByTimeAsync(10);
     expect(useData.getState().model.name).toBe(before);
+  });
+
+  it('两个异步加载乱序完成时，只提交最后一次用户选择', async () => {
+    const resolvers = new Map<string, (value: string | null) => void>();
+    fake.db.get = vi.fn((name: string) => new Promise<string | null>((resolve) => resolvers.set(name, resolve)));
+    useData.setState({ recents: [] });
+
+    const first = useData.getState().loadRecent('旧选择.csv');
+    const second = useData.getState().loadRecent('新选择.csv');
+    resolvers.get('新选择.csv')!(JSON.stringify({
+      name: '新选择.csv', colNames: ['x'], rows: [[20], [21]], textCols: [], savedAt: 't',
+    }));
+    await Promise.resolve();
+    expect(await second).toBe(true);
+    expect(useData.getState().model.name).toBe('新选择.csv');
+
+    resolvers.get('旧选择.csv')!(JSON.stringify({
+      name: '旧选择.csv', colNames: ['x'], rows: [[1], [2]], textCols: [], savedAt: 't',
+    }));
+    expect(await first).toBe(false);
+    expect(useData.getState().model.name).toBe('新选择.csv');
+  });
+
+  it('启动恢复在用户已导入新数据后完成，不覆盖用户工作', async () => {
+    let resolveVault!: (value: string | null) => void;
+    fake.db.get = vi.fn(() => new Promise<string | null>((resolve) => { resolveVault = resolve; }));
+    localStorage.setItem('qp-active-ref-v1', '旧活动.csv');
+    const restore = hydrateActiveFromVault();
+    useData.getState().importMatrix('用户新导入.csv', ['x'], [[7], [8]]);
+    resolveVault(JSON.stringify({
+      name: '旧活动.csv', colNames: ['x'], rows: [[1], [2]], textCols: [], savedAt: 't',
+    }));
+    expect(await restore).toBe(false);
+    expect(useData.getState().model.name).toBe('用户新导入.csv');
+  });
+});
+
+describe('MES 持久化', () => {
+  it('开始与追加子组都会更新活动数据和最近列表，不因重启丢失本轮采集', () => {
+    useData.getState().startMesDataset(3);
+    let stored = JSON.parse(localStorage.getItem('qp-dataset-v1')!);
+    expect(stored.name).toBe('MES 实时采集');
+    expect(stored.rows).toHaveLength(2);
+
+    useData.getState().appendSubgroup([25.01, 24.99, 25.02]);
+    stored = JSON.parse(localStorage.getItem('qp-dataset-v1')!);
+    expect(stored.rows).toHaveLength(3);
+    const recents = JSON.parse(localStorage.getItem('qp-recents-v1')!);
+    expect(recents[0].name).toBe('MES 实时采集');
+    expect(recents[0].data.rows).toHaveLength(3);
   });
 });

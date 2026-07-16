@@ -37,21 +37,21 @@ export class ErrorBoundary extends Component<Props, State> {
           {error.message}
         </div>
         <div style={{ display: 'flex', gap: 10 }}>
-          <div
+          <button type="button"
             onClick={() => this.setState({ error: null })}
-            style={{ padding: '7px 16px', background: '#1f6fb2', color: '#fff', borderRadius: 5, fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}
+            style={{ padding: '7px 16px', border: 0, background: '#1f6fb2', color: '#fff', borderRadius: 5, fontFamily: 'inherit', fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}
           >
             重试
-          </div>
-          <div
+          </button>
+          <button type="button"
             onClick={() => {
               useData.getState().resetDemo();
               this.setState({ error: null });
             }}
-            style={{ padding: '7px 16px', border: '1px solid #cfd5dd', color: '#5b6472', borderRadius: 5, fontSize: 12.5, cursor: 'pointer' }}
+            style={{ padding: '7px 16px', border: '1px solid #cfd5dd', background: '#fff', color: '#5b6472', borderRadius: 5, fontFamily: 'inherit', fontSize: 12.5, cursor: 'pointer' }}
           >
             恢复演示数据集并重试
-          </div>
+          </button>
         </div>
         <div style={{ fontSize: 11.5, color: '#9aa2ad', marginTop: 14 }}>
           若反复出现,可能是导入数据异常;其他页面不受影响。

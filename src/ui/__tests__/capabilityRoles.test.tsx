@@ -5,7 +5,7 @@ import { createElement } from 'react';
 import { computeCapability, nf, prepareSpcData } from '../../core';
 import { useAnalyses } from '../../store/analyses';
 import { useApp } from '../../store/appStore';
-import { rememberSpecFor, suggestedSpec, syncSpecForActiveMeasurement, useData } from '../../store/dataStore';
+import { rememberSpecFor, rememberSpecForActiveMeasurement, suggestedSpec, syncSpecForActiveMeasurement, useData } from '../../store/dataStore';
 import { Capability } from '../pages/Capability';
 import { Dashboard } from '../pages/Dashboard';
 import { buildActiveAnalysisExport, buildActiveAnalysisReport } from '../../platform/activeAnalysisReport';
@@ -112,6 +112,38 @@ describe('能力分析与 SPC 数据角色一致', () => {
       .toEqual(suggestedSpec(prepared.model));
   });
 
+  it('同一工作表的不同测量特性分别记忆规格与单双侧状态', () => {
+    useData.getState().importMatrix('压装.csv', ['过盈量', '压入力'], [
+      [0.04, 900], [0.05, 1000], [0.06, 1100], [0.07, 1200],
+    ]);
+    useApp.setState({ spcDataLayout: 'individuals', spcValueCol: '压入力', lsl: 800, tgt: 1000, usl: 1300, lslOn: false, uslOn: true });
+    rememberSpecForActiveMeasurement(useData.getState().model, useData.getState().textCols, {
+      lsl: 800, tgt: 1000, usl: 1300, lslOn: false, uslOn: true,
+    });
+
+    useApp.setState({ spcValueCol: '过盈量' });
+    syncSpecForActiveMeasurement();
+    expect(useApp.getState().lslOn).toBe(true);
+    expect(useApp.getState().uslOn).toBe(true);
+    expect(useApp.getState().tgt).not.toBe(1000);
+
+    useApp.setState({ spcValueCol: '压入力' });
+    syncSpecForActiveMeasurement();
+    expect(useApp.getState()).toMatchObject({ lsl: 800, tgt: 1000, usl: 1300, lslOn: false, uslOn: true });
+  });
+
+  it('同名文件重新导入不同内容不会继承旧内容的规格', () => {
+    useData.getState().importMatrix('同名.csv', ['测量值'], [[1], [2], [3]]);
+    rememberSpecForActiveMeasurement(useData.getState().model, [], {
+      lsl: -100, tgt: 0, usl: 100, lslOn: false, uslOn: true,
+    });
+
+    useData.getState().importMatrix('同名.csv', ['测量值'], [[1000], [1100], [1200]]);
+    expect(useApp.getState().tgt).toBe(1100);
+    expect(useApp.getState().lslOn).toBe(true);
+    expect(useApp.getState().uslOn).toBe(true);
+  });
+
   it('保存的能力摘要与页面共用准备后模型，并快照恢复数据角色', () => {
     importFeedbackTable();
     const data = useData.getState();
@@ -155,7 +187,7 @@ describe('能力分析与 SPC 数据角色一致', () => {
     expect(report?.charts.find((chart) => chart.title === '过程能力直方图')?.svg).toContain('<svg');
   });
 
-  it('能力历史回看保留保存时规格，不被当前数据集的规格记忆覆盖', () => {
+  it('能力历史回看保留保存时规格，不被当前数据集的规格记忆覆盖', async () => {
     importFeedbackTable();
     useApp.setState({ lsl: 0, tgt: 8, usl: 16, lslOn: true, uslOn: true });
     const before = buildActiveAnalysisReport();
@@ -166,7 +198,7 @@ describe('能力分析与 SPC 数据角色一致', () => {
     useData.getState().importMatrix('后来数据.csv', ['测量1', '测量2'], [[100, 101], [102, 103], [104, 105]]);
     // 覆盖最危险的真实路径：能力页已经挂载，再从项目记录恢复另一数据集。
     render(createElement(Capability, { T: chartTokens('经典', true) }));
-    act(() => useAnalyses.getState().restore(saved.id));
+    await act(async () => { await useAnalyses.getState().restore(saved.id); });
 
     expect(useApp.getState()).toMatchObject({ lsl: 0, tgt: 8, usl: 16 });
     expect(buildActiveAnalysisReport()?.summary).toEqual(before?.summary);

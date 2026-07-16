@@ -9,16 +9,83 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  validate-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify tag, application versions, and updater configuration
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import re
+          import tomllib
+
+          root = pathlib.Path('.')
+          package = json.loads((root / 'package.json').read_text(encoding='utf-8'))
+          package_lock = json.loads((root / 'package-lock.json').read_text(encoding='utf-8'))
+          cargo = tomllib.loads((root / 'src-tauri/Cargo.toml').read_text(encoding='utf-8'))
+          tauri = json.loads((root / 'src-tauri/tauri.conf.json').read_text(encoding='utf-8'))
+
+          tag = os.environ['TAG']
+          if not re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?', tag):
+              raise SystemExit(f'invalid release tag: {tag!r}')
+          expected = tag[1:]
+          versions = {
+              'tag': expected,
+              'package.json': package.get('version'),
+              'package-lock.json': package_lock.get('version'),
+              'package-lock.json packages[""]': package_lock.get('packages', {}).get('', {}).get('version'),
+              'Cargo.toml': cargo.get('package', {}).get('version'),
+              'tauri.conf.json': tauri.get('version'),
+          }
+          mismatches = {name: value for name, value in versions.items() if value != expected}
+          if mismatches:
+              raise SystemExit(f'version gate failed; expected {expected}: {mismatches}')
+
+          bundle = tauri.get('bundle', {})
+          if bundle.get('createUpdaterArtifacts') is not True:
+              raise SystemExit('bundle.createUpdaterArtifacts must be true')
+          required_targets = {'msi', 'nsis', 'app', 'dmg'}
+          actual_targets = set(bundle.get('targets', []))
+          if not required_targets.issubset(actual_targets):
+              raise SystemExit(f'missing bundle targets: {sorted(required_targets - actual_targets)}')
+
+          updater = tauri.get('plugins', {}).get('updater', {})
+          if not str(updater.get('pubkey', '')).strip():
+              raise SystemExit('updater public key is empty')
+          endpoints = updater.get('endpoints')
+          if not isinstance(endpoints, list) or not endpoints or any(not str(value).strip() for value in endpoints):
+              raise SystemExit('updater endpoints must be a non-empty list of non-empty URLs')
+          if not any(str(value).endswith('/latest.json') for value in endpoints):
+              raise SystemExit('updater endpoints do not reference latest.json')
+
+          print(f'release metadata verified for {tag}')
+          PY
+
   build:
+    needs: validate-release
     strategy:
       fail-fast: false
       matrix:
         include:
-          - platform: windows-latest
+          - platform: windows-2025
             args: '--bundles msi,nsis'
-          - platform: macos-latest
+            rust_host: x86_64-pc-windows-msvc
+            updater_platform: windows-x86_64
+          - platform: macos-15
             args: '--bundles app,dmg'
+            rust_host: aarch64-apple-darwin
+            updater_platform: darwin-aarch64
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
@@ -30,8 +97,27 @@ jobs:
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+      - name: Verify build architecture and signing material
+        shell: bash
+        env:
+          EXPECTED_RUST_HOST: ${{ matrix.rust_host }}
+          EXPECTED_UPDATER_PLATFORM: ${{ matrix.updater_platform }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          ACTUAL_RUST_HOST=$(rustc -vV | sed -n 's/^host: //p' | tr -d '\r')
+          test "$ACTUAL_RUST_HOST" = "$EXPECTED_RUST_HOST" || {
+            echo "runner target mismatch: expected $EXPECTED_RUST_HOST, got $ACTUAL_RUST_HOST" >&2
+            exit 1
+          }
+          test -n "$EXPECTED_UPDATER_PLATFORM"
+          test -n "$(printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" | tr -d '[:space:]')" || {
+            echo 'TAURI_SIGNING_PRIVATE_KEY is empty' >&2
+            exit 1
+          }
       - run: npm ci
       - run: npm test
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --locked
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -41,7 +127,9 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: '质量分析平台 ${{ github.ref_name }}'
           releaseBody: '安装包见 Assets。Windows: .msi / -setup.exe；macOS: .dmg。'
-          releaseDraft: false
+          # Keep every artifact private until updater-json has proved that both
+          # platform URLs and signatures are complete.
+          releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
 
@@ -57,29 +145,75 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          gh release view "$TAG" -R "$REPO" --json assets \
-            --jq '.assets[] | .name + "\t" + .url' > assets.tsv
+          gh release view "$TAG" -R "$REPO" --json assets > assets.json
           gh release download "$TAG" -R "$REPO" --pattern '*.sig' -D sigs
-          WIN_URL=$(grep -m1 -P '\t.*setup\.exe$' assets.tsv | cut -f2 || true)
-          MAC_URL=$(grep -m1 -P '\t.*app\.tar\.gz$' assets.tsv | cut -f2 || true)
-          WIN_SIG=$(cat sigs/*setup.exe.sig 2>/dev/null || echo "")
-          MAC_SIG=$(cat sigs/*app.tar.gz.sig 2>/dev/null || echo "")
-          VERSION="${TAG#v}"
-          python3 - "$VERSION" "$WIN_URL" "$WIN_SIG" "$MAC_URL" "$MAC_SIG" <<'PY'
-          import json, sys, datetime
-          v, wu, ws, mu, ms = sys.argv[1:6]
-          platforms = {}
-          if wu: platforms["windows-x86_64"] = {"signature": ws, "url": wu}
-          if mu: platforms["darwin-aarch64"] = {"signature": ms, "url": mu}
-          json.dump({
-            "version": v,
+          python3 - "$TAG" "$REPO" <<'PY'
+          import datetime
+          import json
+          import pathlib
+          import re
+          import sys
+          import urllib.parse
+
+          tag, repo = sys.argv[1:3]
+          assets = json.loads(pathlib.Path('assets.json').read_text(encoding='utf-8')).get('assets', [])
+          by_name = {asset.get('name'): asset for asset in assets}
+          if len(by_name) != len(assets):
+              raise SystemExit('release contains duplicate or unnamed assets')
+
+          def exactly_one(pattern, description):
+              found = [asset for asset in assets if re.search(pattern, str(asset.get('name', '')))]
+              if len(found) != 1:
+                  names = [asset.get('name') for asset in found]
+                  raise SystemExit(f'expected exactly one {description}; found {names}')
+              return found[0]
+
+          # These suffixes are tied to the explicit x64 Windows and arm64 macOS
+          # runners above. A changed bundle architecture therefore fails closed.
+          windows = exactly_one(r'_x64-setup\.exe$', 'Windows x64 NSIS updater')
+          macos = exactly_one(r'_aarch64\.app\.tar\.gz$', 'macOS arm64 updater')
+
+          def platform_entry(asset, platform):
+              name = asset['name']
+              signature_name = name + '.sig'
+              if signature_name not in by_name:
+                  raise SystemExit(f'{platform}: release asset {signature_name!r} is missing')
+              signature_path = pathlib.Path('sigs') / signature_name
+              if not signature_path.is_file():
+                  raise SystemExit(f'{platform}: downloaded signature {signature_name!r} is missing')
+              signature = signature_path.read_text(encoding='utf-8').strip()
+              if not signature:
+                  raise SystemExit(f'{platform}: updater signature is empty')
+              # 草稿 release 资产的 browser_download_url 是 untagged-<hash> 形式,
+              # 发布(转正)后该 URL 即失效;因此 latest.json 的 URL 按 tag+资产名
+              # 确定性构造(转正后生效),草稿资产仅用于存在性与签名校验。
+              encoded_name = urllib.parse.quote(name)
+              url = f'https://github.com/{repo}/releases/download/{tag}/{encoded_name}'
+              return {'signature': signature, 'url': url}
+
+          document = {
+            "version": tag.removeprefix('v'),
             "notes": "见 GitHub Release 页面",
             "pub_date": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            "platforms": platforms,
-          }, open("latest.json", "w"), ensure_ascii=False, indent=2)
+            "platforms": {
+              "windows-x86_64": platform_entry(windows, 'windows-x86_64'),
+              "darwin-aarch64": platform_entry(macos, 'darwin-aarch64'),
+            },
+          }
+          if set(document['platforms']) != {'windows-x86_64', 'darwin-aarch64'}:
+              raise SystemExit('updater platform metadata is incomplete')
+          for platform, metadata in document['platforms'].items():
+              if not metadata['signature'].strip() or not metadata['url'].strip():
+                  raise SystemExit(f'{platform}: updater metadata contains an empty value')
+          pathlib.Path('latest.json').write_text(
+              json.dumps(document, ensure_ascii=False, indent=2) + '\n', encoding='utf-8'
+          )
           PY
           cat latest.json
           gh release upload "$TAG" latest.json -R "$REPO" --clobber
+          mkdir uploaded
+          gh release download "$TAG" -R "$REPO" --pattern latest.json -D uploaded
+          cmp latest.json uploaded/latest.json
 
   # 单文件便携版:一个 HTML,任意机器浏览器打开即用(零安装零网络)
   portable:
@@ -99,3 +233,16 @@ jobs:
         run: |
           mv dist-portable/index.html "quality-platform-portable-${GITHUB_REF_NAME#v}.html"
           gh release upload "$GITHUB_REF_NAME" quality-platform-portable-*.html -R "$GITHUB_REPOSITORY" --clobber
+
+  publish-release:
+    needs: [updater-json, portable]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish only after every artifact and updater check passes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release edit "$TAG" -R "$REPO" --draft=false --latest

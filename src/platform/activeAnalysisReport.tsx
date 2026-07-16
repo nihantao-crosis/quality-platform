@@ -14,6 +14,8 @@ import {
   buildDoeStructuredReport,
   capabilityInputError,
   computeCapability,
+  computeDescriptive,
+  computeVarModel,
   computeGageRR,
   countAnovaPendingCells,
   DEFECTS,
@@ -39,7 +41,8 @@ import {
   resolveAnovaNumericRoles,
   resolveDoeColumns,
   resolveDoeBlockValues,
-  splitStages,
+  resolveNumericColumn,
+  stageValidationError,
   stagedRange,
   stagedXbar,
   tInv,
@@ -81,6 +84,10 @@ const fmt = (value: number | null | undefined, digits = 4) => {
   if (value === -Infinity) return '−∞';
   return nf(value, digits);
 };
+const dispositionLabel = (value: string) => ({
+  none: '无不合格品', unrecorded: '未记录处置状态', pending: '已隔离，待负责部门处置', reworked: '已返工并按要求复验',
+  replaced: '已替换', scrapped: '已报废', concession: '已批准让步接收',
+}[value] ?? '未记录');
 
 function unrunPayload(kind: string, title: string, subtitle: string, reason: string, usesWorksheet?: boolean): AnalysisReportPayload {
   return {
@@ -93,6 +100,59 @@ function unrunPayload(kind: string, title: string, subtitle: string, reason: str
     tables: [],
     charts: [],
     usesWorksheet,
+  };
+}
+
+function buildSummaryPayload(): AnalysisReportPayload {
+  const app = useApp.getState();
+  const data = useData.getState();
+  const selected = resolveNumericColumn(data.model, app.activeVar);
+  const pendingCount = data.pendingCells.filter((cell) => cell.col === selected.index).length;
+  if (pendingCount > 0) {
+    return unrunPayload(
+      'summary',
+      '描述性统计专项报告',
+      `${data.model.name} · ${selected.name}`,
+      `「${selected.name}」还有 ${pendingCount} 个待录入单元格；系统未把占位值作为实测值汇总。`,
+      true,
+    );
+  }
+  const d = computeDescriptive(selected.values);
+  const normality = d.adAvailable
+    ? `Anderson-Darling A²=${fmt(d.ad.a2star, 4)}，P=${fmt(d.ad.p, 6)}；${d.ad.normal ? '未拒绝正态假设' : '显著偏离正态'}。`
+    : `当前 N=${d.n}，不足以运行 Anderson-Darling 正态检验。`;
+  return {
+    kind: 'summary',
+    usesWorksheet: true,
+    title: '描述性统计专项报告',
+    subtitle: `${data.model.name} · 变量 ${selected.name} · N=${d.n}`,
+    generatedAt: now(),
+    summary: [
+      `${selected.name}：均值 ${fmt(d.mean, 6)}，标准差 ${fmt(d.stdev, 6)}，中位数 ${fmt(d.median, 6)}。`,
+      normality,
+    ],
+    warnings: d.stdev === 0
+      ? ['该变量没有观测变异；正态曲线、变异系数和基于方差的推断不具备解释意义。']
+      : d.adAvailable && !d.ad.normal
+        ? ['数据显著偏离正态；使用正态能力或参数检验前应核查分布、异常点或采用适当变换/非参数方法。']
+        : [],
+    tables: [
+      {
+        title: '描述性统计量',
+        headers: ['变量', 'N', '均值', '标准差', 'SE 均值', '最小值', 'Q1', '中位数', 'Q3', '最大值', 'IQR'],
+        rows: [[selected.name, d.n, fmt(d.mean, 8), fmt(d.stdev, 8), fmt(d.seMean, 8), fmt(d.min, 8), fmt(d.q1, 8), fmt(d.median, 8), fmt(d.q3, 8), fmt(d.max, 8), fmt(d.iqr, 8)]],
+      },
+      {
+        title: '用于汇总的原始观测',
+        headers: ['工作表行', selected.name],
+        rows: selected.values.map((value, index) => [index + 1, fmt(value, 10)]),
+        note: '本报告一次只使用一个数值列，不会展平或合并其他量纲的变量。',
+      },
+    ],
+    charts: [
+      svgChart('直方图与正态曲线', <Histogram T={T} data={selected.values} mu={d.mean} sigmaWithin={d.stdev} sigmaOverall={d.stdev} lsl={null} usl={null} tgt={d.mean} bins={13} h={300} />, 960, 300),
+      svgChart('正态概率图', <NormalProbPlot T={T} data={selected.values} h={300} />, 960, 300),
+    ],
   };
 }
 
@@ -112,6 +172,9 @@ function buildAqlPayload(): AnalysisReportPayload {
   ];
   const warnings = [
     report.suspended ? '加严检验累计 5 批不接收，抽样检验已暂停；须确认纠正措施有效后才能恢复。' : '',
+    p.fullInspect
+      ? '本批执行 100% 全检；批接收仍按当前 Ac/Re 判定。发现的不合格品须逐件隔离并按负责部门要求返工、替换、报废或批准处置，批接收不等于放行不合格品。'
+      : '',
     report.state === 'normal' && report.switchingScore >= 30 && (!report.productionSteady || !report.reducedApproved)
       ? '转移得分已达到 30，但生产稳定/负责部门批准条件未同时满足，不能转放宽检验。'
       : '',
@@ -140,12 +203,13 @@ function buildAqlPayload(): AnalysisReportPayload {
       },
       {
         title: '实际批次检验与追溯记录',
-        headers: ['时间', '批次号', '检验人', '初检/复验', '批量 N', '水平', 'AQL', '状态', '主表', '初始字码', '执行字码', '检验量', '全检', 'Ac/Re', '不合格数', '判定', '转移后', '得分', '备注'],
+        headers: ['时间', '批次号', '检验人', '初检/复验', '批量 N', '水平', 'AQL', '状态', '主表', '初始字码', '执行字码', '检验量', '全检', 'Ac/Re', '不合格数', '不合格品处置', '判定', '转移后', '得分', '备注'],
         rows: report.records.map((record) => [
           record.inspectedAt, record.batchId, record.inspector, record.originalInspection ? '初检' : '复验',
           record.lot, record.level, record.aql, record.stateBefore, record.sourceTable, record.initialCode, record.finalCode,
           record.sampleSize, record.fullInspection ? '是' : '否', `${record.acceptanceNumber}/${record.rejectionNumber}`,
-          record.nonconforming, record.decision === 'accepted' ? '接收' : '不接收', record.stateAfter, record.switchingScoreAfter, record.note,
+          record.nonconforming, dispositionLabel(record.nonconformingDisposition),
+          record.decision === 'accepted' ? '接收' : '不接收', record.stateAfter, record.switchingScoreAfter, record.note,
         ]),
         note: '复验批保留追溯记录，但不计入 GB/T 2828.1 第 9.3 条转移规则。',
       },
@@ -223,7 +287,9 @@ function buildAnovaPayload(): AnalysisReportPayload {
     subtitle: `${responseName} vs ${factorName} · ${modeLabel}`,
     generatedAt: now(),
     summary: [
-      `F(${factor.df}, ${error.df})=${fmt(factor.f, 4)}，P=${fmt(factor.p, 6)}；${report.significant ? '组间均值差异显著' : '未发现显著组间差异'}（α=${fmt(report.alpha, 2)}）。`,
+      report.significant
+        ? `F(${factor.df}, ${error.df})=${fmt(factor.f, 4)}，P=${fmt(factor.p, 6)}；当前样本支持至少一组总体均值不同（α=${fmt(report.alpha, 2)}）。`
+        : `F(${factor.df}, ${error.df})=${fmt(factor.f, 4)}，P=${fmt(factor.p, 6)}；当前样本未提供组间均值不同的充分证据（α=${fmt(report.alpha, 2)}）。这不等于各组均值相同、等效或来自同一总体。`,
       `残差按${report.diagnostics.worksheetOrder ? '原工作表采集行序' : '分组顺序'}输出；组均值区间采用 ANOVA 合并误差 MSE。`,
     ],
     warnings: [
@@ -283,7 +349,9 @@ function buildHypothesisPayload(): AnalysisReportPayload {
       const result = oneSampleT(values, mu0);
       return {
         kind: 't1', usesWorksheet: true, title: '单样本 t 检验专项报告', subtitle: `${columnName} vs 目标 μ₀=${fmt(mu0, 8)}`, generatedAt: now(),
-        summary: [`t(${fmt(result.df, 2)})=${fmt(result.t, 5)}，P=${fmt(result.p, 6)}；${result.significant ? '样本均值与目标存在显著差异' : '未发现样本均值显著偏离目标'}（双侧 α=0.05）。`],
+        summary: [result.significant
+          ? `t(${fmt(result.df, 2)})=${fmt(result.t, 5)}，P=${fmt(result.p, 6)}；当前样本支持总体均值偏离目标（双侧 α=0.05）。`
+          : `t(${fmt(result.df, 2)})=${fmt(result.t, 5)}，P=${fmt(result.p, 6)}；当前样本未提供总体均值偏离目标的充分证据（双侧 α=0.05）。这不等于过程已对准目标或已满足等效性要求。`],
         warnings: M.isDemo ? ['当前为出厂演示数据集，不得当作用户过程结论。'] : [],
         tables: [
           { title: '原始样本', headers: ['观测', columnName], rows: values.map((value, index) => [index + 1, fmt(value, 8)]) },
@@ -297,25 +365,32 @@ function buildHypothesisPayload(): AnalysisReportPayload {
   }
 
   if (app.hypoTab === 't2') {
-    const multi = M.colNames.length >= 2;
-    const demo = anovaGroups();
+    if (M.colNames.length < 2) {
+      return unrunPayload(
+        't2',
+        '双样本 t 检验专项报告',
+        M.name,
+        '双样本 t 检验需要两个不同的数值样本列；当前工作表只有 1 个数值列。请导入第二组样本或将两组数据分别放入两列。系统不会改用内置演示数据。',
+        true,
+      );
+    }
     const first = indexFor(app.t2ColAName, 0);
-    const namedSecond = indexFor(app.t2ColBName, multi ? 1 : 0);
-    const second = multi && namedSecond === first ? (first === 0 ? 1 : 0) : namedSecond;
-    const groups = multi
-      ? [
-          { name: M.colNames[first], vals: M.subs.map((sub) => sub.vals[first]) },
-          { name: M.colNames[second], vals: M.subs.map((sub) => sub.vals[second]) },
-        ]
-      : [demo[0], demo[1]];
-    const pending = multi ? pendingIn([first, second]) : 0;
+    const namedSecond = indexFor(app.t2ColBName, 1);
+    const second = namedSecond === first ? (first === 0 ? 1 : 0) : namedSecond;
+    const groups = [
+      { name: M.colNames[first], vals: M.subs.map((sub) => sub.vals[first]) },
+      { name: M.colNames[second], vals: M.subs.map((sub) => sub.vals[second]) },
+    ];
+    const pending = pendingIn([first, second]);
     if (pending > 0) return unrunPayload('t2', '双样本 t 检验专项报告', `${groups[0].name} vs ${groups[1].name}`, `所选样本列还有 ${pending} 个待录入单元格。`);
     try {
       const result = twoSampleT(groups[0].vals, groups[1].vals);
       return {
-        kind: 't2', usesWorksheet: multi, title: '双样本 t 检验（Welch）专项报告', subtitle: `${groups[0].name} vs ${groups[1].name}`, generatedAt: now(),
-        summary: [`t(${fmt(result.df, 2)})=${fmt(result.t, 5)}，P=${fmt(result.p, 6)}；${result.significant ? '两组均值存在显著差异' : '未发现两组均值显著差异'}（Welch 不等方差，双侧 α=0.05）。`],
-        warnings: !multi ? ['当前数据只有 1 列，页面与报告均使用内置设备 A/B 演示样本，非用户数据。'] : M.isDemo ? ['当前为出厂演示数据集。'] : [],
+        kind: 't2', usesWorksheet: true, title: '双样本 t 检验（Welch）专项报告', subtitle: `${groups[0].name} vs ${groups[1].name}`, generatedAt: now(),
+        summary: [result.significant
+          ? `t(${fmt(result.df, 2)})=${fmt(result.t, 5)}，P=${fmt(result.p, 6)}；当前样本支持两组总体均值不同（Welch 不等方差，双侧 α=0.05）。`
+          : `t(${fmt(result.df, 2)})=${fmt(result.t, 5)}，P=${fmt(result.p, 6)}；当前样本未提供两组总体均值不同的充分证据（Welch 不等方差，双侧 α=0.05）。这不等于两组均值相同或等效。`],
+        warnings: M.isDemo ? ['当前为出厂演示数据集。'] : [],
         tables: [
           { title: '原始样本', headers: ['样本', '组内序号', '观测'], rows: groups.flatMap((group) => group.vals.map((value, index) => [group.name, index + 1, fmt(value, 8)])) },
           { title: '检验结果', headers: ['均值差', 't', 'df', 'P', '95% CI 下限', '95% CI 上限', 'SE'], rows: [[fmt(result.estimate), fmt(result.t), fmt(result.df, 2), fmt(result.p, 6), fmt(result.ciLow), fmt(result.ciHigh), fmt(result.se)]] },
@@ -342,7 +417,9 @@ function buildHypothesisPayload(): AnalysisReportPayload {
     const yName = M.colNames[namedY];
     return {
       kind: 'reg', usesWorksheet: true, title: '线性回归专项报告', subtitle: `${yName} vs ${xName}`, generatedAt: now(),
-      summary: [`${yName} = ${fmt(result.intercept, 6)} ${result.slope >= 0 ? '+' : '−'} ${fmt(Math.abs(result.slope), 6)} × ${xName}；R²=${fmt(result.r2, 5)}，P=${fmt(result.p, 6)}，斜率${result.significant ? '显著' : '不显著'}。`],
+      summary: [result.significant
+        ? `${yName} = ${fmt(result.intercept, 6)} ${result.slope >= 0 ? '+' : '−'} ${fmt(Math.abs(result.slope), 6)} × ${xName}；R²=${fmt(result.r2, 5)}，P=${fmt(result.p, 6)}，当前样本支持显著线性关系。`
+        : `${yName} = ${fmt(result.intercept, 6)} ${result.slope >= 0 ? '+' : '−'} ${fmt(Math.abs(result.slope), 6)} × ${xName}；R²=${fmt(result.r2, 5)}，P=${fmt(result.p, 6)}。当前样本未提供显著线性关系的充分证据；这不等于 X 与 Y 相互独立，也不能排除非线性关系。`],
       warnings: M.isDemo ? ['当前为出厂演示数据集。'] : [],
       tables: [
         { title: '原始 X/Y 观测', headers: ['行', xName, yName], rows: xs.map((value, index) => [index + 1, fmt(value, 8), fmt(ys[index], 8)]) },
@@ -449,6 +526,18 @@ function buildDoePayload(): AnalysisReportPayload {
     includeCurvature: app.doeIncludeCurvature,
   });
   const responseName = M.colNames[respIdx];
+  if (result.terms.length === 0) {
+    const aliases = result.aliases?.map((alias) =>
+      alias.relation === 'same' ? `${alias.term} = ${alias.with}`
+        : alias.relation === 'opposite' ? `${alias.term} = −${alias.with}`
+          : `${alias.term} 与 ${alias.with} 线性相关`).join('；');
+    return unrunPayload(
+      'doe',
+      '因子试验设计（DOE）专项报告',
+      `${responseName} · ${detected.design.factorNames.join(' / ')}`,
+      `所选模型项全部不可独立估计${aliases ? `：${aliases}` : ''}。请解除完全混杂、增加运行或改选可估计模型项。`,
+    );
+  }
   const report = buildDoeStructuredReport(detected.design, result, responseName, doeRunMetadata(M.colNames, rows, data.textCols));
   const sig = report.coefficients.filter((term) => term.term !== '常量' && term.significant).map((term) => term.term);
   const main = factorialAdjustedMainMeans(result, detected.design);
@@ -683,7 +772,9 @@ function buildGagePayload(): AnalysisReportPayload {
     return unrunPayload('gagerr', '测量系统分析 Gage R&R 专项报告', data.model.name, prepared.reason, true);
   }
   const observations = requestedReal && prepared.ok ? prepared.study.observations : gageStudyData();
-  const tolerance = requestedReal ? Math.abs(app.usl - app.lsl) : GAGE_TOLERANCE;
+  const tolerance = requestedReal
+    ? app.lslOn && app.uslOn ? app.usl - app.lsl : null
+    : GAGE_TOLERANCE;
   let result: ReturnType<typeof computeGageRR>;
   try {
     result = computeGageRR(observations, tolerance);
@@ -706,8 +797,14 @@ function buildGagePayload(): AnalysisReportPayload {
       ? `${realStudy.valueName} · 部件 ${realStudy.partName} · 操作员 ${realStudy.operatorName} · ${realStudy.partLabels.length}×${realStudy.operatorLabels.length}×${realStudy.repeats}`
       : '内置 10 部件 × 3 操作员 × 2 重复演示研究 · 非用户数据',
     generatedAt: now(),
-    summary: [`合计 Gage R&R=${fmt(result.totalGageRR, 3)}%（研究变异），测量系统${verdict}。`],
-    warnings: requestedReal ? [] : ['本报告使用内置交叉 Gage R&R 演示研究，不得当作用户测量系统结论。'],
+    summary: [
+      `合计 Gage R&R=${fmt(result.totalGageRR, 3)}%（研究变异），测量系统${verdict}。`,
+      `部件×操作员交互项 p=${fmt(result.interaction.pValue, 4)}（α=${fmt(result.interaction.alpha, 2)}），${result.interaction.retained ? '显著，最终模型保留交互分量' : '不显著，已将交互 SS/df 合并到重复性误差'}。`,
+    ],
+    warnings: [
+      ...(!requestedReal ? ['本报告使用内置交叉 Gage R&R 演示研究，不得当作用户测量系统结论。'] : []),
+      ...(requestedReal && tolerance == null ? ['未同时启用 LSL 和 USL，没有双侧公差宽度；% 公差不可计算，报表以“—”显示。'] : []),
+    ],
     tables: [
       {
         title: requestedReal ? '导入的交叉研究原始观测' : '演示交叉研究原始观测',
@@ -723,7 +820,9 @@ function buildGagePayload(): AnalysisReportPayload {
         title: '方差分量与研究变异',
         headers: ['来源', '方差分量', '%贡献', '%研究变异', '%公差'],
         rows: result.components.map((component) => [component.source, fmt(component.variance, 8), fmt(component.pctContribution), fmt(component.pctStudyVar), fmt(component.pctTolerance)]),
-        note: `公差宽度=${fmt(tolerance, 8)}；判定阈值按 AIAG 常用的 <10% / 10–30% / >30%。`,
+        note: tolerance == null
+          ? '未提供双侧公差宽度，% 公差不可计算；研究变异与 AIAG <10% / 10–30% / >30% 判定不受影响。'
+          : `公差宽度=${fmt(tolerance, 8)}；判定阈值按 AIAG 常用的 <10% / 10–30% / >30%。`,
       },
     ],
     charts: [svgChart('Gage R&R 变异分量', <GroupedBars T={T} cats={cats} />, 960, 300)],
@@ -739,11 +838,17 @@ function buildSpcPayload(): AnalysisReportPayload | undefined {
     const cl = isP ? data.pModel.pbar : data.cModel.cbar;
     const ucl = isP ? data.pModel.pUcl : data.cModel.cUcl;
     const lcl = isP ? data.pModel.pLcl : data.cModel.cLcl;
-    const evaluated = evalLimitedRules(values, cl, ucl, lcl, app.spcRules);
+    const evaluated = evalLimitedRules(
+      values,
+      cl,
+      isP ? data.pModel.pUcls : ucl,
+      isP ? data.pModel.pLcls : lcl,
+      app.spcRules,
+    );
     const items = expandSpcRuleItems(evaluated.viol, evaluated.list, isP ? 'P' : 'C');
     const typeLabel = isP ? 'P' : 'C';
     const modelName = isP ? data.pModel.name : data.cModel.name;
-    const sampleSize = isP ? data.pModel.pN : 1;
+    const sampleSize = isP ? data.pModel.pNs : 1;
     const report = spcReport({
       violList: items, k: values.length, n: sampleSize, hasSubgroups: false,
       structure: isP ? 'attribute-p' : 'attribute-c', typeLabel,
@@ -755,16 +860,36 @@ function buildSpcPayload(): AnalysisReportPayload | undefined {
       tables: [
         {
           title: `用于 ${typeLabel} 控制图的原始计数数据`,
-          headers: isP ? ['样本', '不合格品数', '检验数', '不良率'] : ['单位', '缺陷数'],
+          headers: isP ? ['样本', '不合格品数', '检验数', '不良率', 'LCL', 'UCL'] : ['单位', '缺陷数'],
           rows: values.map((value, index) => isP
-            ? [index + 1, data.pModel.pdef[index], data.pModel.pN, fmt(value, 8)]
+            ? [
+                index + 1, data.pModel.pdef[index], data.pModel.pNs[index], fmt(value, 8),
+                fmt(data.pModel.pLcls[index], 8), fmt(data.pModel.pUcls[index], 8),
+              ]
             : [index + 1, data.cModel.cdata[index]]),
-          note: isP ? '不良率 = 不合格品数 / 每批检验数。' : '每个点为一个相同机会区域/单位的缺陷数。',
+          note: isP
+            ? `不良率 = 不合格品数 / 每批检验数；p̄ 按总不良数 / 总检验数计算，LCL/UCL 按每批 nᵢ 计算并截断到 [0,1]。${data.pModel.pVariableN ? '本数据使用逐批变化的样本量。' : ''}`
+            : '每个点为一个相同机会区域/单位的缺陷数。',
         },
-        { title: '控制限', headers: ['图', 'CL', 'UCL', 'LCL', '异常点数'], rows: [[typeLabel, fmt(cl), fmt(ucl), fmt(lcl), new Set(items.map((item) => item.i)).size]] },
+        {
+          title: '控制限', headers: ['图', 'CL', 'UCL', 'LCL', '异常点数'],
+          rows: [[
+            typeLabel,
+            fmt(cl),
+            isP && data.pModel.pVariableN ? '逐批见原始计数表' : fmt(ucl),
+            isP && data.pModel.pVariableN ? '逐批见原始计数表' : fmt(lcl),
+            new Set(items.map((item) => item.i)).size,
+          ]],
+        },
         { title: '判异明细', headers: ['点', '准则', '说明'], rows: items.map((item) => [item.i + 1, item.rule, item.desc]), note: '属性图按适用性执行 Nelson/Minitab 准则 1–4。' },
       ],
-      charts: [svgChart(`${typeLabel} 控制图 · ${modelName}`, <ControlChart T={T} data={values} cl={cl} ucl={ucl} lcl={lcl} clLabel={isP ? 'p̄' : 'c̄'} zones h={300} violations={evaluated.viol} xLabel={isP ? '样本序号' : '单位序号'} yLabel={isP ? '样本不良率' : '单位缺陷数'} />, 960, 300)],
+      charts: [svgChart(`${typeLabel} 控制图 · ${modelName}`, <ControlChart
+        T={T} data={values} cl={cl} ucl={ucl} lcl={lcl} clLabel={isP ? 'p̄' : 'c̄'}
+        zones={!isP || !data.pModel.pVariableN}
+        uclSeries={isP && data.pModel.pVariableN ? data.pModel.pUcls : undefined}
+        lclSeries={isP && data.pModel.pVariableN ? data.pModel.pLcls : undefined}
+        h={300} violations={evaluated.viol} xLabel={isP ? '样本序号' : '单位序号'} yLabel={isP ? '样本不良率' : '单位缺陷数'}
+      />, 960, 300)],
     };
   }
 
@@ -902,7 +1027,18 @@ function buildSpcPayload(): AnalysisReportPayload | undefined {
 
   // X̄-R
   const ranges = M.subs.map((sub) => sub.range);
-  const useStage = stageValues && stageValues.length === M.k && splitStages(stageValues).length >= 2;
+  const stageError = app.spcStageCol
+    ? stageValues
+      ? stageValidationError(stageValues, M.k)
+      : `找不到阶段列“${app.spcStageCol}”`
+    : null;
+  if (stageError) {
+    return {
+      kind: 'spc', title: 'X̄-R 控制图专项报告 · 分阶段未运行', subtitle: prepared.variableName, generatedAt: now(),
+      summary: ['分阶段控制图未运行，未生成统计结论。'], warnings: [stageError], tables: [spcSourceTable], charts: [],
+    };
+  }
+  const useStage = Boolean(stageValues);
   const staged = useStage ? { x: stagedXbar(M.subs.map((sub) => sub.vals), stageValues!, app.spcRules), r: stagedRange(M.subs.map((sub) => sub.vals), stageValues!, app.spcRules) } : null;
   const x = staged ?? null;
   const xEval = x ? { viol: x.x.viol, list: x.x.list } : evalRules(means, M.xbarbar, (M.uclX - M.xbarbar) / 3, app.spcRules);
@@ -967,6 +1103,7 @@ function buildSpcPayload(): AnalysisReportPayload | undefined {
 /** 当前页面没有专项构建器时返回 undefined，导出层继续使用通用质量报告。 */
 export function buildActiveAnalysisReport(): AnalysisReportPayload | undefined {
   switch (useApp.getState().page) {
+    case 'summary': return buildSummaryPayload();
     case 'aql': return buildAqlPayload();
     case 'anova': return useApp.getState().hypoTab === 'anova' ? buildAnovaPayload() : buildHypothesisPayload();
     case 'doe': return buildDoePayload();
@@ -995,6 +1132,15 @@ export function buildActiveAnalysisExport(): { report?: AnalysisReportPayload; m
       pendingCells: data.pendingCells,
     });
     if (prepared.model && !prepared.error) model = prepared.model;
+  } else if (app.page === 'spc' && app.spcType === 'p') {
+    model = computeVarModel(
+      data.pModel.name,
+      ['不良数', '样本量'],
+      data.pModel.pdef.map((count, index) => [count, data.pModel.pNs[index]]),
+    );
+  } else if (app.page === 'summary') {
+    const selected = resolveNumericColumn(data.model, app.activeVar);
+    model = computeVarModel(data.model.name, [selected.name], selected.values.map((value) => [value]));
   }
   return { report: buildActiveAnalysisReport(), model };
 }

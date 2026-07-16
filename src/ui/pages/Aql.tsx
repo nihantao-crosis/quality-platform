@@ -4,8 +4,9 @@ import { useApp } from '../../store/appStore';
 import {
   rqlForResult, producerRiskPct, masterPlanByState, CODE_LETTER_TABLE, MAX_LOT_SIZE, TABLE_BY_STATE,
   decideLot, recordInspection, plansByState, normalizeSwitchStatus,
+  AQL_TRACE_LIMITS,
   restoreNormalInspection, resumeTightenedInspection, setSwitchConditions,
-  type InspectionLevel, type InspState,
+  type InspectionLevel, type InspState, type NonconformingDisposition,
 } from '../../core';
 import type { ChartTokens } from '../tokens';
 import { Card, CardHeader, KvRows, tabStyle } from '../common';
@@ -18,6 +19,11 @@ const STATE_META: Record<InspState, { label: string; bg: string; color: string }
 };
 
 const AQL_OPTIONS = [0.65, 1.0, 1.5, 2.5, 4.0, 6.5];
+const DISPOSITION_LABEL: Record<NonconformingDisposition, string> = {
+  none: '无不合格品', unrecorded: '未记录处置状态', pending: '已隔离，待负责部门处置', reworked: '已返工并按要求复验',
+  replaced: '已替换不合格品', scrapped: '已报废不合格品', concession: '已取得让步接收批准',
+};
+type PositiveDisposition = Exclude<NonconformingDisposition, 'none' | 'unrecorded'>;
 const fmtLot = (lo: number, hi: number) => (hi === Infinity ? `${lo.toLocaleString()}+` : `${lo.toLocaleString()}–${hi.toLocaleString()}`);
 
 /** 按表 1 + 选定的正式主表生成批量范围 → 最终执行方案。 */
@@ -40,6 +46,7 @@ export function Aql({ T }: { T: ChartTokens }) {
   const [batchId, setBatchId] = useState('');
   const [inspector, setInspector] = useState('');
   const [originalInspection, setOriginalInspection] = useState(true);
+  const [nonconformingDisposition, setNonconformingDisposition] = useState<PositiveDisposition | ''>('');
   const [batchError, setBatchError] = useState<string | null>(null);
   const [referenceState, setReferenceState] = useState<InspState>('normal');
   const statePlans = plansByState(aqlLot, aqlLevel, aqlAQL);
@@ -50,9 +57,14 @@ export function Aql({ T }: { T: ChartTokens }) {
   const prodRisk = producerRiskPct(plan, aqlAQL);
   const meta = STATE_META[sw.state];
   const nonconforming = Number(nonconformingDraft);
-  const batchValid = Number.isSafeInteger(nonconforming) && nonconforming >= 0 && nonconforming <= plan.n;
+  const hasNonconforming = nonconformingDraft.trim() !== '';
+  const batchValid = hasNonconforming
+    && Number.isSafeInteger(nonconforming) && nonconforming >= 0 && nonconforming <= plan.n;
   const decision = batchValid ? decideLot(plan, nonconforming) : null;
-  const batchReady = batchValid && batchId.trim().length > 0 && inspector.trim().length > 0 && !sw.suspended;
+  const dispositionRequired = plan.fullInspect && batchValid && nonconforming > 0;
+  const batchReady = batchValid && batchId.trim().length > 0 && inspector.trim().length > 0
+    && (!dispositionRequired || nonconformingDisposition !== '') && !sw.suspended;
+  const schemeLocked = sw.state !== 'normal';
 
   const submitInspection = () => {
     if (!batchValid) {
@@ -67,6 +79,10 @@ export function Aql({ T }: { T: ChartTokens }) {
       setBatchError('请填写检验人，以便追溯质量责任');
       return;
     }
+    if (dispositionRequired && !nonconformingDisposition) {
+      setBatchError('100% 全检发现不合格品时，请记录隔离或后续处置状态');
+      return;
+    }
     try {
       setSw(recordInspection(sw, {
         lot: aqlLot,
@@ -76,9 +92,11 @@ export function Aql({ T }: { T: ChartTokens }) {
         batchId,
         inspector,
         originalInspection,
+        nonconformingDisposition: nonconformingDisposition || undefined,
       }));
       setNonconformingDraft('0');
       setBatchId('');
+      setNonconformingDisposition('');
       setBatchError(null);
     } catch (error) {
       setBatchError(error instanceof Error ? error.message : '无法记录本批检验结果');
@@ -123,20 +141,39 @@ export function Aql({ T }: { T: ChartTokens }) {
         <span style={{ fontSize: 12, color: '#8a929d', fontWeight: 600 }}>检验水平</span>
         <div style={{ display: 'flex', gap: 6 }}>
           {(['I', 'II', 'III'] as InspectionLevel[]).map((l) => (
-            <div key={l} style={tabStyle(aqlLevel === l)} onClick={() => setAql({ aqlLevel: l })}>水平 {l}</div>
+            <button
+              type="button"
+              key={l}
+              disabled={schemeLocked}
+              title={schemeLocked ? '须按正式转移规则恢复正常检验后才能更改检验体系' : undefined}
+              style={{ ...tabStyle(aqlLevel === l), border: 0, opacity: schemeLocked ? 0.55 : 1, cursor: schemeLocked ? 'not-allowed' : 'pointer' }}
+              onClick={() => setAql({ aqlLevel: l })}
+            >水平 {l}</button>
           ))}
         </div>
         <span style={{ width: 1, height: 22, background: '#e5e9ee' }} />
         <span style={{ fontSize: 12, color: '#8a929d', fontWeight: 600 }}>AQL</span>
         <div style={{ display: 'flex', gap: 6 }}>
           {AQL_OPTIONS.map((a) => (
-            <div key={a} style={tabStyle(aqlAQL === a)} onClick={() => setAql({ aqlAQL: a })}>{fmtAql(a)}</div>
+            <button
+              type="button"
+              key={a}
+              disabled={schemeLocked}
+              title={schemeLocked ? '须按正式转移规则恢复正常检验后才能更改检验体系' : undefined}
+              style={{ ...tabStyle(aqlAQL === a), border: 0, opacity: schemeLocked ? 0.55 : 1, cursor: schemeLocked ? 'not-allowed' : 'pointer' }}
+              onClick={() => setAql({ aqlAQL: a })}
+            >{fmtAql(a)}</button>
           ))}
         </div>
         <span style={{ width: 1, height: 22, background: '#e5e9ee' }} />
         <span style={{ padding: '5px 9px', borderRadius: 4, background: '#eef5fb', color: '#1f6fb2', fontSize: 11.5, fontWeight: 600 }}>
           GB/T 2828.1-2012 · 表 1 + {TABLE_BY_STATE[sw.state]}
         </span>
+        {schemeLocked && (
+          <span role="status" style={{ fontSize: 11.5, color: sw.suspended ? '#8a6414' : '#6b7480' }}>
+            当前{sw.suspended ? '暂停' : meta.label}期间，检验水平与 AQL 已锁定
+          </span>
+        )}
       </Card>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 12 }}>
@@ -155,7 +192,7 @@ export function Aql({ T }: { T: ChartTokens }) {
 
       {plan.fullInspect && (
         <div style={{ padding: '10px 14px', background: '#fff6e6', border: '1px solid #f0d69a', borderRadius: 6, fontSize: 12.5, color: '#8a6414', lineHeight: 1.5 }}>
-          ⚠ <b>100% 全检</b>：按 GB/T 2828.1，查表样本量已 ≥ 批量 N（{aqlLot.toLocaleString()}），因此对整批逐件检验。本批仍可在下方录入实际不合格品数并留存判定/追溯记录；抽样 OC、RQL 及 α/β 风险指标不适用，因此不展示。
+          ⚠ <b>100% 全检</b>：按 GB/T 2828.1，查表样本量已 ≥ 批量 N（{aqlLot.toLocaleString()}），因此对整批逐件检验。下方“接收/不接收”仍按当前 Ac/Re 形成批判定；发现的每一件不合格品仍须隔离并按负责部门要求返工、替换、报废或批准处置，<b>批接收不等于放行不合格品</b>。抽样 OC、RQL 及 α/β 风险指标不适用，因此不展示。
         </div>
       )}
 
@@ -209,20 +246,36 @@ export function Aql({ T }: { T: ChartTokens }) {
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2,minmax(0,1fr))', gap: 9 }}>
                   <label style={{ fontSize: 11.5, color: '#6b7480' }}>
                     批次号 *
-                    <input aria-label="批次号" value={batchId} onChange={(e) => { setBatchId(e.target.value); setBatchError(null); }} placeholder="例：LOT-20260714-01" style={{ display: 'block', width: '100%', boxSizing: 'border-box', marginTop: 4, padding: '6px 8px', border: '1px solid #cfd5dd', borderRadius: 4 }} />
+                    <input aria-label="批次号" maxLength={AQL_TRACE_LIMITS.batchId} value={batchId} onChange={(e) => { setBatchId(e.target.value); setBatchError(null); }} placeholder="例：LOT-20260714-01" style={{ display: 'block', width: '100%', boxSizing: 'border-box', marginTop: 4, padding: '6px 8px', border: '1px solid #cfd5dd', borderRadius: 4 }} />
                   </label>
                   <label style={{ fontSize: 11.5, color: '#6b7480' }}>
                     检验人 *
-                    <input aria-label="检验人" value={inspector} onChange={(e) => { setInspector(e.target.value); setBatchError(null); }} placeholder="姓名 / 工号" style={{ display: 'block', width: '100%', boxSizing: 'border-box', marginTop: 4, padding: '6px 8px', border: '1px solid #cfd5dd', borderRadius: 4 }} />
+                    <input aria-label="检验人" maxLength={AQL_TRACE_LIMITS.inspector} value={inspector} onChange={(e) => { setInspector(e.target.value); setBatchError(null); }} placeholder="姓名 / 工号" style={{ display: 'block', width: '100%', boxSizing: 'border-box', marginTop: 4, padding: '6px 8px', border: '1px solid #cfd5dd', borderRadius: 4 }} />
                   </label>
                   <label style={{ fontSize: 11.5, color: '#6b7480' }}>
                     {plan.fullInspect ? '全检不合格品数' : '样本中不合格品数'} *
-                    <input aria-label="实际不合格品数" type="number" min={0} max={plan.n} step={1} value={nonconformingDraft} onChange={(e) => { setNonconformingDraft(e.target.value); setBatchError(null); }} className="mono" style={{ display: 'block', width: '100%', boxSizing: 'border-box', marginTop: 4, padding: '6px 8px', border: `1px solid ${batchValid ? '#cfd5dd' : '#c22f2f'}`, borderRadius: 4 }} />
+                    <input aria-label="实际不合格品数" type="number" min={0} max={plan.n} step={1} value={nonconformingDraft} onChange={(e) => { setNonconformingDraft(e.target.value); setNonconformingDisposition(''); setBatchError(null); }} className="mono" style={{ display: 'block', width: '100%', boxSizing: 'border-box', marginTop: 4, padding: '6px 8px', border: `1px solid ${batchValid ? '#cfd5dd' : '#c22f2f'}`, borderRadius: 4 }} />
                   </label>
                   <div style={{ padding: '7px 10px', alignSelf: 'end', borderRadius: 4, background: decision === 'accepted' ? '#e8f4ea' : decision === 'rejected' ? '#fdecec' : '#f7f9fb', color: decision === 'accepted' ? '#2c8a45' : decision === 'rejected' ? '#c22f2f' : '#8a929d', fontWeight: 700, fontSize: 12.5 }}>
                     自动判定：{decision === 'accepted' ? `接收（d=${nonconforming} ≤ Ac=${plan.ac}）` : decision === 'rejected' ? `不接收（d=${nonconforming} ≥ Re=${plan.re}）` : '请输入有效整数'}
                   </div>
                 </div>
+                {dispositionRequired && (
+                  <label style={{ display: 'block', marginTop: 10, fontSize: 11.5, color: '#6b7480' }}>
+                    不合格品处置 *
+                    <select
+                      aria-label="不合格品处置"
+                      value={nonconformingDisposition}
+                      onChange={(e) => { setNonconformingDisposition(e.target.value as PositiveDisposition | ''); setBatchError(null); }}
+                      style={{ display: 'block', width: '100%', marginTop: 4, padding: '6px 8px', border: `1px solid ${nonconformingDisposition ? '#cfd5dd' : '#c22f2f'}`, borderRadius: 4, background: '#fff', color: '#33404f' }}
+                    >
+                      <option value="">请选择已执行或已确认的处置状态</option>
+                      {(Object.keys(DISPOSITION_LABEL) as NonconformingDisposition[]).filter((value): value is PositiveDisposition => value !== 'none' && value !== 'unrecorded').map((value) => (
+                        <option key={value} value={value}>{DISPOSITION_LABEL[value]}</option>
+                      ))}
+                    </select>
+                  </label>
+                )}
                 <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 10, fontSize: 11.5, color: '#6b7480' }}>
                   <input type="checkbox" checked={originalInspection} onChange={(e) => setOriginalInspection(e.target.checked)} />
                   初次检验（只有初次检验批计入正式转移规则；取消勾选时作为复验留痕）
@@ -259,11 +312,11 @@ export function Aql({ T }: { T: ChartTokens }) {
               {sw.history.slice(-30).map((result, i) => (
                 <span key={`${i}-${result}`} title={result === 'A' ? '初次检验批接收' : '初次检验批不接收'} style={{ width: 14, height: 14, borderRadius: 3, background: result === 'A' ? '#2c8a45' : '#c22f2f', display: 'inline-block' }} />
               ))}
-              {sw.history.length === 0 && <span style={{ fontSize: 11.5, color: '#9aa2ad' }}>尚无初次检验批历史</span>}
+              {sw.history.length === 0 && <span style={{ fontSize: 11.5, color: '#9aa2ad' }}>当前检验体系下尚无初次检验批</span>}
             </div>
             <div style={{ marginTop: 12, paddingTop: 10, borderTop: '1px solid #edf0f3', fontSize: 11.5, color: '#7b8490', lineHeight: 1.65 }}>
               正常→加严：5 批或少于 5 批初次检验中有 2 批不接收。<br />
-              正常→放宽：转移得分≥30，且生产稳定、负责部门同意；Ac≥2 时按严一档 AQL 仍接收才 +3，Ac=0/1 且本批接收时 +2。<br />
+              正常→放宽：转移得分≥30，且生产稳定、负责部门同意；Ac≥2 时，仅当严一档 AQL 的样本量与本批相同且仍接收才 +3，否则清零；Ac=0/1 且本批接收时 +2。<br />
               加严→正常：连续 5 批接收；加严累计 5 批不接收时暂停抽样检验。<br />
               放宽→正常：任一批不接收、生产不稳定/延误，或其他条件需要。复验批只留痕，不计入以上转移计数。
             </div>
@@ -273,7 +326,7 @@ export function Aql({ T }: { T: ChartTokens }) {
                 <div style={{ marginBottom: 6, fontSize: 12, fontWeight: 600, color: '#33404f' }}>最近批次追溯记录</div>
                 <table style={{ width: '100%', minWidth: 900, borderCollapse: 'collapse', fontSize: 11 }}>
                   <thead><tr style={{ color: '#8a929d', textAlign: 'left' }}>
-                    <th style={{ padding: '5px 4px' }}>批次</th><th style={{ padding: '5px 4px' }}>N/水平/AQL</th><th style={{ padding: '5px 4px' }}>类型</th><th style={{ padding: '5px 4px' }}>方案</th><th style={{ padding: '5px 4px' }}>d</th><th style={{ padding: '5px 4px' }}>判定</th><th style={{ padding: '5px 4px' }}>检验人</th>
+                    <th style={{ padding: '5px 4px' }}>批次</th><th style={{ padding: '5px 4px' }}>N/水平/AQL</th><th style={{ padding: '5px 4px' }}>类型</th><th style={{ padding: '5px 4px' }}>方案</th><th style={{ padding: '5px 4px' }}>d</th><th style={{ padding: '5px 4px' }}>判定</th><th style={{ padding: '5px 4px' }}>不合格品处置</th><th style={{ padding: '5px 4px' }}>检验人</th>
                   </tr></thead>
                   <tbody>{sw.records.slice(-8).reverse().map((record) => (
                     <tr key={record.id} style={{ borderTop: '1px solid #f0f2f5' }}>
@@ -283,6 +336,7 @@ export function Aql({ T }: { T: ChartTokens }) {
                       <td className="mono" style={{ padding: '5px 4px', color: '#6b7480' }}>{record.sourceTable} {record.initialCode}→{record.finalCode}/{record.fullInspection ? '全检' : `n${record.sampleSize}`}/Ac{record.acceptanceNumber}/Re{record.rejectionNumber}</td>
                       <td className="mono" style={{ padding: '5px 4px' }}>{record.nonconforming}</td>
                       <td style={{ padding: '5px 4px', color: record.result === 'A' ? '#2c8a45' : '#c22f2f', fontWeight: 600 }}>{record.result === 'A' ? '接收' : '不接收'}</td>
+                      <td style={{ padding: '5px 4px', color: record.nonconformingDisposition === 'pending' || record.nonconformingDisposition === 'unrecorded' ? '#8a6414' : '#6b7480' }}>{DISPOSITION_LABEL[record.nonconformingDisposition]}</td>
                       <td style={{ padding: '5px 4px', color: '#6b7480' }}>{record.inspector}</td>
                     </tr>
                   ))}</tbody>
@@ -331,7 +385,7 @@ export function Aql({ T }: { T: ChartTokens }) {
           <div style={{ fontWeight: 600, color: '#33404f' }}>{STATE_META[referenceState].label}参考方案表（当前检验水平与 AQL）</div>
           <div style={{ display: 'flex', gap: 5, marginLeft: 'auto' }}>
             {(['normal', 'tightened', 'reduced'] as InspState[]).map((state) => (
-              <div key={state} style={tabStyle(referenceState === state)} onClick={() => setReferenceState(state)}>{TABLE_BY_STATE[state]}</div>
+              <button type="button" key={state} aria-pressed={referenceState === state} style={tabStyle(referenceState === state)} onClick={() => setReferenceState(state)}>{TABLE_BY_STATE[state]}</button>
             ))}
           </div>
         </div>

@@ -42,7 +42,7 @@ const worst = (...ls: Level[]): Level => (ls.includes('bad') ? 'bad' : ls.includ
 export function spcReport(args: {
   violList: { i: number; rule: number; desc: string; chartLabel?: string }[];
   k: number;            // 点数(子组/观测)
-  n: number;            // 子组大小
+  n: number | number[]; // 子组大小；P 图可为每批实际检验数
   hasSubgroups: boolean;
   structure?: 'subgroup' | 'individual' | 'attribute-p' | 'attribute-c';
   typeLabel: string;    // 如 X̄-R
@@ -53,6 +53,11 @@ export function spcReport(args: {
   dataRole?: string;
 }): SpcReportData {
   const { violList, k, n, hasSubgroups, typeLabel } = args;
+  const sampleSizeText = Array.isArray(n)
+    ? n.every((value) => value === n[0])
+      ? String(n[0])
+      : `${n.reduce((min, value) => Math.min(min, value), Number.POSITIVE_INFINITY)}–${n.reduce((max, value) => Math.max(max, value), Number.NEGATIVE_INFINITY)}（逐批变化）`
+    : String(n);
   const structure = args.structure ?? (hasSubgroups ? 'subgroup' : 'individual');
   // 按实际子组/观测点去重：同一点可在多张子图、多条准则上产生多条信号，
   // 但对现场调查而言仍是 1 个需追溯的实际点。
@@ -70,11 +75,11 @@ export function spcReport(args: {
     ? { name: '数据量', level: 'ok', note: `${k} 个点 ≥ 20,控制限估计可靠` }
     : { name: '数据量', level: 'warn', note: `仅 ${k} 个点,建议积累 ≥20 点后再固化控制限` };
   const struct: CheckItem = structure === 'attribute-p'
-    ? { name: '抽样结构', level: 'ok', note: `每个样本检验 n=${n} 件，以不良率监控；样本量来自 P 图数据` }
+    ? { name: '抽样结构', level: 'ok', note: `每个样本检验 n=${sampleSizeText} 件，以不良率监控；控制限按每批实际样本量计算` }
     : structure === 'attribute-c'
       ? { name: '计数结构', level: 'ok', note: '按单位缺陷数监控；各单位大小与检验机会应保持一致' }
       : structure === 'subgroup'
-        ? { name: '子组结构', level: 'ok', note: `子组大小 n=${n},组内变异估计合理` }
+        ? { name: '子组结构', level: 'ok', note: `子组大小 n=${sampleSizeText},组内变异估计合理` }
         : { name: '子组结构', level: 'warn', note: '单值数据,对小漂移的灵敏度低于子组图(可配合 EWMA/CUSUM)' };
 
   const variation: CheckItem | null = args.variationChartLabel
@@ -237,9 +242,11 @@ export function capabilityReport(args: {
     : { name: '过程稳定性', level: 'warn', note: `控制图有 ${spcViolations} 个失控点——过程不稳定时能力数值只描述过去,不能预测未来` };
 
   return {
-    verdict: worst(capLevel, norm.level === 'bad' ? 'warn' : 'ok'),
-    headline: capLevel === 'ok'
-      ? `过程能力充足(Cpk=${nf(cpk, 2)}),按当前状态可稳定满足规格要求。`
+    verdict: worst(worst(capLevel, norm.level === 'bad' ? 'warn' : 'ok'), stable.level),
+    headline: spcViolations > 0
+      ? `控制图检出 ${spcViolations} 个失控点；Cpk=${nf(cpk, 2)} 只能描述现有样本，过程稳定前不得用于预测未来质量。`
+      : capLevel === 'ok'
+      ? `过程能力充足(Cpk=${nf(cpk, 2)}),按当前受控状态可满足规格要求。`
       : capLevel === 'warn'
         ? `过程能力临界(Cpk=${nf(cpk, 2)}),建议减少变异或居中过程后复评。`
         : `过程能力不足(Cpk=${nf(cpk, 2)}),预期将产出超差品——优先减少变异/对中,并加严检验。`,

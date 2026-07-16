@@ -43,8 +43,8 @@ function DoeInner({ T }: { T: ChartTokens }) {
       <Card style={{ padding: '10px 16px', display: 'flex', alignItems: 'center', gap: 10 }}>
         <span style={{ fontSize: 12, color: '#8a929d', fontWeight: 600 }}>DOE</span>
         <div style={{ display: 'flex', gap: 6 }}>
-          <div style={tabStyle(tab === 'analyze')} onClick={() => setTab('analyze')}>分析因子设计</div>
-          <div style={tabStyle(tab === 'create')} onClick={() => setTab('create')}>创建因子设计</div>
+          <button type="button" aria-pressed={tab === 'analyze'} style={tabStyle(tab === 'analyze')} onClick={() => setTab('analyze')}>分析因子设计</button>
+          <button type="button" aria-pressed={tab === 'create'} style={tabStyle(tab === 'create')} onClick={() => setTab('create')}>创建因子设计</button>
         </div>
         {M.isDemo && tab === 'analyze' && <div style={{ marginLeft: 'auto' }}><DemoBadge /></div>}
       </Card>
@@ -179,6 +179,29 @@ function AnalyzeDesign({ T }: { T: ChartTokens }) {
     }
   }
 
+  // 因子项可能全部与区组/较低阶项混杂。此时只有截距能拟合，不能把“没有可估计项”
+  // 写成“未发现显著效应”，否则会给退化设计一个看似完整的统计结论。
+  if (!isDemo && real && real.terms.length === 0) {
+    const aliasText = real.aliases?.map((alias) =>
+      alias.relation === 'same'
+        ? `${alias.term} = ${alias.with}`
+        : alias.relation === 'opposite'
+          ? `${alias.term} = −${alias.with}`
+          : `${alias.term} 与 ${alias.with} 线性相关`).join('；');
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+        {picker}
+        <Card style={{ padding: '18px 20px', fontSize: 13, color: '#8a6520', background: '#fffdf7', lineHeight: 1.7 }}>
+          <b>当前模型没有可独立估计的因子效应，分析未运行。</b>
+          <div style={{ fontSize: 12, color: '#7a8491', marginTop: 8 }}>
+            所选模型项：{real.requestedTerms.join('、')}。{aliasText ? `可估计性诊断：${aliasText}。` : ''}
+            请解除因子与区组/其他项的完全混杂，增加能区分这些效应的运行，或改选可估计模型项。
+          </div>
+        </Card>
+      </div>
+    );
+  }
+
   // ── 渲染结果(演示或真实) ──
   const respName = isDemo ? '抗拉强度 (MPa)' : M.colNames[respIdx];
   const factorNames = isDemo ? ['A 温度', 'B 压力', 'C 时间'] : design!.factorNames;
@@ -208,6 +231,7 @@ function AnalyzeDesign({ T }: { T: ChartTokens }) {
   const barTerms = res.terms.map((t) => ({
     name: t.name,
     abs: isT ? (Number.isFinite(t.tStat) ? Math.abs(t.tStat as number) : capT) : Math.abs(t.effect),
+    sig: t.sig,
   }));
   const barRef = isT ? tInv(0.975, res.dfResid ?? 1) : (res.me ?? 0);
 
@@ -316,7 +340,7 @@ function AnalyzeDesign({ T }: { T: ChartTokens }) {
           )}
           <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
             {VIEWS.filter(([k2]) => k2 !== 'cube' || k === 3).map(([k2, l]) => (
-              <div key={k2} style={tabStyle(doeView === k2)} onClick={() => setDoeView(k2)}>{l}</div>
+              <button type="button" key={k2} aria-pressed={doeView === k2} style={tabStyle(doeView === k2)} onClick={() => setDoeView(k2)}>{l}</button>
             ))}
           </div>
         </div>
@@ -532,10 +556,10 @@ function CreateDesign() {
           点类型标明因子点/中心点；末列「响应(待录入)」逐行录入。中心点用于检验曲率并提供纯误差估计。
         </div>
         <div>
-          <div className="hov-act-primary" onClick={create}
-            style={{ display: 'inline-block', padding: '9px 20px', background: '#1f6fb2', color: '#fff', borderRadius: 6, cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>
+          <button type="button" className="hov-act-primary" onClick={create}
+            style={{ display: 'inline-block', padding: '9px 20px', border: 0, background: '#1f6fb2', color: '#fff', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit', fontSize: 13, fontWeight: 600 }}>
             生成设计表 → 工作表
-          </div>
+          </button>
         </div>
       </div>
     </Card>

@@ -177,7 +177,17 @@ function ControlChartImpl(cfg: ControlChartProps) {
               <title>{label(i) + ' = ' + nf(v, dec)}</title>
             </circle>
             {cfg.onPoint && (
-              <circle cx={X(i)} cy={Y(v)} r={11} fill="transparent" style={{ cursor: 'pointer' }} onClick={() => cfg.onPoint!(i)}>
+              <circle
+                cx={X(i)} cy={Y(v)} r={11} fill="transparent" style={{ cursor: 'pointer' }}
+                role="button" tabIndex={0} aria-label={`${label(i)}，值 ${nf(v, dec)}，查看明细`}
+                onClick={() => cfg.onPoint!(i)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    cfg.onPoint!(i);
+                  }
+                }}
+              >
                 <title>{label(i) + ' = ' + nf(v, dec)}</title>
               </circle>
             )}

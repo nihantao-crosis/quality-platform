@@ -68,6 +68,31 @@ describe('数据流冒烟', () => {
     expect(useData.getState().pModel.isDemo).toBe(false);
     expect(useApp.getState().spcType).toBe('p');
   });
+  it('P 图逐批样本量持久化并在页面显示变控制限', () => {
+    act(() => useData.getState().importCounts('p', '变样本量.csv', [1, 2, 3], [10, 20, 30]));
+    useApp.setState({ page: 'spc', spcType: 'p' });
+    render(<App />);
+    expect(screen.getAllByText(/样本量 n = 10–30（逐批变化）/).length).toBeGreaterThan(0);
+    expect(screen.getByText('UCL 范围')).toBeTruthy();
+    expect(screen.getByText('LCL 范围')).toBeTruthy();
+    expect(JSON.parse(localStorage.getItem('qp-attr-v1') ?? '{}').p).toMatchObject({
+      counts: [1, 2, 3], sampleSizes: [10, 20, 30],
+    });
+  });
+  it('P 图剪贴板两列导入按“不良数,每批样本量”解释', () => {
+    render(<App />);
+    fireEvent.click(screen.getByText('导入 CSV/Excel'));
+    fireEvent.click(screen.getByText('剪贴板粘贴'));
+    fireEvent.click(screen.getByText('不良数（P 图）'));
+    fireEvent.change(screen.getByRole('textbox'), {
+      target: { value: '不良数,每批样本量\n1,10\n4,40\n2,20' },
+    });
+    fireEvent.click(screen.getByText('导入', { exact: true }));
+    expect(useApp.getState()).toMatchObject({ modal: null, page: 'spc', spcType: 'p' });
+    expect(useData.getState().pModel.pdef).toEqual([1, 4, 2]);
+    expect(useData.getState().pModel.pNs).toEqual([10, 40, 20]);
+    expect(useData.getState().pModel.pVariableN).toBe(true);
+  });
   it('EWMA/CUSUM 图型可切换', () => {
     render(<App />);
     fireEvent.click(screen.getAllByText('控制图 (SPC)')[0]);
@@ -81,5 +106,18 @@ describe('数据流冒烟', () => {
     const label = screen.getByText(/图表风格: 经典/);
     fireEvent.click(label);
     expect(screen.getByText(/图表风格: 现代/)).toBeTruthy();
+  });
+
+  it('t 检验遇到零标准误时显示未运行，不抛出页面错误或伪 P 值', () => {
+    useData.getState().importMatrix('常量样本.csv', ['常量A', '常量B'], [[5, 9], [5, 9], [5, 9], [5, 9]]);
+    useApp.setState({ page: 'anova', hypoTab: 't1', t1ColName: '常量A', t1Mu0: 0 });
+    const view = render(<App />);
+    expect(view.container.textContent).toContain('分析未运行');
+    expect(view.container.textContent).toContain('标准误为 0 或不可估计');
+    expect(view.container.textContent).not.toContain('P = 0.000');
+
+    act(() => useApp.setState({ hypoTab: 't2', t2ColAName: '常量A', t2ColBName: '常量B' }));
+    expect(view.container.textContent).toContain('分析未运行');
+    expect(view.container.textContent).toContain('双样本 t 检验标准误为 0');
   });
 });

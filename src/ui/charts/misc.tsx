@@ -11,7 +11,7 @@ export interface GageBarCat {
   name: string;
   contrib: number;
   study: number;
-  tol: number;
+  tol: number | null;
 }
 
 // ---------- 帕累托 ----------
@@ -93,7 +93,12 @@ function GroupedBarsImpl({ T, cats }: { T: ChartTokens; cats: GageBarCat[] }) {
   const ph = H - m.t - m.b;
   const gw = pw / cats.length;
   const bw = (gw * 0.72) / series.length;
-  const Y = (v: number) => m.t + (1 - v / 100) * ph;
+  const finiteValues = cats
+    .flatMap((cat) => series.map((item) => cat[item.k]))
+    .filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
+  const rawMax = Math.max(0, ...finiteValues);
+  const axisMax = Math.max(100, Math.ceil(rawMax / 25) * 25);
+  const Y = (v: number) => m.t + (1 - v / axisMax) * ph;
   const leg: Array<[string, string]> = [['%贡献', T.bar], ['%研究变异', T.bar2], ['%公差', T.bar3]];
   let lx = m.l;
   const legendEls = leg.map(([lab, c]) => {
@@ -114,7 +119,7 @@ function GroupedBarsImpl({ T, cats }: { T: ChartTokens; cats: GageBarCat[] }) {
         return (
           <Fragment key={'g' + g}>
             <Ln x1={m.l} y1={yy} x2={m.l + pw} y2={yy} stroke={T.grid} sw={1} />
-            <Txt x={m.l - 6} y={yy} s={100 - (100 * g) / 4 + '%'} fill={T.axis} size={10} anchor="end" />
+            <Txt x={m.l - 6} y={yy} s={nf(axisMax - (axisMax * g) / 4, 0) + '%'} fill={T.axis} size={10} anchor="end" />
           </Fragment>
         );
       })}
@@ -122,9 +127,12 @@ function GroupedBarsImpl({ T, cats }: { T: ChartTokens; cats: GageBarCat[] }) {
         const gx = m.l + i * gw + gw * 0.14;
         return (
           <Fragment key={'c' + i}>
-            {series.map((s, j) => (
-              <rect key={s.k} x={gx + j * bw} y={Y(cat[s.k])} width={bw - 3} height={m.t + ph - Y(cat[s.k])} fill={s.c} />
-            ))}
+            {series.map((s, j) => {
+              const value = cat[s.k];
+              return value == null ? null : (
+                <rect key={s.k} x={gx + j * bw} y={Y(value)} width={bw - 3} height={m.t + ph - Y(value)} fill={s.c} />
+              );
+            })}
             <Txt x={m.l + i * gw + gw / 2} y={H - 30} s={cat.name} fill={T.text} size={10.5} anchor="middle" weight={500} />
           </Fragment>
         );

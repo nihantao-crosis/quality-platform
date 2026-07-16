@@ -31,12 +31,19 @@ describe('单样本 t', () => {
     expect(r.significant).toBe(true);
     expect(r.p).toBeLessThan(0.01);
   });
-  it('零方差边界：常数等于目标不显著，常数偏离目标为无穷 t / P=0', () => {
-    const equal = oneSampleT([5, 5, 5], 5);
-    expect(equal).toMatchObject({ t: 0, p: 1, significant: false, se: 0, ciLow: 5, ciHigh: 5 });
-    const shifted = oneSampleT([5, 5, 5], 0);
-    expect(shifted.t).toBe(Infinity);
-    expect(shifted).toMatchObject({ p: 0, significant: true, se: 0, ciLow: 5, ciHigh: 5 });
+  it('样本与 H0 同时加同一大常数不改变 t / P 或显著性', () => {
+    const values = [...Array(12).fill(1), ...Array(12).fill(-1)];
+    const offset = 1e15;
+    const base = oneSampleT(values, 0);
+    const shifted = oneSampleT(values.map((value) => value + offset), offset);
+    expect(base).toMatchObject({ t: 0, p: 1, significant: false });
+    expect(shifted.t).toBeCloseTo(base.t, 12);
+    expect(shifted.p).toBeCloseTo(base.p, 12);
+    expect(shifted.significant).toBe(base.significant);
+  });
+  it('零标准误边界明确不可估计，不生成虚假 t / P 显著结论', () => {
+    expect(() => oneSampleT([5, 5, 5], 5)).toThrow('标准误为 0 或不可估计');
+    expect(() => oneSampleT([5, 5, 5], 0)).toThrow('标准误为 0 或不可估计');
   });
   it('拒绝非有限观测或目标', () => {
     expect(() => oneSampleT([1, Number.NaN], 0)).toThrow('有限数值');
@@ -57,10 +64,8 @@ describe('双样本 t (Welch)', () => {
     const r = twoSampleT([1, 2, 3], [1, 2, 3]);
     expect(r.p).toBeCloseTo(1, 10);
   });
-  it('两组零方差边界：相同常数 P=1，不同常数 |t|=∞ / P=0', () => {
-    expect(twoSampleT([5, 5], [5, 5])).toMatchObject({ t: 0, p: 1, significant: false, se: 0 });
-    const different = twoSampleT([5, 5], [4, 4]);
-    expect(different.t).toBe(Infinity);
-    expect(different).toMatchObject({ estimate: 1, p: 0, significant: true, se: 0, ciLow: 1, ciHigh: 1 });
+  it('两组零标准误边界明确不可估计，不生成虚假 t / P 显著结论', () => {
+    expect(() => twoSampleT([5, 5], [5, 5])).toThrow('标准误为 0 或不可估计');
+    expect(() => twoSampleT([5, 5], [4, 4])).toThrow('标准误为 0 或不可估计');
   });
 });

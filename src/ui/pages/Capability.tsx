@@ -1,7 +1,7 @@
 /** 过程能力分析 ★深度实现 — 可编辑规格限实时重算 + 直方图 + PPM 性能表。 */
 import { useApp } from '../../store/appStore';
-import { useData, suggestedSpec, rememberSpecFor, resolveActiveMeasurementData } from '../../store/dataStore';
-import { nf, fmtCap, capabilityInputError, computeCapability, andersonDarling, bestLambda, transformWithSpec, stdev, evalRules } from '../../core';
+import { useData, suggestedSpec, rememberSpecForActiveMeasurement, resolveActiveMeasurementData } from '../../store/dataStore';
+import { nf, fmtCap, capabilityInputError, computeCapability, andersonDarling, bestLambda, transformWithSpec, stdev, evalLimitedRules, evalRules } from '../../core';
 import { ReportCard } from '../ReportCard';
 import { capabilityReport } from '../reportData';
 import type { ChartTokens } from '../tokens';
@@ -37,7 +37,16 @@ export function Capability({ T }: { T: ChartTokens }) {
   const setSpec = (patch: Partial<{ lsl: number; usl: number; tgt: number }>) => {
     setSpecRaw(patch);
     const s = useApp.getState();
-    rememberSpecFor(M.name, { lsl: s.lsl, tgt: s.tgt, usl: s.usl });
+    rememberSpecForActiveMeasurement(rawModel, textCols, {
+      lsl: s.lsl, tgt: s.tgt, usl: s.usl, lslOn: s.lslOn, uslOn: s.uslOn,
+    });
+  };
+  const toggleSpecSide = (side: 'lslOn' | 'uslOn') => {
+    toggleSide(side);
+    const s = useApp.getState();
+    rememberSpecForActiveMeasurement(rawModel, textCols, {
+      lsl: s.lsl, tgt: s.tgt, usl: s.usl, lslOn: s.lslOn, uslOn: s.uslOn,
+    });
   };
   // 单侧规格：关闭的一侧传 null
   const effLsl = lslOn ? lsl : null;
@@ -57,7 +66,7 @@ export function Capability({ T }: { T: ChartTokens }) {
               type="checkbox"
               checked={i.on}
               title={i.on ? '取消勾选 → 单侧规格（忽略此限）' : '启用此侧规格限'}
-              onChange={() => toggleSide(i.side!)}
+              onChange={() => toggleSpecSide(i.side!)}
             />
           )}
           {i.label}
@@ -79,13 +88,13 @@ export function Capability({ T }: { T: ChartTokens }) {
           单侧规格：Cpk = {lslOn ? 'CPL' : 'CPU'},双侧指标（Cp/Pp/Cpm）不适用
         </span>
       )}
-      <div
+      <button type="button"
         onClick={() => setSpec(suggestedSpec(M))}
         title={M.isDemo ? '恢复默认规格 24.90 / 25.00 / 25.10' : `按当前测量口径（${prepared.variableName}）的 μ±4σ 重新建议规格限`}
-        style={{ padding: '5px 12px', border: '1px solid #cfd5dd', borderRadius: 4, cursor: 'pointer', fontSize: 12, color: '#5b6472', background: '#fff' }}
+        style={{ padding: '5px 12px', border: '1px solid #cfd5dd', borderRadius: 4, cursor: 'pointer', fontFamily: 'inherit', fontSize: 12, color: '#5b6472', background: '#fff' }}
       >
         复位
-      </div>
+      </button>
     </Card>
   );
   const inputError = capabilityInputError(M.all, M.sigmaWithin, { lsl: effLsl, tgt, usl: effUsl });
@@ -146,10 +155,14 @@ export function Capability({ T }: { T: ChartTokens }) {
     { k: '整体 (实际)', lsl: cap.ppm.overall.belowLsl == null ? '—' : Math.round(cap.ppm.overall.belowLsl).toLocaleString(), usl: cap.ppm.overall.aboveUsl == null ? '—' : Math.round(cap.ppm.overall.aboveUsl).toLocaleString(), ppm: Math.round(cap.ppm.overall.total).toLocaleString() },
   ];
 
-  // 助手结论卡:稳定性检查沿用 X̄ 图判异
-  const spcViol = M.hasSubgroups
-    ? evalRules(M.subs.map((s) => s.mean), M.xbarbar, (M.uclX - M.xbarbar) / 3, spcRules).viol.size
-    : 0;
+  // 能力结论必须先同时检查位置图与离散图；R/MR 失控时不能宣称过程稳定。
+  const locationEval = M.hasSubgroups
+    ? evalRules(M.subs.map((s) => s.mean), M.xbarbar, (M.uclX - M.xbarbar) / 3, spcRules)
+    : evalRules(M.indiv, M.indMean, M.iSig, spcRules);
+  const dispersionEval = M.hasSubgroups
+    ? evalLimitedRules(M.subs.map((s) => s.range), M.rbar, M.uclR, M.lclR, spcRules)
+    : evalLimitedRules(M.mr.slice(1) as number[], M.mrbar, M.mrUcl, 0, spcRules);
+  const spcViol = locationEval.viol.size + dispersionEval.viol.size;
   const report = capabilityReport({
     cpk: cap.cpk, verdict: cap.verdict,
     adP: ad ? ad.p : null, n: M.all.length, spcViolations: spcViol,

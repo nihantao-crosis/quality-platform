@@ -1,8 +1,11 @@
 /** 应用外壳 — 菜单栏 → 工具栏 → (左导航 + 主内容) → 状态栏 + 弹窗/Toast + 全局快捷键。 */
-import { useEffect, useMemo } from 'react';
+import { useEffect } from 'react';
 import { useApp } from './store/appStore';
 import { useData } from './store/dataStore';
-import { capabilityInputError, computeCapability, computeGageRR, gageStudyData, GAGE_TOLERANCE, nf, prepareSpcData } from './core';
+import {
+  capabilityInputError, computeCapability, computeGageRR, gageStudyData, GAGE_TOLERANCE, nf,
+  prepareGageStudy, prepareSpcData, resolveNumericColumn,
+} from './core';
 import { platform } from './platform/adapter';
 import { exportProject } from './platform/project';
 import { useAnalyses } from './store/analyses';
@@ -28,7 +31,8 @@ import { Aql } from './ui/pages/Aql';
 export default function App() {
   const {
     page, openMenu, varOpen, setOpenMenu, setVarOpen, openModal, showToast, chartStyle, showGrid, lsl, usl, tgt, lslOn, uslOn,
-    spcType, spcDataLayout, spcValueCol, spcSubgroupCol,
+    spcType, spcDataLayout, spcValueCol, spcSubgroupCol, hypoTab, aqlLevel, aqlAQL,
+    gageUseReal, gageValueName, gagePartName, gageOperatorName, activeVar,
   } = useApp();
   const { model: M, textCols, pendingCells } = useData();
   const T = chartTokens(chartStyle, showGrid);
@@ -42,7 +46,21 @@ export default function App() {
   const cap = capModel && capabilityInputError(capModel.all, capModel.sigmaWithin, capSpec) == null
     ? computeCapability(capModel.all, capModel.sigmaWithin, capSpec)
     : null;
-  const gage = useMemo(() => computeGageRR(gageStudyData(), GAGE_TOLERANCE), []);
+  const preparedGage = prepareGageStudy(M, textCols, {
+    valueColumn: gageValueName,
+    partColumn: gagePartName,
+    operatorColumn: gageOperatorName,
+    pendingCells,
+  });
+  const requestedRealGage = !M.isDemo && gageUseReal;
+  let gageRR: number | null = null;
+  if (!requestedRealGage) {
+    gageRR = computeGageRR(gageStudyData(), GAGE_TOLERANCE).totalGageRR;
+  } else if (preparedGage.ok) {
+    try {
+      gageRR = computeGageRR(preparedGage.study.observations, lslOn && uslOn ? usl - lsl : null).totalGageRR;
+    } catch { /* 状态栏显示未运行；页面负责给出具体原因 */ }
+  }
 
   // 全局快捷键（菜单栏标注的 Ctrl+S/O/P/N;输入控件聚焦时不劫持）
   useEffect(() => {
@@ -61,7 +79,7 @@ export default function App() {
         e.preventDefault();
         exportProject(__APP_VERSION__, useApp.getState().projectName).then((dest) => {
           if (dest) s.showToast('项目已保存: ' + dest);
-        });
+        }).catch((error) => s.showToast(`项目保存失败：${(error as Error).message}`));
       } else if (k === 'o') {
         e.preventDefault();
         s.openModal('import');
@@ -90,19 +108,44 @@ export default function App() {
   }, []);
 
   // 数据相关页面的副标题跟随活动数据集
+  const effectiveSpcType = !preparedSpc.error && preparedSpc.model && !preparedSpc.model.hasSubgroups
+    && (spcType === 'xbar-r' || spcType === 'xbar-s') ? 'i-mr' : spcType;
+  const spcTypeLabel = ({ 'xbar-r': 'X̄-R', 'xbar-s': 'X̄-S', 'i-mr': 'I-MR', ewma: 'EWMA', cusum: 'CUSUM', p: 'P 图', c: 'C 图' } as const)[effectiveSpcType];
+  const summaryColumn = resolveNumericColumn(M, activeVar);
+  const specLabel = lslOn && uslOn
+    ? `${nf(lsl, 2)}–${nf(usl, 2)}`
+    : lslOn ? `LSL ${nf(lsl, 2)}` : uslOn ? `USL ${nf(usl, 2)}` : '未启用';
+  const dynTitle: Partial<Record<typeof page, string>> = {
+    worksheet: `数据工作表 · ${M.name}`,
+    summary: `描述性统计 · ${summaryColumn.name}`,
+    spc: `SPC 控制图 · ${spcTypeLabel}`,
+    anova: hypoTab === 'anova' ? '单因子方差分析'
+      : hypoTab === 't1' ? '单样本 t 检验'
+        : hypoTab === 't2' ? '双样本 t 检验（Welch）' : '相关与线性回归',
+  };
+  const title = dynTitle[page] ?? cur.title;
   const dynSub: Partial<Record<typeof page, string>> = {
-    worksheet: `${M.k} 子组 × ${M.n} 测量值 · ${M.isDemo ? '直径 (mm)' : M.colNames.join(' / ')}`,
+    worksheet: `${M.k} 行 × ${M.colNames.length} 个数值列${textCols.length ? ` + ${textCols.length} 个文本列` : ''} · ${M.isDemo ? '直径 (mm)' : M.colNames.join(' / ')}`,
     spc: spcType === 'p' ? 'P 图 · 样本不良率'
       : spcType === 'c' ? 'C 图 · 单位缺陷数'
         : preparedSpc.error ? 'SPC 数据角色待配置'
           : preparedSpc.model?.hasSubgroups
             ? `子组控制图 · 子组大小 n = ${preparedSpc.model.n}`
             : '单值-移动极差控制图 · 单值序列',
-    capability: `正态能力 · 规格 ${nf(lsl, 2)}–${nf(usl, 2)}`,
+    capability: preparedSpc.error ? '能力数据角色待配置' : `正态能力 · 规格 ${specLabel}`,
+    gagerr: requestedRealGage
+      ? preparedGage.ok
+        ? `导入数据 · ${preparedGage.study.operatorLabels.length} 操作员 × ${preparedGage.study.partLabels.length} 部件 × ${preparedGage.study.repeats} 次`
+        : `尚未运行 · ${preparedGage.reason}`
+      : '演示研究 · 交叉设计 · ANOVA 法',
+    aql: `GB/T 2828.1 · 一般检验水平 ${aqlLevel} · AQL ${aqlAQL}`,
   };
   const subtitle = dynSub[page] ?? cur.sub;
 
-  const wsCols = M.colNames.length + 1 + (M.hasSubgroups ? 2 : 0) + (M.isDemo ? 3 : 0);
+  const rowSpcDisplayed = !preparedSpc.error && preparedSpc.layout === 'rows'
+    && preparedSpc.model?.hasSubgroups === true && preparedSpc.model.k === M.k;
+  const wsCols = M.colNames.length + textCols.length + 1 + (rowSpcDisplayed ? 2 : 0) + (M.isDemo ? 3 : 0);
+  const analysisPage = page !== 'dashboard' && page !== 'assistant' && page !== 'worksheet';
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', minWidth: 1180, background: '#eef0f3', fontSize: 13, overflow: 'hidden' }}>
@@ -114,12 +157,13 @@ export default function App() {
         <main style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', background: '#eef0f3' }}>
           <div style={{ display: 'flex', alignItems: 'center', padding: '14px 22px', background: '#fff', borderBottom: '1px solid #e0e4ea', flex: 'none' }}>
             <div>
-              <div style={{ fontSize: 17, fontWeight: 600, color: '#26303c', letterSpacing: '-0.01em' }}>{cur.title}</div>
+              <div style={{ fontSize: 17, fontWeight: 600, color: '#26303c', letterSpacing: '-0.01em' }}>{title}</div>
               <div style={{ fontSize: 12.5, color: '#8a929d', marginTop: 2 }}>{subtitle}</div>
             </div>
             <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
-              <div className="hov-act" onClick={() => openModal('export')} style={{ padding: '7px 14px', border: '1px solid #cfd5dd', borderRadius: 5, cursor: 'pointer', fontSize: 12.5, color: '#3a4350', background: '#fff', fontWeight: 500 }}>导出报表</div>
-              <div
+              {analysisPage && <button type="button" className="hov-act" onClick={() => openModal('export')} style={{ padding: '7px 14px', border: '1px solid #cfd5dd', borderRadius: 5, cursor: 'pointer', fontFamily: 'inherit', fontSize: 12.5, color: '#3a4350', background: '#fff', fontWeight: 500 }}>导出报表</button>}
+              {analysisPage && <button
+                type="button"
                 className="hov-act-primary"
                 title={page === 'aql'
                   ? '保存当前 AQL 方案与账本摘要；点击历史摘要只返回当前连续检验流，不会回滚活跃状态'
@@ -129,10 +173,10 @@ export default function App() {
                   if (saved) showToast(`已保存分析「${saved.title}」到项目 · ${saved.metric}`);
                   else showToast(useAnalyses.getState().lastError ?? '当前页无可保存的分析,请先打开一个分析模块（SPC / 能力 / ANOVA…）');
                 }}
-                style={{ padding: '7px 14px', border: '1px solid #1f6fb2', borderRadius: 5, cursor: 'pointer', fontSize: 12.5, color: '#fff', background: '#1f6fb2', fontWeight: 600 }}
+                style={{ padding: '7px 14px', border: '1px solid #1f6fb2', borderRadius: 5, cursor: 'pointer', fontFamily: 'inherit', fontSize: 12.5, color: '#fff', background: '#1f6fb2', fontWeight: 600 }}
               >
                 {page === 'aql' ? '保存当前摘要' : '保存到项目'}
-              </div>
+              </button>}
             </div>
           </div>
 
@@ -160,7 +204,7 @@ export default function App() {
       <Modals />
       <Toast />
       <SessionPanel />
-      <StatusBar cpk={cap?.cpk ?? null} gageRR={gage.totalGageRR} wsName={M.name} rows={M.k} cols={wsCols} />
+      <StatusBar cpk={cap?.cpk ?? null} gageRR={gageRR} gageDemo={!requestedRealGage} wsName={M.name} rows={M.k} cols={wsCols} />
     </div>
   );
 }

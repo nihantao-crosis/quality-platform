@@ -7,7 +7,7 @@ import { gageReport, anovaReport, tReport, regReport, paretoReport } from '../re
 import {
   nf, anovaGroups, DEFECTS, gageStudyData, GAGE_TOLERANCE,
   computeGageRR, oneWayAnova, anovaResiduals, anovaGroupSummaries, buildAnovaGroups, wideScaleDisparate, oneSampleT, twoSampleT, linearRegression,
-  resolveAnovaMode, resolveAnovaNumericRoles, countAnovaPendingCells, isDoeAnalysisColumn, prepareGageStudy,
+  resolveAnovaMode, resolveAnovaNumericRoles, countAnovaPendingCells, isDoeAnalysisColumn, prepareGageStudy, listGageCategoryColumns,
   type TTestResult, type AnovaMode, type AnovaGroup,
 } from '../../core';
 import { ScatterPlot } from '../charts/ScatterPlot';
@@ -34,6 +34,44 @@ function SourceBadge({ real }: { real: boolean }) {
   );
 }
 
+const pLabel = (p: number) => p < 0.001 ? 'P<0.001' : `P=${nf(p, 3)}`;
+
+/** “未拒绝原假设”不能被展示成“已经证明相同、等效或独立”。 */
+function evidenceAwareTReport(args: Parameters<typeof tReport>[0]) {
+  const report = tReport(args);
+  if (args.kind === 't1' && !args.significant) {
+    return {
+      ...report,
+      headline: `当前样本未提供均值偏离目标的充分证据(${pLabel(args.p)})。这不等于过程已对准目标或已满足等效性要求。`,
+    };
+  }
+  if (args.kind === 't2') {
+    return {
+      ...report,
+      headline: args.significant
+        ? `两组均值差异显著(${pLabel(args.p)},Welch 校正)——当前样本支持两组总体均值不同。`
+        : `当前样本未提供两组均值不同的充分证据(${pLabel(args.p)},Welch 校正)。这不等于两组均值相同或等效。`,
+    };
+  }
+  return report;
+}
+
+function evidenceAwareAnovaReport(args: Parameters<typeof anovaReport>[0]) {
+  const report = anovaReport(args);
+  return args.significant ? report : {
+    ...report,
+    headline: `当前样本未提供组间均值不同的充分证据(${pLabel(args.p)})。这不等于各组均值相同、等效或来自同一总体。`,
+  };
+}
+
+function evidenceAwareRegReport(args: Parameters<typeof regReport>[0]) {
+  const report = regReport(args);
+  return args.significant ? report : {
+    ...report,
+    headline: `当前样本未提供显著线性关系的充分证据(斜率 ${pLabel(args.p)})。这不等于 X 与 Y 相互独立，也不能排除非线性关系。`,
+  };
+}
+
 // ---------- Gage R&R ----------
 export function GageRR({ T }: { T: ChartTokens }) {
   const name = useData((s) => s.model.name);
@@ -43,14 +81,16 @@ export function GageRR({ T }: { T: ChartTokens }) {
 function GageRRInner({ T }: { T: ChartTokens }) {
   const { model, textCols, pendingCells } = useData();
   const {
-    lsl, usl, gageUseReal, gageValueName, gagePartName, gageOperatorName, setGageOptions,
+    lsl, usl, lslOn, uslOn, gageUseReal, gageValueName, gagePartName, gageOperatorName, setGageOptions,
   } = useApp();
-  // 真实研究需要：≥1 测量列 + ≥2 文本列（部件 / 操作员）
-  const canReal = textCols.length >= 2 && model.colNames.length >= 1;
   const namedValueIndex = gageValueName ? model.colNames.indexOf(gageValueName) : -1;
-  const namedPartIndex = gagePartName ? textCols.findIndex((column) => column.name === gagePartName) : -1;
-  const namedOperatorIndex = gageOperatorName ? textCols.findIndex((column) => column.name === gageOperatorName) : -1;
   const valCol = namedValueIndex >= 0 ? namedValueIndex : 0;
+  const selectedValueName = model.colNames[valCol] ?? null;
+  const categoryColumns = listGageCategoryColumns(model, textCols, selectedValueName);
+  // 部件/操作员可以是文本编码或数字 ID，但必须是测量列以外的两列。
+  const canReal = model.colNames.length >= 1 && categoryColumns.length >= 2;
+  const namedPartIndex = gagePartName ? categoryColumns.findIndex((column) => column.name === gagePartName) : -1;
+  const namedOperatorIndex = gageOperatorName ? categoryColumns.findIndex((column) => column.name === gageOperatorName) : -1;
   const partCol = namedPartIndex >= 0 ? namedPartIndex : 0;
   const operCol = namedOperatorIndex >= 0 ? namedOperatorIndex : 1;
   const controls = (!model.isDemo || canReal) ? (
@@ -66,12 +106,12 @@ function GageRRInner({ T }: { T: ChartTokens }) {
             {model.colNames.map((n, i) => <option key={n} value={i}>{n}</option>)}
           </select>
           部件
-          <select style={selStyle} value={partCol} onChange={(e) => setGageOptions({ gagePartName: textCols[+e.target.value].name })}>
-            {textCols.map((c, i) => <option key={c.name} value={i}>{c.name}</option>)}
+          <select style={selStyle} value={partCol} onChange={(e) => setGageOptions({ gagePartName: categoryColumns[+e.target.value].name })}>
+            {categoryColumns.map((c, i) => <option key={c.name} value={i}>{c.name}{c.source === 'numeric' ? ' (数字 ID)' : ''}</option>)}
           </select>
           操作员
-          <select style={selStyle} value={operCol} onChange={(e) => setGageOptions({ gageOperatorName: textCols[+e.target.value].name })}>
-            {textCols.map((c, i) => <option key={c.name} value={i}>{c.name}</option>)}
+          <select style={selStyle} value={operCol} onChange={(e) => setGageOptions({ gageOperatorName: categoryColumns[+e.target.value].name })}>
+            {categoryColumns.map((c, i) => <option key={c.name} value={i}>{c.name}{c.source === 'numeric' ? ' (数字 ID)' : ''}</option>)}
           </select>
         </>
       )}
@@ -88,7 +128,7 @@ function GageRRInner({ T }: { T: ChartTokens }) {
   let realError = requestedReal && !prepared.ok ? prepared.reason : '';
   if (requestedReal && prepared.ok) {
     try {
-      real = computeGageRR(prepared.study.observations, Math.abs(usl - lsl));
+      real = computeGageRR(prepared.study.observations, lslOn && uslOn ? usl - lsl : null);
     } catch (error) {
       realError = (error as Error).message;
     }
@@ -111,6 +151,7 @@ function GageRRInner({ T }: { T: ChartTokens }) {
 
   const g = real ?? computeGageRR(gageStudyData(), GAGE_TOLERANCE);
   const isReal = real != null;
+  const hasTolerance = !isReal || (lslOn && uslOn);
   const verdictText = { acceptable: '可接受', marginal: '临界', unacceptable: '不可接受' }[g.verdict];
   const verdictStyle = {
     acceptable: { background: '#e8f4ea', color: '#2c8a45' },
@@ -136,6 +177,15 @@ function GageRRInner({ T }: { T: ChartTokens }) {
           {controls}
         </div>
         {!isReal && <div style={{ margin: '10px 16px 0' }}><DemoBadge /></div>}
+        {isReal && !hasTolerance && (
+          <div role="status" style={{ margin: '10px 16px 0', padding: '8px 10px', color: '#8a5a00', background: '#fff8e8', borderRadius: 4, fontSize: 12 }}>
+            未同时启用 LSL 和 USL：研究变异仍可计算，但没有双侧公差宽度，% 公差明确不计算。
+          </div>
+        )}
+        <div style={{ margin: '10px 16px 0', color: '#697382', fontSize: 11.5 }}>
+          部件×操作员交互项 p={nf(g.interaction.pValue, 4)}（α={nf(g.interaction.alpha, 2)}）；
+          {g.interaction.retained ? '交互显著，已保留在再现性中。' : '交互不显著，已合并到重复性误差。'}
+        </div>
         <div style={{ padding: '14px 16px 6px' }}>
           <GroupedBars T={T} cats={cats} />
         </div>
@@ -148,7 +198,7 @@ function GageRRInner({ T }: { T: ChartTokens }) {
           </div>
           <div className="mono" style={{ fontSize: 34, fontWeight: 700, color: bigColor }}>{nf(g.totalGageRR, 1)}%</div>
           <div style={{ fontSize: 12, color: '#8a929d', marginTop: 2 }}>合计 Gage R&R (%研究变异)</div>
-          <div style={{ fontSize: 11.5, color: '#9aa2ad', marginTop: 10, lineHeight: 1.5 }}>&lt; 10% 优秀 · 10–30% 可接受 · &gt; 30% 不可接受 (AIAG)</div>
+          <div style={{ fontSize: 11.5, color: '#9aa2ad', marginTop: 10, lineHeight: 1.5 }}>&lt; 10% 可接受 · 10–30% 临界（结合用途评估）· &gt; 30% 不可接受 (AIAG)</div>
         </Card>
         <Card>
           <div style={{ padding: '11px 16px', borderBottom: '1px solid #edf0f3', fontWeight: 600, color: '#33404f', fontSize: 12.5 }}>方差分量</div>
@@ -189,7 +239,7 @@ export function Anova({ T }: { T: ChartTokens }) {
         <span style={{ fontSize: 12, color: '#8a929d', fontWeight: 600 }}>检验方法</span>
         <div style={{ display: 'flex', gap: 6 }}>
           {tabs.map(([k, l]) => (
-            <div key={k} style={tabStyle(tab === k)} onClick={() => setTab(k)}>{l}</div>
+            <button type="button" key={k} aria-pressed={tab === k} style={tabStyle(tab === k)} onClick={() => setTab(k)}>{l}</button>
           ))}
         </div>
       </Card>
@@ -219,6 +269,22 @@ function PendingHypothesisNotice({
       <Card style={{ padding: '18px 20px', fontSize: 12.5, color: '#b0620f', background: '#fff8e8', lineHeight: 1.7 }}>
         <b>分析尚未运行：</b>当前参与分析的列中还有 {count} 个待录入单元格。
         请先完成实测数据录入；系统不会把占位 0 当作观测值计算统计量或 P 值。
+      </Card>
+    </div>
+  );
+}
+
+function UnrunHypothesisNotice({ title, reason, controls }: { title: string; reason: string; controls: React.ReactNode }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <Card>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '11px 16px', flexWrap: 'wrap' }}>
+          <div style={{ fontWeight: 600, color: '#33404f' }}>{title}</div>
+          {controls}
+        </div>
+      </Card>
+      <Card style={{ padding: '18px 20px', fontSize: 12.5, color: '#a3422f', background: '#fff3f0', lineHeight: 1.7 }}>
+        <b>分析未运行：</b>{reason}
       </Card>
     </div>
   );
@@ -271,7 +337,7 @@ function RegressionPanel({ T }: { T: ChartTokens }) {
   const sign = reg && reg.intercept >= 0 ? '+' : '−';
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-      {reg && <ReportCard data={regReport({ r2: reg.r2, p: reg.p, significant: reg.significant, n: reg.n })} />}
+      {reg && <ReportCard data={evidenceAwareRegReport({ r2: reg.r2, p: reg.p, significant: reg.significant, n: reg.n })} />}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: 16 }}>
       <Card>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '11px 16px', borderBottom: '1px solid #edf0f3', flexWrap: 'wrap' }}>
@@ -319,7 +385,7 @@ function RegressionPanel({ T }: { T: ChartTokens }) {
             <div style={{ fontSize: 12.5, color: '#5b6472', lineHeight: 1.6 }}>
               {reg.significant
                 ? `P ${reg.p < 0.001 ? '< 0.001' : '= ' + nf(reg.p, 3)} < 0.05,「${model.colNames[colX]}」对「${model.colNames[colY]}」存在显著线性关系,R² = ${nf(reg.r2, 3)} 表示约 ${Math.round(reg.r2 * 100)}% 的变异可由回归解释。`
-                : `P = ${nf(reg.p, 3)} ≥ 0.05,无充分证据表明「${model.colNames[colX]}」与「${model.colNames[colY]}」存在线性关系（同一过程的重复测量列间通常独立,属预期结果）。`}
+                : `P = ${nf(reg.p, 3)} ≥ 0.05，当前样本未提供「${model.colNames[colX]}」与「${model.colNames[colY]}」存在线性关系的充分证据；这不等于两列相互独立，也不能排除非线性关系。`}
             </div>
           </Card>
         </div>
@@ -387,13 +453,18 @@ function OneSampleTPanel({ T }: { T: ChartTokens }) {
     return <PendingHypothesisNotice title="单样本 t 检验 · 均值 vs 目标 μ₀" count={pendingCount} controls={controls} />;
   }
   const xs = model.subs.map((s) => s.vals[col]);
-  const r = oneSampleT(xs, mu0);
+  let r: TTestResult;
+  try {
+    r = oneSampleT(xs, mu0);
+  } catch (error) {
+    return <UnrunHypothesisNotice title="单样本 t 检验 · 均值 vs 目标 μ₀" reason={(error as Error).message} controls={controls} />;
+  }
   const conclusion = r.significant
     ? `P ${r.p < 0.001 ? '< 0.001' : '= ' + nf(r.p, 3)} < 0.05，「${model.colNames[col]}」的均值 ${nf(r.estimate, 4)} 与目标 ${nf(mu0, 4)} 存在显著差异,过程中心可能偏移,建议调整。`
-    : `P = ${nf(r.p, 3)} ≥ 0.05，无充分证据表明「${model.colNames[col]}」的均值偏离目标 ${nf(mu0, 4)},过程中心可视为对准目标。`;
+    : `P = ${nf(r.p, 3)} ≥ 0.05，当前样本未提供「${model.colNames[col]}」均值偏离目标 ${nf(mu0, 4)} 的充分证据；这不等于过程已对准目标或已满足等效性要求。`;
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-      <ReportCard data={tReport({ kind: 't1', p: r.p, significant: r.significant, n: xs.length })} />
+      <ReportCard data={evidenceAwareTReport({ kind: 't1', p: r.p, significant: r.significant, n: xs.length })} />
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: 16 }}>
       <Card>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '11px 16px', borderBottom: '1px solid #edf0f3', flexWrap: 'wrap' }}>
@@ -417,20 +488,25 @@ function TwoSampleTPanel({ T }: { T: ChartTokens }) {
   const { model, pendingCells } = useData();
   const { t2ColAName, t2ColBName, setHypothesisOptions } = useApp();
   const multi = model.colNames.length >= 2;
-  // 单列数据集时退回演示两组（设备 A vs B）
-  const demo = useMemo(() => anovaGroups(), []);
+  if (!multi) {
+    return (
+      <UnrunHypothesisNotice
+        title="双样本 t 检验（Welch,不等方差）"
+        reason="双样本 t 检验需要两个不同的数值样本列；当前工作表只有 1 个数值列。请导入第二组样本或将两组数据分别放入两列。系统不会改用内置演示数据。"
+        controls={<div style={{ marginLeft: 'auto' }}><SourceBadge real={!model.isDemo} /></div>}
+      />
+    );
+  }
   const namedA = t2ColAName ? model.colNames.indexOf(t2ColAName) : -1;
   const namedB = t2ColBName ? model.colNames.indexOf(t2ColBName) : -1;
   const colA = namedA >= 0 ? namedA : 0;
-  const candidateB = namedB >= 0 ? namedB : (multi ? 1 : 0);
-  const colB = multi && candidateB === colA ? (colA === 0 ? 1 : 0) : candidateB;
-  const groups = multi
-    ? [
-        { name: model.colNames[colA], vals: model.subs.map((s) => s.vals[colA]) },
-        { name: model.colNames[colB], vals: model.subs.map((s) => s.vals[colB]) },
-      ]
-    : [demo[0], demo[1]];
-  const controls = multi ? (
+  const candidateB = namedB >= 0 ? namedB : 1;
+  const colB = candidateB === colA ? (colA === 0 ? 1 : 0) : candidateB;
+  const groups = [
+    { name: model.colNames[colA], vals: model.subs.map((s) => s.vals[colA]) },
+    { name: model.colNames[colB], vals: model.subs.map((s) => s.vals[colB]) },
+  ];
+  const controls = (
     <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#5b6472' }}>
       样本 1
       <select style={selStyle} value={colA} onChange={(e) => setHypothesisOptions({ t2ColAName: model.colNames[+e.target.value] })}>
@@ -441,19 +517,24 @@ function TwoSampleTPanel({ T }: { T: ChartTokens }) {
         {model.colNames.map((n, i) => i === colA ? null : <option key={n} value={i}>{n}</option>)}
       </select>
     </div>
-  ) : <div style={{ marginLeft: 'auto' }}><SourceBadge real={false} /></div>;
-  const pendingCount = multi ? pendingCells.filter((cell) =>
-    cell.row >= 0 && cell.row < model.k && (cell.col === colA || cell.col === colB)).length : 0;
+  );
+  const pendingCount = pendingCells.filter((cell) =>
+    cell.row >= 0 && cell.row < model.k && (cell.col === colA || cell.col === colB)).length;
   if (pendingCount > 0) {
     return <PendingHypothesisNotice title="双样本 t 检验（Welch,不等方差）" count={pendingCount} controls={controls} />;
   }
-  const r = twoSampleT(groups[0].vals, groups[1].vals);
+  let r: TTestResult;
+  try {
+    r = twoSampleT(groups[0].vals, groups[1].vals);
+  } catch (error) {
+    return <UnrunHypothesisNotice title="双样本 t 检验（Welch,不等方差）" reason={(error as Error).message} controls={controls} />;
+  }
   const conclusion = r.significant
-    ? `P ${r.p < 0.001 ? '< 0.001' : '= ' + nf(r.p, 3)} < 0.05，「${groups[0].name}」与「${groups[1].name}」均值差 ${nf(r.estimate, 4)} 显著（Welch 校正）,两组不可视为同一总体。`
-    : `P = ${nf(r.p, 3)} ≥ 0.05，「${groups[0].name}」与「${groups[1].name}」均值无显著差异（Welch 校正）。`;
+    ? `P ${r.p < 0.001 ? '< 0.001' : '= ' + nf(r.p, 3)} < 0.05，「${groups[0].name}」与「${groups[1].name}」均值差 ${nf(r.estimate, 4)} 显著（Welch 校正），当前样本支持两组总体均值不同。`
+    : `P = ${nf(r.p, 3)} ≥ 0.05，当前样本未提供「${groups[0].name}」与「${groups[1].name}」均值不同的充分证据（Welch 校正）；这不等于两组均值相同或等效。`;
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-      <ReportCard data={tReport({ kind: 't2', p: r.p, significant: r.significant, n: Math.min(groups[0].vals.length, groups[1].vals.length) })} />
+      <ReportCard data={evidenceAwareTReport({ kind: 't2', p: r.p, significant: r.significant, n: Math.min(groups[0].vals.length, groups[1].vals.length) })} />
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: 16 }}>
       <Card>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '11px 16px', borderBottom: '1px solid #edf0f3', flexWrap: 'wrap' }}>
@@ -530,8 +611,8 @@ function AnovaInner({ T }: { T: ChartTokens }) {
 
   // 工具条:提为普通 JSX 变量(不作为组件类型),避免每次渲染重建导致 <select> 焦点丢失
   const tab = (m: AnovaMode, label: string, can: boolean, tip: string) => (
-    <div style={{ ...tabStyle(effMode === m), ...(can ? {} : { opacity: 0.45, cursor: 'not-allowed' }) }}
-      title={tip} onClick={() => can && setAnovaSel({ anovaMode: m })}>{label}</div>
+    <button type="button" disabled={!can} aria-pressed={effMode === m} style={{ ...tabStyle(effMode === m), ...(can ? {} : { opacity: 0.45, cursor: 'not-allowed' }) }}
+      title={tip} onClick={() => setAnovaSel({ anovaMode: m })}>{label}</button>
   );
   const modeBar = (
     <Card style={{ padding: '10px 16px', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', fontSize: 12 }}>
@@ -649,11 +730,11 @@ function AnovaInner({ T }: { T: ChartTokens }) {
   ];
   const conclusion = a.significant
     ? `P = ${nf(a.pValue, 3)} < 0.05，在 95% 置信水平下拒绝原假设：各「${factorName}」组均值存在显著差异。「${hi}」组均值最高，建议优先排查。`
-    : `P = ${nf(a.pValue, 3)} ≥ 0.05，无充分证据表明各「${factorName}」组均值存在显著差异，可视为同一总体。`;
+    : `P = ${nf(a.pValue, 3)} ≥ 0.05，当前样本未提供各「${factorName}」组均值不同的充分证据；这不等于各组均值相同、等效或来自同一总体。`;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-      <ReportCard data={anovaReport({ p: a.pValue, significant: a.significant, groups: groups.map((g) => ({ name: g.name, n: g.vals.length })), wideCaution: effMode === 'wide' })} />
+      <ReportCard data={evidenceAwareAnovaReport({ p: a.pValue, significant: a.significant, groups: groups.map((g) => ({ name: g.name, n: g.vals.length })), wideCaution: effMode === 'wide' })} />
       {modeBar}
       {effMode === 'wide' && (
         // 量纲悬殊的宽表已在上游拦截;此处仅对"同量纲宽表"给温和提示(可选堆叠为长表)。
@@ -662,10 +743,10 @@ function AnovaInner({ T }: { T: ChartTokens }) {
             宽表模式把每个数值列当作一组。仅当各列是<b>同一响应量(同量纲)</b>在不同条件下的观测时,比较均值才有统计意义;
             若各列是不同物理量,请改用「数值因子」模式或因子实验思路。
           </span>
-          <div className="hov-act" onClick={() => { try { stackColumns(); setAnovaSel({ anovaMode: 'stacked' }); showToast('已堆叠为「测量值+来源列」长表并切换到分组列模式'); } catch (e) { showToast('堆叠失败:' + (e as Error).message); } }}
-            style={{ padding: '5px 12px', border: '1px solid #d9b96a', borderRadius: 4, cursor: 'pointer', color: '#8a6520', background: '#fff', fontWeight: 600, flex: 'none' }}>
+          <button type="button" className="hov-act" onClick={() => { try { stackColumns(); setAnovaSel({ anovaMode: 'stacked' }); showToast('已堆叠为「测量值+来源列」长表并切换到分组列模式'); } catch (e) { showToast('堆叠失败:' + (e as Error).message); } }}
+            style={{ padding: '5px 12px', border: '1px solid #d9b96a', borderRadius: 4, cursor: 'pointer', color: '#8a6520', background: '#fff', fontFamily: 'inherit', fontWeight: 600, flex: 'none' }}>
             一键堆叠为长表
-          </div>
+          </button>
         </div>
       )}
       <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 430px', gap: 16 }}>
@@ -675,9 +756,9 @@ function AnovaInner({ T }: { T: ChartTokens }) {
             单因子方差分析 · {isDemo ? '直径 vs 设备' : effMode === 'wide' ? `各测量列比较(${groups.length} 组)` : `${respLabel} vs ${factorName}`}
           </div>
           <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
-            <div style={tabStyle(chartKind === 'box')} onClick={() => setChartKind('box')}>箱线图</div>
-            <div style={tabStyle(chartKind === 'individual')} onClick={() => setChartKind('individual')}>个体值图</div>
-            <div style={tabStyle(chartKind === 'interval')} onClick={() => setChartKind('interval')}>区间图</div>
+            <button type="button" aria-pressed={chartKind === 'box'} style={tabStyle(chartKind === 'box')} onClick={() => setChartKind('box')}>箱线图</button>
+            <button type="button" aria-pressed={chartKind === 'individual'} style={tabStyle(chartKind === 'individual')} onClick={() => setChartKind('individual')}>个体值图</button>
+            <button type="button" aria-pressed={chartKind === 'interval'} style={tabStyle(chartKind === 'interval')} onClick={() => setChartKind('interval')}>区间图</button>
           </div>
         </div>
         <div style={{ padding: '14px 16px 6px' }}>
@@ -770,8 +851,8 @@ export function Pareto({ T }: { T: ChartTokens }) {
       <Card style={{ padding: '11px 16px', display: 'flex', alignItems: 'center', gap: 14 }}>
         <span style={{ fontSize: 12, color: '#8a929d', fontWeight: 600 }}>分析视图</span>
         <div style={{ display: 'flex', gap: 6 }}>
-          <div style={tabStyle(paretoView === 'pareto')} onClick={() => setParetoView('pareto')}>帕累托图</div>
-          <div style={tabStyle(paretoView === 'fishbone')} onClick={() => setParetoView('fishbone')}>鱼骨图（因果分析）</div>
+          <button type="button" aria-pressed={paretoView === 'pareto'} style={tabStyle(paretoView === 'pareto')} onClick={() => setParetoView('pareto')}>帕累托图</button>
+          <button type="button" aria-pressed={paretoView === 'fishbone'} style={tabStyle(paretoView === 'fishbone')} onClick={() => setParetoView('fishbone')}>鱼骨图（因果分析）</button>
         </div>
         {paretoView === 'fishbone' && (
           <span style={{ marginLeft: 'auto', fontSize: 11.5, color: '#8a929d' }}>针对帕累托 Top 缺陷做根因分析</span>

@@ -30,6 +30,52 @@ export const DOE_DESIGN: Array<['-' | '+', '-' | '+', '-' | '+', number]> = [
   ['+', '+', '+', 66],
 ];
 
+interface NormalizedResponse {
+  center: number;
+  scale: number;
+  values: number[];
+}
+
+/**
+ * DOE 的显著性检验只应取决于响应的相对变化，而不应取决于用户选用 Pa/MPa
+ * 或是否给整列加了一个基准值。先按响应的中程和半极差无量纲化，既避免固定
+ * 绝对 epsilon，也减轻带大截距数据在正规方程中的消减误差。
+ */
+function normalizeResponse(values: number[]): NormalizedResponse {
+  if (!values.length || values.some((value) => !Number.isFinite(value))) {
+    throw new Error('DOE 响应必须是非空的有限数值列');
+  }
+  let low = values[0];
+  let high = values[0];
+  for (let index = 1; index < values.length; index++) {
+    if (values[index] < low) low = values[index];
+    if (values[index] > high) high = values[index];
+  }
+  // 分别除以 2 再相加，避免 high-low 或 high+low 在有限输入下溢出到 Infinity。
+  const center = low / 2 + high / 2;
+  const scale = values.reduce((largest, value) => Math.max(largest, Math.abs(value - center)), 0);
+  return {
+    center,
+    scale,
+    values: scale > 0 ? values.map((value) => (value - center) / scale) : values.map(() => 0),
+  };
+}
+
+/** 无量纲计算中的舍入容差；只与问题规模相关，不带响应单位。 */
+function relativeNumericTolerance(rows: number, columns: number): number {
+  return Number.EPSILON * 64 * Math.max(1, rows, columns);
+}
+
+function lenthScale(absEffects: number[]): { pse: number; me: number } {
+  if (!absEffects.length) return { pse: 0, me: 0 };
+  const s0 = 1.5 * median(absEffects);
+  const trimmed = s0 > 0 ? absEffects.filter((effect) => effect < 2.5 * s0) : [];
+  const candidate = trimmed.length ? 1.5 * median(trimmed) : 0;
+  const pse = candidate > 0 ? candidate : s0 / 1.5;
+  const dLen = Math.max(1, absEffects.length / 3);
+  return { pse, me: tInv(0.975, dLen) * pse };
+}
+
 const SG = {
   A: [-1, 1, -1, 1, -1, 1, -1, 1],
   B: [-1, -1, 1, 1, -1, -1, 1, 1],
@@ -37,7 +83,9 @@ const SG = {
 };
 
 export function analyzeDoe(responses: number[] = DOE_DESIGN.map((d) => d[3])): DoeResult {
-  const y = responses;
+  if (responses.length !== DOE_DESIGN.length) throw new Error('2³ DOE 分析需要恰好 8 个响应');
+  const normalized = normalizeResponse(responses);
+  const y = normalized.values;
   const mul = (x: number[], z: number[]) => x.map((v, i) => v * z[i]);
   const eff = (s: number[]) => y.reduce((a, v, i) => a + v * s[i], 0) / 4;
   const EA = eff(SG.A);
@@ -47,9 +95,15 @@ export function analyzeDoe(responses: number[] = DOE_DESIGN.map((d) => d[3])): D
   const EAC = eff(mul(SG.A, SG.C));
   const EBC = eff(mul(SG.B, SG.C));
   const absAll = [EA, EB, EC, EAB, EAC, EBC].map(Math.abs);
+  // 演示页沿用原型的 2.57·PSE 界限，但在无量纲效应上判断，之后再换回原单位。
   const s0 = 1.5 * median(absAll);
-  const pse = 1.5 * median(absAll.filter((a) => a < 2.5 * s0)) || s0 / 1.5;
-  const me = 2.57 * pse;
+  const trimmed = s0 > 0 ? absAll.filter((effect) => effect < 2.5 * s0) : [];
+  const candidate = trimmed.length ? 1.5 * median(trimmed) : 0;
+  const pseNormalized = candidate > 0 ? candidate : s0 / 1.5;
+  const meNormalized = 2.57 * pseNormalized;
+  const zeroTolerance = relativeNumericTolerance(responses.length, 7);
+  const pse = pseNormalized * normalized.scale;
+  const me = meNormalized * normalized.scale;
   const terms = [
     { name: 'A 温度', v: EA },
     { name: 'B 压力', v: EB },
@@ -58,7 +112,18 @@ export function analyzeDoe(responses: number[] = DOE_DESIGN.map((d) => d[3])): D
     { name: 'A×C', v: EAC },
     { name: 'B×C', v: EBC },
   ]
-    .map((t) => ({ name: t.name, v: t.v, abs: Math.abs(t.v), coef: t.v / 2, sig: Math.abs(t.v) >= me }))
+    .map((t) => {
+      const v = t.v * normalized.scale;
+      const absNormalized = Math.abs(t.v);
+      return {
+        name: t.name,
+        v,
+        abs: Math.abs(v),
+        coef: v / 2,
+        // PSE=0 时零效应不能因“0 >= 0”被标成显著；非零效应仍可识别。
+        sig: absNormalized > zeroTolerance && absNormalized + zeroTolerance >= meNormalized,
+      };
+    })
     .sort((a, b) => b.abs - a.abs);
   return { terms, pse, me };
 }
@@ -169,8 +234,15 @@ export function detectFactorial(
     if (uniq.length === 2) {
       // 纯两水平
     } else if (uniq.length === 3) {
-      const mid = uniq[1], expect = (low + high) / 2;
-      if (Math.abs(mid - expect) > Math.abs(high - low) * 0.02 + 1e-9) {
+      const mid = uniq[1];
+      const left = mid - low;
+      const right = high - mid;
+      const distanceScale = Math.max(left, right);
+      // |mid−中点| ≤ 2%·全量程，等价于左右距离相对不平衡 ≤ 4%。先用左右
+      // 距离自身归一化，因而平移/换单位都不改变判断，也不会在极大值时求和溢出。
+      const imbalance = Math.abs(left / distanceScale - right / distanceScale)
+        / (left / distanceScale + right / distanceScale);
+      if (imbalance > 0.04 + Number.EPSILON * 32) {
         return { ok: false, reason: `因子「${f.name}」有 3 个非规整水平(中值应为上下限的中点),不是标准两水平设计` };
       }
       hasCenter = true;
@@ -251,33 +323,55 @@ function estimableColumns(XtX: number[][], tol: number): number[] {
   return kept;
 }
 
+interface OlsFit {
+  beta: number[];
+  /** 无量纲响应上的系数/残差，专供显著性与标准化残差计算。 */
+  normalizedBeta: number[];
+  normalizedResiduals: number[];
+  responseScale: number;
+  invDiag: number[];
+  rank: number;
+  fits: number[];
+  residuals: number[];
+  leverage: number[];
+}
+
 /** 普通最小二乘:返回全长系数(秩亏列=0)、(XᵀX)⁻¹ 对角(秩亏列=NaN,用于系数标准误)、秩、拟合与残差。
- * 不假设正交,可正确处理不平衡/非正交设计;别名列自动剔除,支持分数因子。 */
-function olsFit(X: number[][], y: number[]): { beta: number[]; invDiag: number[]; rank: number; fits: number[]; residuals: number[]; leverage: number[] } {
+ * 不假设正交,可正确处理不平衡/非正交设计;别名列自动剔除,支持分数因子。
+ * 响应先无量纲化，确保单位缩放/平移不会改变秩外的推断结论。 */
+function olsFit(X: number[][], y: number[]): OlsFit {
   const N = X.length, p = X[0].length;
+  const normalized = normalizeResponse(y);
   const XtX: number[][] = Array.from({ length: p }, () => new Array(p).fill(0));
   const Xty = new Array(p).fill(0);
   for (let i = 0; i < N; i++) {
     const xi = X[i];
     for (let a = 0; a < p; a++) {
-      Xty[a] += xi[a] * y[i];
+      Xty[a] += xi[a] * normalized.values[i];
       for (let b = a; b < p; b++) { const v = xi[a] * xi[b]; XtX[a][b] += v; if (b !== a) XtX[b][a] += v; }
     }
   }
   let scale = 0; for (let dg = 0; dg < p; dg++) scale = Math.max(scale, Math.abs(XtX[dg][dg]));
-  const tol = 1e-9 * (scale || 1);
+  // X 已编码为 -1/0/+1（含 0/1 区组虚拟列）。秩容差按矩阵范数和规模取
+  // 浮点舍入界，不用会把合法弱列直接删除的固定 1e-9 比例。
+  const tol = Number.EPSILON * 64 * Math.max(N, p) * scale;
   const kept = estimableColumns(XtX, tol);
   const sub = kept.map((r) => kept.map((c) => XtX[r][c]));
   const subInv = kept.length ? invertMatrix(sub) : [];
-  const beta = new Array(p).fill(0);
+  const normalizedBeta = new Array(p).fill(0);
   const invDiag = new Array(p).fill(NaN);
   kept.forEach((col, a) => {
     let bv = 0; for (let b = 0; b < kept.length; b++) bv += subInv[a][b] * Xty[kept[b]];
-    beta[col] = bv;
+    normalizedBeta[col] = bv;
     invDiag[col] = subInv[a][a];
   });
-  const fits = X.map((xi) => xi.reduce((s, v, j) => s + v * beta[j], 0));
-  const residuals = y.map((v, i) => v - fits[i]);
+  const normalizedFits = X.map((xi) => xi.reduce((sum, value, column) => sum + value * normalizedBeta[column], 0));
+  const normalizedResiduals = normalized.values.map((value, row) => value - normalizedFits[row]);
+  const beta = normalizedBeta.map((value) => value * normalized.scale);
+  // 第一列由调用端保证是截距；响应中心只加回截距，不污染任何效应。
+  beta[0] += normalized.center;
+  const fits = normalizedFits.map((value) => normalized.center + value * normalized.scale);
+  const residuals = normalizedResiduals.map((value) => value * normalized.scale);
   // 杠杆值 h_ii = x_i·(XᵀX)⁻¹·x_iᵀ(仅取可估计列),用于标准化残差
   const leverage = X.map((xi) => {
     const xk = kept.map((c) => xi[c]);
@@ -285,7 +379,10 @@ function olsFit(X: number[][], y: number[]): { beta: number[]; invDiag: number[]
     for (let a = 0; a < kept.length; a++) for (let b = 0; b < kept.length; b++) h += xk[a] * subInv[a][b] * xk[b];
     return h;
   });
-  return { beta, invDiag, rank: kept.length, fits, residuals, leverage };
+  return {
+    beta, normalizedBeta, normalizedResiduals, responseScale: normalized.scale,
+    invDiag, rank: kept.length, fits, residuals, leverage,
+  };
 }
 
 type ColMeta = { kind: 'intercept' } | { kind: 'block'; name: string } | { kind: 'term'; name: string } | { kind: 'curv' };
@@ -297,6 +394,33 @@ export function analyzeFactorial(design: CodedDesign, options: FactorialModelOpt
   const { coded, response: y, factorNames } = design;
   const N = y.length;
   const k = factorNames.length;
+  if (k < 2 || k > 4 || factorNames.length !== design.levels.length) {
+    throw new Error('DOE 编码设计必须包含 2–4 个因子及对应水平定义');
+  }
+  const trimmedNames = factorNames.map((name) => name.trim());
+  if (trimmedNames.some((name, index) => !name || name !== factorNames[index])
+    || new Set(trimmedNames).size !== trimmedNames.length) {
+    throw new Error('DOE 因子名必须非空且不能重复');
+  }
+  if (design.levels.some((level) => !Number.isFinite(level.low) || !Number.isFinite(level.high) || !(level.low < level.high))) {
+    throw new Error('DOE 因子水平必须是有限数值且满足低水平 < 高水平');
+  }
+  if (N < 4 || coded.length !== N || y.some((value) => !Number.isFinite(value))) {
+    throw new Error('DOE 编码设计至少需要 4 行且响应必须为有限数值');
+  }
+  if (coded.some((row) => row.length !== k || row.some((value) => value !== -1 && value !== 0 && value !== 1))) {
+    throw new Error('DOE 编码因子只能取 -1、0、+1，且每行必须包含全部因子');
+  }
+  if (coded.some((row) => row.some((value) => value === 0) && !row.every((value) => value === 0))) {
+    throw new Error('DOE 中心点必须在同一运行中让所有因子同时取 0');
+  }
+  const hasCenterRun = coded.some((row) => row.every((value) => value === 0));
+  if (design.levels.some((level) => level.hasCenter !== hasCenterRun)) {
+    throw new Error('DOE 编码中心点与因子水平定义不一致');
+  }
+  if (factorNames.some((_, factor) => !coded.some((row) => row[factor] === -1) || !coded.some((row) => row[factor] === 1))) {
+    throw new Error('DOE 每个因子都必须同时包含低水平和高水平运行');
+  }
   const allBase = termSubsets(k).map((sub) => ({
     name: termName(sub, factorNames),
     x: coded.map((row) => sub.reduce((p, j) => p * row[j], 1)),
@@ -305,13 +429,18 @@ export function analyzeFactorial(design: CodedDesign, options: FactorialModelOpt
   const requestedTerms = options.terms == null
     ? allBase.map((term) => term.name)
     : [...new Set(options.terms)].filter((name) => available.has(name));
+  if (!requestedTerms.length) throw new Error('DOE 模型至少需要 1 个合法效应项');
   const requested = new Set(requestedTerms);
   const base = allBase.filter((term) => requested.has(term.name));
   const isCenter = (row: number[]) => row.every((v) => v === 0);
-  const hasCenter = coded.some(isCenter);
+  const hasCenter = hasCenterRun;
   const includeCurvature = (options.includeCurvature ?? true) && hasCenter;
   const rawBlocks = options.blocks ?? design.blocks;
   if (rawBlocks && rawBlocks.length !== N) throw new Error('区组列与响应行数不一致');
+  if (rawBlocks?.some((value) => value == null || String(value).trim() === ''
+    || (typeof value === 'number' && !Number.isFinite(value)))) {
+    throw new Error('区组列包含空值或非有限数值');
+  }
   const blockValues = rawBlocks?.map((value) => String(value).trim());
   const blockLevels = blockValues ? [...new Set(blockValues)] : [];
   // b 个区组用 b-1 个处理编码列。它们在因子项之前入模，因此与区组生成元
@@ -332,18 +461,25 @@ export function analyzeFactorial(design: CodedDesign, options: FactorialModelOpt
     ...(includeCurvature ? [coded.map((row) => (isCenter(row) ? 1 : 0))] : []),
   ];
   const X = y.map((_, i) => colX.map((c) => c[i]));
-  const { beta, invDiag, rank, fits, residuals, leverage } = olsFit(X, y);
+  const {
+    beta, normalizedBeta, normalizedResiduals, responseScale,
+    invDiag, rank, fits, residuals, leverage,
+  } = olsFit(X, y);
   const grand = beta[0];
   const dfResid = N - rank;
+  const inferenceTolerance = relativeNumericTolerance(N, colMeta.length);
 
   const dropped: string[] = [];
-  const estTerms: { j: number; name: string; coef: number; effect: number }[] = [];
+  const estTerms: { j: number; name: string; coef: number; effect: number; normalizedEffect: number }[] = [];
   let curvJ = -1;
   colMeta.forEach((meta, j) => {
     if (meta.kind === 'curv' && Number.isFinite(invDiag[j])) curvJ = j;
     if (meta.kind !== 'term') return;
     if (!Number.isFinite(invDiag[j])) { dropped.push(meta.name); return; }
-    estTerms.push({ j, name: meta.name, coef: beta[j], effect: 2 * beta[j] });
+    estTerms.push({
+      j, name: meta.name, coef: beta[j], effect: 2 * beta[j],
+      normalizedEffect: 2 * normalizedBeta[j],
+    });
   });
   const aliases = dropped.map((name) => {
     const j = colMeta.findIndex((meta) => meta.kind === 'term' && meta.name === name);
@@ -351,8 +487,8 @@ export function analyzeFactorial(design: CodedDesign, options: FactorialModelOpt
     for (let q = 0; q < j; q++) {
       if (!Number.isFinite(invDiag[q])) continue;
       const z = colX[q];
-      const same = x.every((value, i) => Math.abs(value - z[i]) < 1e-9);
-      const opposite = x.every((value, i) => Math.abs(value + z[i]) < 1e-9);
+      const same = x.every((value, i) => Math.abs(value - z[i]) <= inferenceTolerance * Math.max(1, Math.abs(value), Math.abs(z[i])));
+      const opposite = x.every((value, i) => Math.abs(value + z[i]) <= inferenceTolerance * Math.max(1, Math.abs(value), Math.abs(z[i])));
       if (same || opposite) {
         const meta = colMeta[q];
         const withName = meta.kind === 'intercept' ? '常量' : meta.kind === 'curv' ? '曲率' : meta.name;
@@ -370,36 +506,47 @@ export function analyzeFactorial(design: CodedDesign, options: FactorialModelOpt
 
   if (dfResid >= 1) {
     method = 'ttest';
-    mse = residuals.reduce((a, r) => a + r * r, 0) / dfResid;
-    if (mse > 1e-12) {
-      const s = Math.sqrt(mse);
-      stdResiduals = residuals.map((r, i) => {
-        const denom = s * Math.sqrt(Math.max(1e-9, 1 - leverage[i]));
-        return denom > 0 ? r / denom : 0;
+    const mseNormalizedRaw = normalizedResiduals.reduce((sum, residual) => sum + residual * residual, 0) / dfResid;
+    const zeroMseThreshold = inferenceTolerance * inferenceTolerance;
+    const mseNormalized = mseNormalizedRaw <= zeroMseThreshold ? 0 : mseNormalizedRaw;
+    mse = mseNormalizedRaw * responseScale * responseScale;
+    if (mseNormalized > 0) {
+      const s = Math.sqrt(mseNormalized);
+      stdResiduals = normalizedResiduals.map((residual, i) => {
+        const denom = s * Math.sqrt(Math.max(inferenceTolerance, 1 - leverage[i]));
+        return denom > 0 ? residual / denom : 0;
       });
-    } else stdResiduals = residuals.map(() => 0);
+    } else stdResiduals = normalizedResiduals.map(() => 0);
     for (const t of estTerms) {
-      const seEff = 2 * Math.sqrt(mse * invDiag[t.j]);
+      const seEff = 2 * Math.sqrt(mseNormalized * invDiag[t.j]);
+      const effectIsZero = Math.abs(t.normalizedEffect) <= inferenceTolerance;
       // 零残差(完美拟合)时:非零效应 → 无穷显著(p→0),而非误判为不显著;零效应 → 无信息(p=1)
-      const tStat = seEff > 0 ? t.effect / seEff : (t.effect === 0 ? 0 : Math.sign(t.effect) * Infinity);
-      const p = seEff > 0 ? 2 * (1 - tCdf(Math.abs(tStat), dfResid)) : (t.effect === 0 ? 1 : 0);
+      const tStat = seEff > 0 ? t.normalizedEffect / seEff : (effectIsZero ? 0 : Math.sign(t.normalizedEffect) * Infinity);
+      const p = seEff > 0 ? 2 * (1 - tCdf(Math.abs(tStat), dfResid)) : (effectIsZero ? 1 : 0);
       terms.push({ name: t.name, effect: t.effect, coef: t.coef, tStat, p, sig: p < 0.05 });
     }
     if (curvJ >= 0) {
-      const seCoef = Math.sqrt(mse * invDiag[curvJ]);
+      const seCoef = Math.sqrt(mseNormalized * invDiag[curvJ]);
       const cf = beta[curvJ];
-      const tStat = seCoef > 0 ? cf / seCoef : (cf === 0 ? 0 : Math.sign(cf) * Infinity);
-      const p = seCoef > 0 ? 2 * (1 - tCdf(Math.abs(tStat), dfResid)) : (cf === 0 ? 1 : 0);
+      const normalizedCf = normalizedBeta[curvJ];
+      const curvatureIsZero = Math.abs(normalizedCf) <= inferenceTolerance;
+      const tStat = seCoef > 0 ? normalizedCf / seCoef : (curvatureIsZero ? 0 : Math.sign(normalizedCf) * Infinity);
+      const p = seCoef > 0 ? 2 * (1 - tCdf(Math.abs(tStat), dfResid)) : (curvatureIsZero ? 1 : 0);
       curvature = { coef: cf, tStat, p, sig: p < 0.05 };
     }
   } else {
     method = 'lenth';
-    const absAll = estTerms.map((t) => Math.abs(t.effect));
-    const s0 = 1.5 * median(absAll);
-    pse = 1.5 * median(absAll.filter((a) => a < 2.5 * s0)) || s0 / 1.5 || 1e-9;
-    const dLen = Math.max(1, absAll.length / 3); // Lenth 用分数自由度 m/3(不取整)
-    me = tInv(0.975, dLen) * pse;
-    for (const t of estTerms) terms.push({ name: t.name, effect: t.effect, coef: t.coef, sig: Math.abs(t.effect) >= me });
+    const absNormalized = estTerms.map((term) => Math.abs(term.normalizedEffect));
+    const lenth = lenthScale(absNormalized);
+    pse = lenth.pse * responseScale;
+    me = lenth.me * responseScale;
+    for (const t of estTerms) {
+      const absEffect = Math.abs(t.normalizedEffect);
+      terms.push({
+        name: t.name, effect: t.effect, coef: t.coef,
+        sig: absEffect > inferenceTolerance && absEffect + inferenceTolerance >= lenth.me,
+      });
+    }
     if (curvJ >= 0) curvature = { coef: beta[curvJ], sig: false }; // 无残差自由度,曲率不可检验
   }
   terms.sort((a, b) => Math.abs(b.effect) - Math.abs(a.effect));
@@ -451,6 +598,16 @@ export interface FactorialOptimizationDecision {
   fixedCoded?: Array<-1 | 1 | null>;
 }
 
+function factorialCornerContrast(result: FactorialResult, design: CodedDesign, coded: number[]): number {
+  const subsetByName = new Map(termSubsets(design.factorNames.length)
+    .map((subset) => [termName(subset, design.factorNames), subset]));
+  return result.terms.reduce((sum, term) => {
+    const subset = subsetByName.get(term.name);
+    if (!subset) return sum;
+    return sum + term.coef * subset.reduce((product, index) => product * coded[index], 1);
+  }, 0);
+}
+
 /**
  * 枚举当前拟合模型的全部 2^k 角点预测。区组使用等权最小二乘均值（LS mean），
  * 从而不会让非平衡区组的原始边际构成反转主效应/交互图方向。
@@ -459,18 +616,13 @@ export function factorialCornerPredictions(
   result: FactorialResult,
   design: CodedDesign,
 ): FactorialCornerPrediction[] {
-  const subsets = termSubsets(design.factorNames.length);
-  const subsetByName = new Map(subsets.map((subset) => [termName(subset, design.factorNames), subset]));
   const averageBlockOffset = result.block
     ? result.block.coefficients.reduce((sum, block) => sum + block.coef, 0) / result.block.levels.length
     : 0;
   return Array.from({ length: 1 << design.factorNames.length }, (_, mask) => {
     const coded = design.factorNames.map((_, index) => mask & (1 << index) ? 1 : -1);
-    const predicted = result.terms.reduce((sum, term) => {
-      const subset = subsetByName.get(term.name);
-      if (!subset) return sum;
-      return sum + term.coef * subset.reduce((product, index) => product * coded[index], 1);
-    }, result.grand + averageBlockOffset);
+    const contrast = factorialCornerContrast(result, design, coded);
+    const predicted = result.grand + averageBlockOffset + contrast;
     return {
       coded,
       factorValues: coded.map((level, index) => level > 0 ? design.levels[index].high : design.levels[index].low),
@@ -519,12 +671,22 @@ export function factorialCornerOptimum(
   objective: 'maximize' | 'minimize' = 'maximize',
 ): FactorialCornerOptimum {
   const corners = factorialCornerPredictions(result, design);
-  const best = corners.reduce((current, candidate) =>
+  // 截距（以及响应整体平移）对角点排序没有意义。用模型对比项直接比较，避免
+  // “响应加了一个大基准值 → 1e-9×基准值把不同角点全判成并列”的单位依赖。
+  const scored = corners.map((corner) => ({
+    corner,
+    score: factorialCornerContrast(result, design, corner.coded),
+  }));
+  const bestScored = scored.reduce((current, candidate) =>
     objective === 'maximize'
-      ? candidate.predicted > current.predicted ? candidate : current
-      : candidate.predicted < current.predicted ? candidate : current);
-  const tolerance = 1e-9 * Math.max(1, Math.abs(best.predicted));
-  const ties = corners.filter((candidate) => Math.abs(candidate.predicted - best.predicted) <= tolerance);
+      ? candidate.score > current.score ? candidate : current
+      : candidate.score < current.score ? candidate : current);
+  const scoreScale = scored.reduce((largest, candidate) => Math.max(largest, Math.abs(candidate.score)), 0);
+  const tolerance = 1e-9 * scoreScale;
+  const ties = scored
+    .filter((candidate) => Math.abs(candidate.score - bestScored.score) <= tolerance)
+    .map((candidate) => candidate.corner);
+  const best = bestScored.corner;
   return { ...best, ties, unique: ties.length === 1 };
 }
 
@@ -668,7 +830,7 @@ export function generateFactorialDesign(
         standardOrder: standardOrder++,
         block,
         pointType: '中心点',
-        factorValues: factors.map((factor) => (factor.low + factor.high) / 2),
+        factorValues: factors.map((factor) => factor.low / 2 + factor.high / 2),
       });
     }
   }
@@ -820,7 +982,7 @@ export function buildDoeStructuredReport(
         codedLevels,
         factorValues: codedLevels.map((level, factor) => {
           const limits = design.levels[factor];
-          return level < 0 ? limits.low : level > 0 ? limits.high : (limits.low + limits.high) / 2;
+          return level < 0 ? limits.low : level > 0 ? limits.high : limits.low / 2 + limits.high / 2;
         }),
         observed,
         fitted: result.fits[row],

@@ -1,15 +1,19 @@
 /** 描述性统计 · 图形化摘要（对标 Minitab Graphical Summary）。 */
 import { useState } from 'react';
 import { useData } from '../../store/dataStore';
-import { computeDescriptive, nf } from '../../core';
+import { useApp } from '../../store/appStore';
+import { computeDescriptive, nf, resolveNumericColumn } from '../../core';
 import type { ChartTokens } from '../tokens';
 import { Card, CardHeader, Badge } from '../common';
 import { Histogram } from '../charts/Histogram';
 
 export function Summary({ T }: { T: ChartTokens }) {
-  const M = useData((s) => s.model);
+  const { model: M, pendingCells } = useData();
+  const { activeVar, setActiveVar } = useApp();
   const [bins, setBins] = useState(13);
-  const d = computeDescriptive(M.all);
+  const selected = resolveNumericColumn(M, activeVar);
+  const pending = pendingCells.filter((cell) => cell.col === selected.index);
+  const d = computeDescriptive(selected.values);
 
   const dp = 3; // 显示小数位
   const statRows: Array<[string, string, string?]> = [
@@ -18,7 +22,7 @@ export function Summary({ T }: { T: ChartTokens }) {
     ['均值标准误 SE', nf(d.seMean, dp)],
     ['标准差', nf(d.stdev, dp)],
     ['方差', nf(d.variance, dp)],
-    ['变异系数 CV', nf(d.cv, 2) + ' %'],
+    ['变异系数 CV', d.cv == null ? '—（均值为 0）' : nf(d.cv, 2) + ' %'],
     ['偏度', nf(d.skewness, 3)],
     ['峰度', nf(d.kurtosis, 3)],
     ['最小值', nf(d.min, dp)],
@@ -38,6 +42,26 @@ export function Summary({ T }: { T: ChartTokens }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <Card style={{ padding: '11px 16px', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, color: '#5b6472', fontSize: 12.5 }}>
+          分析变量
+          <select
+            aria-label="描述性统计变量"
+            value={selected.name}
+            onChange={(event) => setActiveVar(event.target.value)}
+            style={{ padding: '5px 9px', border: '1px solid #cfd5dd', borderRadius: 4, background: '#fff', color: '#2a333f' }}
+          >
+            {M.colNames.map((name, index) => <option key={`${name}-${index}`} value={name}>{name}</option>)}
+          </select>
+        </label>
+        <span style={{ fontSize: 11.5, color: '#8a929d' }}>一次只分析一个数值变量；不会把不同量纲的列展平混算。</span>
+      </Card>
+      {pending.length > 0 ? (
+        <Card style={{ padding: '18px 20px', color: '#b0620f', background: '#fff8e8', lineHeight: 1.7 }}>
+          <b>描述性统计尚未运行：</b>「{selected.name}」还有 {pending.length} 个待录入单元格。完成录入后再分析，系统不会把占位值当实测值。
+        </Card>
+      ) : (
+      <>
       <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap' }}>
         <Card style={{ flex: '2 1 460px', minWidth: 420 }}>
           <CardHeader
@@ -49,8 +73,8 @@ export function Summary({ T }: { T: ChartTokens }) {
               </label>
             }
           />
-          <Histogram T={T} data={M.all} mu={d.mean} sigmaWithin={d.stdev} sigmaOverall={d.stdev} lsl={null} usl={null} tgt={d.mean} bins={bins} h={210} />
-          <BoxPlot T={T} d={d} />
+          <Histogram T={T} data={selected.values} mu={d.mean} sigmaWithin={d.stdev} sigmaOverall={d.stdev} lsl={null} usl={null} tgt={d.mean} bins={bins} h={210} />
+          <BoxPlot T={T} data={selected.values} d={d} />
           <div style={{ fontSize: 11.5, color: '#98a1ac', padding: '2px 4px 4px' }}>
             上:直方图叠正态曲线（μ={nf(d.mean, dp)}, σ={nf(d.stdev, dp)}）· 下:箱线图（Q1–中位–Q3,须及 1.5·IQR,○ 为离群点）
           </div>
@@ -61,7 +85,7 @@ export function Summary({ T }: { T: ChartTokens }) {
             title="正态性检验"
             right={d.adAvailable
               ? <Badge bg={d.ad.normal ? '#e8f4ea' : '#fcf3e3'} color={d.ad.normal ? '#2c8a45' : '#d98324'}>{d.ad.normal ? '近似正态' : '偏离正态'}</Badge>
-              : <Badge bg="#eef1f4" color="#8a929d">样本不足</Badge>}
+              : <Badge bg="#eef1f4" color="#8a929d">不可检验</Badge>}
           />
           <div style={{ padding: '4px 4px 8px', fontSize: 13, color: '#3a4350', lineHeight: 1.8 }}>
             {d.adAvailable ? (
@@ -75,7 +99,7 @@ export function Summary({ T }: { T: ChartTokens }) {
                 </div>
               </>
             ) : (
-              <div style={{ fontSize: 12.5, color: '#8a929d' }}>Anderson-Darling 正态检验至少需要 8 个观测,当前仅 {d.n} 个。</div>
+              <div style={{ fontSize: 12.5, color: '#8a929d' }}>{d.adUnavailableReason}</div>
             )}
           </div>
           <div style={{ borderTop: '1px solid #eef0f3', marginTop: 8, paddingTop: 8 }}>
@@ -86,11 +110,13 @@ export function Summary({ T }: { T: ChartTokens }) {
       </div>
 
       <Card>
-        <CardHeader title="描述性统计量" right={<span style={{ fontSize: 12, color: '#8a929d' }}>变量:{M.name}（{M.all.length} 个观测）</span>} />
+        <CardHeader title="描述性统计量" right={<span style={{ fontSize: 12, color: '#8a929d' }}>变量：{selected.name}（{selected.values.length} 个观测）</span>} />
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: '2px 22px', padding: '2px 4px 6px' }}>
           {statRows.map(([k, v]) => <Row key={k} k={k} v={v} />)}
         </div>
       </Card>
+      </>
+      )}
     </div>
   );
 }
@@ -105,14 +131,16 @@ function Row({ k, v }: { k: string; v: string }) {
 }
 
 /** 水平箱线图:Q1–中位–Q3 盒,须延伸到 1.5·IQR 内的极值,盒外点为离群。 */
-function BoxPlot({ T, d }: { T: ChartTokens; d: ReturnType<typeof computeDescriptive> }) {
+function BoxPlot({ T, data, d }: { T: ChartTokens; data: number[]; d: ReturnType<typeof computeDescriptive> }) {
   const W = 640, H = 74, padL = 14, padR = 14;
   const loFence = d.q1 - 1.5 * d.iqr;
   const hiFence = d.q3 + 1.5 * d.iqr;
-  const outliers = d.n > 0 ? undefined : undefined; // 由 whisker 端点近似（无原始数组时用 fence 与极值）
-  // 须端点:取 fence 与实际极值中更靠内者
-  const whiskLo = Math.max(d.min, loFence);
-  const whiskHi = Math.min(d.max, hiFence);
+  const sorted = [...data].sort((a, b) => a - b);
+  const inliers = sorted.filter((value) => value >= loFence && value <= hiFence);
+  const outliers = sorted.filter((value) => value < loFence || value > hiFence);
+  // Tukey 须必须落在真实观测值上，不能直接把理论 fence 当须端。
+  const whiskLo = inliers[0] ?? d.q1;
+  const whiskHi = inliers[inliers.length - 1] ?? d.q3;
   // 轴范围:含全部数据（含离群),留白
   const dataLo = Math.min(d.min, whiskLo);
   const dataHi = Math.max(d.max, whiskHi);
@@ -120,9 +148,6 @@ function BoxPlot({ T, d }: { T: ChartTokens; d: ReturnType<typeof computeDescrip
   const lo = dataLo - span * 0.06, hi = dataHi + span * 0.06;
   const X = (v: number) => padL + ((v - lo) / (hi - lo)) * (W - padL - padR);
   const cy = 34, bh = 26;
-  const hasLoOut = d.min < loFence;
-  const hasHiOut = d.max > hiFence;
-  void outliers;
 
   return (
     <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ display: 'block' }}>
@@ -136,9 +161,10 @@ function BoxPlot({ T, d }: { T: ChartTokens; d: ReturnType<typeof computeDescrip
       <line x1={X(d.median)} y1={cy - bh / 2} x2={X(d.median)} y2={cy + bh / 2} stroke={T.bar} strokeWidth={2.2} />
       {/* 均值菱形 */}
       <path d={`M ${X(d.mean)} ${cy - 5} L ${X(d.mean) + 5} ${cy} L ${X(d.mean)} ${cy + 5} L ${X(d.mean) - 5} ${cy} Z`} fill={T.curve} opacity={0.9} />
-      {/* 离群点(近似:落在极值处) */}
-      {hasLoOut && <circle cx={X(d.min)} cy={cy} r={3.4} fill="none" stroke={T.limit} strokeWidth={1.4} />}
-      {hasHiOut && <circle cx={X(d.max)} cy={cy} r={3.4} fill="none" stroke={T.limit} strokeWidth={1.4} />}
+      {/* 全部离群观测；重复值稍作纵向错位，避免只看见一个点。 */}
+      {outliers.map((value, index) => (
+        <circle key={`${value}-${index}`} cx={X(value)} cy={cy + ((index % 3) - 1) * 5} r={3.2} fill="none" stroke={T.limit} strokeWidth={1.3} />
+      ))}
       {/* 刻度标注 */}
       {[['min', d.min], ['Q1', d.q1], ['中位', d.median], ['Q3', d.q3], ['max', d.max]].map(([lab, v]) => (
         <text key={lab as string} x={X(v as number)} y={H - 6} fontSize={9.5} fill={T.text} textAnchor="middle">{nf(v as number, 2)}</text>

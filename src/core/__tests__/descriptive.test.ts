@@ -1,6 +1,7 @@
 /** 描述性统计:基本量、四分位、偏度/峰度、置信区间。 */
 import { describe, it, expect } from 'vitest';
 import { computeDescriptive } from '../descriptive';
+import { andersonDarling } from '../normality';
 
 describe('描述性统计 · 1..10', () => {
   const d = computeDescriptive([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
@@ -10,6 +11,22 @@ describe('描述性统计 · 1..10', () => {
     expect(d.min).toBe(1);
     expect(d.max).toBe(10);
     expect(d.range).toBe(9);
+  });
+
+  it('N=2 的标准差置信区间使用有效卡方分位且保持有限', () => {
+    const d = computeDescriptive([1, 2]);
+    expect(d.ciStdev.every(Number.isFinite)).toBe(true);
+    expect(d.ciStdev[0]).toBeGreaterThan(0);
+    expect(d.ciStdev[0]).toBeLessThan(d.stdev);
+    expect(d.ciStdev[1]).toBeGreaterThan(d.stdev);
+  });
+
+  it('均值为 0 时 CV 未定义，常量数据不伪造 AD 结论', () => {
+    expect(computeDescriptive([-1, 1]).cv).toBeNull();
+    const constant = computeDescriptive(Array(8).fill(3));
+    expect(constant.adAvailable).toBe(false);
+    expect(constant.adUnavailableReason).toContain('标准差为 0');
+    expect(() => andersonDarling(Array(8).fill(3))).toThrow(/正的有限标准差/);
   });
   it('均值/中位数', () => {
     expect(d.mean).toBeCloseTo(5.5, 10);

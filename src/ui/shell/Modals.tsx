@@ -1,8 +1,8 @@
 /** 四个弹窗：导入 / 导出 / 计算器 / 关于 + Toast。 */
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useApp, type ImportTab, type ExportFmt } from '../../store/appStore';
-import { useData } from '../../store/dataStore';
-import { parseMatrix, parseCategoryCounts, evalFormula, truthy, arrMin, arrMax, FormulaError, type ParsedMatrix } from '../../core';
+import { prepareVaultDatasetRemoval, useData } from '../../store/dataStore';
+import { parseMatrix, parseCategoryCounts, extractPChartColumns, evalFormula, truthy, arrMin, arrMax, FormulaError, type ParsedMatrix } from '../../core';
 import { platform } from '../../platform/adapter';
 import { buildExportJob } from '../../platform/report';
 import { mesStart, mesStop } from '../../platform/mes';
@@ -14,10 +14,24 @@ import { OptionsModal } from './OptionsModal';
 import type { ImportKind } from '../../store/appStore';
 type DataKind = ImportKind;
 
+const FOCUSABLE_SELECTOR = [
+  'button:not([disabled])',
+  'a[href]',
+  'input:not([disabled])',
+  'select:not([disabled])',
+  'textarea:not([disabled])',
+  '[tabindex]:not([tabindex="-1"])',
+].join(',');
+
+function focusableElements(root: HTMLElement) {
+  return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))
+    .filter((element) => element.tabIndex >= 0 && element.getAttribute('aria-hidden') !== 'true');
+}
+
 const tabStyle = (a: boolean): React.CSSProperties =>
   a
-    ? { padding: '6px 15px', borderRadius: 5, cursor: 'pointer', fontSize: 12.5, fontWeight: 600, background: '#1f6fb2', color: '#fff', whiteSpace: 'nowrap' }
-    : { padding: '6px 15px', borderRadius: 5, cursor: 'pointer', fontSize: 12.5, color: '#4a5462', background: '#eef1f4', whiteSpace: 'nowrap' };
+    ? { padding: '6px 15px', border: 0, borderRadius: 5, cursor: 'pointer', fontFamily: 'inherit', fontSize: 12.5, fontWeight: 600, background: '#1f6fb2', color: '#fff', whiteSpace: 'nowrap' }
+    : { padding: '6px 15px', border: 0, borderRadius: 5, cursor: 'pointer', fontFamily: 'inherit', fontSize: 12.5, color: '#4a5462', background: '#eef1f4', whiteSpace: 'nowrap' };
 
 function ModalFrame({ width, title, onClose, children, footer }: {
   width: number; title: string; onClose: () => void;
@@ -27,7 +41,7 @@ function ModalFrame({ width, title, onClose, children, footer }: {
     <div style={{ position: 'relative', width, background: '#fff', borderRadius: 10, boxShadow: '0 24px 60px rgba(10,20,40,0.32)', overflow: 'hidden' }}>
       <div style={{ display: 'flex', alignItems: 'center', padding: '16px 20px', borderBottom: '1px solid #edf0f3' }}>
         <div style={{ fontSize: 15, fontWeight: 600, color: '#26303c' }}>{title}</div>
-        <div onClick={onClose} style={{ marginLeft: 'auto', cursor: 'pointer', color: '#9aa2ad', fontSize: 17 }}>✕</div>
+        <button type="button" aria-label={`关闭${title}`} onClick={onClose} style={{ marginLeft: 'auto', border: 0, background: 'transparent', cursor: 'pointer', color: '#9aa2ad', fontSize: 17 }}>✕</button>
       </div>
       {children}
       {footer && (
@@ -37,8 +51,8 @@ function ModalFrame({ width, title, onClose, children, footer }: {
   );
 }
 
-const cancelBtn: React.CSSProperties = { padding: '8px 18px', border: '1px solid #cfd5dd', borderRadius: 5, cursor: 'pointer', fontSize: 12.5, color: '#5b6472' };
-const primaryBtn: React.CSSProperties = { padding: '8px 18px', background: '#1f6fb2', color: '#fff', borderRadius: 5, cursor: 'pointer', fontSize: 12.5, fontWeight: 600 };
+const cancelBtn: React.CSSProperties = { padding: '8px 18px', border: '1px solid #cfd5dd', background: '#fff', borderRadius: 5, cursor: 'pointer', fontFamily: 'inherit', fontSize: 12.5, color: '#5b6472' };
+const primaryBtn: React.CSSProperties = { padding: '8px 18px', border: '1px solid #1f6fb2', background: '#1f6fb2', color: '#fff', borderRadius: 5, cursor: 'pointer', fontFamily: 'inherit', fontSize: 12.5, fontWeight: 600 };
 
 function ImportModal() {
   const { importTab, setImportTab, importKind, setImportKind, closeModal, goTo, showToast } = useApp();
@@ -168,20 +182,40 @@ function ImportModal() {
       showToast(`已导入 ${name} · ${p.rows.length} 行 × ${p.colNames.length} 个数值列；请在 SPC 页确认数据角色${notes.length ? ' · ' + notes.join(' · ') : ''}`);
       return true;
     }
-    // 计数数据：取第一个数值列
+    if (dataKind === 'p') {
+      const extracted = extractPChartColumns(p, pSampleSize);
+      if ('error' in extracted) {
+        showToast('导入失败：' + extracted.error);
+        return false;
+      }
+      try {
+        importCounts('p', name, extracted.counts, extracted.sampleSizes);
+      } catch (e) {
+        showToast('导入失败：' + (e as Error).message);
+        return false;
+      }
+      goTo('spc');
+      showToast(`已导入 ${name} · ${extracted.counts.length} 个样本不良数（P 图）${extracted.variableSampleSizes ? ' · 使用逐批样本量' : ''}`);
+      return true;
+    }
+    // C 图只能接受一列计数；不能静默丢弃多余列。
+    if (p.colNames.length !== 1 || p.textCols.length > 0) {
+      showToast(`导入失败：C 图数据应为单列计数（检测到 ${p.colNames.length + p.textCols.length} 列）`);
+      return false;
+    }
     const counts = p.rows.map((r) => r[0]);
     if (counts.some((c) => c < 0 || !Number.isInteger(c))) {
       showToast('导入失败：计数必须为非负整数');
       return false;
     }
     try {
-      importCounts(dataKind, name, counts, pSampleSize);
+      importCounts('c', name, counts);
     } catch (e) {
       showToast('导入失败：' + (e as Error).message);
       return false;
     }
     goTo('spc');
-    showToast(`已导入 ${name} · ${counts.length} 个${dataKind === 'p' ? '样本不良数（P 图）' : '单位缺陷数（C 图）'}`);
+    showToast(`已导入 ${name} · ${counts.length} 个单位缺陷数（C 图）`);
     return true;
   };
 
@@ -212,20 +246,23 @@ function ImportModal() {
         </label>
       ))}
       {dataKind === 'p' && (
-        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: '#5b6472' }}>
-          样本量 n
-          <input
-            type="number"
-            min={1}
-            value={pSampleSize}
-            onChange={(e) => {
-              const v = parseInt(e.target.value);
-              if (!isNaN(v) && v >= 1) setPSampleSize(v);
-            }}
-            className="mono"
-            style={{ width: 64, padding: '3px 6px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12 }}
-          />
-        </label>
+        <>
+          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: '#5b6472' }}>
+            单列默认样本量 n
+            <input
+              type="number"
+              min={1}
+              value={pSampleSize}
+              onChange={(e) => {
+                const v = parseInt(e.target.value);
+                if (!isNaN(v) && v >= 1) setPSampleSize(v);
+              }}
+              className="mono"
+              style={{ width: 64, padding: '3px 6px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12 }}
+            />
+          </label>
+          <span style={{ color: '#8a929d', fontSize: 11.5 }}>两列时按“不良数, 每批样本量”读取，界面默认 n 不参与计算</span>
+        </>
       )}
       {dataKind === 'pareto' && (
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, color: '#5b6472', flexWrap: 'wrap' }}>
@@ -250,13 +287,13 @@ function ImportModal() {
   return (
     <ModalFrame width={560} title="导入数据" onClose={closeModal}
       footer={<>
-        <div onClick={closeModal} style={cancelBtn}>取消</div>
-        <div onClick={doImport} style={primaryBtn}>导入</div>
+        <button type="button" onClick={closeModal} style={cancelBtn}>取消</button>
+        <button type="button" onClick={doImport} style={primaryBtn}>导入</button>
       </>}>
       <div style={{ padding: '18px 20px' }}>
         <div style={{ display: 'flex', gap: 6, marginBottom: 16, flexWrap: 'wrap' }}>
           {tabs.map(([k, l]) => (
-            <div key={k} style={tabStyle(importTab === k)} onClick={() => setImportTab(k)}>{l}</div>
+            <button type="button" role="tab" aria-selected={importTab === k} key={k} style={tabStyle(importTab === k)} onClick={() => setImportTab(k)}>{l}</button>
           ))}
         </div>
         {(importTab === 'csv' || importTab === 'excel' || importTab === 'clip') && kindSelector}
@@ -286,7 +323,7 @@ function ImportModal() {
                     {pending.parsed!.droppedCols > 0 ? `保留 ${pending.parsed!.droppedCols} 个文本/分组列` : ''}
                   </div>
                 )}
-                <div onClick={pickFile} style={{ display: 'inline-block', marginTop: 14, padding: '8px 18px', border: '1px solid #cfd5dd', color: '#5b6472', borderRadius: 5, fontSize: 12.5, fontWeight: 600, cursor: 'pointer', background: '#fff' }}>重新选择</div>
+                <button type="button" onClick={pickFile} style={{ display: 'inline-block', marginTop: 14, padding: '8px 18px', border: '1px solid #cfd5dd', color: '#5b6472', borderRadius: 5, fontFamily: 'inherit', fontSize: 12.5, fontWeight: 600, cursor: 'pointer', background: '#fff' }}>重新选择</button>
               </>
             ) : (
               <>
@@ -294,7 +331,7 @@ function ImportModal() {
                 <div style={{ fontSize: 12, color: '#9aa2ad', marginTop: 6 }}>
                   {importTab === 'excel' ? '支持 .xlsx / .xls 工作簿（读取首个工作表，首行作为列名）' : '支持 .csv / .txt，自动识别分隔符与列名'}
                 </div>
-                <div onClick={pickFile} style={{ display: 'inline-block', marginTop: 14, padding: '8px 18px', background: '#1f6fb2', color: '#fff', borderRadius: 5, fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}>选择文件</div>
+                <button type="button" onClick={pickFile} style={{ display: 'inline-block', marginTop: 14, padding: '8px 18px', border: '1px solid #1f6fb2', background: '#1f6fb2', color: '#fff', borderRadius: 5, fontFamily: 'inherit', fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}>选择文件</button>
               </>
             )}
           </div>
@@ -326,22 +363,22 @@ function ImportModal() {
             <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
               {mesRunning ? (
                 <>
-                  <div
+                  <button type="button"
                     onClick={() => { mesStop(); showToast('MES 采集已停止 · 共 ' + model.k + ' 子组'); }}
-                    style={{ padding: '8px 18px', background: '#c22f2f', color: '#fff', borderRadius: 5, fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}
+                    style={{ padding: '8px 18px', border: '1px solid #c22f2f', background: '#c22f2f', color: '#fff', borderRadius: 5, fontFamily: 'inherit', fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}
                   >
                     ■ 停止采集
-                  </div>
+                  </button>
                   <span className="mono" style={{ fontSize: 12, color: '#1f6fb2' }}>已采集 {model.k} 子组 · SPC 页实时更新</span>
                 </>
               ) : (
                 <>
-                  <div
+                  <button type="button"
                     onClick={() => { mesStart(); goTo('spc'); showToast('MES 模拟采集已启动 · 控制图实时更新'); closeModal(); }}
-                    style={{ padding: '8px 18px', background: '#1f6fb2', color: '#fff', borderRadius: 5, fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}
+                    style={{ padding: '8px 18px', border: '1px solid #1f6fb2', background: '#1f6fb2', color: '#fff', borderRadius: 5, fontFamily: 'inherit', fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}
                   >
                     ▶ 开始模拟采集
-                  </div>
+                  </button>
                   <span style={{ fontSize: 11.5, color: '#9aa2ad' }}>模拟 CNC-01 每 0.8s 产出一个 n=5 子组（偶发过程漂移），生产版接串口/OPC-UA</span>
                 </>
               )}
@@ -381,18 +418,18 @@ function ExportModal() {
   return (
     <ModalFrame width={520} title="导出报表" onClose={closeModal}
       footer={<>
-        <div onClick={closeModal} style={cancelBtn}>取消</div>
-        <div onClick={doExport} style={primaryBtn}>导出</div>
+        <button type="button" onClick={closeModal} style={cancelBtn}>取消</button>
+        <button type="button" onClick={doExport} style={primaryBtn}>导出</button>
       </>}>
       <div style={{ padding: '18px 20px' }}>
         <div style={{ fontSize: 12.5, color: '#8a929d', marginBottom: 10 }}>选择导出格式</div>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
           {fmts.map(([k, l, d]) => (
-            <div key={k} onClick={() => setExportFmt(k)}
-              style={{ border: '1px solid ' + (exportFmt === k ? '#1f6fb2' : '#e2e5ea'), background: exportFmt === k ? '#f0f6fc' : '#fff', borderRadius: 6, padding: '12px 14px', cursor: 'pointer' }}>
+            <button type="button" key={k} aria-pressed={exportFmt === k} onClick={() => setExportFmt(k)}
+              style={{ border: '1px solid ' + (exportFmt === k ? '#1f6fb2' : '#e2e5ea'), background: exportFmt === k ? '#f0f6fc' : '#fff', borderRadius: 6, padding: '12px 14px', cursor: 'pointer', textAlign: 'left', fontFamily: 'inherit' }}>
               <div style={{ fontSize: 13.5, fontWeight: 600, color: '#26303c' }}>{l}</div>
               <div style={{ fontSize: 11.5, color: '#8a929d', marginTop: 3 }}>{d}</div>
-            </div>
+            </button>
           ))}
         </div>
       </div>
@@ -402,7 +439,7 @@ function ExportModal() {
 
 function CalcModal() {
   const { calc, pressCalc, closeModal } = useApp();
-  const base: React.CSSProperties = { display: 'flex', alignItems: 'center', justifyContent: 'center', height: 46, borderRadius: 6, cursor: 'pointer', fontSize: 16, fontFamily: 'IBM Plex Mono,monospace', fontWeight: 500, userSelect: 'none' };
+  const base: React.CSSProperties = { display: 'flex', alignItems: 'center', justifyContent: 'center', height: 46, border: 0, borderRadius: 6, cursor: 'pointer', fontSize: 16, fontFamily: 'IBM Plex Mono,monospace', fontWeight: 500, userSelect: 'none' };
   const styleOf = (t: string): React.CSSProperties => {
     if (t === 'op') return { ...base, background: '#eaf1f9', color: '#1f6fb2', fontWeight: 600 };
     if (t === 'eq') return { ...base, background: '#1f6fb2', color: '#fff', fontWeight: 700 };
@@ -422,9 +459,10 @@ function CalcModal() {
         <div className="mono" style={{ background: '#f4f6f8', borderRadius: 8, padding: 16, textAlign: 'right', fontSize: 28, fontWeight: 600, color: '#26303c', marginBottom: 12, overflow: 'hidden', whiteSpace: 'nowrap' }}>
           {calc.disp}
         </div>
+        {calc.error && <div role="alert" style={{ color: '#b33a2b', fontSize: 12, margin: '-4px 2px 10px', textAlign: 'right' }}>{calc.error}</div>}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 8 }}>
           {btns.map(([k, t]) => (
-            <div key={k} style={styleOf(t)} onClick={() => pressCalc(k)}>{k}</div>
+            <button type="button" aria-label={`计算器 ${k}`} key={k} style={styleOf(t)} onClick={() => pressCalc(k)}>{k}</button>
           ))}
         </div>
       </div>
@@ -446,6 +484,8 @@ function FormulaModal() {
   if (expr.trim() !== '') {
     try {
       previewVals = evalFormula(expr, { columns, colNames: model.colNames, rowCount: model.k }).values;
+      const invalidRow = previewVals.findIndex((value) => !Number.isFinite(value));
+      if (invalidRow >= 0) error = `第 ${invalidRow + 1} 行未得到有限数值（可能除以 0、对负数开方或数值溢出）`;
     } catch (e) {
       error = e instanceof FormulaError ? e.message : (e as Error).message;
     }
@@ -462,14 +502,14 @@ function FormulaModal() {
     showToast(`已添加公式列「${name.trim() || '公式列'}」（可 Ctrl+Z 撤销）`);
   };
 
-  const chip: React.CSSProperties = { padding: '3px 8px', borderRadius: 4, background: '#eef1f4', color: '#3a4350', cursor: 'pointer', fontSize: 11.5, fontFamily: 'IBM Plex Mono,monospace' };
+  const chip: React.CSSProperties = { padding: '3px 8px', border: 0, borderRadius: 4, background: '#eef1f4', color: '#3a4350', cursor: 'pointer', fontSize: 11.5, fontFamily: 'IBM Plex Mono,monospace' };
   const fnChip: React.CSSProperties = { ...chip, background: '#f0f2f5', color: '#5b6472' };
 
   return (
     <ModalFrame width={540} title="公式计算列 · Calculator" onClose={closeModal}
       footer={<>
-        <div onClick={closeModal} style={cancelBtn}>取消</div>
-        <div onClick={apply} style={{ ...primaryBtn, ...(error ? { opacity: 0.5, pointerEvents: 'none' } : {}) }}>添加列</div>
+        <button type="button" onClick={closeModal} style={cancelBtn}>取消</button>
+        <button type="button" disabled={!!error} onClick={apply} style={{ ...primaryBtn, ...(error ? { opacity: 0.5, cursor: 'not-allowed' } : {}) }}>添加列</button>
       </>}>
       <div style={{ padding: '18px 20px', display: 'flex', flexDirection: 'column', gap: 12, fontSize: 12.5, color: '#5b6472' }}>
         <label style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -488,7 +528,7 @@ function FormulaModal() {
           <div style={{ fontSize: 11, color: '#98a1ac', marginBottom: 5 }}>点击插入列引用</div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
             {model.colNames.map((n, i) => (
-              <span key={i} style={chip} title={n} onClick={() => insert(`C${i + 1}`)}>C{i + 1} · {n}</span>
+              <button type="button" key={i} style={chip} title={n} onClick={() => insert(`C${i + 1}`)}>C{i + 1} · {n}</button>
             ))}
           </div>
         </div>
@@ -496,7 +536,7 @@ function FormulaModal() {
           <div style={{ fontSize: 11, color: '#98a1ac', marginBottom: 5 }}>函数(逐元素 / 聚合)</div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
             {['abs()', 'sqrt()', 'ln()', 'log10()', 'exp()', 'round()', 'sq()', 'mean()', 'std()', 'min()', 'max()', 'sum()', 'median()'].map((f) => (
-              <span key={f} style={fnChip} onClick={() => insert(f)}>{f}</span>
+              <button type="button" key={f} style={fnChip} onClick={() => insert(f)}>{f}</button>
             ))}
           </div>
         </div>
@@ -507,7 +547,7 @@ function FormulaModal() {
             <div style={{ color: '#c22f2f', fontSize: 12.5 }}>⚠ {error}</div>
           ) : previewVals ? (
             <div className="mono" style={{ fontSize: 12.5, color: '#1c4e7a' }}>
-              {previewVals.slice(0, 6).map((v) => (Number.isFinite(v) ? Number(v.toFixed(4)) : '—')).join('   ')}
+              {previewVals.slice(0, 6).map((v) => Number(v.toFixed(4))).join('   ')}
               {model.k > 6 ? '   …' : ''}
             </div>
           ) : (
@@ -526,6 +566,7 @@ function VaultModal() {
   const db = platform.datasetDb;
   const [list, setList] = useState<Array<{ name: string; saved_at: string; bytes: number }>>([]);
   const [stats, setStats] = useState<{ count: number; total_bytes: number; path: string } | null>(null);
+  const [deleteArmed, setDeleteArmed] = useState<string | null>(null);
 
   const refresh = () => {
     if (!db) return;
@@ -538,7 +579,7 @@ function VaultModal() {
 
   return (
     <ModalFrame width={560} title="数据集库(本机)" onClose={closeModal}
-      footer={<div onClick={closeModal} style={primaryBtn}>关闭</div>}>
+      footer={<button type="button" onClick={closeModal} style={primaryBtn}>关闭</button>}>
       <div style={{ padding: '16px 20px', fontSize: 12.5, color: '#5b6472' }}>
         {!db ? (
           <div style={{ padding: '18px 4px', lineHeight: 1.8 }}>
@@ -562,20 +603,55 @@ function VaultModal() {
                       <div style={{ color: '#2b3440', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.name}</div>
                       <div className="mono" style={{ fontSize: 11, color: '#98a1ac' }}>{new Date(d.saved_at).toLocaleString('zh-CN')} · {fmtKB(d.bytes)}</div>
                     </div>
-                    <div
+                    <button type="button"
                       className="hov-act"
-                      onClick={() => { loadRecent(d.name); closeModal(); goTo('worksheet'); showToast('正在从数据集库加载 ' + d.name); }}
-                      style={{ padding: '5px 12px', border: '1px solid #1f6fb2', color: '#1f6fb2', borderRadius: 4, cursor: 'pointer', fontSize: 12, fontWeight: 600, flex: 'none' }}
+                      onClick={async () => {
+                        const loaded = await loadRecent(d.name);
+                        if (loaded) {
+                          closeModal();
+                          goTo('worksheet');
+                          showToast('已从数据集库加载 ' + d.name);
+                        } else {
+                          showToast('数据集加载失败或已被更新的加载请求取代：' + d.name);
+                        }
+                      }}
+                      style={{ padding: '5px 12px', border: '1px solid #1f6fb2', background: '#fff', color: '#1f6fb2', borderRadius: 4, cursor: 'pointer', fontFamily: 'inherit', fontSize: 12, fontWeight: 600, flex: 'none' }}
                     >
                       加载
-                    </div>
-                    <div
+                    </button>
+                    <button type="button"
                       className="hov-act"
-                      onClick={() => { db.remove(d.name).then(() => { refresh(); showToast('已从数据集库删除 ' + d.name); }).catch(() => showToast('删除失败')); }}
-                      style={{ padding: '5px 12px', border: '1px solid #cfd5dd', color: '#c22f2f', borderRadius: 4, cursor: 'pointer', fontSize: 12, flex: 'none' }}
+                      onClick={async () => {
+                        if (useData.getState().model.name === d.name) {
+                          showToast(`不能删除当前活动数据集「${d.name}」；请先切换数据集或导出项目`);
+                          return;
+                        }
+                        let activeRef: string | null = null;
+                        try { activeRef = localStorage.getItem('qp-active-ref-v1'); } catch { /* 忽略 */ }
+                        if (activeRef === d.name) {
+                          showToast(`不能删除活动数据集「${d.name}」：它仅存在于本机库；请先另存/导出项目`);
+                          return;
+                        }
+                        if (deleteArmed !== d.name) {
+                          setDeleteArmed(d.name);
+                          showToast(`再次点击“确认删除”才会移除「${d.name}」`);
+                          return;
+                        }
+                        try {
+                          await prepareVaultDatasetRemoval(d.name);
+                          const removed = await db.remove(d.name);
+                          if (!removed) throw new Error('数据集不存在或未能删除');
+                          setDeleteArmed(null);
+                          refresh();
+                          showToast('已从数据集库删除 ' + d.name);
+                        } catch (error) {
+                          showToast(`删除失败：${(error as Error).message}`);
+                        }
+                      }}
+                      style={{ padding: '5px 12px', border: '1px solid #cfd5dd', background: '#fff', color: '#c22f2f', borderRadius: 4, cursor: 'pointer', fontFamily: 'inherit', fontSize: 12, flex: 'none' }}
                     >
-                      删除
-                    </div>
+                      {deleteArmed === d.name ? '确认删除' : '删除'}
+                    </button>
                   </div>
                 ))}
               </div>
@@ -614,8 +690,8 @@ function FindReplaceModal() {
   return (
     <ModalFrame width={420} title="查找 / 替换 · 测量值" onClose={closeModal}
       footer={<>
-        <div onClick={closeModal} style={cancelBtn}>取消</div>
-        <div onClick={apply} style={{ ...primaryBtn, ...(canApply ? {} : { opacity: 0.5, pointerEvents: 'none' }) }}>全部替换</div>
+        <button type="button" onClick={closeModal} style={cancelBtn}>取消</button>
+        <button type="button" disabled={!canApply} onClick={apply} style={{ ...primaryBtn, ...(canApply ? {} : { opacity: 0.5, cursor: 'not-allowed' }) }}>全部替换</button>
       </>}>
       <div style={{ padding: '18px 20px', display: 'flex', flexDirection: 'column', gap: 13, fontSize: 12.5, color: '#5b6472' }}>
         <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
@@ -674,15 +750,15 @@ function SubsetModal() {
     showToast(`已生成子集「${r.name}」· 保留 ${r.kept}/${r.total} 行`);
   };
 
-  const chip: React.CSSProperties = { padding: '3px 8px', borderRadius: 4, background: '#eef1f4', color: '#3a4350', cursor: 'pointer', fontSize: 11.5, fontFamily: 'IBM Plex Mono,monospace' };
+  const chip: React.CSSProperties = { padding: '3px 8px', border: 0, borderRadius: 4, background: '#eef1f4', color: '#3a4350', cursor: 'pointer', fontSize: 11.5, fontFamily: 'IBM Plex Mono,monospace' };
   const opChip: React.CSSProperties = { ...chip, background: '#f0f2f5', color: '#5b6472' };
   const canApply = !error && kept != null && kept >= 2 && kept < model.k;
 
   return (
     <ModalFrame width={540} title="子集 / 条件筛选 · Subset" onClose={closeModal}
       footer={<>
-        <div onClick={closeModal} style={cancelBtn}>取消</div>
-        <div onClick={apply} style={{ ...primaryBtn, ...(canApply ? {} : { opacity: 0.5, pointerEvents: 'none' }) }}>生成子集</div>
+        <button type="button" onClick={closeModal} style={cancelBtn}>取消</button>
+        <button type="button" disabled={!canApply} onClick={apply} style={{ ...primaryBtn, ...(canApply ? {} : { opacity: 0.5, cursor: 'not-allowed' }) }}>生成子集</button>
       </>}>
       <div style={{ padding: '18px 20px', display: 'flex', flexDirection: 'column', gap: 12, fontSize: 12.5, color: '#5b6472' }}>
         <label style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
@@ -696,7 +772,7 @@ function SubsetModal() {
           <div style={{ fontSize: 11, color: '#98a1ac', marginBottom: 5 }}>点击插入列引用</div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
             {model.colNames.map((n, i) => (
-              <span key={i} style={chip} title={n} onClick={() => insert(`C${i + 1}`)}>C{i + 1} · {n}</span>
+              <button type="button" key={i} style={chip} title={n} onClick={() => insert(`C${i + 1}`)}>C{i + 1} · {n}</button>
             ))}
           </div>
         </div>
@@ -704,7 +780,7 @@ function SubsetModal() {
           <div style={{ fontSize: 11, color: '#98a1ac', marginBottom: 5 }}>比较 / 逻辑运算符</div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
             {['>', '<', '>=', '<=', '==', '<>', 'and', 'or', 'not'].map((o) => (
-              <span key={o} style={opChip} onClick={() => insert(o)}>{o}</span>
+              <button type="button" key={o} style={opChip} onClick={() => insert(o)}>{o}</button>
             ))}
           </div>
         </div>
@@ -730,7 +806,7 @@ function AboutModal() {
   const { closeModal } = useApp();
   return (
     <ModalFrame width={460} title="关于本软件" onClose={closeModal}
-      footer={<div onClick={closeModal} style={primaryBtn}>确定</div>}>
+      footer={<button type="button" onClick={closeModal} style={primaryBtn}>确定</button>}>
       <div style={{ padding: '22px 20px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14 }}>
           <span style={{ width: 40, height: 40, borderRadius: 9, background: '#1f6fb2', color: '#fff', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 18, fontWeight: 700 }}>质</span>
@@ -763,8 +839,8 @@ function SortModal() {
   return (
     <ModalFrame width={380} title="按列排序" onClose={closeModal}
       footer={<>
-        <div onClick={closeModal} style={cancelBtn}>取消</div>
-        <div onClick={apply} style={primaryBtn}>排序</div>
+        <button type="button" onClick={closeModal} style={cancelBtn}>取消</button>
+        <button type="button" onClick={apply} style={primaryBtn}>排序</button>
       </>}>
       <div style={{ padding: '18px 20px', display: 'flex', flexDirection: 'column', gap: 14, fontSize: 12.5, color: '#5b6472' }}>
         <label style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -802,7 +878,7 @@ function ColStatsModal() {
   const td: React.CSSProperties = { padding: '7px 10px', borderTop: '1px solid #f0f2f5', textAlign: 'right', fontFamily: 'IBM Plex Mono,monospace', color: '#2a333f' };
   return (
     <ModalFrame width={560} title={`列统计 · ${model.name}`} onClose={closeModal}
-      footer={<div onClick={closeModal} style={primaryBtn}>关闭</div>}>
+      footer={<button type="button" onClick={closeModal} style={primaryBtn}>关闭</button>}>
       <div style={{ padding: '10px 8px', maxHeight: 320, overflowY: 'auto' }}>
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
           <thead>
@@ -863,8 +939,8 @@ function RandomModal() {
   return (
     <ModalFrame width={380} title="生成正态随机数据" onClose={closeModal}
       footer={<>
-        <div onClick={closeModal} style={cancelBtn}>取消</div>
-        <div onClick={apply} style={primaryBtn}>生成</div>
+        <button type="button" onClick={closeModal} style={cancelBtn}>取消</button>
+        <button type="button" onClick={apply} style={primaryBtn}>生成</button>
       </>}>
       <div style={{ padding: '18px 20px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, fontSize: 12.5, color: '#5b6472' }}>
         {fields.map(([label, val, set, step]) => (
@@ -884,23 +960,78 @@ function RandomModal() {
 
 export function Modals() {
   const { modal, closeModal } = useApp();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    if (!modal) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') closeModal();
+    };
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [modal, closeModal]);
+
+  useEffect(() => {
+    if (!modal) return;
+    returnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const dialog = dialogRef.current;
+    if (dialog) {
+      const preferred = dialog.querySelector<HTMLElement>('[autofocus]');
+      (preferred ?? focusableElements(dialog)[0] ?? dialog).focus();
+    }
+    return () => {
+      const previous = returnFocusRef.current;
+      if (previous?.isConnected) previous.focus();
+    };
+  }, [modal]);
+
+  const trapFocus = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== 'Tab') return;
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    const focusable = focusableElements(dialog);
+    if (focusable.length === 0) {
+      event.preventDefault();
+      dialog.focus();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    const active = document.activeElement;
+    if (event.shiftKey && (active === first || !dialog.contains(active))) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && (active === last || !dialog.contains(active))) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+
   if (!modal) return null;
+  const modalLabel: Record<Exclude<typeof modal, null>, string> = {
+    import: '导入数据', export: '导出报表', calc: '计算器', formula: '公式计算列', subset: '条件筛选',
+    vault: '本机数据集库', findreplace: '查找替换', about: '关于本软件', help: '帮助主题', options: '选项与本地数据',
+    sort: '排序', colstats: '列统计', random: '生成正态随机数据',
+  };
   return (
     <div style={{ position: 'fixed', inset: 0, zIndex: 300, background: 'rgba(20,28,40,0.42)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-      <div onClick={closeModal} style={{ position: 'absolute', inset: 0 }} />
-      {modal === 'import' && <ImportModal />}
-      {modal === 'export' && <ExportModal />}
-      {modal === 'calc' && <CalcModal />}
-      {modal === 'formula' && <FormulaModal />}
-      {modal === 'subset' && <SubsetModal />}
-      {modal === 'vault' && <VaultModal />}
-      {modal === 'findreplace' && <FindReplaceModal />}
-      {modal === 'about' && <AboutModal />}
-      {modal === 'help' && <HelpModal onClose={closeModal} />}
-      {modal === 'options' && <OptionsModal onClose={closeModal} />}
-      {modal === 'sort' && <SortModal />}
-      {modal === 'colstats' && <ColStatsModal />}
-      {modal === 'random' && <RandomModal />}
+      <button type="button" tabIndex={-1} aria-label="关闭弹窗" onClick={closeModal} style={{ position: 'absolute', inset: 0, border: 0, padding: 0, background: 'transparent', cursor: 'default' }} />
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={modalLabel[modal]} tabIndex={-1} onKeyDown={trapFocus} style={{ position: 'relative' }}>
+        {modal === 'import' && <ImportModal />}
+        {modal === 'export' && <ExportModal />}
+        {modal === 'calc' && <CalcModal />}
+        {modal === 'formula' && <FormulaModal />}
+        {modal === 'subset' && <SubsetModal />}
+        {modal === 'vault' && <VaultModal />}
+        {modal === 'findreplace' && <FindReplaceModal />}
+        {modal === 'about' && <AboutModal />}
+        {modal === 'help' && <HelpModal onClose={closeModal} />}
+        {modal === 'options' && <OptionsModal onClose={closeModal} />}
+        {modal === 'sort' && <SortModal />}
+        {modal === 'colstats' && <ColStatsModal />}
+        {modal === 'random' && <RandomModal />}
+      </div>
     </div>
   );
 }
@@ -908,9 +1039,10 @@ export function Modals() {
 export function Toast() {
   const toast = useApp((s) => s.toast);
   if (!toast) return null;
+  const isError = /(失败|错误|损坏|无法|未能|不完整|异常|拒绝|不可用|不足|超限)/.test(toast);
   return (
-    <div style={{ position: 'fixed', bottom: 40, right: 26, zIndex: 400, background: '#26303c', color: '#fff', padding: '12px 18px', borderRadius: 8, boxShadow: '0 12px 30px rgba(10,20,40,0.3)', fontSize: 13, display: 'flex', alignItems: 'center', gap: 10 }}>
-      <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#43c46e' }} />
+    <div role={isError ? 'alert' : 'status'} aria-live={isError ? 'assertive' : 'polite'} aria-atomic="true" style={{ position: 'fixed', bottom: 40, right: 26, zIndex: 400, background: '#26303c', color: '#fff', padding: '12px 18px', borderRadius: 8, boxShadow: '0 12px 30px rgba(10,20,40,0.3)', fontSize: 13, display: 'flex', alignItems: 'center', gap: 10 }}>
+      <span aria-hidden="true" style={{ width: 8, height: 8, borderRadius: '50%', background: isError ? '#e25555' : '#43c46e' }} />
       {toast}
     </div>
   );

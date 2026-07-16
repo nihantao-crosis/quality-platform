@@ -39,13 +39,21 @@ export interface RuleViolation {
 
 /** R/S/MR 与属性图按 Minitab 适用性仅执行准则 1–4；5–8 只用于均值/单值等位置图。 */
 export function evalLimitedRules(
-  data: number[], cl: number, ucl: number, lcl: number, rules: NelsonRules,
+  data: number[], cl: number, ucl: number | number[], lcl: number | number[], rules: NelsonRules,
 ): { viol: Set<number>; list: RuleViolation[] } {
+  const ucls = Array.isArray(ucl) ? ucl : Array.from({ length: data.length }, () => ucl);
+  const lcls = Array.isArray(lcl) ? lcl : Array.from({ length: data.length }, () => lcl);
+  if (ucls.length !== data.length || lcls.length !== data.length) {
+    throw new Error('逐点控制限数量必须与数据点数量一致');
+  }
+  if (ucls.some((value, index) => !Number.isFinite(value) || !Number.isFinite(lcls[index]) || lcls[index] > value)) {
+    throw new Error('控制限必须为有限数且 LCL ≤ UCL');
+  }
   const viol = new Set<number>();
   const list: RuleViolation[] = [];
   if (rules.r1) {
     data.forEach((v, i) => {
-      if (v > ucl || v < lcl) {
+      if (v > ucls[i] || v < lcls[i]) {
         viol.add(i);
         list.push({ i, rule: 1, desc: '1 点超出该图的 3σ 控制限' });
       }
@@ -56,7 +64,10 @@ export function evalLimitedRules(
     r5: false, r6: false, r7: false, r8: false,
   };
   // 准则 2–4 只依赖中心线/点序；sigma 取有限正数即可。准则 1 由非对称 UCL/LCL 精确判断。
-  const pattern = evalRules(data, cl, Math.max(Math.abs(ucl - cl), Math.abs(cl - lcl)) / 3 || 1e-12, patternRules);
+  // 趋势/游程规则只依赖点序与中心线；可变控制限不改变这些规则。
+  const maxDistance = ucls.reduce((value, upper, index) =>
+    Math.max(value, Math.abs(upper - cl), Math.abs(cl - lcls[index])), 0);
+  const pattern = evalRules(data, cl, maxDistance / 3 || 1e-12, patternRules);
   pattern.viol.forEach((i) => viol.add(i));
   list.push(...pattern.list);
   return { viol, list: list.sort((a, b) => a.i - b.i || a.rule - b.rule) };

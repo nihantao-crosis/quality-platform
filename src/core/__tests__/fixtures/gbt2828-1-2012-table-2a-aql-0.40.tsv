@@ -1,0 +1,21 @@
+# source=GB/T 2828.1-2012 / ISO 2859-1:1999 table 2-A AQL 0.40 column
+# pdf=../../../../../AQL表2-C问题证据/GBT2828.1-2012_国标原文.pdf
+# pdf_sha256=7a336944db23d14cf23fe007b0cfe2dffa5d5bef434767d2b1300ffaa35e5a37
+# cell_format=final_code/sample_size/Ac/Re
+source_table	pdf_page	printed_page	initial_code	aql	plan
+2-A	21	15	A	0.40	G/32/0/1
+2-A	21	15	B	0.40	G/32/0/1
+2-A	21	15	C	0.40	G/32/0/1
+2-A	21	15	D	0.40	G/32/0/1
+2-A	21	15	E	0.40	G/32/0/1
+2-A	21	15	F	0.40	G/32/0/1
+2-A	21	15	G	0.40	G/32/0/1
+2-A	21	15	H	0.40	G/32/0/1
+2-A	21	15	J	0.40	K/125/1/2
+2-A	21	15	K	0.40	K/125/1/2
+2-A	21	15	L	0.40	L/200/2/3
+2-A	21	15	M	0.40	M/315/3/4
+2-A	21	15	N	0.40	N/500/5/6
+2-A	21	15	P	0.40	P/800/7/8
+2-A	21	15	Q	0.40	Q/1250/10/11
+2-A	21	15	R	0.40	R/2000/14/15

@@ -11,7 +11,7 @@ import {
   setSwitchConditions, type RecordInspectionInput, type SwitchStatus,
 } from '../aqlSwitch';
 import { computeCapability } from '../capability';
-import { parseMatrix } from '../csv';
+import { extractPChartColumns, parseMatrix } from '../csv';
 import { buildData } from '../sampleData';
 
 describe('计数控制图', () => {
@@ -22,6 +22,42 @@ describe('计数控制图', () => {
     expect(m.pUcl).toBeCloseTo(m.pbar + 3 * sig, 10);
     expect(m.pLcl).toBe(0); // 截 0
   });
+  it('P 图可变样本量：p̄ 按总数加权且每点使用自己的 nᵢ', () => {
+    const counts = [1, 4, 3];
+    const sampleSizes = [10, 20, 30];
+    const m = computePChart(counts, sampleSizes, 'varying-n');
+    expect(m.pbar).toBeCloseTo(8 / 60, 12);
+    expect(m.pprop).toEqual([0.1, 0.2, 0.1]);
+    expect(m.pNs).toEqual(sampleSizes);
+    expect(m.pVariableN).toBe(true);
+    sampleSizes.forEach((n, index) => {
+      const sigma = Math.sqrt((m.pbar * (1 - m.pbar)) / n);
+      expect(m.pUcls[index]).toBeCloseTo(Math.min(1, m.pbar + 3 * sigma), 12);
+      expect(m.pLcls[index]).toBeCloseTo(Math.max(0, m.pbar - 3 * sigma), 12);
+    });
+    expect(m.pUcls[0]).toBeGreaterThan(m.pUcls[2]);
+  });
+  it('P 图控制限始终截断到概率范围 [0,1]', () => {
+    const m = computePChart([1, 0], [1, 1], 'clamped');
+    expect(m.pUcls).toEqual([1, 1]);
+    expect(m.pLcls).toEqual([0, 0]);
+  });
+  it('P 图导入一列沿用默认 n，两列读取逐批 n，并拒绝多列/非法 n', () => {
+    const one = parseMatrix('不良数\n1\n2\n0');
+    expect('error' in one ? one : extractPChartColumns(one, 50)).toMatchObject({
+      counts: [1, 2, 0], sampleSizes: 50, variableSampleSizes: false,
+    });
+    const two = parseMatrix('不良数,检验数\n1,10\n2,20\n0,30');
+    expect('error' in two ? two : extractPChartColumns(two, 50)).toMatchObject({
+      counts: [1, 2, 0], sampleSizes: [10, 20, 30], variableSampleSizes: true,
+    });
+    const three = parseMatrix('不良数,检验数,备注数\n1,10,7\n2,20,8');
+    expect('error' in three ? three : extractPChartColumns(three, 50)).toMatchObject({ error: expect.stringContaining('1 列') });
+    const invalid = parseMatrix('不良数,检验数\n1,10\n2,0');
+    expect('error' in invalid ? invalid : extractPChartColumns(invalid, 50)).toMatchObject({ error: expect.stringContaining('正整数') });
+    const partlyInvalid = parseMatrix('不良数,检验数\n1,10\n2,x\n3,30\n4,40\n5,50');
+    expect('error' in partlyInvalid ? partlyInvalid : extractPChartColumns(partlyInvalid, 50)).toMatchObject({ error: expect.stringContaining('不允许跳过') });
+  });
   it('C 图公式：c̄ ± 3√c̄', () => {
     const m = computeCChart([4, 6, 3, 5, 7], 't');
     expect(m.cbar).toBe(5);
@@ -29,6 +65,8 @@ describe('计数控制图', () => {
   });
   it('校验：不良数不能超样本量 / 必须为整数', () => {
     expect(() => computePChart([60], 50, 't')).toThrow();
+    expect(() => computePChart([1, 2], [10], 't')).toThrow(/数量/);
+    expect(() => computePChart([1, 2], [10, 0], 't')).toThrow(/正整数/);
     expect(() => computeCChart([1.5, 2], 't')).toThrow();
   });
 });
@@ -47,6 +85,14 @@ describe('正态性检验 (Anderson-Darling)', () => {
     const r = andersonDarling(exp);
     expect(r.normal).toBe(false);
     expect(r.p).toBeLessThan(0.05);
+  });
+  it('极端双点分布在大样本尾部仍拒绝正态，P 值不随 A*² 增大而反转', () => {
+    const moderate = andersonDarling([...Array(100).fill(0), ...Array(100).fill(1)]);
+    const extreme = andersonDarling([...Array(1000).fill(0), ...Array(1000).fill(1)]);
+    expect(extreme.a2star).toBeGreaterThan(moderate.a2star);
+    expect(extreme.p).toBeLessThanOrEqual(moderate.p);
+    expect(extreme.p).toBeLessThan(0.05);
+    expect(extreme.normal).toBe(false);
   });
   it('概率图坐标按值排序且 z 单调', () => {
     const pts = probPlotPoints([3, 1, 2, 5, 4, 6, 8, 7]);
@@ -128,7 +174,7 @@ describe('AQL 转移规则', () => {
     const reduced = run(Array(10).fill(0), eligible); // K/1.0 严一档为 K/0.65/Ac2，每批 +3
     expect(reduced.state).toBe('reduced');
     expect(reduced.switchingScore).toBe(30);
-    expect(recordInspection(reduced, input(2)).state).toBe('normal'); // 表 2-C:K/50/Ac1/Re2
+    expect(recordInspection(reduced, input(3)).state).toBe('normal'); // 表 2-C:K/50/Ac2/Re3
   });
 
   it('转移得分：Ac≥2 需在严一档 AQL 仍接收；Ac=0/1 接收时 +2', () => {
@@ -140,6 +186,11 @@ describe('AQL 转移规则', () => {
     const smallAc = recordInspection(freshSwitchStatus(), input(0, { lot: 120 }));
     expect(plansByState(120, 'II', 1.0).normal.ac).toBe(0);
     expect(smallAc.switchingScore).toBe(2);
+
+    const crossSample = recordInspection(freshSwitchStatus(), input(0, { lot: 20_000, aql: 6.5 }));
+    expect(plansByState(20_000, 'II', 6.5).normal).toMatchObject({ code: 'L', n: 200, ac: 21 });
+    expect(crossSample.switchingScore).toBe(0);
+    expect(crossSample.note).toContain('样本量');
   });
 
   it('复验批留痕但不计入转移；实际不合格数自动决定批结果', () => {
@@ -162,7 +213,7 @@ describe('AQL 转移规则', () => {
     const p = plansByState(2000, 'II', 1.0);
     expect(p.normal).toMatchObject({ code: 'K', n: 125, ac: 3 });
     expect(p.tightened).toMatchObject({ code: 'K', n: 125, ac: 2, re: 3 });
-    expect(p.reduced).toMatchObject({ code: 'K', n: 50, ac: 1, re: 2 });
+    expect(p.reduced).toMatchObject({ code: 'K', n: 50, ac: 2, re: 3 });
   });
 
   it('三态方案 Ac=0 边界仍满足 Re=Ac+1', () => {

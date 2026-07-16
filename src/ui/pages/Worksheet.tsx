@@ -95,14 +95,16 @@ function HeaderCell({ name, canDelete, onRename, onDelete }: {
       <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
         <span>{name}</span>
         {canDelete && (
-          <span
+          <button
+            type="button"
             className="col-del"
-            title="删除此测量列"
+            aria-label={`删除测量列：${name}`}
             onClick={(e) => { e.stopPropagation(); onDelete(); }}
-            style={{ color: '#c22f2f', fontWeight: 700, cursor: 'pointer' }}
+            onDoubleClick={(e) => e.stopPropagation()}
+            style={{ border: 0, padding: 0, background: 'transparent', color: '#c22f2f', fontWeight: 700, fontFamily: 'inherit', cursor: 'pointer' }}
           >
             ×
-          </span>
+          </button>
         )}
       </span>
     </th>
@@ -196,17 +198,15 @@ export function Worksheet() {
   const winEnd = virtual ? Math.min(M.k, Math.ceil((scrollTop + viewH) / ROW_H) + OVERSCAN) : M.k;
   const visibleSubs = virtual ? M.subs.slice(winStart, winEnd) : M.subs;
 
-  // 列头：C1 子组 + 测量列 + 均值/极差 +（演示）操作员/日期/班次
-  const cols: { code: string; name: string }[] = [{ code: 'C1', name: '子组' }];
-  M.colNames.forEach((n, i) => cols.push({ code: `C${i + 2}`, name: n }));
-  textCols.forEach((column, i) => cols.push({ code: `C${M.colNames.length + 2 + i}-T`, name: column.name }));
+  // 公式引擎的 C1/C2…只指真实数值列；隐含子组标签不能占用 C1。
+  const cols: { code: string; name: string }[] = [{ code: 'ID', name: '子组' }];
+  M.colNames.forEach((n, i) => cols.push({ code: `C${i + 1}`, name: n }));
+  textCols.forEach((column, i) => cols.push({ code: `T${i + 1}`, name: column.name }));
   const extra: Array<[string, string]> = [
     ...(rowSpc ? ([['', '均值'], ['', '极差']] as Array<[string, string]>) : []),
     ...(M.isDemo ? ([['-T', '操作员'], ['-D', '日期'], ['-T', '班次']] as Array<[string, string]>) : []),
   ];
-  extra.forEach(([suffix, name], i) =>
-    cols.push({ code: `C${M.colNames.length + textCols.length + 2 + i}${suffix}`, name }),
-  );
+  extra.forEach(([suffix, name], i) => cols.push({ code: `S${i + 1}${suffix}`, name }));
 
   const sources: Array<{ icon: IconName; iconColor: string; label: string; status: string; statusColor: string; onClick: () => void }> = [
     { icon: 'grid', iconColor: '#2c8a45', label: 'Excel / CSV 导入', status: '已连接', statusColor: '#2c8a45', onClick: () => { setImportTab('csv'); openModal('import'); } },
@@ -276,13 +276,15 @@ export function Worksheet() {
                     >
                       <span className="ws-num">{s.i}</span>
                       {M.k > 2 && (
-                        <span
+                        <button
+                          type="button"
                           className="ws-del"
+                          aria-label={`删除子组 ${s.i}`}
                           onClick={() => { deleteRow(i); showToast(`已删除子组 ${s.i}`); }}
-                          style={{ cursor: 'pointer', color: '#c22f2f', fontWeight: 700 }}
+                          style={{ border: 0, padding: 0, background: 'transparent', cursor: 'pointer', color: '#c22f2f', fontWeight: 700, fontFamily: 'inherit' }}
                         >
                           ×
-                        </span>
+                        </button>
                       )}
                     </td>
                     <td style={{ ...numCell, color: '#9aa2ad' }}>{s.i}</td>
@@ -321,19 +323,21 @@ export function Worksheet() {
         <Card style={{ padding: '14px 16px' }}>
           <div style={{ fontWeight: 600, color: '#33404f', marginBottom: 10 }}>手工录入</div>
           <div style={{ display: 'flex', gap: 8 }}>
-            <div
+            <button
+              type="button"
               onClick={() => { addSubgroupRow(); showToast('已添加子组（复制末行,双击单元格修改）'); }}
-              style={{ flex: 1, padding: '7px 0', textAlign: 'center', background: '#1f6fb2', color: '#fff', borderRadius: 5, fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}
+              style={{ flex: 1, border: 0, padding: '7px 0', textAlign: 'center', background: '#1f6fb2', color: '#fff', borderRadius: 5, fontSize: 12.5, fontWeight: 600, fontFamily: 'inherit', cursor: 'pointer' }}
             >
               ＋ 子组
-            </div>
-            <div
+            </button>
+            <button
+              type="button"
               onClick={() => { insertColumn(); showToast('已插入数值列（双击列名可重命名）'); }}
               title="在末尾插入一个数值列；SPC 会按数据角色校验真正子组大小"
-              style={{ flex: 1, padding: '7px 0', textAlign: 'center', border: '1px solid #cfd5dd', color: '#3a4350', background: '#fff', borderRadius: 5, fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}
+              style={{ flex: 1, padding: '7px 0', textAlign: 'center', border: '1px solid #cfd5dd', color: '#3a4350', background: '#fff', borderRadius: 5, fontSize: 12.5, fontWeight: 600, fontFamily: 'inherit', cursor: 'pointer' }}
             >
               ＋ 数值列
-            </div>
+            </button>
           </div>
           <div style={{ fontSize: 11.5, color: '#9aa2ad', marginTop: 8, lineHeight: 1.5 }}>
             双击测量单元格编辑值、双击列名重命名;悬停行号删行、悬停列名删列。{M.isDemo ? '编辑演示集将另存为「质检数据 (副本)」。' : '修改即时保存。'}
@@ -342,11 +346,11 @@ export function Worksheet() {
         <Card style={{ padding: '14px 16px' }}>
           <div style={{ fontWeight: 600, color: '#33404f', marginBottom: 10 }}>数据来源</div>
           {sources.map((s) => (
-            <div key={s.label} className="hov-source" onClick={s.onClick} style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '8px 8px', margin: '0 -8px', borderRadius: 5, borderTop: '1px solid #f2f4f6', cursor: 'pointer' }}>
+            <button type="button" key={s.label} className="hov-source" onClick={s.onClick} style={{ width: 'calc(100% + 16px)', display: 'flex', alignItems: 'center', gap: 9, padding: '8px 8px', margin: '0 -8px', border: 0, borderTop: '1px solid #f2f4f6', background: 'transparent', borderRadius: 5, fontFamily: 'inherit', textAlign: 'left', cursor: 'pointer' }}>
               <span style={{ display: 'inline-flex' }}><Icon name={s.icon} color={s.iconColor} /></span>
               <span style={{ fontSize: 12.5, color: '#3a4350' }}>{s.label}</span>
               <span style={{ marginLeft: 'auto', fontSize: 11, color: s.statusColor, fontWeight: 600 }}>{s.status}</span>
-            </div>
+            </button>
           ))}
         </Card>
         <Card style={{ padding: '14px 16px' }}>

@@ -58,6 +58,139 @@ describe('detectFactorial', () => {
       [1, 2, Number.NaN, 4],
     )).toMatchObject({ ok: false, reason: expect.stringContaining('响应列') });
   });
+
+  it('中心点规整性按因子量程判断，极小单位不会被固定绝对 epsilon 放宽', () => {
+    const tinyInvalid = detectFactorial(
+      [
+        { name: 'A', values: [1e-12, 3e-12, 1e-12, 3e-12, 2.5e-12, 2.5e-12] },
+        { name: 'B', values: [2e-15, 2e-15, 6e-15, 6e-15, 5e-15, 5e-15] },
+      ],
+      [10, 20, 14, 30, 16, 17],
+    );
+    expect(tinyInvalid).toMatchObject({ ok: false, reason: expect.stringContaining('非规整水平') });
+
+    for (const map of [
+      (value: number) => value * 1e-12,
+      (value: number) => 1e12 + value,
+    ]) {
+      const valid = detectFactorial(
+        [
+          { name: 'A', values: [0, 2, 0, 2, 1, 1].map(map) },
+          { name: 'B', values: [10, 10, 14, 14, 12, 12].map(map) },
+        ],
+        [10, 20, 14, 30, 16, 17],
+      );
+      expect(valid.ok).toBe(true);
+    }
+  });
+});
+
+describe('DOE 数值结论对响应单位与基准值不变', () => {
+  const factorA = [0, 1, 0, 1, 0, 1, 0, 1];
+  const factorB = [0, 0, 1, 1, 0, 0, 1, 1];
+
+  it('t 检验、P 值和标准化残差在缩放/平移后保持一致', () => {
+    const response = [10, 30, 12, 33, 11, 29, 13, 31];
+    const fit = (values: number[]) => {
+      const detected = detectFactorial(
+        [{ name: 'A', values: factorA }, { name: 'B', values: factorB }],
+        values,
+      );
+      expect(detected.ok).toBe(true);
+      if (!detected.ok) throw new Error(detected.reason);
+      return analyzeFactorial(detected.design);
+    };
+    const base = fit(response);
+    const tiny = fit(response.map((value) => value * 1e-14));
+    const shifted = fit(response.map((value) => 1e6 + value * 0.1));
+    for (const candidate of [tiny, shifted]) {
+      expect(candidate.terms.map((term) => [term.name, term.sig])).toEqual(base.terms.map((term) => [term.name, term.sig]));
+      for (const term of base.terms) {
+        const actual = candidate.terms.find((item) => item.name === term.name)!;
+        expect(actual.tStat).toBeCloseTo(term.tStat!, 6);
+        expect(actual.p).toBeCloseTo(term.p!, 8);
+      }
+      expect(candidate.stdResiduals).toHaveLength(base.stdResiduals!.length);
+      candidate.stdResiduals!.forEach((value, row) => expect(value).toBeCloseTo(base.stdResiduals![row], 6));
+    }
+  });
+
+  it('饱和设计的零 PSE 不把零效应判显著，也不设物理单位下限', () => {
+    const fit = (response: number[]) => {
+      const detected = detectFactorial(
+        [{ name: 'A', values: factorA.slice(0, 4) }, { name: 'B', values: factorB.slice(0, 4) }],
+        response,
+      );
+      expect(detected.ok).toBe(true);
+      if (!detected.ok) throw new Error(detected.reason);
+      return analyzeFactorial(detected.design);
+    };
+    const base = fit([0, 1, 0, 1]);
+    const tiny = fit([0, 1e-15, 0, 1e-15]);
+    const shifted = fit([1e9, 1e9 + 1e-5, 1e9, 1e9 + 1e-5]);
+    for (const result of [base, tiny, shifted]) {
+      expect(result.pse).toBe(0);
+      expect(result.me).toBe(0);
+      expect(result.terms.find((term) => term.name === 'A')?.sig).toBe(true);
+      expect(result.terms.filter((term) => term.name !== 'A').every((term) => !term.sig)).toBe(true);
+    }
+    expect(analyzeDoe(Array(8).fill(3)).terms.every((term) => !term.sig)).toBe(true);
+  });
+
+  it('最优角点按效应对比而非大截距判并列', () => {
+    const response = factorA.map((a, row) => 10 * a + 2 * factorB[row]);
+    const fit = (values: number[]) => {
+      const detected = detectFactorial(
+        [{ name: 'A', values: factorA }, { name: 'B', values: factorB }],
+        values,
+      );
+      expect(detected.ok).toBe(true);
+      if (!detected.ok) throw new Error(detected.reason);
+      return { result: analyzeFactorial(detected.design), design: detected.design };
+    };
+    const base = fit(response);
+    const shifted = fit(response.map((value) => value + 1e12));
+    expect(factorialCornerOptimum(base.result, base.design)).toMatchObject({ coded: [1, 1], unique: true });
+    expect(factorialCornerOptimum(shifted.result, shifted.design)).toMatchObject({ coded: [1, 1], unique: true });
+  });
+
+  it('因子物理量缩放后保持同一别名与秩判定', () => {
+    const fit = (scale: number, offset: number) => {
+      const rawA = [-1, 1, -1, 1];
+      const rawB = [-1, -1, 1, 1];
+      const rawC = [1, -1, -1, 1];
+      const map = (value: number) => offset + scale * value;
+      const detected = detectFactorial(
+        [
+          { name: 'A', values: rawA.map(map) },
+          { name: 'B', values: rawB.map(map) },
+          { name: 'C', values: rawC.map(map) },
+        ],
+        [20, 30, 26, 40],
+      );
+      expect(detected.ok).toBe(true);
+      if (!detected.ok) throw new Error(detected.reason);
+      return analyzeFactorial(detected.design);
+    };
+    for (const result of [fit(1, 0), fit(1e-18, 0), fit(2, 1e12)]) {
+      expect(result.droppedTerms).toContain('A×B');
+      expect(result.aliases).toContainEqual({ term: 'A×B', with: 'C', relation: 'same' });
+    }
+  });
+
+  it('直接传入退化编码或空模型时明确拒绝，不返回截距伪分析', () => {
+    const detected = detectFactorial(
+      [{ name: 'A', values: factorA.slice(0, 4) }, { name: 'B', values: factorB.slice(0, 4) }],
+      [1, 2, 3, 4],
+    );
+    expect(detected.ok).toBe(true);
+    if (!detected.ok) return;
+    expect(() => analyzeFactorial(detected.design, { terms: [] })).toThrow('至少需要 1 个合法效应项');
+    expect(() => analyzeFactorial({
+      ...detected.design,
+      coded: detected.design.coded.map((row) => [-1, row[1]]),
+    })).toThrow('每个因子都必须同时包含低水平和高水平');
+  });
 });
 
 describe('analyzeFactorial 与 analyzeDoe(2³)一致', () => {

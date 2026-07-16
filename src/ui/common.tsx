@@ -43,8 +43,8 @@ export function Badge({ bg, color, children }: { bg: string; color: string; chil
 
 export const tabStyle = (a: boolean): CSSProperties =>
   a
-    ? { padding: '6px 15px', borderRadius: 5, cursor: 'pointer', fontSize: 12.5, fontWeight: 600, background: '#1f6fb2', color: '#fff', whiteSpace: 'nowrap' }
-    : { padding: '6px 15px', borderRadius: 5, cursor: 'pointer', fontSize: 12.5, color: '#4a5462', background: '#eef1f4', whiteSpace: 'nowrap' };
+    ? { padding: '6px 15px', border: 0, borderRadius: 5, cursor: 'pointer', fontFamily: 'inherit', fontSize: 12.5, fontWeight: 600, background: '#1f6fb2', color: '#fff', whiteSpace: 'nowrap' }
+    : { padding: '6px 15px', border: 0, borderRadius: 5, cursor: 'pointer', fontFamily: 'inherit', fontSize: 12.5, color: '#4a5462', background: '#eef1f4', whiteSpace: 'nowrap' };
 
 export const chipStyle = (on: boolean): CSSProperties =>
   on
@@ -81,21 +81,22 @@ export function EmptyStateCard({ title, need, current, actions, onDemo }: {
       )}
       <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginTop: 16, flexWrap: 'wrap' }}>
         {actions?.map((a) => (
-          <div
+          <button
+            type="button"
             key={a.label}
             className={a.primary ? 'hov-act-primary' : 'hov-act'}
             onClick={a.onClick}
             style={a.primary
-              ? { padding: '8px 18px', background: '#1f6fb2', color: '#fff', borderRadius: 5, cursor: 'pointer', fontSize: 12.5, fontWeight: 600 }
-              : { padding: '8px 18px', border: '1px solid #cfd5dd', color: '#3a4350', background: '#fff', borderRadius: 5, cursor: 'pointer', fontSize: 12.5 }}
+              ? { padding: '8px 18px', border: '1px solid #1f6fb2', background: '#1f6fb2', color: '#fff', borderRadius: 5, cursor: 'pointer', fontFamily: 'inherit', fontSize: 12.5, fontWeight: 600 }
+              : { padding: '8px 18px', border: '1px solid #cfd5dd', color: '#3a4350', background: '#fff', borderRadius: 5, cursor: 'pointer', fontFamily: 'inherit', fontSize: 12.5 }}
           >
             {a.label}
-          </div>
+          </button>
         ))}
         {onDemo && (
-          <div className="hov-act" onClick={onDemo} style={{ padding: '8px 18px', border: '1px dashed #cfd5dd', color: '#8a929d', background: '#fff', borderRadius: 5, cursor: 'pointer', fontSize: 12.5 }}>
+          <button type="button" className="hov-act" onClick={onDemo} style={{ padding: '8px 18px', border: '1px dashed #cfd5dd', color: '#8a929d', background: '#fff', borderRadius: 5, cursor: 'pointer', fontFamily: 'inherit', fontSize: 12.5 }}>
             查看示例数据
-          </div>
+          </button>
         )}
       </div>
     </Card>

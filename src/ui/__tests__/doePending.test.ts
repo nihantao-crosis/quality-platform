@@ -37,6 +37,26 @@ describe('DOE 创建→录入→分析→存储端到端', () => {
     expect(text).not.toContain('A=1.000000(高)、B=1.000000(高)');
   });
 
+  it('所选模型项全部与区组混杂时明确标成未运行，不伪报“无显著项”', () => {
+    const factorA = [-1, 1, -1, 1, -1, 1, -1, 1];
+    const factorB = [-1, -1, 1, 1, -1, -1, 1, 1];
+    const blocks = factorA.map((value) => value < 0 ? 1 : 2); // A 与区组完全混杂
+    const response = factorB.map((value, row) => 50 + 5 * value + row * 0.1);
+    useData.getState().importMatrix(
+      'DOE退化模型', ['区组', 'A', 'B', 'Y'],
+      factorA.map((value, row) => [blocks[row], value, factorB[row], response[row]]),
+    );
+    useApp.setState({
+      page: 'doe', doeFactorCols: ['A', 'B'], doeRespCol: 'Y',
+      doeModelTerms: ['A'], doeIncludeCurvature: false,
+    });
+    const text = render(createElement(Doe, { T: chartTokens('经典', true) })).container.textContent ?? '';
+    expect(text).toContain('当前模型没有可独立估计的因子效应，分析未运行');
+    expect(text).toContain('A 与 已保留模型项的线性组合 线性相关');
+    expect(text).not.toContain('未发现显著');
+    expect(text).not.toContain('将存储项写回工作表');
+  });
+
   it('精确 7 行设计的元数据、响应、拟合/效应/残差/系数/标准化残差全部落盘', () => {
     const design = generateFactorialDesign(
       [{ name: '过盈量', low: 0.045, high: 0.09 }, { name: '轴硬度', low: 28, high: 32 }],

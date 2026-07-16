@@ -43,13 +43,13 @@ export function Assistant() {
 
       {crumbs.length > 0 && (
         <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6, margin: '4px 0 16px', fontSize: 12.5, color: '#5b6472' }}>
-          <span
+          <button type="button"
             className="hov-act"
             onClick={reset}
-            style={{ color: '#1f6fb2', cursor: 'pointer', fontWeight: 500 }}
+            style={{ padding: 0, border: 0, background: 'transparent', fontFamily: 'inherit', fontSize: 'inherit', color: '#1f6fb2', cursor: 'pointer', fontWeight: 500 }}
           >
             开始
-          </span>
+          </button>
           {crumbs.map((c, i) => (
             <span key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
               <span style={{ color: '#c2c8d0' }}>›</span>
@@ -66,13 +66,13 @@ export function Assistant() {
           <div style={{ fontSize: 16, fontWeight: 600, color: '#26303c', margin: '2px 0 14px' }}>{node.prompt}</div>
           <div style={{ display: 'grid', gap: 10 }}>
             {node.choices.map((c) => (
-              <div
+              <button type="button"
                 key={c.to}
                 className="hov-card"
                 onClick={() => choose(c.to)}
                 style={{
-                  display: 'flex', alignItems: 'center', gap: 12, padding: '14px 16px', background: '#fff',
-                  border: '1px solid #e0e4ea', borderRadius: 8, cursor: 'pointer',
+                  display: 'flex', alignItems: 'center', gap: 12, width: '100%', padding: '14px 16px', background: '#fff',
+                  border: '1px solid #e0e4ea', borderRadius: 8, cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left',
                 }}
               >
                 <div style={{ flex: 1 }}>
@@ -80,7 +80,7 @@ export function Assistant() {
                   {c.hint && <div style={{ fontSize: 12.5, color: '#8a929d', marginTop: 3 }}>{c.hint}</div>}
                 </div>
                 <span style={{ color: '#1f6fb2', fontSize: 18, fontWeight: 300 }}>›</span>
-              </div>
+              </button>
             ))}
           </div>
           {path.length > 0 && (
@@ -102,7 +102,7 @@ function Header({ onReset }: { onReset: () => void }) {
         <div style={{ fontSize: 15, fontWeight: 600, color: '#26303c' }}>不确定该用哪个分析?让助手带你选。</div>
         <div style={{ fontSize: 12.5, color: '#8a929d', marginTop: 3 }}>回答几个关于你的目标与数据的问题,助手会推荐合适的模块并说明理由,一键进入。</div>
       </div>
-      <div className="hov-act" onClick={onReset} style={{ padding: '6px 12px', border: '1px solid #cfd5dd', borderRadius: 5, cursor: 'pointer', fontSize: 12.5, color: '#3a4350', background: '#fff', flex: 'none' }}>重新开始</div>
+      <button type="button" className="hov-act" onClick={onReset} style={{ padding: '6px 12px', border: '1px solid #cfd5dd', borderRadius: 5, cursor: 'pointer', fontFamily: 'inherit', fontSize: 12.5, color: '#3a4350', background: '#fff', flex: 'none' }}>重新开始</button>
     </div>
   );
 }
@@ -122,15 +122,15 @@ function RecCard({ rec, onStart, onBack, onReset }: { rec: Recommendation; onSta
         <Field label="为什么推荐它" text={rec.why} />
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '0 20px 18px' }}>
-        <div
+        <button type="button"
           className="hov-act-primary"
           onClick={onStart}
-          style={{ padding: '9px 20px', border: '1px solid #1f6fb2', borderRadius: 6, cursor: 'pointer', fontSize: 13.5, color: '#fff', background: '#1f6fb2', fontWeight: 600 }}
+          style={{ padding: '9px 20px', border: '1px solid #1f6fb2', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit', fontSize: 13.5, color: '#fff', background: '#1f6fb2', fontWeight: 600 }}
         >
           开始分析 →
-        </div>
+        </button>
         <BackBtn onClick={onBack} />
-        <div className="hov-act" onClick={onReset} style={{ padding: '8px 14px', border: '1px solid #cfd5dd', borderRadius: 6, cursor: 'pointer', fontSize: 13, color: '#3a4350', background: '#fff' }}>重新开始</div>
+        <button type="button" className="hov-act" onClick={onReset} style={{ padding: '8px 14px', border: '1px solid #cfd5dd', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit', fontSize: 13, color: '#3a4350', background: '#fff' }}>重新开始</button>
       </div>
     </div>
   );
@@ -147,6 +147,6 @@ function Field({ label, text }: { label: string; text: string }) {
 
 function BackBtn({ onClick }: { onClick: () => void }) {
   return (
-    <div className="hov-act" onClick={onClick} style={{ padding: '8px 14px', border: '1px solid #cfd5dd', borderRadius: 6, cursor: 'pointer', fontSize: 13, color: '#3a4350', background: '#fff' }}>← 上一步</div>
+    <button type="button" className="hov-act" onClick={onClick} style={{ padding: '8px 14px', border: '1px solid #cfd5dd', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit', fontSize: 13, color: '#3a4350', background: '#fff' }}>← 上一步</button>
   );
 }

@@ -14,7 +14,7 @@ const TOPICS: Topic[] = [
     lines: [
       'X̄-R：X̿ ± A2·R̄;R 图 UCL = D4·R̄。σ̂组内 = R̄/d₂(常数表 n=2..10)。',
       'X̄-S：X̿ ± A3·S̄;I-MR：X̄ ± 3·MR̄/1.128。',
-      'P 图：p̄ ± 3√(p̄(1−p̄)/n);C 图：c̄ ± 3√c̄(LCL 截 0)。',
+      'P 图：固定样本量时 p̄ ± 3√(p̄(1−p̄)/n)；逐批样本量变化时 p̄=Σdᵢ/Σnᵢ，并按每批 nᵢ 计算各点控制限（截断到 [0,1]）。C 图：c̄ ± 3√c̄（LCL 截 0）。',
       'EWMA(λ=0.2, L=2.7)与 CUSUM(k=0.5, h=4/5)对 ≤1.5σ 的小漂移更敏感。',
       '判异准则 1–8(Nelson 1984 / Minitab 特殊原因检验,可逐条勾选):',
       '  1) 1 点越 3σ;2) 连续 9 点同侧;3) 连续 6 点持续升/降;4) 连续 14 点上下交替。',
@@ -40,7 +40,7 @@ const TOPICS: Topic[] = [
       '交叉设计(ANOVA 法):方差分解为 重复性 + 再现性(操作员+交互) + 部件间。',
       '%研究变异 = 6σ分量/6σ总;%公差 = 6σGRR/(USL−LSL)。',
       'AIAG 判定:GRR < 10% 可接受;10–30% 视用途临界;> 30% 不可接受。',
-      '导入数据需含 部件、操作员 两个文本列,且每个组合 ≥ 2 次重复。',
+      '导入数据需含 1 个数值测量列，以及 部件、操作员 两个类别列；类别可使用文本编码或数值 ID，且每个组合须有相同且 ≥ 2 次重复。',
     ],
   },
   {
@@ -86,7 +86,7 @@ const TOPICS: Topic[] = [
     key: 'formula', title: '公式计算列',
     lines: [
       '计算 → 公式计算列…:用表达式从已有列算出新列,如 (C1+C2)/2、sqrt(C1)。',
-      '列引用:C1 C2…(按工作表顺序)或引号列名 \'直径 (mm)\'。',
+      '列引用:C1 C2…对应工作表顶部同名数值列（ID 子组标签不占 C 编号）;也可用引号列名 \'直径 (mm)\'。',
       '运算:+ − × ÷ ^ 与括号;逐元素函数 abs/sqrt/ln/log10/exp/round/sq。',
       '聚合函数整列折算成常量再广播:mean/std/var/min/max/sum/median/range/n。',
       '典型用法:z 分数 (C1−mean(C1))/std(C1);两列均值 (C1+C2)/2。',
@@ -143,24 +143,25 @@ export function HelpModal({ onClose }: { onClose: () => void }) {
     <div style={{ position: 'relative', width: 720, background: '#fff', borderRadius: 10, boxShadow: '0 24px 60px rgba(10,20,40,0.32)', overflow: 'hidden' }}>
       <div style={{ display: 'flex', alignItems: 'center', padding: '16px 20px', borderBottom: '1px solid #edf0f3' }}>
         <div style={{ fontSize: 15, fontWeight: 600, color: '#26303c' }}>帮助中心 · 统计指南</div>
-        <div onClick={onClose} style={{ marginLeft: 'auto', cursor: 'pointer', color: '#9aa2ad', fontSize: 17 }}>✕</div>
+        <button type="button" aria-label="关闭帮助中心" onClick={onClose} style={{ marginLeft: 'auto', padding: 0, border: 0, background: 'transparent', cursor: 'pointer', color: '#9aa2ad', fontSize: 17 }}>✕</button>
       </div>
       <div style={{ display: 'flex', minHeight: 340 }}>
         <div style={{ width: 168, borderRight: '1px solid #edf0f3', padding: '10px 0', background: '#fbfcfd' }}>
           {TOPICS.map((t) => (
-            <div
+            <button type="button"
               key={t.key}
+              aria-pressed={topic === t.key}
               onClick={() => setTopic(t.key)}
               className={topic === t.key ? undefined : 'hov-nav'}
               style={{
-                padding: '8px 16px', fontSize: 12.5, cursor: 'pointer',
+                display: 'block', width: '100%', padding: '8px 16px', border: 0, fontFamily: 'inherit', textAlign: 'left', fontSize: 12.5, cursor: 'pointer',
                 ...(topic === t.key
                   ? { background: '#e7f0f9', color: '#1f6fb2', fontWeight: 600, borderLeft: '3px solid #1f6fb2' }
-                  : { color: '#4a5462', borderLeft: '3px solid transparent' }),
+                  : { background: 'transparent', color: '#4a5462', borderLeft: '3px solid transparent' }),
               }}
             >
               {t.title}
-            </div>
+            </button>
           ))}
         </div>
         <div style={{ flex: 1, padding: '16px 22px' }}>
@@ -172,7 +173,7 @@ export function HelpModal({ onClose }: { onClose: () => void }) {
             </div>
           ))}
           {topic !== 'data' && (
-            <div
+            <button type="button"
               onClick={() => {
                 const page = ({ spc: 'spc', capability: 'capability', msa: 'gagerr', hypo: 'anova', doe: 'doe', aql: 'aql', formula: 'worksheet', subset: 'worksheet', vault: 'worksheet', summary: 'summary', assistant: 'assistant' } as const)[topic as never];
                 if (page) {
@@ -180,10 +181,10 @@ export function HelpModal({ onClose }: { onClose: () => void }) {
                   onClose();
                 }
               }}
-              style={{ display: 'inline-block', marginTop: 14, padding: '6px 14px', border: '1px solid #bcd6ee', color: '#1f6fb2', borderRadius: 5, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}
+              style={{ display: 'inline-block', marginTop: 14, padding: '6px 14px', border: '1px solid #bcd6ee', background: '#fff', color: '#1f6fb2', borderRadius: 5, fontFamily: 'inherit', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}
             >
               打开对应模块 →
-            </div>
+            </button>
           )}
         </div>
       </div>

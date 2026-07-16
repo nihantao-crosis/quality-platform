@@ -16,6 +16,8 @@ export function SideNav() {
   const removeAnalysis = useAnalyses((s) => s.remove);
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState('');
+  const [focusedRow, setFocusedRow] = useState<string | null>(null);
+  const startEditingName = () => { setNameDraft(projectName); setEditingName(true); };
 
   return (
     <aside style={{ width: 242, flex: 'none', background: '#fbfcfd', borderRight: '1px solid #dadee4', overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
@@ -25,26 +27,25 @@ export function SideNav() {
           {PAGES.filter((p) => p.group === g).map((p) => {
             const active = page === p.key;
             return (
-              <div
+              <button
+                type="button"
                 key={p.key}
                 className={active ? 'hov-nav-active' : 'hov-nav'}
+                aria-current={active ? 'page' : undefined}
                 onClick={() => goTo(p.key)}
                 style={{
-                  display: 'flex', alignItems: 'center', gap: 10, margin: '1px 8px', padding: '8px 10px',
-                  borderRadius: 5, cursor: 'pointer', fontSize: 13,
+                  width: 'calc(100% - 16px)', display: 'flex', alignItems: 'center', gap: 10, margin: '1px 8px', padding: '8px 10px',
+                  border: 0, borderRadius: 5, cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left', fontSize: 13,
                   ...(active
                     ? { background: '#e7f0f9', color: '#1f6fb2', fontWeight: 600, borderLeft: '3px solid #1f6fb2' }
-                    : { color: '#4a5462', borderLeft: '3px solid transparent' }),
+                    : { background: 'transparent', color: '#4a5462', borderLeft: '3px solid transparent' }),
                 }}
               >
                 <span style={{ display: 'inline-flex', width: 18, justifyContent: 'center', opacity: 0.9 }}>
                   <Icon name={p.icon} color={active ? '#1f6fb2' : '#7a828d'} />
                 </span>
                 <span style={{ flex: 1 }}>{p.label}</span>
-                {p.key === 'spc' && (
-                  <span className="mono" style={{ background: '#e23b3b', color: '#fff', fontSize: 10, fontWeight: 700, padding: '1px 6px', borderRadius: 9 }}>2</span>
-                )}
-              </div>
+              </button>
             );
           })}
         </div>
@@ -62,9 +63,15 @@ export function SideNav() {
               style={{ width: '100%', border: '2px solid #1f6fb2', borderRadius: 3, padding: '2px 6px', fontSize: 12, boxSizing: 'border-box' }}
             />
           ) : (
-            <div title="双击重命名项目" style={{ cursor: 'cell' }} onDoubleClick={() => { setNameDraft(projectName); setEditingName(true); }}>
+            <button
+              type="button"
+              title="双击重命名项目；键盘按 Enter 或空格也可重命名"
+              onDoubleClick={startEditingName}
+              onClick={(event) => { if (event.detail === 0) startEditingName(); }}
+              style={{ width: '100%', border: 0, padding: 0, background: 'transparent', color: 'inherit', cursor: 'cell', fontFamily: 'inherit', fontSize: 'inherit', lineHeight: 'inherit', textAlign: 'left' }}
+            >
               📁 {projectName}
-            </div>
+            </button>
           )}
           <div style={{ paddingLeft: 16, color: '#1f6fb2', fontWeight: 500 }}>工作表 · {model.name}</div>
           {recents.length > 0 && (
@@ -74,27 +81,40 @@ export function SideNav() {
                 <div
                   key={r.name}
                   className="hov-nav"
-                  title={'导入于 ' + new Date(r.savedAt).toLocaleString('zh-CN')}
-                  onClick={() => {
-                    loadRecent(r.name);
-                    goTo('worksheet');
-                    showToast('已加载数据集 ' + r.name);
+                  onFocusCapture={() => setFocusedRow(`recent:${r.name}`)}
+                  onBlurCapture={(event) => {
+                    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocusedRow(null);
                   }}
-                  style={{ paddingLeft: 16, color: r.name === model.name ? '#1f6fb2' : '#7a828d', cursor: 'pointer', borderRadius: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center' }}
+                  style={{ paddingLeft: 16, color: r.name === model.name ? '#1f6fb2' : '#7a828d', borderRadius: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center' }}
                 >
-                  <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis' }}>↻ {r.name}</span>
-                  <span
+                  <button
+                    type="button"
+                    title={'导入于 ' + new Date(r.savedAt).toLocaleString('zh-CN')}
+                    onClick={async () => {
+                      const loaded = await loadRecent(r.name);
+                      if (loaded) {
+                        goTo('worksheet');
+                        showToast('已加载数据集 ' + r.name);
+                      } else {
+                        showToast('数据集加载失败或已被更新的加载请求取代：' + r.name);
+                      }
+                    }}
+                    style={{ minWidth: 0, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', border: 0, padding: 0, background: 'transparent', color: 'inherit', cursor: 'pointer', fontFamily: 'inherit', fontSize: 'inherit', lineHeight: 'inherit', textAlign: 'left' }}
+                  >
+                    ↻ {r.name}
+                  </button>
+                  <button
+                    type="button"
                     className="rc-del"
-                    title="从最近列表移除"
-                    onClick={(e) => {
-                      e.stopPropagation();
+                    aria-label={`从最近列表移除：${r.name}`}
+                    onClick={() => {
                       removeRecent(r.name);
                       showToast('已从最近列表移除 ' + r.name);
                     }}
-                    style={{ color: '#c22f2f', fontWeight: 700, padding: '0 6px' }}
+                    style={{ display: focusedRow === `recent:${r.name}` ? 'inline' : undefined, border: 0, background: 'transparent', color: '#c22f2f', fontWeight: 700, padding: '0 6px', fontFamily: 'inherit', cursor: 'pointer' }}
                   >
                     ×
-                  </span>
+                  </button>
                 </div>
               ))}
             </>
@@ -106,20 +126,35 @@ export function SideNav() {
             <div
               key={a.id}
               className="hov-nav rc-row"
-              title={`${a.title} · ${a.metric} · ${a.datasetName}\n${a.kind === 'aql' ? '历史摘要：点击返回当前 AQL，不回滚连续检验流' : '点击恢复此分析的数据集与参数'}`}
-              onClick={() => restore(a.id)}
-              style={{ paddingLeft: 16, color: '#7a828d', cursor: 'pointer', borderRadius: 4, overflow: 'hidden', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center' }}
+              onFocusCapture={() => setFocusedRow(`analysis:${a.id}`)}
+              onBlurCapture={(event) => {
+                if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocusedRow(null);
+              }}
+              style={{ paddingLeft: 16, color: '#7a828d', borderRadius: 4, overflow: 'hidden', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center' }}
             >
-              <span style={{ width: 6, height: 6, borderRadius: '50%', background: a.statusColor, flex: 'none', marginRight: 6 }} />
-              <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis' }}>{a.title}</span>
-              <span
+              <button
+                type="button"
+                title={`${a.title} · ${a.metric} · ${a.datasetName}\n${a.kind === 'aql' ? `保存于 ${new Date(a.createdAt).toLocaleString('zh-CN')}；点击返回当前 AQL，不回滚连续检验流` : '点击恢复此分析的数据集与参数'}`}
+                onClick={() => restore(a.id)}
+                style={{ minWidth: 0, flex: 1, display: 'flex', alignItems: 'center', overflow: 'hidden', border: 0, padding: 0, background: 'transparent', color: 'inherit', cursor: 'pointer', fontFamily: 'inherit', fontSize: 'inherit', lineHeight: 'inherit', textAlign: 'left' }}
+              >
+                <span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: '50%', background: a.statusColor, flex: 'none', marginRight: 6 }} />
+                <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis' }}>{a.title}</span>
+                {a.kind === 'aql' && (
+                  <span className="mono" style={{ flex: 'none', marginLeft: 6, color: '#a0a7b0', fontSize: 10 }}>
+                    {new Date(a.createdAt).toLocaleDateString('zh-CN')}
+                  </span>
+                )}
+              </button>
+              <button
+                type="button"
                 className="rc-del"
-                title="删除此分析记录"
-                onClick={(e) => { e.stopPropagation(); removeAnalysis(a.id); showToast('已删除分析记录 ' + a.title); }}
-                style={{ color: '#c22f2f', fontWeight: 700, padding: '0 6px' }}
+                aria-label={`删除分析记录：${a.title}`}
+                onClick={() => { removeAnalysis(a.id); showToast('已删除分析记录 ' + a.title); }}
+                style={{ display: focusedRow === `analysis:${a.id}` ? 'inline' : undefined, border: 0, background: 'transparent', color: '#c22f2f', fontWeight: 700, padding: '0 6px', fontFamily: 'inherit', cursor: 'pointer' }}
               >
                 ×
-              </span>
+              </button>
             </div>
           ))}
         </div>

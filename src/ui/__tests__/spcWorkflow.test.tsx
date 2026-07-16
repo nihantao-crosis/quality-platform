@@ -96,6 +96,37 @@ describe('SPC 页面端到端数据角色', () => {
     expect(html).toContain('不会回退到“把所有数值列都当测量值”的旧口径');
   });
 
+  it('切换工作表会清除上一张表的 SPC 布局、列角色和阶段，不跨物理量静默混算', () => {
+    useData.getState().importMatrix(
+      '旧尺寸.csv', ['直径1', '直径2'], [[10, 11], [12, 13]],
+      [{ name: '阶段', values: ['基线', '改善'] }],
+    );
+    useApp.setState({
+      spcDataLayout: 'rows', spcValueCol: '直径1', spcSubgroupCol: null, spcStageCol: '阶段', selSub: 1,
+    });
+
+    useData.getState().importMatrix('新工艺.csv', ['温度', '压力'], [[100, 5], [110, 6], [120, 7]]);
+
+    expect(useApp.getState()).toMatchObject({
+      spcDataLayout: 'auto', spcValueCol: null, spcSubgroupCol: null, spcStageCol: null, selSub: null,
+    });
+    const html = renderSpc();
+    expect(html).toContain('控制图未运行');
+    expect(html).toContain('多个名称不同的业务数值列');
+    expect(html).not.toContain('分阶段未运行');
+  });
+
+  it('从 P/C 属性数据切回变量工作表时退出旧属性图', () => {
+    useData.getState().importCounts('p', '旧P图', [1, 2, 0], [50, 100, 40]);
+    expect(useApp.getState().spcType).toBe('p');
+
+    useData.getState().importMatrix('新变量.csv', ['直径1', '直径2'], [[10, 11], [12, 13], [11, 12]]);
+    expect(useApp.getState().spcType).toBe('xbar-r');
+    const html = renderSpc();
+    expect(html).toContain('变量：直径');
+    expect(html).not.toContain('旧P图');
+  });
+
   it('多候选测量列时仪表盘的 Cpk/PPM 也保持待配置，不用原始混列数据计算', () => {
     useData.getState().importMatrix('歧义.csv', ['子组', '直径', '温度'], [
       [1, 10, 20], [1, 11, 21], [2, 12, 22], [2, 13, 23],
@@ -170,5 +201,17 @@ describe('SPC 页面端到端数据角色', () => {
     });
     expect(view.container.innerHTML).toContain('「原列子组」仅作子组标签，未参与测量计算');
     expect(view.container.innerHTML).toContain('批次-101');
+  });
+
+  it('单点阶段被明确拒绝，不用退化控制限把异常点洗成受控', () => {
+    useData.getState().importMatrix(
+      '非法阶段.csv', ['x1', 'x2'], [[10, 11], [10, 11], [100, 101], [10, 11], [10, 11]],
+      [{ name: '阶段', values: ['基线', '基线', '异常点', '改善后', '改善后'] }],
+    );
+    useApp.setState({ spcType: 'xbar-r', spcDataLayout: 'rows', spcStageCol: '阶段' });
+    const view = render(createElement(Spc, { T: chartTokens('经典', true) }));
+    expect(view.container.textContent).toContain('阶段未启用');
+    expect(view.container.textContent).toContain('只有 1 个点，至少需要 2 个');
+    expect(view.container.textContent).toContain('分阶段未运行');
   });
 });

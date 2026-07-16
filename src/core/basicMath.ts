@@ -56,15 +56,54 @@ export function binomCdf(k: number, n: number, p: number): number {
   return Math.min(1, cum);
 }
 
+/**
+ * 以首个观测为原点并对偏移量做 Neumaier 补偿求和。
+ *
+ * 直接累加大基准数据（例如 1e15±1）会先丢掉低位，再除以 n，导致均值和所有
+ * 依赖均值的推断随“加同一个常数”而改变。偏移量求和既保留低位，也避免把无关
+ * 的绝对基准带入累计误差。
+ */
+function offsetMean(xs: number[]): { origin: number; offset: number } {
+  if (xs.length === 0) return { origin: 0, offset: Number.NaN };
+  const origin = xs[0];
+  let sum = 0;
+  let correction = 0;
+  for (let i = 1; i < xs.length; i++) {
+    const value = xs[i] - origin;
+    const next = sum + value;
+    correction += Math.abs(sum) >= Math.abs(value)
+      ? (sum - next) + value
+      : (value - next) + sum;
+    sum = next;
+  }
+  return { origin, offset: (sum + correction) / xs.length };
+}
+
 export function mean(xs: number[]): number {
-  return xs.reduce((a, b) => a + b, 0) / xs.length;
+  const centered = offsetMean(xs);
+  return xs.length === 0 ? Number.NaN : centered.origin + centered.offset;
 }
 
 /** sample=true → n-1 分母（默认样本标准差） */
 export function stdev(xs: number[], sample = true): number {
-  const m = mean(xs);
   const denom = sample ? xs.length - 1 : xs.length;
-  return Math.sqrt(xs.reduce((a, b) => a + (b - m) ** 2, 0) / denom);
+  const centered = offsetMean(xs);
+  // 在偏移坐标内计算离差，避免先把均值舍入回大基准后再相减。
+  // 缩放平方和算法同时避免合法有限输入在平方时不必要地上溢/下溢。
+  let scale = 0;
+  let sumSquares = 1;
+  for (let i = 0; i < xs.length; i++) {
+    const deviation = Math.abs((xs[i] - centered.origin) - centered.offset);
+    if (deviation === 0) continue;
+    if (scale < deviation) {
+      sumSquares = 1 + sumSquares * (scale / deviation) ** 2;
+      scale = deviation;
+    } else {
+      sumSquares += (deviation / scale) ** 2;
+    }
+  }
+  if (scale === 0) return Math.sqrt(0 / denom);
+  return scale * Math.sqrt(sumSquares / denom);
 }
 
 export function median(xs: number[]): number {

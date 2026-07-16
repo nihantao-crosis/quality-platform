@@ -22,6 +22,36 @@ describe('列操作', () => {
     useData.getState().renameColumn(0, 'a');
     expect(useData.getState().model).toBe(before);
   });
+  it('重命名为另一现有列或文本列时明确拒绝', () => {
+    useData.getState().importMatrix(
+      '含文本列.csv',
+      ['a', 'b'],
+      [[1, 2], [3, 4], [5, 6]],
+      [{ name: '操作员', values: ['甲', '乙', '丙'] }],
+    );
+    const before = useData.getState().model;
+    useData.getState().renameColumn(1, 'a');
+    expect(useData.getState().model).toBe(before);
+    useData.getState().renameColumn(1, '操作员');
+    expect(useData.getState().model).toBe(before);
+  });
+  it('导入空名/重名列按原顺序稳定规范化，数值与文本列不串名', () => {
+    useData.getState().importMatrix(
+      '列名冲突.csv',
+      [' A ', 'A', '', 'C4'],
+      [[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12]],
+      [
+        { name: 'A', values: ['x', 'y', 'z'] },
+        { name: ' ', values: ['u', 'v', 'w'] },
+      ],
+    );
+    expect(useData.getState().model.colNames).toEqual(['A', 'A (2)', 'C3', 'C4']);
+    expect(useData.getState().textCols.map((column) => column.name)).toEqual(['A (3)', 'T2']);
+    expect(new Set([
+      ...useData.getState().model.colNames,
+      ...useData.getState().textCols.map((column) => column.name),
+    ]).size).toBe(6);
+  });
   it('删除测量列(n 减一,值同步)', () => {
     useData.getState().deleteColumn(1);
     const m = useData.getState().model;

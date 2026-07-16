@@ -14,8 +14,10 @@ export interface AdResult {
 export function andersonDarling(xs: number[]): AdResult {
   const n = xs.length;
   if (n < 8) throw new Error('Anderson-Darling 检验至少需要 8 个观测');
+  if (xs.some((value) => !Number.isFinite(value))) throw new Error('Anderson-Darling 检验只接受有限数值');
   const m = mean(xs);
   const s = stdev(xs, true);
+  if (!(s > 0) || !Number.isFinite(s)) throw new Error('Anderson-Darling 检验要求数据具有正的有限标准差');
   const z = [...xs].sort((a, b) => a - b).map((x) => (x - m) / s);
   const EPS = 1e-12;
   let sum = 0;
@@ -27,7 +29,14 @@ export function andersonDarling(xs: number[]): AdResult {
   const a2 = -n - sum / n;
   const a2star = a2 * (1 + 0.75 / n + 2.25 / (n * n));
   let p: number;
-  if (a2star >= 0.6) p = Math.exp(1.2937 - 5.709 * a2star + 0.0186 * a2star * a2star);
+  if (a2star >= 0.6) {
+    // Stephens 的尾部近似是开口向上的二次式；超出其有效区间后若继续外推，
+    // 指数会在顶点后反向增大，甚至把极端非正态样本算成 p=1。顶点之后只保留
+    // 最小尾概率，使 P 值随更大的 A*² 保持非增。
+    const tailTurningPoint = 5.709 / (2 * 0.0186);
+    const tailStatistic = Math.min(a2star, tailTurningPoint);
+    p = Math.exp(1.2937 - 5.709 * tailStatistic + 0.0186 * tailStatistic * tailStatistic);
+  }
   else if (a2star > 0.34) p = Math.exp(0.9177 - 4.279 * a2star - 1.38 * a2star * a2star);
   else if (a2star > 0.2) p = 1 - Math.exp(-8.318 + 42.796 * a2star - 59.938 * a2star * a2star);
   else p = 1 - Math.exp(-13.436 + 101.14 * a2star - 223.73 * a2star * a2star);

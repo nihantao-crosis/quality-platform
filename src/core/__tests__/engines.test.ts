@@ -2,6 +2,7 @@
  * 新增引擎对拍 — ANOVA / Gage R&R / F 分布 / 变量模型 / 常数表 / CSV 解析。
  */
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { fCdf, betai } from '../basicMath';
 import { oneWayAnova } from '../anova';
 import { computeGageRR } from '../gage';
@@ -38,6 +39,33 @@ describe('单因子 ANOVA', () => {
     const means = groups.map((g) => g.vals.reduce((x, y) => x + y, 0) / g.vals.length);
     expect(Math.max(...means)).toBe(means[1]); // 设备 B
   });
+  it('观测单位缩放不改变 F / P，小量纲数据不被固定阈值误判为零方差', () => {
+    const small = [[1e-7, 1.1e-7], [2e-7, 2.1e-7]];
+    const scaled = small.map((group) => group.map((value) => value * 1e8));
+    const a = oneWayAnova(small);
+    const b = oneWayAnova(scaled);
+    expect(a.fStat).toBeGreaterThan(0);
+    expect(Number.isFinite(a.fStat)).toBe(true);
+    expect(a.fStat).toBeCloseTo(b.fStat, 12);
+    expect(a.pValue).toBeCloseTo(b.pValue, 12);
+    expect(a.significant).toBe(b.significant);
+  });
+  it('所有观测加同一大常数不改变 F / P 或显著性结论', () => {
+    const groups = [[25, 24, 25], [8, 16, 9], [12, 20, 28]];
+    const offset = 1e15;
+    const base = oneWayAnova(groups);
+    const shifted = oneWayAnova(groups.map((group) => group.map((value) => value + offset)));
+    expect(base.pValue).toBeLessThan(0.05);
+    expect(shifted.fStat).toBeCloseTo(base.fStat, 12);
+    expect(shifted.pValue).toBeCloseTo(base.pValue, 12);
+    expect(shifted.significant).toBe(base.significant);
+  });
+  it('极大单位下零组内平方和保持 0，F/P 不被 0×Infinity 污染为 NaN', () => {
+    const a = oneWayAnova([[1e200, 1e200], [2e200, 2e200]]);
+    expect(a.errorSS).toBe(0);
+    expect(a.fStat).toBe(Infinity);
+    expect(a.pValue).toBe(0);
+  });
 });
 
 describe('Gage R&R（交叉 ANOVA 法）', () => {
@@ -45,8 +73,91 @@ describe('Gage R&R（交叉 ANOVA 法）', () => {
   it('演示研究：合计 GRR < 10%（可接受）', () => {
     expect(g.totalGageRR).toBeGreaterThan(5);
     expect(g.totalGageRR).toBeLessThan(10);
-    expect(g.totalGageRR).toBeCloseTo(9.033781359105838, 10);
+    expect(g.totalGageRR).toBeCloseTo(8.776934972010649, 10);
     expect(g.verdict).toBe('acceptable');
+    expect(g.interaction.retained).toBe(false);
+  });
+  it('2×2×2 可手算交叉数据：不显著交互合并到重复性误差', () => {
+    const handCalculated = [
+      { part: 0, operator: 0, trial: 0, value: 10 },
+      { part: 0, operator: 0, trial: 1, value: 12 },
+      { part: 0, operator: 1, trial: 0, value: 11 },
+      { part: 0, operator: 1, trial: 1, value: 13 },
+      { part: 1, operator: 0, trial: 0, value: 20 },
+      { part: 1, operator: 0, trial: 1, value: 22 },
+      { part: 1, operator: 1, trial: 0, value: 21 },
+      { part: 1, operator: 1, trial: 1, value: 23 },
+    ];
+    // 手算 ANOVA：MS_part=200, MS_operator=2, SS_interaction=0, SS_error=8。
+    // p_interaction=1，缩减模型 MSE=(0+8)/(1+4)=1.6；因此
+    // σ²_repeat=1.6, σ²_operator=(2-1.6)/4=0.1, σ²_part=(200-1.6)/4=49.6。
+    const exact = computeGageRR(handCalculated, 100);
+    [1.7, 1.6, 0.1, 49.6, 51.3].forEach((expected, index) => {
+      expect(exact.components[index].variance).toBeCloseTo(expected, 12);
+    });
+    expect(exact.totalGageRR).toBeCloseTo(Math.sqrt(1.7 / 51.3) * 100, 12);
+    expect(exact.interaction).toMatchObject({ pValue: 1, retained: false, alpha: 0.05 });
+    expect(exact.verdict).toBe('marginal');
+  });
+  it('显著交互保留，且平移/换单位不改变 F、p、%GRR', () => {
+    const interactionStudy = [
+      { part: 0, operator: 0, trial: 0, value: 0 },
+      { part: 0, operator: 0, trial: 1, value: 2 },
+      { part: 0, operator: 1, trial: 0, value: 9 },
+      { part: 0, operator: 1, trial: 1, value: 11 },
+      { part: 1, operator: 0, trial: 0, value: 9 },
+      { part: 1, operator: 0, trial: 1, value: 11 },
+      { part: 1, operator: 1, trial: 0, value: 0 },
+      { part: 1, operator: 1, trial: 1, value: 2 },
+    ];
+    const base = computeGageRR(interactionStudy, 20);
+    expect(base.interaction.retained).toBe(true);
+    expect(base.interaction.fStat).toBeCloseTo(81, 12);
+    expect(base.interaction.pValue).toBeLessThan(0.001);
+    [82, 2, 80, 0, 82].forEach((expected, index) => {
+      expect(base.components[index].variance).toBeCloseTo(expected, 12);
+    });
+
+    const shiftedScaled = computeGageRR(
+      interactionStudy.map((row) => ({ ...row, value: 1_000_000 + row.value * 100 })),
+      2_000,
+    );
+    expect(shiftedScaled.interaction.fStat).toBeCloseTo(base.interaction.fStat, 10);
+    expect(shiftedScaled.interaction.pValue).toBeCloseTo(base.interaction.pValue, 12);
+    expect(shiftedScaled.totalGageRR).toBeCloseTo(base.totalGageRR, 12);
+    shiftedScaled.components.forEach((component, index) => {
+      expect(component.variance).toBeCloseTo(base.components[index].variance * 10_000, 6);
+      expect(component.pctTolerance).toBeCloseTo(base.components[index].pctTolerance!, 10);
+    });
+  });
+  it('官方 Minitab 交叉 Gage 样例对拍：p=0.974 后删除交互并复现方差分量', () => {
+    const fixture = readFileSync(new URL('./fixtures/gage-crossed-minitab.tsv', import.meta.url), 'utf8');
+    const rows = fixture.split(/\r?\n/).filter((line) => line && !line.startsWith('#')).slice(1);
+    const operators = ['A', 'B', 'C'];
+    const trials = new Map<string, number>();
+    const observations = rows.map((line) => {
+      const [partText, operatorText, valueText] = line.split('\t');
+      const key = `${partText}:${operatorText}`;
+      const trial = trials.get(key) ?? 0;
+      trials.set(key, trial + 1);
+      return { part: Number(partText) - 1, operator: operators.indexOf(operatorText), trial, value: Number(valueText) };
+    });
+    expect(observations).toHaveLength(90);
+    const result = computeGageRR(observations, 8);
+    expect(result.interaction.retained).toBe(false);
+    expect(result.interaction.pValue).toBeCloseTo(0.974, 3);
+    const variances = result.components.map((component) => component.variance);
+    expect(variances[0]).toBeCloseTo(0.09143, 5);
+    expect(variances[1]).toBeCloseTo(0.03997, 5);
+    expect(variances[2]).toBeCloseTo(0.05146, 5);
+    expect(variances[3]).toBeCloseTo(1.08645, 5);
+    expect(variances[4]).toBeCloseTo(1.17788, 5);
+    expect(result.totalGageRR).toBeCloseTo(27.86, 2);
+  });
+  it('未给双侧公差时仍计算研究变异，%Tolerance 明确为 null', () => {
+    const withoutTolerance = computeGageRR(gageStudyData(), null);
+    expect(withoutTolerance.totalGageRR).toBeCloseTo(g.totalGageRR, 12);
+    expect(withoutTolerance.components.every((component) => component.pctTolerance === null)).toBe(true);
   });
   it('%贡献相加 = 100（GRR + 部件间 = 合计）', () => {
     const grr = g.components[0];
@@ -111,11 +222,38 @@ describe('Gage R&R（交叉 ANOVA 法）', () => {
 });
 
 describe('控制图常数表 n=2..10', () => {
-  it('覆盖 n=2..10，关键值正确', () => {
-    for (let n = 2; n <= 10; n++) expect(CONTROL_CONSTANTS[n]).toBeDefined();
-    expect(CONTROL_CONSTANTS[2].A2).toBeCloseTo(1.88, 3);
-    expect(CONTROL_CONSTANTS[5].d2).toBeCloseTo(2.326, 3);
-    expect(CONTROL_CONSTANTS[10].D4).toBeCloseTo(1.777, 3);
+  it('用独立 d2/d3/c4 基础表与公开公式核对全部 72 个单元格', () => {
+    const text = readFileSync(new URL('./fixtures/spc-control-constant-bases.tsv', import.meta.url), 'utf8');
+    const rows = text.split(/\r?\n/).filter((line) => line && !line.startsWith('#')).slice(1);
+    expect(rows).toHaveLength(9);
+    expect(rows.map((row) => Number(row.split('\t')[0]))).toEqual([2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    const close = (actual: number, expected: number, tolerance: number) => {
+      expect(Math.abs(actual - expected)).toBeLessThanOrEqual(tolerance);
+    };
+    for (const row of rows) {
+      const [nText, d2Text, d3Text, c4Text] = row.split('\t');
+      const n = Number(nText);
+      const d2 = Number(d2Text);
+      const d3 = Number(d3Text);
+      const c4 = Number(c4Text);
+      const expected = {
+        d2,
+        c4,
+        A2: 3 / (d2 * Math.sqrt(n)),
+        A3: 3 / (c4 * Math.sqrt(n)),
+        D3: Math.max(0, 1 - (3 * d3) / d2),
+        D4: 1 + (3 * d3) / d2,
+        B3: Math.max(0, 1 - (3 * Math.sqrt(1 - c4 ** 2)) / c4),
+        B4: 1 + (3 * Math.sqrt(1 - c4 ** 2)) / c4,
+      };
+      const actual = CONTROL_CONSTANTS[n];
+      expect(actual, `n=${n}`).toBeDefined();
+      close(actual.d2, expected.d2, 0.0006);
+      close(actual.c4, expected.c4, 0.00006);
+      for (const key of ['A2', 'A3', 'D3', 'D4', 'B3', 'B4'] as const) {
+        close(actual[key], expected[key], 0.0015);
+      }
+    }
   });
 });
 

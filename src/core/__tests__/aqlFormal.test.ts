@@ -1,4 +1,5 @@
 /** GB/T 2828.1-2012 / ISO 2859-1:1999 正式一次抽样表逐格回归。 */
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
   AQL_COLS, aqlPlanByState, masterPlanByState, normalPlanOneStepTighter,
@@ -6,79 +7,106 @@ import {
 } from '../aql';
 import { buildAqlReportData, freshSwitchStatus, recordInspection } from '../aqlSwitch';
 
-/**
- * 以“最终字码 n Ac”独立声明标准期望值。每行 6 格依次为
- * AQL 0.65 / 1.0 / 1.5 / 2.5 / 4.0 / 6.5；Re 在 1999 版三张表中均为 Ac+1。
- */
-const EXPECTED: Record<InspectionState, Record<string, string>> = {
-  normal: {
-    A: 'F 20 0|E 13 0|D 8 0|C 5 0|B 3 0|A 2 0',
-    B: 'F 20 0|E 13 0|D 8 0|C 5 0|B 3 0|A 2 0',
-    C: 'F 20 0|E 13 0|D 8 0|C 5 0|B 3 0|D 8 1',
-    D: 'F 20 0|E 13 0|D 8 0|C 5 0|E 13 1|D 8 1',
-    E: 'F 20 0|E 13 0|D 8 0|F 20 1|E 13 1|E 13 2',
-    F: 'F 20 0|E 13 0|G 32 1|F 20 1|F 20 2|F 20 3',
-    G: 'F 20 0|H 50 1|G 32 1|G 32 2|G 32 3|G 32 5',
-    H: 'J 80 1|H 50 1|H 50 2|H 50 3|H 50 5|H 50 7',
-    J: 'J 80 1|J 80 2|J 80 3|J 80 5|J 80 7|J 80 10',
-    K: 'K 125 2|K 125 3|K 125 5|K 125 7|K 125 10|K 125 14',
-    L: 'L 200 3|L 200 5|L 200 7|L 200 10|L 200 14|L 200 21',
-    M: 'M 315 5|M 315 7|M 315 10|M 315 14|M 315 21|L 200 21',
-    N: 'N 500 7|N 500 10|N 500 14|N 500 21|M 315 21|L 200 21',
-    P: 'P 800 10|P 800 14|P 800 21|N 500 21|M 315 21|L 200 21',
-    Q: 'Q 1250 14|Q 1250 21|P 800 21|N 500 21|M 315 21|L 200 21',
-    R: 'R 2000 21|Q 1250 21|P 800 21|N 500 21|M 315 21|L 200 21',
-  },
-  tightened: {
-    A: 'G 32 0|F 20 0|E 13 0|D 8 0|C 5 0|B 3 0',
-    B: 'G 32 0|F 20 0|E 13 0|D 8 0|C 5 0|B 3 0',
-    C: 'G 32 0|F 20 0|E 13 0|D 8 0|C 5 0|E 13 1',
-    D: 'G 32 0|F 20 0|E 13 0|D 8 0|F 20 1|E 13 1',
-    E: 'G 32 0|F 20 0|E 13 0|G 32 1|F 20 1|E 13 1',
-    F: 'G 32 0|F 20 0|H 50 1|G 32 1|F 20 1|F 20 2',
-    G: 'G 32 0|J 80 1|H 50 1|G 32 1|G 32 2|G 32 3',
-    H: 'K 125 1|J 80 1|H 50 1|H 50 2|H 50 3|H 50 5',
-    J: 'K 125 1|J 80 1|J 80 2|J 80 3|J 80 5|J 80 8',
-    K: 'K 125 1|K 125 2|K 125 3|K 125 5|K 125 8|K 125 12',
-    L: 'L 200 2|L 200 3|L 200 5|L 200 8|L 200 12|L 200 18',
-    M: 'M 315 3|M 315 5|M 315 8|M 315 12|M 315 18|L 200 18',
-    N: 'N 500 5|N 500 8|N 500 12|N 500 18|M 315 18|L 200 18',
-    P: 'P 800 8|P 800 12|P 800 18|N 500 18|M 315 18|L 200 18',
-    Q: 'Q 1250 12|Q 1250 18|P 800 18|N 500 18|M 315 18|L 200 18',
-    R: 'R 2000 18|Q 1250 18|P 800 18|N 500 18|M 315 18|L 200 18',
-  },
-  reduced: {
-    A: 'F 8 0|E 5 0|D 3 0|C 2 0|B 2 0|A 2 0',
-    B: 'F 8 0|E 5 0|D 3 0|C 2 0|B 2 0|A 2 0',
-    C: 'F 8 0|E 5 0|D 3 0|C 2 0|B 2 0|D 3 0',
-    D: 'F 8 0|E 5 0|D 3 0|C 2 0|E 5 0|D 3 0',
-    E: 'F 8 0|E 5 0|D 3 0|F 8 0|E 5 0|E 5 1',
-    F: 'F 8 0|E 5 0|G 13 0|F 8 0|F 8 1|F 8 1',
-    G: 'F 8 0|H 20 0|G 13 0|G 13 1|G 13 1|G 13 2',
-    H: 'J 32 0|H 20 0|H 20 1|H 20 1|H 20 2|H 20 3',
-    J: 'J 32 0|J 32 1|J 32 1|J 32 2|J 32 3|J 32 5',
-    K: 'K 50 1|K 50 1|K 50 2|K 50 3|K 50 5|K 50 7',
-    L: 'L 80 1|L 80 2|L 80 3|L 80 5|L 80 7|L 80 10',
-    M: 'M 125 2|M 125 3|M 125 5|M 125 7|M 125 10|L 80 10',
-    N: 'N 200 3|N 200 5|N 200 7|N 200 10|M 125 10|L 80 10',
-    P: 'P 315 5|P 315 7|P 315 10|N 200 10|M 125 10|L 80 10',
-    Q: 'Q 500 7|Q 500 10|P 315 10|N 200 10|M 125 10|L 80 10',
-    R: 'R 800 10|Q 500 10|P 315 10|N 200 10|M 125 10|L 80 10',
-  },
-};
+const PDF_SHA256 = '7a336944db23d14cf23fe007b0cfe2dffa5d5bef434767d2b1300ffaa35e5a37';
+const TABLE_AQLS = ['0.65', '1.0', '1.5', '2.5', '4.0', '6.5'] as const;
+const INITIAL_CODES = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'J', 'K', 'L', 'M', 'N', 'P', 'Q', 'R'];
+
+interface FixtureFile {
+  metadata: string[];
+  rows: Record<string, string>[];
+}
+
+interface GoldenPlan {
+  code: string;
+  n: number;
+  ac: number;
+  re: number;
+}
+
+function loadTsv(name: string): FixtureFile {
+  const lines = readFileSync(new URL(`./fixtures/${name}`, import.meta.url), 'utf8')
+    .split(/\r?\n/)
+    .filter((line) => line.trim().length > 0);
+  const metadata = lines.filter((line) => line.startsWith('#'));
+  const data = lines.filter((line) => !line.startsWith('#'));
+  const headers = data[0]?.split('\t') ?? [];
+  const rows = data.slice(1).map((line) => {
+    const values = line.split('\t');
+    expect(values, `夹具行列数错误：${line}`).toHaveLength(headers.length);
+    return Object.fromEntries(headers.map((header, index) => [header, values[index]]));
+  });
+  return { metadata, rows };
+}
+
+function parsePlan(cell: string, context: string): GoldenPlan {
+  const parts = cell.split('/');
+  expect(parts, `夹具单元格格式错误：${context}=${cell}`).toHaveLength(4);
+  const [code, nText, acText, reText] = parts;
+  const plan = { code, n: Number(nText), ac: Number(acText), re: Number(reText) };
+  expect(INITIAL_CODES, `${context} 含国标表中不存在的执行字码 ${plan.code}`).toContain(plan.code);
+  expect([plan.n, plan.ac, plan.re], `${context} 含非数值`).toSatisfy(
+    (values: number[]) => values.every(Number.isInteger),
+  );
+  expect(plan.re, `${context} 的 Re 必须在夹具内显式给出`).toBe(plan.ac + 1);
+  return plan;
+}
+
+describe('正式表黄金夹具来源', () => {
+  it('固定国标 PDF 哈希、页码及 304 个显式方案单元格', () => {
+    const tables = loadTsv('gbt2828-1-2012-tables-2abc.tsv');
+    const col040 = loadTsv('gbt2828-1-2012-table-2a-aql-0.40.tsv');
+
+    expect(tables.metadata).toContain(`# pdf_sha256=${PDF_SHA256}`);
+    expect(col040.metadata).toContain(`# pdf_sha256=${PDF_SHA256}`);
+    expect(tables.rows).toHaveLength(48);
+    expect(col040.rows).toHaveLength(16);
+    for (const row of col040.rows) {
+      expect(row).toMatchObject({
+        source_table: '2-A', pdf_page: '21', printed_page: '15', aql: '0.40',
+      });
+    }
+    expect(col040.rows.map((row) => row.initial_code)).toEqual(INITIAL_CODES);
+
+    const expectedPages = {
+      normal: { source_table: '2-A', pdf_page: '21', printed_page: '15' },
+      tightened: { source_table: '2-B', pdf_page: '22', printed_page: '16' },
+      reduced: { source_table: '2-C', pdf_page: '23', printed_page: '17' },
+    } as const;
+    for (const [state, page] of Object.entries(expectedPages)) {
+      const rows = tables.rows.filter((row) => row.state === state);
+      expect(rows).toHaveLength(16);
+      expect(rows.map((row) => row.initial_code)).toEqual(INITIAL_CODES);
+      for (const row of rows) expect(row).toMatchObject(page);
+    }
+
+    let explicitCells = 0;
+    for (const row of tables.rows) {
+      for (const aql of TABLE_AQLS) {
+        parsePlan(row[`aql_${aql}`], `${row.source_table}/${row.initial_code}/AQL${aql}`);
+        explicitCells += 1;
+      }
+    }
+    for (const row of col040.rows) {
+      parsePlan(row.plan, `2-A/${row.initial_code}/AQL0.40`);
+      explicitCells += 1;
+    }
+    expect(explicitCells).toBe(304);
+  });
+});
 
 describe('正式表 2-A / 2-B / 2-C 逐格核对', () => {
+  const fixture = loadTsv('gbt2828-1-2012-tables-2abc.tsv');
+
+  expect(AQL_COLS).toEqual([0.65, 1.0, 1.5, 2.5, 4.0, 6.5]);
   for (const state of ['normal', 'tightened', 'reduced'] as InspectionState[]) {
     it(`${state}: 16 个初始字码 × 6 个 AQL 全部一致`, () => {
-      for (const [initialCode, row] of Object.entries(EXPECTED[state])) {
-        const cells = row.split('|');
-        expect(cells).toHaveLength(AQL_COLS.length);
-        AQL_COLS.forEach((aql, column) => {
-          const [code, nText, acText] = cells[column].split(' ');
-          const ac = Number(acText);
-          expect(masterPlanByState(state, initialCode, aql), `${state}/${initialCode}/AQL${aql}`).toEqual({
-            code, n: Number(nText), ac, re: ac + 1,
-          });
+      const rows = fixture.rows.filter((row) => row.state === state);
+      expect(rows).toHaveLength(16);
+      for (const row of rows) {
+        TABLE_AQLS.forEach((aqlText) => {
+          const context = `${row.source_table}/${row.initial_code}/AQL${aqlText}`;
+          const expected = parsePlan(row[`aql_${aqlText}`], context);
+          expect(masterPlanByState(state, row.initial_code, Number(aqlText)), context).toEqual(expected);
         });
       }
     });
@@ -90,7 +118,7 @@ describe('正式表 2-A / 2-B / 2-C 逐格核对', () => {
   });
 
   it('表 2-C 使用独立样本量序列，并保留箭头解析后的执行字码', () => {
-    expect(masterPlanByState('reduced', 'K', 1.0)).toEqual({ code: 'K', n: 50, ac: 1, re: 2 });
+    expect(masterPlanByState('reduced', 'K', 1.0)).toEqual({ code: 'K', n: 50, ac: 2, re: 3 });
     expect(masterPlanByState('reduced', 'M', 6.5)).toEqual({ code: 'L', n: 80, ac: 10, re: 11 });
   });
 });
@@ -98,18 +126,12 @@ describe('正式表 2-A / 2-B / 2-C 逐格核对', () => {
 describe('转移得分的严一档 AQL', () => {
   it('六个产品 AQL 的严一档映射完整，0.65 使用正式 0.40 列', () => {
     expect(AQL_COLS.map(oneStepTighterAql)).toEqual([0.4, 0.65, 1.0, 1.5, 2.5, 4.0]);
-    const expected040: Record<string, string> = {
-      A: 'G 32 0', B: 'G 32 0', C: 'G 32 0', D: 'G 32 0',
-      E: 'G 32 0', F: 'G 32 0', G: 'G 32 0', H: 'G 32 0',
-      J: 'K 125 1', K: 'K 125 1', L: 'L 200 2', M: 'M 315 3',
-      N: 'N 500 5', P: 'P 800 7', Q: 'Q 1250 10', R: 'R 2000 14',
-    };
-    for (const [initialCode, cell] of Object.entries(expected040)) {
-      const [code, nText, acText] = cell.split(' ');
-      const ac = Number(acText);
-      expect(normalPlanOneStepTighter(initialCode, 0.65), `2-A/${initialCode}/AQL0.40`).toEqual({
-        code, n: Number(nText), ac, re: ac + 1,
-      });
+    const fixture = loadTsv('gbt2828-1-2012-table-2a-aql-0.40.tsv');
+    for (const row of fixture.rows) {
+      const context = `2-A/${row.initial_code}/AQL0.40`;
+      expect(normalPlanOneStepTighter(row.initial_code, 0.65), context).toEqual(
+        parsePlan(row.plan, context),
+      );
     }
     expect(normalPlanOneStepTighter('K', 1.0)).toEqual({ code: 'K', n: 125, ac: 2, re: 3 });
   });

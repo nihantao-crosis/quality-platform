@@ -3,7 +3,7 @@
  * 与原型内置样本数据（种子 20260601）。
  */
 import { describe, it, expect } from 'vitest';
-import { phi, invNorm, binomCdf, median, quantile } from '../basicMath';
+import { phi, invNorm, binomCdf, mean, median, quantile } from '../basicMath';
 import { evalRules, DEFAULT_RULES } from '../spc';
 import { capabilityInputError, computeCapability } from '../capability';
 import { analyzeDoe, mainEffectMeans, interactionMeans } from '../doe';
@@ -14,6 +14,12 @@ import { calcKey, CALC_INIT, type CalcState } from '../calculator';
 const M = buildData();
 
 describe('基础数学', () => {
+  it('均值不受可精确表示的大基准平移影响', () => {
+    const values = [...Array(12).fill(1), ...Array(12).fill(-1)];
+    const offset = 1e15;
+    expect(mean(values)).toBe(0);
+    expect(mean(values.map((value) => value + offset))).toBe(offset);
+  });
   it('phi(0) = 0.5, phi(1.96) ≈ 0.975', () => {
     expect(phi(0)).toBeCloseTo(0.5, 6);
     expect(phi(1.96)).toBeCloseTo(0.975, 3);
@@ -66,7 +72,17 @@ describe('过程能力（默认规格 24.90/25.00/25.10）', () => {
   it('Cpk ≈ 1.36（关键校验值）', () => {
     expect(cap.cpk).toBeGreaterThan(1.30);
     expect(cap.cpk).toBeLessThan(1.42);
-    expect(cap.cpk).toBeCloseTo(M.Cpk, 10);
+  });
+  it('用可手算数据独立核对 Cp/Cpk/Pp/Ppk/Cpm', () => {
+    const exact = computeCapability([8, 9, 10, 11, 12], 1, { lsl: 7, tgt: 10, usl: 13 });
+    expect(exact.mean).toBe(10);
+    expect(exact.sigmaOverall).toBeCloseTo(Math.sqrt(2.5), 12);
+    expect(exact.cp).toBeCloseTo(1, 12);
+    expect(exact.cpk).toBeCloseTo(1, 12);
+    expect(exact.pp).toBeCloseTo(1 / Math.sqrt(2.5), 12);
+    expect(exact.ppk).toBeCloseTo(1 / Math.sqrt(2.5), 12);
+    expect(exact.cpm).toBeCloseTo(1 / Math.sqrt(2), 12);
+    expect(exact.verdict).toBe('marginal');
   });
   it('判定为能力充足', () => {
     expect(cap.verdict).toBe('sufficient');
@@ -167,7 +183,11 @@ describe('计算器（关键校验值 144 ÷ 12 = 12）', () => {
     expect(press(['1', '2', '⌫']).disp).toBe('1');
     expect(press(['9', 'C']).disp).toBe('0');
   });
-  it('除零返回 0（原型行为）', () => {
-    expect(press(['5', '÷', '0', '=']).disp).toBe('0');
+  it('除零进入明确 Error 状态，不能伪装成合法 0；可清除或直接重新输入', () => {
+    const failed = press(['5', '÷', '0', '=']);
+    expect(failed).toMatchObject({ disp: 'Error', error: '不能除以零', acc: null, op: null, fresh: true });
+    expect(calcKey(failed, '+')).toEqual(failed);
+    expect(calcKey(failed, 'C')).toEqual(CALC_INIT);
+    expect(calcKey(failed, '7')).toMatchObject({ disp: '7', error: null, fresh: false });
   });
 });

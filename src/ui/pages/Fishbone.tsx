@@ -145,16 +145,16 @@ export function Fishbone({ T }: { T: ChartTokens }) {
           <div style={{ fontWeight: 600, color: '#33404f', marginBottom: 10 }}>原因编辑</div>
           <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', marginBottom: 10 }}>
             {data.categories.map((c, i) => (
-              <div key={c.name} style={{ ...tabStyle(i === catIdx), padding: '4px 10px', fontSize: 11.5 }} onClick={() => setCatIdx(i)}>
+              <button type="button" key={c.name} aria-pressed={i === catIdx} style={{ ...tabStyle(i === catIdx), padding: '4px 10px', fontSize: 11.5 }} onClick={() => setCatIdx(i)}>
                 {c.name.split(' ')[0]}
-              </div>
+              </button>
             ))}
           </div>
           {cat.causes.length === 0 && <div style={{ fontSize: 12, color: '#9aa2ad', padding: '4px 0' }}>暂无原因,在下方添加</div>}
           {cat.causes.map((cause, i) => (
             <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0', borderTop: '1px solid #f2f4f6', fontSize: 12.5 }}>
               <span style={{ flex: 1, color: '#3a4350' }}>{cause}</span>
-              <span onClick={() => removeCause(i)} style={{ cursor: 'pointer', color: '#c22f2f', fontWeight: 700, padding: '0 4px' }}>×</span>
+              <button type="button" aria-label={`删除原因：${cause}`} onClick={() => removeCause(i)} style={{ cursor: 'pointer', color: '#c22f2f', fontWeight: 700, padding: '0 4px', border: 0, background: 'transparent', fontFamily: 'inherit' }}>×</button>
             </div>
           ))}
           <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
@@ -165,14 +165,14 @@ export function Fishbone({ T }: { T: ChartTokens }) {
               style={{ ...inputStyle, flex: 1 }}
               placeholder={`添加「${cat.name.split(' ')[0]}」类原因…`}
             />
-            <div onClick={addCause} style={{ padding: '6px 14px', background: '#1f6fb2', color: '#fff', borderRadius: 4, fontSize: 12.5, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap' }}>添加</div>
+            <button type="button" onClick={addCause} style={{ padding: '6px 14px', border: 0, background: '#1f6fb2', color: '#fff', borderRadius: 4, fontFamily: 'inherit', fontSize: 12.5, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap' }}>添加</button>
           </div>
-          <div
+          <button type="button"
             onClick={() => { update(FISHBONE_DEFAULT, true); setCatIdx(0); showToast('鱼骨图已重置为演示内容'); }}
-            style={{ marginTop: 10, fontSize: 11.5, color: '#8a929d', cursor: 'pointer', textDecoration: 'underline' }}
+            style={{ marginTop: 10, padding: 0, border: 0, background: 'transparent', fontFamily: 'inherit', fontSize: 11.5, color: '#8a929d', cursor: 'pointer', textDecoration: 'underline' }}
           >
             重置为演示内容
-          </div>
+          </button>
         </Card>
       </div>
     </div>

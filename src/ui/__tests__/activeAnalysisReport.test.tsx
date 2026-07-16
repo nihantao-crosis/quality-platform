@@ -135,6 +135,22 @@ describe('buildActiveAnalysisReport', () => {
     expect(buildActiveAnalysisReport()?.summary.join(' ')).not.toContain('未运行');
   });
 
+  it('P 图专项报告逐批导出样本量与变控制限，不伪造固定 n', () => {
+    useData.getState().importCounts('p', 'P逐批.csv', [1, 4, 2], [10, 40, 20]);
+    useApp.setState({ page: 'spc', spcType: 'p' });
+    const report = buildActiveAnalysisReport();
+    const raw = report?.tables.find((table) => table.title === '用于 P 控制图的原始计数数据');
+    expect(raw?.headers).toEqual(['样本', '不合格品数', '检验数', '不良率', 'LCL', 'UCL']);
+    expect(raw?.rows.map((row) => row[2])).toEqual([10, 40, 20]);
+    expect(new Set(raw?.rows.map((row) => row[5])).size).toBeGreaterThan(1);
+    expect(raw?.note).toContain('每批 nᵢ');
+    expect(report?.tables.find((table) => table.title === '控制限')?.rows[0]).toContain('逐批见原始计数表');
+
+    const exported = buildActiveAnalysisExport();
+    expect(exported.model.colNames).toEqual(['不良数', '样本量']);
+    expect(exported.model.subs.map((subgroup) => subgroup.vals)).toEqual([[1, 10], [4, 40], [2, 20]]);
+  });
+
   it('ANOVA 专项保留文本因子与原始响应，并排除 DOE 输出文本列', () => {
     useData.getState().importMatrix(
       'ANOVA长表',
@@ -260,7 +276,7 @@ describe('buildActiveAnalysisReport', () => {
     useApp.setState({ page: 'spc', spcType: 'p' });
     const p = buildActiveAnalysisReport();
     const pRaw = p?.tables.find((table) => table.title.includes('原始计数'));
-    expect(pRaw?.headers).toEqual(['样本', '不合格品数', '检验数', '不良率']);
+    expect(pRaw?.headers).toEqual(['样本', '不合格品数', '检验数', '不良率', 'LCL', 'UCL']);
     expect(pRaw?.rows.length).toBeGreaterThan(0);
 
     useApp.setState({ spcType: 'c' });
@@ -304,6 +320,18 @@ describe('buildActiveAnalysisReport', () => {
     expect(limits?.rows).toHaveLength(4);
     expect(limits?.rows.map((row) => row[0])).toEqual(['X̄ · 改进前', 'R · 改进前', 'X̄ · 改进后', 'R · 改进后']);
     expect(limits?.rows[0][1]).not.toEqual(limits?.rows[2][1]);
+  });
+
+  it('单点阶段的专项报告明确未运行且不生成控制图', () => {
+    useData.getState().importMatrix(
+      '非法阶段SPC', ['测量1', '测量2'], [[10, 11], [10, 11], [100, 101], [10, 11], [10, 11]],
+      [{ name: '阶段', values: ['基线', '基线', '异常点', '改善后', '改善后'] }],
+    );
+    useApp.setState({ page: 'spc', spcType: 'xbar-r', spcDataLayout: 'rows', spcStageCol: '阶段' });
+    const report = buildActiveAnalysisReport();
+    expect(report?.title).toContain('分阶段未运行');
+    expect(report?.warnings.join(' ')).toContain('只有 1 个点');
+    expect(report?.charts).toHaveLength(0);
   });
 
   it('帕累托报告使用导入数据、累计占比和其他合并设置', () => {

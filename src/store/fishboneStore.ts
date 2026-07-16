@@ -1,4 +1,7 @@
 /** 鱼骨图数据与演示标记的单一持久化入口。 */
+import { projectStoreValidationError, registerProjectLifecycleHooks } from '../platform/project';
+import { preserveCorruptStore } from './quarantine';
+
 export interface FishboneData {
   problem: string;
   categories: { name: string; causes: string[] }[];
@@ -11,6 +14,8 @@ export interface FishboneState {
 }
 
 export const FISHBONE_STORAGE_KEY = 'qp-fishbone-v1';
+let dirtyFishboneJson: string | null = null;
+let protectedCorruptFishbone: { raw: string; detail: string } | null = null;
 
 export const FISHBONE_DEFAULT: FishboneData = {
   problem: '尺寸超差',
@@ -48,10 +53,19 @@ function validFishbone(value: unknown): value is FishboneData {
  * 没有有效持久化内容时返回明确标记的内置示例。
  */
 export function loadFishboneState(): FishboneState {
+  let raw: string | null = null;
   try {
-    const raw = localStorage.getItem(FISHBONE_STORAGE_KEY);
+    // localStorage 配额失败后，页面、报告与项目导出都必须继续看到同一份最新内存状态。
+    raw = dirtyFishboneJson ?? localStorage.getItem(FISHBONE_STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as unknown;
+      const detail = projectStoreValidationError(FISHBONE_STORAGE_KEY, parsed);
+      if (detail) {
+        if (!preserveCorruptStore(FISHBONE_STORAGE_KEY, raw, detail)) {
+          protectedCorruptFishbone = { raw, detail };
+        } else protectedCorruptFishbone = null;
+        return { data: cloneFishbone(FISHBONE_DEFAULT), isDemo: true };
+      }
       if (parsed && typeof parsed === 'object' && 'data' in parsed) {
         const envelope = parsed as { data?: unknown; isDemo?: unknown };
         if (validFishbone(envelope.data) && typeof envelope.isDemo === 'boolean') {
@@ -60,7 +74,11 @@ export function loadFishboneState(): FishboneState {
       }
       if (validFishbone(parsed)) return { data: cloneFishbone(parsed), isDemo: false };
     }
-  } catch { /* 回落内置示例 */ }
+  } catch {
+    if (raw && !preserveCorruptStore(FISHBONE_STORAGE_KEY, raw, 'JSON 解析失败或写入被截断')) {
+      protectedCorruptFishbone = { raw, detail: 'JSON 解析失败或写入被截断' };
+    } else if (raw) protectedCorruptFishbone = null;
+  }
   return { data: cloneFishbone(FISHBONE_DEFAULT), isDemo: true };
 }
 
@@ -70,5 +88,36 @@ export function loadFishbone(): FishboneData {
 
 export function saveFishboneState(data: FishboneData, isDemo = false): void {
   if (!validFishbone(data)) throw new Error('鱼骨图必须包含完整的 6M 分类');
-  localStorage.setItem(FISHBONE_STORAGE_KEY, JSON.stringify({ data: cloneFishbone(data), isDemo }));
+  const encoded = JSON.stringify({ data: cloneFishbone(data), isDemo });
+  if (protectedCorruptFishbone) {
+    const { raw, detail } = protectedCorruptFishbone;
+    if (!preserveCorruptStore(FISHBONE_STORAGE_KEY, raw, detail)) {
+      dirtyFishboneJson = encoded;
+      throw new Error('损坏的鱼骨图原文尚未成功隔离，已禁止覆盖；请先释放本地存储空间');
+    }
+    protectedCorruptFishbone = null;
+  }
+  try {
+    localStorage.setItem(FISHBONE_STORAGE_KEY, encoded);
+    dirtyFishboneJson = null;
+  } catch (error) {
+    dirtyFishboneJson = encoded;
+    throw error;
+  }
 }
+
+/** “清除业务数据”显式丢弃内存中尚未落盘的鱼骨编辑。 */
+export function clearFishboneState(): void {
+  dirtyFishboneJson = null;
+  protectedCorruptFishbone = null;
+  try { localStorage.removeItem(FISHBONE_STORAGE_KEY); } catch { /* 调用方会统一提示清除错误 */ }
+}
+
+registerProjectLifecycleHooks({
+  beforeExport: () => {
+    if (protectedCorruptFishbone) throw new Error('损坏的鱼骨图原文尚未成功隔离，项目未导出');
+  },
+  projectStoreOverrides: () => dirtyFishboneJson
+    ? { [FISHBONE_STORAGE_KEY]: dirtyFishboneJson }
+    : {},
+});

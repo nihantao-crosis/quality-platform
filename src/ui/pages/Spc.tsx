@@ -6,7 +6,7 @@ import { useApp, type SpcType } from '../../store/appStore';
 import { syncSpecForActiveMeasurement, useData } from '../../store/dataStore';
 import { expandSpcRuleItems, uniqueSpcPointCount, type SpcViolationItem } from '../../store/analyses';
 import {
-  nf, evalRules, evalLimitedRules, RULE_DEFS, ewmaSeries, cusumSeries, stagedXbar, stagedRange, splitStages,
+  nf, evalRules, evalLimitedRules, RULE_DEFS, ewmaSeries, cusumSeries, stagedXbar, stagedRange, stageValidationError,
   prepareSpcData, spcMeasurementColumnNames, spcRoleOptions,
   type RuleNo, type SpcDataLayout, type SpcPreparedData, type VarModel, type TextColumn,
 } from '../../core';
@@ -140,8 +140,9 @@ export function Spc({ T }: { T: ChartTokens }) {
   const stageCol = spcStageCol == null ? -1 : textCols.findIndex((c) => c.name === spcStageCol);
   const stageLabels = stageCol >= 0 && stageCol < textCols.length ? textCols[stageCol].values : null;
   const canStage = M.hasSubgroups && textCols.length > 0;
+  const stageError = stageLabels ? stageValidationError(stageLabels, M.k) : null;
   const staged =
-    stageLabels && stageLabels.length === M.k && splitStages(stageLabels).length >= 2 && M.hasSubgroups
+    stageLabels && !stageError && M.hasSubgroups
       ? {
           x: stagedXbar(M.subs.map((s) => s.vals), stageLabels, spcRules),
           r: stagedRange(M.subs.map((s) => s.vals), stageLabels, spcRules),
@@ -157,6 +158,13 @@ export function Spc({ T }: { T: ChartTokens }) {
   const groupXLabel = prepared.xAxisLabel;
   const groupPointLabels = labelsFor(M.k);
   const indivPointLabels = labelsFor(M.indiv.length);
+  const pMinN = pModel.pNs.reduce((value, n) => Math.min(value, n), Number.POSITIVE_INFINITY);
+  const pMaxN = pModel.pNs.reduce((value, n) => Math.max(value, n), Number.NEGATIVE_INFINITY);
+  const pMinUcl = pModel.pUcls.reduce((value, limit) => Math.min(value, limit), Number.POSITIVE_INFINITY);
+  const pMaxUcl = pModel.pUcls.reduce((value, limit) => Math.max(value, limit), Number.NEGATIVE_INFINITY);
+  const pMinLcl = pModel.pLcls.reduce((value, limit) => Math.min(value, limit), Number.POSITIVE_INFINITY);
+  const pMaxLcl = pModel.pLcls.reduce((value, limit) => Math.max(value, limit), Number.NEGATIVE_INFINITY);
+  const pNLabel = pModel.pVariableN ? `${pMinN}–${pMaxN}（逐批变化）` : String(pModel.pN);
 
   type SpecDef = {
     sub: string;
@@ -171,7 +179,9 @@ export function Spc({ T }: { T: ChartTokens }) {
     'xbar-r': {
       sub: staged
         ? `分阶段 · ${staged.x.segments.length} 段（按「${textCols[stageCol]?.name}」）· n = ${M.n}`
-        : `子组大小 n = ${M.n} · 均值-极差`,
+        : stageCol >= 0 && stageError
+          ? `分阶段未运行：${stageError}`
+          : `子组大小 n = ${M.n} · 均值-极差`,
       disabled: !M.hasSubgroups,
       shewhart: true,
       coreViol: staged ? staged.x.viol : undefined,
@@ -237,10 +247,19 @@ export function Spc({ T }: { T: ChartTokens }) {
       ],
     },
     p: {
-      sub: `不良率 · 样本量 n = ${pModel.pN} · ${pModel.isDemo ? '演示数据' : pModel.name}`,
+      sub: `不良率 · 样本量 n = ${pNLabel} · ${pModel.isDemo ? '演示数据' : pModel.name}`,
       shewhart: true,
       charts: [
-        { t: `不良率控制图 (P) · ${pModel.name}`, main: true, dec: 3, props: { data: pModel.pprop, cl: pModel.pbar, ucl: pModel.pUcl, lcl: pModel.pLcl, clLabel: 'p̄', zones: true, h: 300, xLabel: '样本序号', yLabel: '样本不良率' } },
+        {
+          t: `不良率控制图 (P) · ${pModel.name}`, main: true, dec: 3,
+          props: {
+            data: pModel.pprop, cl: pModel.pbar, ucl: pModel.pUcl, lcl: pModel.pLcl, clLabel: 'p̄',
+            zones: !pModel.pVariableN,
+            uclSeries: pModel.pVariableN ? pModel.pUcls : undefined,
+            lclSeries: pModel.pVariableN ? pModel.pLcls : undefined,
+            h: 300, xLabel: '样本序号', yLabel: '样本不良率',
+          },
+        },
       ],
     },
     c: {
@@ -263,8 +282,10 @@ export function Spc({ T }: { T: ChartTokens }) {
     viol = spec.coreViol;
     violList = spec.coreList;
   } else if (spec.shewhart) {
-    const r = effType === 'p' || effType === 'c'
-      ? evalLimitedRules(main.props.data, main.props.cl, main.props.ucl, main.props.lcl, spcRules)
+    const r = effType === 'p'
+      ? evalLimitedRules(main.props.data, main.props.cl, pModel.pUcls, pModel.pLcls, spcRules)
+      : effType === 'c'
+        ? evalLimitedRules(main.props.data, main.props.cl, main.props.ucl, main.props.lcl, spcRules)
       : evalRules(main.props.data, main.props.cl, (main.props.ucl - main.props.cl) / 3, spcRules);
     viol = r.viol;
     violList = r.list;
@@ -322,7 +343,9 @@ export function Spc({ T }: { T: ChartTokens }) {
   const sel = selSub != null && selSub < main.props.data.length ? selSub : null;
   const labWord = { 'xbar-r': '子组', 'xbar-s': '子组', 'i-mr': '观测', ewma: '点', cusum: '点', p: '样本', c: '单位' }[effType];
   const mainLabels = effType === 'p' || effType === 'c' ? undefined : labelsFor(main.props.data.length);
-  const ptLab = (i: number) => labWord + ' ' + (mainLabels?.[i] ?? (i + 1));
+  const ptLab = (i: number) => effType === 'p'
+    ? `${labWord} ${i + 1}（n=${pModel.pNs[i]}）`
+    : labWord + ' ' + (mainLabels?.[i] ?? (i + 1));
 
   const stats: { k: string; v: string }[] = [];
   if (effType === 'ewma') {
@@ -347,7 +370,16 @@ export function Spc({ T }: { T: ChartTokens }) {
       { k: 'UCL', v: nf(main.props.ucl, main.dec) },
       { k: 'LCL', v: nf(main.props.lcl, main.dec) },
     );
-    if (effType === 'xbar-r' && staged) {
+    if (effType === 'p') {
+      stats.length = 0;
+      stats.push(
+        { k: '中心线 p̄', v: nf(pModel.pbar, 4) },
+        { k: '样本量 nᵢ', v: pNLabel },
+        { k: 'UCL 范围', v: pModel.pVariableN ? `${nf(pMinUcl, 4)}–${nf(pMaxUcl, 4)}` : nf(pModel.pUcl, 4) },
+        { k: 'LCL 范围', v: pModel.pVariableN ? `${nf(pMinLcl, 4)}–${nf(pMaxLcl, 4)}` : nf(pModel.pLcl, 4) },
+        { k: '样本数', v: String(pModel.pprop.length) },
+      );
+    } else if (effType === 'xbar-r' && staged) {
       stats.length = 0;
       staged.x.segments.forEach((sg) => {
         stats.push({ k: `「${sg.label}」CL·UCL·LCL`, v: `${nf(sg.cl, 3)} / ${nf(sg.ucl, 3)} / ${nf(sg.lcl, 3)}` });
@@ -356,7 +388,6 @@ export function Spc({ T }: { T: ChartTokens }) {
     } else if (effType === 'xbar-r') stats.push({ k: 'R̄', v: nf(M.rbar, 3) }, { k: 'σ̂ 组内', v: nf(M.sigmaWithin, 4) }, { k: '子组数', v: String(M.k) });
     else if (effType === 'xbar-s') stats.push({ k: 'S̄', v: nf(M.sbar, 4) }, { k: 'σ̂ (S̄/c₄)', v: nf(M.sbar / M.c4, 4) }, { k: '子组数', v: String(M.k) });
     else if (effType === 'i-mr') stats.push({ k: 'MR̄', v: nf(M.mrbar, 3) }, { k: 'σ̂ (MR̄/d₂)', v: nf(M.iSig, 4) }, { k: '观测数', v: String(M.indiv.length) });
-    else if (effType === 'p') stats.push({ k: 'p̄', v: nf(pModel.pbar, 4) }, { k: '样本量 n', v: String(pModel.pN) }, { k: '样本数', v: String(pModel.pprop.length) });
     else stats.push({ k: 'c̄', v: nf(cModel.cbar, 3) }, { k: '单位数', v: String(cModel.cdata.length) });
   }
 
@@ -385,8 +416,9 @@ export function Spc({ T }: { T: ChartTokens }) {
     } else if (effType === 'p') {
       subRows = [
         { k: '不良数', v: String(pModel.pdef[sel]) },
-        { k: '样本量', v: String(pModel.pN) },
+        { k: '样本量', v: String(pModel.pNs[sel]) },
         { k: '不良率', v: nf(pModel.pprop[sel], 3) },
+        { k: 'UCL / LCL', v: `${nf(pModel.pUcls[sel], 4)} / ${nf(pModel.pLcls[sel], 4)}` },
       ];
     } else {
       subRows = [{ k: '缺陷数', v: String(cModel.cdata[sel]) }];
@@ -403,14 +435,16 @@ export function Spc({ T }: { T: ChartTokens }) {
   const report = spcReport({
     violList: allViolItems, // 含 R/S/MR 离散图失控点——顶部结论卡与右侧列表口径一致
     k: main.props.data.length,
-    n: effType === 'p' ? pModel.pN : effType === 'c' ? 1 : M.n,
+    n: effType === 'p' ? pModel.pNs : effType === 'c' ? 1 : M.n,
     hasSubgroups: effType === 'p' || effType === 'c' ? false : M.hasSubgroups,
     structure: effType === 'p' ? 'attribute-p' : effType === 'c' ? 'attribute-c' : M.hasSubgroups ? 'subgroup' : 'individual',
     typeLabel: typeTabs.find(([k]) => k === effType)?.[1] ?? effType,
     variationChartLabel,
     variationViolations: dispItems,
     variableName: effType === 'p' || effType === 'c' ? undefined : variableName,
-    dataRole: effType === 'p' || effType === 'c' ? undefined : prepared.note,
+    dataRole: effType === 'p'
+      ? `每批不良数 / 实际检验数；${pModel.pVariableN ? '逐批 nᵢ 生成变控制限' : `固定 n=${pModel.pN}`}`
+      : effType === 'c' ? undefined : prepared.note,
   });
 
   return (
@@ -423,14 +457,17 @@ export function Spc({ T }: { T: ChartTokens }) {
           {typeTabs.map(([k, l]) => {
             const off = specs[k].disabled;
             return (
-              <div
+              <button
+                type="button"
                 key={k}
                 title={off ? '单列数据无子组，不可用' : undefined}
                 style={{ ...tabStyle(effType === k), ...(off ? { opacity: 0.45, cursor: 'not-allowed' } : {}) }}
-                onClick={() => !off && setSpcType(k)}
+                disabled={off}
+                aria-pressed={effType === k}
+                onClick={() => setSpcType(k)}
               >
                 {l}
-              </div>
+              </button>
             );
           })}
         </div>
@@ -443,15 +480,18 @@ export function Spc({ T }: { T: ChartTokens }) {
                 const d = RULE_DEFS[Number(k.slice(1)) as RuleNo];
                 const unavailable = (effType === 'p' || effType === 'c') && Number(k.slice(1)) > 4;
                 return (
-                  <div
+                  <button
+                    type="button"
                     key={k}
-                    style={{ ...chipStyle(!unavailable && spcRules[k]), ...(unavailable ? { opacity: 0.4, cursor: 'not-allowed' } : {}) }}
-                    onClick={() => !unavailable && toggleRule(k)}
+                    style={{ ...chipStyle(!unavailable && spcRules[k]), fontFamily: 'inherit', ...(unavailable ? { opacity: 0.4, cursor: 'not-allowed' } : {}) }}
+                    disabled={unavailable}
+                    aria-pressed={!unavailable && spcRules[k]}
+                    onClick={() => toggleRule(k)}
                     title={unavailable ? 'P/C 属性控制图仅适用准则 1–4' : `${d.def}(${d.points})· ${d.source}`}
                   >
                     <span style={{ width: 7, height: 7, borderRadius: '50%', background: !unavailable && spcRules[k] ? '#1f6fb2' : '#c8cfd8' }} />
                     {l}
-                  </div>
+                  </button>
                 );
               })}
             </div>
@@ -475,7 +515,7 @@ export function Spc({ T }: { T: ChartTokens }) {
               {textCols.map((c, i) => <option key={c.name} value={i}>按 {c.name}</option>)}
             </select>
             {stageCol >= 0 && !staged && (
-              <span style={{ fontSize: 11.5, color: '#d98324' }}>该列只有 1 个连续段,无法分阶段</span>
+              <span role="alert" style={{ fontSize: 11.5, color: '#b65400' }}>阶段未启用：{stageError ?? '阶段列与控制图数据不匹配'}</span>
             )}
           </>
         )}
@@ -517,8 +557,10 @@ export function Spc({ T }: { T: ChartTokens }) {
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 300px', gap: 16 }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-          {spec.charts.map((ch) => (
-            <Card key={ch.t}>
+          {spec.charts.map((ch) => {
+            const chartSelection = ch.main ? sel : effType === 'i-mr' ? (sel != null && sel > 0 ? sel - 1 : null) : sel;
+            const selectChartPoint = (index: number) => setSelSub(effType === 'i-mr' && !ch.main ? index + 1 : index);
+            return <Card key={ch.t}>
               <div style={{ display: 'flex', alignItems: 'center', padding: '11px 16px', borderBottom: '1px solid #edf0f3' }}>
                 <div style={{ fontWeight: 600, color: '#33404f' }}>{ch.t}</div>
                 <div style={{ marginLeft: 'auto', fontSize: 11, color: '#a3abb5' }}>点击数据点查看明细</div>
@@ -529,13 +571,13 @@ export function Spc({ T }: { T: ChartTokens }) {
                   {...ch.props}
                   dec={ch.dec}
                   violations={ch.main ? viol : dispViolByChart.get(ch.t)}
-                  sel={ch.main ? sel : null}
-                  onPoint={ch.main ? (i) => setSelSub(i) : undefined}
+                  sel={chartSelection}
+                  onPoint={selectChartPoint}
                   ptLabel={effType === 'i-mr' && !ch.main ? (i) => ptLab(i + 1) : ptLab}
                 />
               </div>
-            </Card>
-          ))}
+            </Card>;
+          })}
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -549,12 +591,13 @@ export function Spc({ T }: { T: ChartTokens }) {
               </div>
               <KvRows rows={subRows} />
               {(effType === 'xbar-r' || effType === 'xbar-s' || effType === 'i-mr') && (
-                <div
+                <button
+                  type="button"
                   onClick={() => useApp.getState().goTo('worksheet')}
-                  style={{ marginTop: 10, padding: '6px 0', textAlign: 'center', border: '1px solid #bcd6ee', color: '#1f6fb2', borderRadius: 5, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}
+                  style={{ width: '100%', marginTop: 10, padding: '6px 0', textAlign: 'center', border: '1px solid #bcd6ee', background: '#fff', color: '#1f6fb2', borderRadius: 5, fontSize: 12, fontWeight: 600, fontFamily: 'inherit', cursor: 'pointer' }}
                 >
                   在工作表中查看此行 →
-                </div>
+                </button>
               )}
             </div>
           )}

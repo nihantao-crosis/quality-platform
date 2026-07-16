@@ -3,11 +3,14 @@
  * @vitest-environment jsdom
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { expandSpcRuleItems, uniqueSpcPointCount, useAnalyses } from '../../store/analyses';
+import {
+  expandSpcRuleItems, normalizeSavedAnalysesForStorage, reloadAnalyses, uniqueSpcPointCount, useAnalyses,
+} from '../../store/analyses';
 import { useApp } from '../../store/appStore';
 import { useData } from '../../store/dataStore';
 import { loadFishboneState, saveFishboneState, type FishboneData } from '../../store/fishboneStore';
 import { freshSwitchStatus, recordInspection, type SwitchStatus } from '../../core/aqlSwitch';
+import { platform } from '../../platform/adapter';
 
 const R1_ONLY = { r1: true, r2: false, r3: false, r4: false, r5: false, r6: false, r7: false, r8: false };
 const aqlStatus = (patch: Partial<SwitchStatus> = {}): SwitchStatus => ({ ...freshSwitchStatus(), ...patch });
@@ -118,6 +121,17 @@ describe('保存分析', () => {
     useAnalyses.getState().restore(staged.id);
     expect(useApp.getState().spcStageCol).toBe('阶段');
     expect(useApp.getState().spcRules).toEqual(R1_ONLY);
+  });
+
+  it('非法单点阶段保存为未分析，不回退全局控制限伪报受控', () => {
+    useData.getState().importMatrix(
+      '非法阶段.csv', ['x1', 'x2'], [[10, 11], [10, 11], [100, 101], [10, 11], [10, 11]],
+      [{ name: '阶段', values: ['基线', '基线', '异常点', '改善后', '改善后'] }],
+    );
+    useApp.setState({ page: 'spc', spcType: 'xbar-r', spcDataLayout: 'rows', spcStageCol: '阶段' });
+    const saved = useAnalyses.getState().saveCurrent()!;
+    expect(saved).toMatchObject({ title: 'X̄-R 控制图 · 分阶段未运行', status: '未分析' });
+    expect(saved.metric).toContain('只有 1 个点');
   });
 
   it('人工反馈行式数据保存时记录正确角色：数值子组列不计入 n', () => {
@@ -238,7 +252,7 @@ describe('保存分析', () => {
     }
   });
 
-  it('AQL 保存当前加严方案与批历史，但回看不改写当前活跃检验流', () => {
+  it('AQL 只保存当时摘要而不复制责任账本，回看不改写当前活跃检验流', () => {
     useApp.setState({
       page: 'aql', aqlLot: 2000, aqlLevel: 'II', aqlAQL: 1.0,
       aqlSwitch: aqlStatus({
@@ -248,13 +262,52 @@ describe('保存分析', () => {
     });
     const saved = useAnalyses.getState().saveCurrent()!;
     expect(saved.title).toContain('加严');
-    expect(saved.metric).toBe('n=125 Ac=2');
-    expect(saved.snapshot.aqlSwitch?.history).toEqual(['R', 'A', 'R']);
+    expect(saved.metric).toBe('保存时 n=125 Ac=2 Re=3');
+    expect(saved.snapshot.aqlSwitch).toBeUndefined();
 
     const active = aqlStatus({ note: '当前活跃检验流' });
     useApp.setState({ aqlSwitch: active });
     useAnalyses.getState().restore(saved.id);
     expect(useApp.getState().aqlSwitch).toEqual(active);
+  });
+
+  it('升级时清理旧 AQL 摘要中从未被消费的重复责任账本', () => {
+    useApp.setState({ page: 'aql' });
+    const saved = useAnalyses.getState().saveCurrent()!;
+    const legacy = {
+      ...saved,
+      snapshot: { ...saved.snapshot, aqlSwitch: aqlStatus({ history: ['A'], records: [] }) },
+    };
+    const normalized = normalizeSavedAnalysesForStorage([legacy]);
+    expect(normalized).toHaveLength(1);
+    expect(normalized[0].snapshot.aqlSwitch).toBeUndefined();
+    expect(normalized[0]).toMatchObject({ id: saved.id, title: saved.title, metric: saved.metric });
+  });
+
+  it('旧 AQL 摘要清理写回失败时，仍加载已读取并规范化的历史', () => {
+    useApp.setState({ page: 'aql' });
+    const saved = useAnalyses.getState().saveCurrent()!;
+    const legacy = {
+      ...saved,
+      snapshot: { ...saved.snapshot, aqlSwitch: aqlStatus({ history: ['A'], records: [] }) },
+    };
+    localStorage.setItem('qp-analyses-v1', JSON.stringify([legacy]));
+    useAnalyses.setState({ saved: [], lastError: null });
+
+    const originalSetItem = Storage.prototype.setItem;
+    const spy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (this: Storage, key, value) {
+      if (key === 'qp-analyses-v1') throw new DOMException('Quota exceeded', 'QuotaExceededError');
+      return originalSetItem.call(this, key, value);
+    });
+    try {
+      reloadAnalyses();
+      expect(useAnalyses.getState().saved).toHaveLength(1);
+      expect(useAnalyses.getState().saved[0]).toMatchObject({ id: saved.id, title: saved.title });
+      expect(useAnalyses.getState().saved[0].snapshot.aqlSwitch).toBeUndefined();
+      expect(JSON.parse(localStorage.getItem('qp-analyses-v1')!)[0].snapshot.aqlSwitch).toBeDefined();
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('AQL B1 保存后新增 B2，回看 B1 保持完整当前状态并让 B3 连续判定', () => {
@@ -318,25 +371,27 @@ describe('保存分析', () => {
     expect(useApp.getState().aqlSwitch).toEqual(currentSwitch);
   });
 
-  it('AQL 参数变化重置转移历史但保留责任追溯，全检不再冒充加严抽样', () => {
+  it('AQL 正常态参数变化建立新序列并保留责任追溯，全检摘要明确是保存时状态', () => {
     const tracked = recordInspection(freshSwitchStatus(), {
       lot: 2000, level: 'II', aql: 1.0, nonconforming: 0,
       batchId: 'TRACE-001', inspector: '张检', inspectedAt: '2026-07-14T08:00:00.000Z',
     });
     useApp.setState({
       page: 'aql', aqlLot: 2000,
-      aqlSwitch: { ...tracked, state: 'tightened', history: ['R', 'A', 'R'], sinceSwitch: [], note: '加严' },
+      aqlSwitch: tracked,
     });
     useApp.getState().setAql({ aqlLot: 8, aqlAQL: 0.65 });
     expect(useApp.getState().aqlSwitch.state).toBe('normal');
     expect(useApp.getState().aqlSwitch.history).toEqual([]);
     expect(useApp.getState().aqlSwitch.records).toHaveLength(1);
     expect(useApp.getState().aqlSwitch.records[0].batchId).toBe('TRACE-001');
+    expect(useApp.getState().aqlSwitch.records[0].sequenceId).not.toBe(useApp.getState().aqlSwitch.sequenceId);
 
     const saved = useAnalyses.getState().saveCurrent()!;
-    expect(saved.title).toBe('接收检验 · 100% 全检');
-    expect(saved.metric).toBe('N=8 Ac=0');
-    expect(saved.status).toBe('100% 全检');
+    expect(saved.title).toBe('AQL 历史摘要 · 100% 全检');
+    expect(saved.metric).toBe('保存时 N=8 Ac=0 Re=1');
+    expect(saved.status).toBe('保存时：全检');
+    expect(saved.snapshot.aqlSwitch).toBeUndefined();
   });
 
   it('回看旧版无转移快照的 AQL 记录也不改写当前活跃检验流', () => {
@@ -474,6 +529,35 @@ describe('回看分析', () => {
     expect(useData.getState().cModel.cdata).toEqual([2, 0, 3, 1]);
   });
 
+  it('P 图分析快照保存并恢复每批样本量，旧固定 n 快照仍兼容', () => {
+    useData.getState().importCounts('p', 'P-变样本量.csv', [1, 4, 2, 5], [40, 80, 50, 100]);
+    useApp.setState({ page: 'spc', spcType: 'p' });
+    const saved = useAnalyses.getState().saveCurrent()!;
+    expect(saved.snapshot.pChartData).toMatchObject({
+      sampleSize: 40,
+      sampleSizes: [40, 80, 50, 100],
+    });
+
+    useData.getState().importCounts('p', 'P-后来.csv', [0, 0, 0], 10);
+    useAnalyses.getState().restore(saved.id);
+    expect(useData.getState().pModel.pNs).toEqual([40, 80, 50, 100]);
+    expect(useData.getState().pModel.pVariableN).toBe(true);
+
+    // 模拟 v5 及更早只保存 sampleSize 的记录。
+    const legacy = {
+      ...saved,
+      id: 'legacy-p-fixed-n',
+      snapshot: {
+        ...saved.snapshot,
+        pChartData: { name: 'P-旧快照.csv', counts: [1, 2, 3], sampleSize: 30 },
+      },
+    };
+    useAnalyses.setState((state) => ({ saved: [legacy, ...state.saved] }));
+    useAnalyses.getState().restore(legacy.id);
+    expect(useData.getState().pModel.pNs).toEqual([30, 30, 30]);
+    expect(useData.getState().pModel.pVariableN).toBe(false);
+  });
+
   it('ANOVA 超出最近 5 份数据后仍按保存时工作表精确恢复', () => {
     const rows = [[1, 10], [1, 11], [2, 20], [2, 21]];
     useData.getState().importMatrix('ANOVA-A.csv', ['因子', '响应'], rows);
@@ -541,6 +625,35 @@ describe('回看分析', () => {
     expect(useData.getState().model.indiv).toEqual(originalIndiv);
   });
 
+  it('描述性统计所选列仍有待录入格时拒绝保存，不把内部 0 占位固化为统计结论', () => {
+    useData.getState().importMatrix(
+      '待录入摘要.csv', ['完整列', '待录入列'], [[1, 10], [2, 0], [3, 30]], [], [{ row: 1, col: 1 }],
+    );
+    useApp.setState({ page: 'summary', activeVar: '待录入列' });
+    const before = useAnalyses.getState().saved.length;
+
+    expect(useAnalyses.getState().saveCurrent()).toBeNull();
+    expect(useAnalyses.getState().saved).toHaveLength(before);
+    expect(useAnalyses.getState().lastError).toContain('仍有 1 个待录入单元格');
+    expect(useAnalyses.getState().lastError).toContain('分析未保存');
+
+    useApp.setState({ activeVar: '完整列' });
+    expect(useAnalyses.getState().saveCurrent()).toMatchObject({
+      title: '描述性统计 · 完整列', metric: 'x̄ 2.000 · s 1.000',
+    });
+  });
+
+  it('真实工作表只有一个数值列时拒绝保存双样本 t，不混入演示组', () => {
+    useData.getState().importMatrix('单列实测.csv', ['强度'], [[10], [11], [12], [13]]);
+    useApp.setState({ page: 'anova', hypoTab: 't2', t2ColAName: '强度', t2ColBName: null });
+    const before = useAnalyses.getState().saved.length;
+
+    expect(useAnalyses.getState().saveCurrent()).toBeNull();
+    expect(useAnalyses.getState().saved).toHaveLength(before);
+    expect(useAnalyses.getState().lastError).toContain('需要两个不同的数值列');
+    expect(useAnalyses.getState().lastError).toContain('分析未保存');
+  });
+
   it('旧版 ANOVA/DOE/摘要缺少数据快照时明确阻断，不套用当前工作表', () => {
     for (const kind of ['anova', 'doe', 'summary'] as const) {
       useAnalyses.setState({
@@ -574,6 +687,34 @@ describe('回看分析', () => {
     expect(useData.getState().model.name).toBe(currentName);
     expect(useApp.getState().page).toBe('dashboard');
     expect(useApp.getState().toast).toContain('对应数据集已不可用');
+  });
+
+  it('旧版轻量最近项异步读取失败时不回放参数、不跳页', async () => {
+    useData.getState().importMatrix('当前批次.csv', ['x'], [[1], [2], [3]]);
+    useData.setState({ recents: [{ name: '旧批次.csv', savedAt: '2026-07-01T00:00:00Z' }] });
+    useAnalyses.setState({
+      saved: [{
+        id: 'legacy-light-failed', kind: 'capability', title: '旧能力分析', datasetName: '旧批次.csv',
+        metric: 'Cpk 1.20', status: '能力临界', statusColor: '#000', statusBg: '#fff', createdAt: 1,
+        snapshot: { lsl: 99, usl: 101, lslOn: true, uslOn: true },
+      }],
+      lastError: null,
+    });
+    useApp.setState({ page: 'dashboard', lsl: 0, usl: 10, toast: null });
+    const previousDb = platform.datasetDb;
+    platform.datasetDb = {
+      put: async () => {}, get: async () => null, list: async () => [], remove: async () => false,
+      stats: async () => ({ count: 0, total_bytes: 0, path: ':memory:' }),
+    };
+    try {
+      expect(await useAnalyses.getState().restore('legacy-light-failed')).toBe(false);
+    } finally {
+      platform.datasetDb = previousDb;
+    }
+
+    expect(useData.getState().model.name).toBe('当前批次.csv');
+    expect(useApp.getState()).toMatchObject({ page: 'dashboard', lsl: 0, usl: 10 });
+    expect(useApp.getState().toast).toContain('读取失败');
   });
 
   it('删除记录', () => {
