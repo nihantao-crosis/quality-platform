@@ -7,8 +7,8 @@ import { create } from 'zustand';
 import {
   nf, capabilityInputError, computeCapability, evalRules, evalLimitedRules, prepareSpcData, computeGageRR, gageStudyData, GAGE_TOLERANCE,
   andersonDarling, assessCapability, countCapabilityViolations,
-  prepareGageStudy, resolveNumericColumn,
-  oneWayAnova, oneSampleT, twoSampleT, linearRegression, anovaGroups, buildAnovaGroups, wideScaleDisparate, resolveAnovaMode, countAnovaPendingCells, isDoeAnalysisColumn, analyzeDoe, detectFactorial, analyzeFactorial, factorialModelTerms, resolveDoeColumns, resolveDoeBlockValues, plansByState, computeDescriptive,
+  prepareGageStudy, effectiveGageSelection, listGageCategoryColumns, resolveNumericColumn,
+  oneWayAnova, oneSampleT, twoSampleT, linearRegression, anovaGroups, buildAnovaGroups, wideScaleDisparate, resolveAnovaMode, countAnovaPendingCells, isDoeAnalysisColumn, analyzeDoe, detectFactorial, analyzeFactorial, detectGeneralFactorial, analyzeGeneralFactorial, detectFractionalFactorial, analyzeFractionalFactorial, resolveDoeColumnsWide, MAX_FRACTIONAL_FACTORS, factorialModelTerms, resolveDoeBlockValues, plansByState, computeDescriptive,
   ewmaSeries, cusumSeries, stagedXbar, stagedRange, stageValidationError, normalizeSwitchStatus,
   DEFAULT_RULE_K, normalizeRuleK,
   type InspectionLevel, type AnovaMode, type AqlMethod, type AqlAcMethod, type NelsonRules, type NelsonRuleK, type SwitchStatus, type SpcDataLayout,
@@ -197,13 +197,15 @@ function analysisUsesWorksheet(kind: AnalysisKind, snapshot: AnalysisSnapshot): 
 function currentGageStudy() {
   const app = useApp.getState();
   const data = useData.getState();
+  // 与 MSA 页同源:未手选的角色用可解释推荐补齐(716-R3 收口),否则页面按推荐算、
+  // 保存记录按列序算,同一数据会得到两种研究结构。
+  const effective = effectiveGageSelection(data.model, data.textCols,
+    { value: app.gageValueName, part: app.gagePartName, operator: app.gageOperatorName });
   const prepared = prepareGageStudy(data.model, data.textCols, {
-    valueColumn: app.gageValueName,
-    partColumn: app.gagePartName,
-    operatorColumn: app.gageOperatorName,
+    ...effective,
     pendingCells: data.pendingCells,
   });
-  return { requestedReal: !data.model.isDemo && app.gageUseReal, prepared };
+  return { requestedReal: !data.model.isDemo && app.gageUseReal, prepared, effective };
 }
 
 function attachWorksheetSnapshot(snapshot: AnalysisSnapshot) {
@@ -309,8 +311,9 @@ function buildSummary(kind: AnalysisKind): Omit<SavedAnalysis, 'id' | 'createdAt
         const r = evalRules(data, cl, sigma, app.spcRules, app.spcRuleK);
         return expandSpcRuleItems(r.viol, r.list, chartLabel, app.spcRuleK);
       };
-      const limitedItems = (data: number[], cl: number, ucl: number | number[], lcl: number | number[], chartLabel: string, indexOffset = 0) => {
-        const r = evalLimitedRules(data, cl, ucl, lcl, app.spcRules, app.spcRuleK);
+      const limitedItems = (data: number[], cl: number, ucl: number | number[], lcl: number | number[], chartLabel: string, indexOffset = 0, sigmas?: number | number[]) => {
+        // P/C 图限值有钳位:与 SPC 页/专项报告同口径直传真 σ(新增参数必须查全消费路径,716-R3 自查)
+        const r = evalLimitedRules(data, cl, ucl, lcl, app.spcRules, app.spcRuleK, sigmas);
         return expandSpcRuleItems(r.viol, r.list, chartLabel, app.spcRuleK).map((item) => ({ ...item, i: item.i + indexOffset }));
       };
       let items: SpcViolationItem[];
@@ -370,9 +373,10 @@ function buildSummary(kind: AnalysisKind): Omit<SavedAnalysis, 'id' | 'createdAt
         const r = cusumSeries(data, mu, sigma, 0.5, SM.hasSubgroups ? 4 : 5);
         items = [...r.viol].map((i) => ({ i, rule: 1, desc: '累积和超出判定限 H', chartLabel: 'CUSUM' }));
       } else if (effType === 'p') {
-        items = limitedItems(pModel.pprop, pModel.pbar, pModel.pUcls, pModel.pLcls, 'P');
+        items = limitedItems(pModel.pprop, pModel.pbar, pModel.pUcls, pModel.pLcls, 'P', 0,
+          pModel.pNs.map((n) => Math.sqrt(pModel.pbar * (1 - pModel.pbar) / n)));
       } else {
-        items = limitedItems(cModel.cdata, cModel.cbar, cModel.cUcl, cModel.cLcl, 'C');
+        items = limitedItems(cModel.cdata, cModel.cbar, cModel.cUcl, cModel.cLcl, 'C', 0, Math.sqrt(cModel.cbar));
       }
 
       // 不同准则、不同子图命中同一子组/观测时，依然只是 1 个实际失控点。
@@ -550,26 +554,47 @@ function buildSummary(kind: AnalysisKind): Omit<SavedAnalysis, 'id' | 'createdAt
           status: '演示', ...pick(INFO),
         };
       }
-      // 真实数据:与 DOE 分析页共用 resolveDoeColumns(同一选择/同一 4 因子上限),
-      // 保证「保存到项目的汇总卡」与分析页所见一致,避免页面出结果而卡片显示未分析。
+      // 真实数据:与 DOE 分析页共用 resolveDoeColumnsWide(同一选择/同一 7 因子上限,716-R3),
+      // 保证「保存到项目的汇总卡」与分析页所见一致——旧 resolveDoeColumns 截到 4 因子会把
+      // 2^(5-1) 的 E 因子静默丢弃,其效应冒充 A×B×C×D 出现在卡片上(自查确认 high)。
       const nc = M.colNames.length;
       if (nc >= 3) {
-        const { factorIdx, respIdx } = resolveDoeColumns(M.colNames, app.doeFactorCols, app.doeRespCol);
+        const { factorIdx, respIdx } = resolveDoeColumnsWide(M.colNames, app.doeFactorCols, app.doeRespCol, MAX_FRACTIONAL_FACTORS);
         const facs = factorIdx.map((i) => ({ name: M.colNames[i], values: M.subs.map((s) => s.vals[i]) }));
         const resp = M.subs.map((s) => s.vals[respIdx]);
         // 检查顺序与分析页一致:先看因子结构、再看响应是否录入,避免页面与卡片给出不同诊断
         const blocks = resolveDoeBlockValues(M.colNames, M.subs.map((sub) => sub.vals), useData.getState().textCols);
-        const det = detectFactorial(facs, resp, { blocks });
+        const det = facs.length <= 4 ? detectFactorial(facs, resp, { blocks }) : detectFractionalFactorial(facs, resp, { blocks });
         if (!det.ok) {
+          // 716-R3:两水平识别失败时按一般全因子(2–5 水平)回落——分析页能出结果,
+          // 保存卡不能还写「数据非因子设计」造成口径分裂。
+          const gen = detectGeneralFactorial(facs, resp);
+          if (gen.ok) {
+            const pendingRows = useData.getState().pendingCells.filter((p) => p.col === respIdx).length;
+            if (new Set(resp).size < 2 || pendingRows > 0) {
+              return { kind, title: '实验设计 (DOE)', metric: pendingRows > 0 ? `尚有 ${pendingRows} 行未录入` : '响应尚未录入', status: '未分析', ...pick(WARN) };
+            }
+            const gr = analyzeGeneralFactorial(gen.design);
+            const gSig = gr.rows.filter((row) => row.sig).map((row) => row.name);
+            return {
+              kind, title: `实验设计 · 一般全因子 ${gen.design.factorNames.length} 因子`,
+              metric: gSig.length ? `${gSig.slice(0, 3).join('、')} 显著` : '无显著项',
+              status: '已分析', ...pick(INFO),
+            };
+          }
           return { kind, title: '实验设计 (DOE)', metric: '数据非因子设计', status: '未分析', ...pick(WARN) };
         }
         const pendingRows = useData.getState().pendingCells.filter((p) => p.col === respIdx).length;
         if (new Set(resp).size < 2 || pendingRows > 0) {
           return { kind, title: '实验设计 (DOE)', metric: pendingRows > 0 ? `尚有 ${pendingRows} 行未录入` : '响应尚未录入', status: '未分析', ...pick(WARN) };
         }
-        const availableTerms = factorialModelTerms(det.design.factorNames);
+        const allTerms = factorialModelTerms(det.design.factorNames);
+        // 与分析页同口径:5 因子以上默认仅主效应+二因子交互入模(高阶交互与低阶项混杂)
+        const availableTerms = det.design.factorNames.length > 4
+          ? allTerms.filter((term) => term.split('×').length <= 2)
+          : allTerms;
         const selectedTerms = app.doeModelTerms?.filter((term) => availableTerms.includes(term));
-        const fr = analyzeFactorial(det.design, {
+        const fr = (det.design.factorNames.length <= 4 ? analyzeFactorial : analyzeFractionalFactorial)(det.design, {
           terms: selectedTerms && selectedTerms.length > 0 ? selectedTerms : availableTerms,
           includeCurvature: app.doeIncludeCurvature,
         });
@@ -674,10 +699,12 @@ function snapshotOf(kind: AnalysisKind): AnalysisSnapshot {
     snap.lslOn = a.lslOn;
     snap.uslOn = a.uslOn;
     snap.gageUseReal = a.gageUseReal;
-    snap.gageValueName = a.gageValueName;
-    snap.gagePartName = a.gagePartName;
-    snap.gageOperatorName = a.gageOperatorName;
     const current = currentGageStudy();
+    // 快照存「生效角色」而非原始 store 值(可能为 null 走推荐):推荐算法将来若调整,
+    // 历史记录回放不能跟着变口径——保存时用的哪三列就固化哪三列。
+    snap.gageValueName = a.gageValueName ?? current.effective.valueColumn;
+    snap.gagePartName = a.gagePartName ?? current.effective.partColumn;
+    snap.gageOperatorName = a.gageOperatorName ?? current.effective.operatorColumn;
     snap.gageRequestedReal = current.requestedReal;
     snap.gageSourceReal = current.requestedReal && current.prepared.ok;
   }
@@ -1020,6 +1047,16 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
       if (s.doeIncludeCurvature === undefined) patch.doeIncludeCurvature = true;
     }
     if (a.kind === 'pareto' && !s.paretoData) patch.paretoShowDemo = s.paretoShowDemo ?? false;
+    // R3 前的旧 gage 快照未固化生效角色(null=保存当时的列序位置默认);回放时按基线口径
+    // 显式解析成列名,不能让 null 落到新的推荐路径——推荐与位置默认不同会静默改口径。
+    if (a.kind === 'gagerr' && (s.gageValueName == null || s.gagePartName == null || s.gageOperatorName == null)) {
+      const restored = useData.getState();
+      const value = s.gageValueName ?? restored.model.colNames[0] ?? null;
+      const cats = listGageCategoryColumns(restored.model, restored.textCols, value);
+      patch.gageValueName = value;
+      patch.gagePartName = s.gagePartName ?? cats[0]?.name ?? null;
+      patch.gageOperatorName = s.gageOperatorName ?? cats[1]?.name ?? null;
+    }
     useApp.setState(patch);
     if (a.kind === 'spc' && usesWorksheet) syncSpecForActiveMeasurement();
     if (s.hypoTab) useApp.getState().setHypoTab(s.hypoTab);

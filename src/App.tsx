@@ -1,10 +1,10 @@
 /** 应用外壳 — 菜单栏 → 工具栏 → (左导航 + 主内容) → 状态栏 + 弹窗/Toast + 全局快捷键。 */
-import { useEffect } from 'react';
+import { useEffect, useMemo } from 'react';
 import { useApp } from './store/appStore';
-import { useData } from './store/dataStore';
+import { useData, resolveCapabilityMeasurementData } from './store/dataStore';
 import {
   capabilityInputError, computeCapability, computeGageRR, gageStudyData, GAGE_TOLERANCE, nf,
-  prepareGageStudy, prepareSpcData, resolveNumericColumn,
+  effectiveGageSelection, prepareGageStudy, prepareSpcData, resolveNumericColumn,
 } from './core';
 import { platform } from './platform/adapter';
 import { exportProject } from './platform/project';
@@ -33,6 +33,7 @@ export default function App() {
     page, openMenu, varOpen, setOpenMenu, setVarOpen, openModal, showToast, chartStyle, showGrid, lsl, usl, tgt, lslOn, busyOverlay, uslOn,
     spcType, spcDataLayout, spcValueCol, spcSubgroupCol, hypoTab, aqlLevel, aqlAQL,
     gageUseReal, gageValueName, gagePartName, gageOperatorName, activeVar,
+    capSubgroupMode, capSubgroupSize, capValueCol, capSubgroupIdCol,
   } = useApp();
   const { model: M, textCols, pendingCells } = useData();
   const T = chartTokens(chartStyle, showGrid);
@@ -41,15 +42,22 @@ export default function App() {
     layout: spcDataLayout, valueColumn: spcValueCol, subgroupColumn: spcSubgroupCol,
     pendingCells,
   });
-  const capModel = preparedSpc.model;
+  // 批次716-R3:壳层能力指标(能力页副标题/状态栏 Cpk)改走能力口径解析,与能力页/
+  // 保存记录/专项报告完全同源;SPC 副标题与工作表列数仍使用上面的 preparedSpc,互不串扰。
+  // resolver 内部含 prepareSpcData 成本,按口径输入记忆化,避免每次渲染重复解析;
+  // resolver 从 store 内部读取以下口径/角色字段,依赖需手工列全以便口径变化时失效。
+  const preparedCap = useMemo(
+    () => resolveCapabilityMeasurementData(M, textCols),
+    [M, textCols, pendingCells, capSubgroupMode, capSubgroupSize, capValueCol, capSubgroupIdCol, spcDataLayout, spcValueCol, spcSubgroupCol], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+  const capModel = preparedCap.model;
   const capSpec = { lsl: lslOn ? lsl : null, tgt, usl: uslOn ? usl : null };
   const cap = capModel && capabilityInputError(capModel.all, capModel.sigmaWithin, capSpec) == null
     ? computeCapability(capModel.all, capModel.sigmaWithin, capSpec)
     : null;
+  // Gage 角色经 effectiveGageSelection 与 MSA 页同源(未手选时用推荐,不再按列序猜)
   const preparedGage = prepareGageStudy(M, textCols, {
-    valueColumn: gageValueName,
-    partColumn: gagePartName,
-    operatorColumn: gageOperatorName,
+    ...effectiveGageSelection(M, textCols, { value: gageValueName, part: gagePartName, operator: gageOperatorName }),
     pendingCells,
   });
   const requestedRealGage = !M.isDemo && gageUseReal;
@@ -133,19 +141,26 @@ export default function App() {
           : preparedSpc.model?.hasSubgroups
             ? `子组控制图 · 子组大小 n = ${preparedSpc.model.n}`
             : '单值-移动极差控制图 · 单值序列',
-    capability: preparedSpc.error ? '能力数据角色待配置' : `正态能力 · 规格 ${specLabel}`,
+    // 716-R3:副标题跟随能力口径(而非 SPC 口径)——能力页显示 Cpk 时此处不得再写「待配置」;
+    // 输入闸门(含 1000σ 量纲哨兵)拦截时与能力页/状态栏/首页卡一致显示未运行。
+    capability: preparedCap.error
+      ? '能力数据角色待配置'
+      : cap
+        ? `正态能力 · ${preparedCap.variableName} · 规格 ${specLabel}`
+        : `正态能力 · ${preparedCap.variableName} · 未运行(输入校验未通过)`,
     gagerr: requestedRealGage
       ? preparedGage.ok
         ? `导入数据 · ${preparedGage.study.operatorLabels.length} 操作员 × ${preparedGage.study.partLabels.length} 部件 × ${preparedGage.study.repeats} 次`
         : `尚未运行 · ${preparedGage.reason}`
       : '演示研究 · 交叉设计 · ANOVA 法',
-    aql: `GB/T 2828.1 · ${aqlLevel.startsWith('S-') ? '特殊' : '一般'}检验水平 ${aqlLevel} · AQL ${aqlAQL}`,
+    aql: `GB/T 2828.1 · ${aqlLevel.startsWith('S-') ? '特殊' : '一般'}检验水平 ${aqlLevel} · AQL ${aqlAQL} · ${aqlAQL >= 15 ? '每百单位不合格数' : '百分不合格品'}`,
   };
   const subtitle = dynSub[page] ?? cur.sub;
 
   const rowSpcDisplayed = !preparedSpc.error && preparedSpc.layout === 'rows'
     && preparedSpc.model?.hasSubgroups === true && preparedSpc.model.k === M.k;
-  const wsCols = M.colNames.length + textCols.length + 1 + (rowSpcDisplayed ? 2 : 0) + (M.isDemo ? 3 : 0);
+  // ID/行 数据列已在 716-R3 删除(只剩行号槽),列计数不再 +1
+  const wsCols = M.colNames.length + textCols.length + (rowSpcDisplayed ? 2 : 0) + (M.isDemo ? 3 : 0);
   const analysisPage = page !== 'dashboard' && page !== 'assistant' && page !== 'worksheet';
 
   return (

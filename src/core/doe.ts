@@ -1,7 +1,7 @@
 /**
  * DOE 2³ 全因子 — 效应/系数/Lenth 检验，从原型 doe 页逻辑逐字迁移（交接文档 §8.5）。
  */
-import { median } from './basicMath';
+import { fCdf, mean, median } from './basicMath';
 import { tCdf, tInv } from './ttest';
 
 export interface DoeTerm {
@@ -204,14 +204,36 @@ export interface FactorialModelOptions {
   blocks?: Array<string | number>;
 }
 
+/** 两水平设计(2^(k−p) 分数因子)允许的最大因子数;两水平/一般全因子仍为 4。 */
+export const MAX_FRACTIONAL_FACTORS = 7;
+
 /** 把用户的因子列 + 响应识别为编码设计。每个因子须为 2 水平(可含中心点=中值)。 */
 export function detectFactorial(
   factors: { name: string; values: number[] }[],
   response: number[],
   metadata: { blocks?: Array<string | number> } = {},
 ): { ok: true; design: CodedDesign } | { ok: false; reason: string } {
+  // 716-R3:逻辑原样抽入 detectTwoLevelCore(仅因子数上限参数化),本函数行为与历史锚点完全一致。
+  return detectTwoLevelCore(factors, response, metadata, 4);
+}
+
+/** 716-R3:分数因子(2^(k−p),k≤7)的两水平检测——与 detectFactorial 同一套逻辑,仅放宽因子数上限。 */
+export function detectFractionalFactorial(
+  factors: { name: string; values: number[] }[],
+  response: number[],
+  metadata: { blocks?: Array<string | number> } = {},
+): { ok: true; design: CodedDesign } | { ok: false; reason: string } {
+  return detectTwoLevelCore(factors, response, metadata, MAX_FRACTIONAL_FACTORS);
+}
+
+function detectTwoLevelCore(
+  factors: { name: string; values: number[] }[],
+  response: number[],
+  metadata: { blocks?: Array<string | number> },
+  maxFactors: number,
+): { ok: true; design: CodedDesign } | { ok: false; reason: string } {
   if (factors.length < 2) return { ok: false, reason: 'DOE 至少需要 2 个因子列' };
-  if (factors.length > 4) return { ok: false, reason: 'DOE 因子最多支持 4 个' };
+  if (factors.length > maxFactors) return { ok: false, reason: `DOE 因子最多支持 ${maxFactors} 个` };
   const factorNames = factors.map((factor) => factor.name.trim());
   if (factorNames.some((name) => !name)) return { ok: false, reason: '因子名不能为空' };
   if (new Set(factorNames).size !== factorNames.length) return { ok: false, reason: '因子名不能重复' };
@@ -391,11 +413,22 @@ type ColMeta = { kind: 'intercept' } | { kind: 'block'; name: string } | { kind:
  * 有中心点时把「曲率(中心点指示)」作为独立模型列纳入,使残差回归为纯误差并给出弯曲检验;
  * 残差自由度>0(重复/中心点)→ t 检验;饱和设计 → Lenth PSE(分数自由度 m/3)。 */
 export function analyzeFactorial(design: CodedDesign, options: FactorialModelOptions = {}): FactorialResult {
+  // 716-R3:逻辑原样抽入 analyzeTwoLevelCore(仅因子数上限参数化),本函数行为与历史锚点完全一致。
+  return analyzeTwoLevelCore(design, options, 4);
+}
+
+/** 716-R3:分数因子(2^(k−p),k≤7)分析——与 analyzeFactorial 同一 OLS + estimableColumns 引擎,
+ * 别名列(如 2^(5-2) 的 D=AB、E=AC 生成的 A×B、A×C)按低阶优先自动剔除并报告混杂关系。 */
+export function analyzeFractionalFactorial(design: CodedDesign, options: FactorialModelOptions = {}): FactorialResult {
+  return analyzeTwoLevelCore(design, options, MAX_FRACTIONAL_FACTORS);
+}
+
+function analyzeTwoLevelCore(design: CodedDesign, options: FactorialModelOptions, maxFactors: number): FactorialResult {
   const { coded, response: y, factorNames } = design;
   const N = y.length;
   const k = factorNames.length;
-  if (k < 2 || k > 4 || factorNames.length !== design.levels.length) {
-    throw new Error('DOE 编码设计必须包含 2–4 个因子及对应水平定义');
+  if (k < 2 || k > maxFactors || factorNames.length !== design.levels.length) {
+    throw new Error(`DOE 编码设计必须包含 2–${maxFactors} 个因子及对应水平定义`);
   }
   const trimmedNames = factorNames.map((name) => name.trim());
   if (trimmedNames.some((name, index) => !name || name !== factorNames[index])
@@ -989,6 +1022,17 @@ export function resolveDoeColumns(
   factorCols: string[] | null,
   respCol: string | null,
 ): { factorIdx: number[]; respIdx: number } {
+  // 716-R3:逻辑原样抽入 resolveDoeColumnsWide(仅截断上限参数化),本函数行为与历史锚点完全一致。
+  return resolveDoeColumnsWide(colNames, factorCols, respCol, 4);
+}
+
+/** 716-R3:分数因子分析页使用的列解析——同一回落逻辑,因子截断上限放宽到 maxFactors(默认 7)。 */
+export function resolveDoeColumnsWide(
+  colNames: string[],
+  factorCols: string[] | null,
+  respCol: string | null,
+  maxFactors: number = MAX_FRACTIONAL_FACTORS,
+): { factorIdx: number[]; respIdx: number } {
   const eligible = colNames.map((name, index) => ({ name, index })).filter(({ name }) => isDoeAnalysisColumn(name));
   let respIdx = respCol ? colNames.indexOf(respCol) : -1;
   if (respIdx < 0 || !isDoeAnalysisColumn(colNames[respIdx] ?? '')) respIdx = eligible.length ? eligible[eligible.length - 1].index : -1;
@@ -998,7 +1042,7 @@ export function resolveDoeColumns(
   if (!factorIdx.length) {
     factorIdx = eligible.map(({ index }) => index).filter((i) => i !== respIdx);
   }
-  return { factorIdx: factorIdx.slice(0, 4), respIdx };
+  return { factorIdx: factorIdx.slice(0, maxFactors), respIdx };
 }
 
 export interface DoeStructuredReport {
@@ -1144,4 +1188,467 @@ export function buildDoeWorksheetOutput(result: FactorialResult): DoeWorksheetOu
     ...(!result.stdResiduals ? [{ name: 'DOE标准化残差', values: Array(n).fill('不可估计（无残差自由度）') }] : []),
   ];
   return { numericColumns, textColumns };
+}
+
+// ==================== 716-R3 ①:一般全因子(每因子 2–5 个手动水平) ====================
+
+/** 一般全因子的因子数上限(与两水平全因子一致);每因子水平数上限。 */
+export const GENERAL_MAX_FACTORS = 4;
+export const GENERAL_MAX_LEVELS = 5;
+export const GENERAL_MIN_LEVELS = 2;
+
+/** 一般全因子的因子定义:名称 + 显式水平值列表(2–5 个,允许不等距)。 */
+export interface GeneralFactorLevels { name: string; levels: number[] }
+
+/** 一般全因子设计:levels 为各因子升序去重水平值;levelIndex[r][f] 为第 r 行观测在因子 f 上的水平下标。 */
+export interface GeneralFactorialDesign {
+  factorNames: string[];
+  levels: number[][];
+  levelIndex: number[][];
+  response: number[];
+}
+
+/** 把用户的因子列 + 响应识别为一般全因子设计(每因子 2–5 个数值水平,不要求等距/平衡)。
+ * 纯两水平数据同样能通过本检测,但页面约定:两水平检测成功时只走既有两水平引擎,本路径仅接
+ * 「存在 ≥3 水平因子(或非规整中值)」的数据,保证两水平行为零回归。 */
+export function detectGeneralFactorial(
+  factors: { name: string; values: number[] }[],
+  response: number[],
+): { ok: true; design: GeneralFactorialDesign } | { ok: false; reason: string } {
+  if (factors.length < 2) return { ok: false, reason: '一般全因子至少需要 2 个因子列' };
+  if (factors.length > GENERAL_MAX_FACTORS) return { ok: false, reason: `一般全因子最多支持 ${GENERAL_MAX_FACTORS} 个因子` };
+  const factorNames = factors.map((factor) => factor.name.trim());
+  if (factorNames.some((name) => !name)) return { ok: false, reason: '因子名不能为空' };
+  if (new Set(factorNames).size !== factorNames.length) return { ok: false, reason: '因子名不能重复' };
+  const N = response.length;
+  if (N < 4) return { ok: false, reason: '至少需要 4 行数据' };
+  if (response.some((value) => !Number.isFinite(value))) return { ok: false, reason: '响应列包含空值或非有限数值' };
+  const levels: number[][] = [];
+  const levelIndexCols: number[][] = [];
+  for (const f of factors) {
+    if (f.values.length !== N) return { ok: false, reason: `因子「${f.name}」与响应行数不一致` };
+    if (f.values.some((value) => !Number.isFinite(value))) return { ok: false, reason: `因子「${f.name}」包含空值或非有限数值` };
+    const uniq = [...new Set(f.values)].sort((a, b) => a - b);
+    if (uniq.length < GENERAL_MIN_LEVELS) return { ok: false, reason: `因子「${f.name}」只有 1 个水平,无法分析效应` };
+    if (uniq.length > GENERAL_MAX_LEVELS) {
+      return { ok: false, reason: `因子「${f.name}」检测到 ${uniq.length} 个水平,一般全因子每因子最多支持 ${GENERAL_MAX_LEVELS} 个水平` };
+    }
+    const indexOf = new Map(uniq.map((value, index) => [value, index]));
+    levels.push(uniq);
+    levelIndexCols.push(f.values.map((value) => indexOf.get(value)!));
+  }
+  const levelIndex = response.map((_, r) => levelIndexCols.map((col) => col[r]));
+  return { ok: true, design: { factorNames, levels, levelIndex, response: [...response] } };
+}
+
+export interface GeneralAnovaTermRow {
+  name: string;                 // 主效应=因子名;交互=「A×B」
+  kind: 'main' | 'interaction';
+  df: number;
+  adjSS: number;
+  adjMS: number | null;
+  f: number | null;             // 无残差自由度时为 null
+  p: number | null;
+  sig: boolean;                 // p < 0.05
+}
+
+export interface GeneralFactorialResult {
+  rows: GeneralAnovaTermRow[];                                  // 因子主效应 + (纳入时)二因子交互
+  error: { df: number; adjSS: number; adjMS: number | null };
+  total: { df: number; adjSS: number };
+  includeInteractions: boolean;
+  /** 二因子交互未纳入时的原因说明。 */
+  interactionNote?: string;
+  /** 因秩亏(缺格等)完全无法估计的项。 */
+  inestimableTerms?: string[];
+  fits: number[];
+  residuals: number[];
+  grand: number;
+  r2: number;
+  r2Adj: number | null;
+  factorNames: string[];
+  nRuns: number;
+  levelMeans: { name: string; levels: number[]; means: number[]; counts: number[] }[];
+}
+
+/** 各因子按水平分组的响应均值(主效应图数据,均值按水平算)。 */
+export function generalLevelMeans(design: GeneralFactorialDesign): GeneralFactorialResult['levelMeans'] {
+  return design.factorNames.map((name, f) => {
+    const sums = design.levels[f].map(() => 0);
+    const counts = design.levels[f].map(() => 0);
+    design.levelIndex.forEach((row, r) => {
+      sums[row[f]] += design.response[r];
+      counts[row[f]] += 1;
+    });
+    return {
+      name,
+      levels: [...design.levels[f]],
+      means: sums.map((sum, j) => (counts[j] ? sum / counts[j] : NaN)),
+      counts,
+    };
+  });
+}
+
+/** 一般全因子的效应编码(deviation coding)列:水平 j(0..L−2)一列,取值 该水平=+1、末水平=−1、其余=0。 */
+function generalEffectColumns(design: GeneralFactorialDesign, factor: number): number[][] {
+  const L = design.levels[factor].length;
+  return Array.from({ length: L - 1 }, (_, j) =>
+    design.levelIndex.map((row) => (row[factor] === j ? 1 : row[factor] === L - 1 ? -1 : 0)));
+}
+
+/**
+ * 一般全因子多向 ANOVA(≥3 水平因子的分析路径)。
+ *
+ * 统计口径(注释即规格):
+ * - 模型:截距 + 各因子主效应 + (自由度允许时)全部二因子交互,OLS 拟合(效应编码/deviation coding)。
+ * - 平方和:每一项的 Adj SS = SSE(去掉该项的模型) − SSE(完整模型),即效应编码下的边际
+ *   (Type III)平方和,与 Minitab GLM 默认的 Adj SS 口径一致;平衡设计下退化为经典的
+ *   分组均值公式(如主效应 SS = n_level·Σ(水平均值−总均值)²)。不采用序贯(Type I)SS,
+ *   以免不平衡数据下结论依赖项的输入顺序。
+ * - 二因子交互:仅当纳入后残差自由度 ≥1(即有仿行支撑)才进入模型,否则明确说明无法与
+ *   误差分离并把其变异并入误差项;三因子及以上交互本版不纳入。
+ * - 检验:F = Adj MS / MSE,P = 1 − F 分布 CDF,α=0.05;残差自由度为 0 时 F/P 置 null。
+ * - 缺格导致某项完全别名(秩增量为 0)时,该项记入 inestimableTerms,不冒充 0 显著性。
+ */
+export function analyzeGeneralFactorial(
+  design: GeneralFactorialDesign,
+  options: { includeInteractions?: boolean } = {},
+): GeneralFactorialResult {
+  const { factorNames, levels, levelIndex, response: y } = design;
+  const k = factorNames.length;
+  const N = y.length;
+  if (k < 2 || k > GENERAL_MAX_FACTORS || levels.length !== k) {
+    throw new Error(`一般全因子设计必须包含 2–${GENERAL_MAX_FACTORS} 个因子及对应水平定义`);
+  }
+  const trimmed = factorNames.map((name) => name.trim());
+  if (trimmed.some((name, index) => !name || name !== factorNames[index]) || new Set(trimmed).size !== k) {
+    throw new Error('一般全因子因子名必须非空且不能重复');
+  }
+  if (levels.some((ls) => ls.length < GENERAL_MIN_LEVELS || ls.length > GENERAL_MAX_LEVELS
+    || ls.some((value) => !Number.isFinite(value)) || new Set(ls).size !== ls.length)) {
+    throw new Error(`一般全因子每因子需要 ${GENERAL_MIN_LEVELS}–${GENERAL_MAX_LEVELS} 个互不相同的有限水平值`);
+  }
+  if (N < 4 || levelIndex.length !== N || y.some((value) => !Number.isFinite(value))) {
+    throw new Error('一般全因子设计至少需要 4 行且响应必须为有限数值');
+  }
+  if (levelIndex.some((row) => row.length !== k
+    || row.some((index, f) => !Number.isInteger(index) || index < 0 || index >= levels[f].length))) {
+    throw new Error('一般全因子水平下标必须逐行覆盖全部因子且在水平范围内');
+  }
+  if (factorNames.some((_, f) => new Set(levelIndex.map((row) => row[f])).size !== levels[f].length)) {
+    throw new Error('一般全因子每个因子的所有水平都必须至少出现一次');
+  }
+  if (new Set(y).size < 2) {
+    throw new Error('响应所有值相同(零方差),无法进行方差分析;请确认已录入实测响应');
+  }
+
+  interface ModelTerm { name: string; kind: 'main' | 'interaction'; cols: number[][] }
+  const mains: ModelTerm[] = factorNames.map((name, f) => ({ name, kind: 'main', cols: generalEffectColumns(design, f) }));
+  const inters: ModelTerm[] = [];
+  for (let i = 0; i < k; i++) {
+    for (let j = i + 1; j < k; j++) {
+      const cols: number[][] = [];
+      for (const a of mains[i].cols) for (const b of mains[j].cols) cols.push(a.map((value, r) => value * b[r]));
+      inters.push({ name: `${factorNames[i]}×${factorNames[j]}`, kind: 'interaction', cols });
+    }
+  }
+  const buildX = (termList: ModelTerm[]): number[][] =>
+    y.map((_, r) => [1, ...termList.flatMap((term) => term.cols.map((col) => col[r]))]);
+  const sseOf = (residuals: number[]) => residuals.reduce((sum, value) => sum + value * value, 0);
+
+  // 先试含全部二因子交互的模型,按秩(而非名义参数数)判断是否有残差自由度支撑交互。
+  const fitWith = olsFit(buildX([...mains, ...inters]), y);
+  const dfWith = N - fitWith.rank;
+  const includeInteractions = options.includeInteractions ?? (inters.length > 0 && dfWith >= 1);
+  const chosen = includeInteractions ? [...mains, ...inters] : mains;
+  const fitFull = includeInteractions ? fitWith : olsFit(buildX(mains), y);
+  const interactionNote = !includeInteractions && inters.length
+    ? (options.includeInteractions === false
+      ? '按设置未纳入二因子交互,其变异并入误差项。'
+      : '当前设计无仿行(纳入二因子交互后残差自由度为 0),二因子交互无法与误差分离,未纳入模型;其变异并入误差项。')
+    : undefined;
+
+  const grand = mean(y);
+  const sst = y.reduce((sum, value) => sum + (value - grand) * (value - grand), 0);
+  const sse = sseOf(fitFull.residuals);
+  const columnCount = 1 + chosen.reduce((sum, term) => sum + term.cols.length, 0);
+  // 平方和的「等效零」阈值:与总平方和同尺度的浮点舍入界,避免把纯舍入残渣当成非零 SS 参与 F=∞ 判定。
+  const ssTol = sst * Number.EPSILON * 64 * Math.max(N, columnCount);
+  const dfError = N - fitFull.rank;
+  const mse = dfError > 0 ? sse / dfError : null;
+  const mseIsZero = dfError > 0 && sse <= ssTol;
+
+  const rows: GeneralAnovaTermRow[] = [];
+  const inestimable: string[] = [];
+  for (const term of chosen) {
+    const reduced = chosen.filter((other) => other !== term);
+    const fitReduced = olsFit(buildX(reduced), y);
+    const df = fitFull.rank - fitReduced.rank;
+    if (df <= 0) {
+      // 该项的列全部与更低阶已保留列线性相关(缺格/别名),无法单独估计。
+      inestimable.push(term.name);
+      rows.push({ name: term.name, kind: term.kind, df: 0, adjSS: 0, adjMS: null, f: null, p: null, sig: false });
+      continue;
+    }
+    const adjSS = Math.max(0, sseOf(fitReduced.residuals) - sse);
+    const adjMS = adjSS / df;
+    let f: number | null = null;
+    let p: number | null = null;
+    if (dfError > 0) {
+      if (mseIsZero) {
+        // 完美拟合:非零 SS → 无穷显著(p=0);零 SS → 无信息(p=1)。与 oneWayAnova 口径一致。
+        f = adjSS <= ssTol ? 0 : Infinity;
+        p = adjSS <= ssTol ? 1 : 0;
+      } else {
+        f = adjMS / mse!;
+        p = 1 - fCdf(f, df, dfError);
+      }
+    }
+    rows.push({ name: term.name, kind: term.kind, df, adjSS, adjMS, f, p, sig: p != null && p < 0.05 });
+  }
+
+  return {
+    rows,
+    error: { df: dfError, adjSS: sse, adjMS: mse },
+    total: { df: N - 1, adjSS: sst },
+    includeInteractions,
+    interactionNote,
+    inestimableTerms: inestimable.length ? inestimable : undefined,
+    fits: fitFull.fits,
+    residuals: fitFull.residuals,
+    grand,
+    r2: sst > 0 ? 1 - sse / sst : 0,
+    r2Adj: dfError > 0 ? 1 - (sse / dfError) / (sst / (N - 1)) : null,
+    factorNames: [...factorNames],
+    nRuns: N,
+    levelMeans: generalLevelMeans(design),
+  };
+}
+
+/** 新增生成器共用的确定性 LCG 区组内洗牌;常数与 generateFactorialDesign 内联实现一致,种子相同结果可复现。 */
+function lcgShuffleByBlock<T>(byBlock: T[][], seed: number | undefined): void {
+  let s = (seed ?? 12345) >>> 0;
+  const rnd = () => (s = (1103515245 * s + 12345) >>> 0) / 0x100000000;
+  for (const blockRuns of byBlock) {
+    for (let i = blockRuns.length - 1; i > 0; i--) {
+      const j = Math.floor(rnd() * (i + 1));
+      [blockRuns[i], blockRuns[j]] = [blockRuns[j], blockRuns[i]];
+    }
+  }
+}
+
+const positiveIntegerOption = (value: number | undefined, fallback: number, label: string, minimum: number): number => {
+  const resolved = value ?? fallback;
+  if (!Number.isInteger(resolved) || resolved < minimum) throw new Error(`${label}必须是不小于 ${minimum} 的整数`);
+  return resolved;
+};
+
+/** 生成一般全因子设计(∏水平数 × 仿行数),落表格式与 generateFactorialDesign 完全一致:
+ * 标准序/运行序/区组/因子列/末列「响应(待录入)」+ 点类型文本列。
+ * - 区组:本版一般全因子不支持多区组(两水平的 2 的幂区组生成元不适用于混合水平),区组列恒为 1。
+ * - 点类型:一般全因子没有「角点/中心点」二分——多水平因子的弯曲信息由 ≥3 水平主效应 ANOVA 本身
+ *   承载,无需单独曲率项,故所有运行统一记为「因子点」;保留该列使元数据识别管道口径一致。
+ * - 标准序:因子 1 变化最快(混合进制 Yates 序);随机化沿用确定性 LCG,同种子完全可复现。 */
+export function generateGeneralFactorialDesign(
+  factors: GeneralFactorLevels[],
+  opts: { replicates?: number; randomize?: boolean; seed?: number } = {},
+): GeneratedFactorialDesign {
+  const k = factors.length;
+  if (k < 2 || k > GENERAL_MAX_FACTORS) throw new Error(`一般全因子设计支持 2–${GENERAL_MAX_FACTORS} 个因子`);
+  const names = factors.map((factor) => factor.name.trim());
+  if (names.some((name) => !name)) throw new Error('因子名不能为空');
+  if (new Set(names).size !== names.length) throw new Error('因子名不能重复');
+  for (const factor of factors) {
+    if (factor.levels.length < GENERAL_MIN_LEVELS || factor.levels.length > GENERAL_MAX_LEVELS) {
+      throw new Error(`因子「${factor.name}」的水平数必须在 ${GENERAL_MIN_LEVELS}–${GENERAL_MAX_LEVELS} 之间`);
+    }
+    if (factor.levels.some((value) => !Number.isFinite(value))) throw new Error(`因子「${factor.name}」的水平值必须是有限数值`);
+    if (new Set(factor.levels).size !== factor.levels.length) throw new Error(`因子「${factor.name}」的水平值不能重复`);
+  }
+  const reps = positiveIntegerOption(opts.replicates, 1, '仿行数', 1);
+  const counts = factors.map((factor) => factor.levels.length);
+  const runsPerRep = counts.reduce((product, count) => product * count, 1);
+  const generated: GeneratedRun[] = [];
+  let standardOrder = 1;
+  for (let r = 0; r < reps; r++) {
+    for (let combo = 0; combo < runsPerRep; combo++) {
+      // 混合进制展开:因子 1 变化最快,与两水平生成器的 Yates 序习惯一致。
+      let rest = combo;
+      const values = factors.map((factor, j) => {
+        const idx = rest % counts[j];
+        rest = Math.floor(rest / counts[j]);
+        return factor.levels[idx];
+      });
+      generated.push({ standardOrder: standardOrder++, block: 1, pointType: '因子点', factorValues: values });
+    }
+  }
+  if (opts.randomize) lcgShuffleByBlock([generated], opts.seed);
+  const colNames = ['标准序', '运行序', '区组', ...names, '响应(待录入)'];
+  const rows = generated.map((run, index) => [run.standardOrder, index + 1, run.block, ...run.factorValues, 0]);
+  return {
+    colNames,
+    rows,
+    textCols: [{ name: '点类型', values: generated.map((run) => run.pointType) }],
+    responseCol: colNames.length - 1,
+    blockCount: 1,
+  };
+}
+
+// ==================== 716-R3 ②:分数因子 2^(k−p) 设计与折叠 ====================
+
+const FACTOR_LETTERS = 'ABCDEFG';
+const RESOLUTION_ROMAN: Record<number, string> = { 3: 'III', 4: 'IV', 5: 'V', 6: 'VI', 7: 'VII' };
+
+/**
+ * 标准最小失真 2^(k−p) 生成元表(k=3..7)。
+ * 生成元与分辨率取自公认的教科书标准设计表(Box–Hunter–Hunter《Statistics for
+ * Experimenters》表 6.22 / Montgomery《Design and Analysis of Experiments》附录,
+ * 与 Minitab「创建因子设计」的默认设计一致):
+ *   3-1: C=AB(III)          4-1: D=ABC(IV)          5-1: E=ABCD(V)
+ *   5-2: D=AB,E=AC(III)     6-1: F=ABCDE(VI)        6-2: E=ABC,F=BCD(IV)
+ *   6-3: D=AB,E=AC,F=BC(III) 7-1: G=ABCDEF(VII)     7-2: F=ABCD,G=ABDE(IV)
+ *   7-3: E=ABC,F=BCD,G=ACD(IV) 7-4: D=AB,E=AC,F=BC,G=ABC(III)
+ * subsets 是各生成因子(位置 k−p..k−1)对应的基础因子下标(A=0)。
+ */
+const FRACTIONAL_GENERATORS: Record<string, { resolution: number; subsets: number[][] }> = {
+  '3-1': { resolution: 3, subsets: [[0, 1]] },
+  '4-1': { resolution: 4, subsets: [[0, 1, 2]] },
+  '5-1': { resolution: 5, subsets: [[0, 1, 2, 3]] },
+  '5-2': { resolution: 3, subsets: [[0, 1], [0, 2]] },
+  '6-1': { resolution: 6, subsets: [[0, 1, 2, 3, 4]] },
+  '6-2': { resolution: 4, subsets: [[0, 1, 2], [1, 2, 3]] },
+  '6-3': { resolution: 3, subsets: [[0, 1], [0, 2], [1, 2]] },
+  '7-1': { resolution: 7, subsets: [[0, 1, 2, 3, 4, 5]] },
+  '7-2': { resolution: 4, subsets: [[0, 1, 2, 3], [0, 1, 3, 4]] },
+  '7-3': { resolution: 4, subsets: [[0, 1, 2], [1, 2, 3], [0, 2, 3]] },
+  '7-4': { resolution: 3, subsets: [[0, 1], [0, 2], [1, 2], [0, 1, 2]] },
+};
+
+export interface FractionalDesignSpec {
+  k: number;
+  p: number;                       // 0 = 全因子
+  runs: number;                    // 2^(k−p),单仿行、未折叠
+  resolution: number | null;       // null = 全因子(无混杂)
+  resolutionLabel: string;         // 罗马数字;全因子为「完全」
+  generators: string[];            // 如 ['D=ABC'];全因子为空数组
+  label: string;                   // 如 '2^(5-2)' / '2^5'
+}
+
+const fractionalSpec = (k: number, p: number): FractionalDesignSpec => {
+  if (p === 0) {
+    return { k, p, runs: 1 << k, resolution: null, resolutionLabel: '完全', generators: [], label: `2^${k}` };
+  }
+  const entry = FRACTIONAL_GENERATORS[`${k}-${p}`];
+  if (!entry) throw new Error(`不支持 2^(${k}-${p}) 设计;k=3..7 的标准分数因子见设计选择表`);
+  const base = k - p;
+  return {
+    k,
+    p,
+    runs: 1 << base,
+    resolution: entry.resolution,
+    resolutionLabel: RESOLUTION_ROMAN[entry.resolution],
+    generators: entry.subsets.map((subset, index) =>
+      `${FACTOR_LETTERS[base + index]}=${subset.map((j) => FACTOR_LETTERS[j]).join('')}`),
+    label: `2^(${k}-${p})`,
+  };
+};
+
+/** 设计选择表:给定因子数 k(3..7),返回可选设计(全因子 + 各标准分数)及次数/分辨率。 */
+export function fractionalDesignOptions(k: number): FractionalDesignSpec[] {
+  if (!Number.isInteger(k) || k < 3 || k > MAX_FRACTIONAL_FACTORS) {
+    throw new Error(`分数因子设计支持 3–${MAX_FRACTIONAL_FACTORS} 个因子`);
+  }
+  const options: FractionalDesignSpec[] = [fractionalSpec(k, 0)];
+  for (let p = 1; p < k; p++) {
+    if (FRACTIONAL_GENERATORS[`${k}-${p}`]) options.push(fractionalSpec(k, p));
+  }
+  return options;
+}
+
+export type FractionalFold = 'none' | 'full' | number; // number = 指定折叠因子的下标(0-based)
+
+export interface GeneratedFractionalDesign extends GeneratedFactorialDesign {
+  resolutionLabel: string;
+  generators: string[];
+  folded: boolean;
+}
+
+/** 生成 2^(k−p) 分数因子设计(p=0 时为 2^k 全因子),支持折叠:
+ * - 不折叠:2^(k−p)×仿行 次,区组恒为 1;
+ * - 全折叠:追加全部因子符号取反的镜像运行(分辨率 III 设计折叠后主效应与二因子交互解除混杂,III→IV);
+ * - 指定因子折叠:仅该因子符号取反追加(解除该因子与二因子交互的混杂)。
+ * 折叠追加的运行记为区组 2(折叠块可作区组进入分析,吸收两批试验间的批次差),标准序在原设计之后
+ * 顺延;随机化按区组内 LCG 洗牌,同种子完全可复现。生成的工作表可直接被两水平分析引擎
+ * (OLS + estimableColumns)读取,别名项按低阶优先自动剔除并报告混杂关系。 */
+export function generateFractionalFactorialDesign(
+  factors: FactorDef[],
+  p: number,
+  opts: { fold?: FractionalFold; replicates?: number; randomize?: boolean; seed?: number } = {},
+): GeneratedFractionalDesign {
+  const k = factors.length;
+  if (k < 3 || k > MAX_FRACTIONAL_FACTORS) throw new Error(`分数因子设计支持 3–${MAX_FRACTIONAL_FACTORS} 个因子`);
+  const names = factors.map((factor) => factor.name.trim());
+  if (names.some((name) => !name)) throw new Error('因子名不能为空');
+  if (new Set(names).size !== names.length) throw new Error('因子名不能重复');
+  if (factors.some((factor) => !Number.isFinite(factor.low) || !Number.isFinite(factor.high))) {
+    throw new Error('因子上下限必须是有限数值');
+  }
+  if (factors.some((factor) => !(factor.low < factor.high))) throw new Error('每个因子必须满足低水平 < 高水平');
+  if (!Number.isInteger(p) || p < 0) throw new Error('分数 p 必须是非负整数');
+  const spec = fractionalSpec(k, p);
+  const fold: FractionalFold = opts.fold ?? 'none';
+  if (fold !== 'none' && p === 0) throw new Error('全因子设计无别名,无需折叠');
+  if (typeof fold === 'number' && (!Number.isInteger(fold) || fold < 0 || fold >= k)) {
+    throw new Error('折叠因子下标必须在 0..k-1 之间');
+  }
+  const reps = positiveIntegerOption(opts.replicates, 1, '仿行数', 1);
+  const base = k - p;
+  const subsets = p === 0 ? [] : FRACTIONAL_GENERATORS[`${k}-${p}`].subsets;
+
+  // 基础分数的符号矩阵:基础因子按 Yates 序(A 变化最快),生成因子=基础因子符号之积。
+  const signRows: number[][] = Array.from({ length: 1 << base }, (_, combo) => {
+    const signs = new Array<number>(k);
+    for (let j = 0; j < base; j++) signs[j] = combo & (1 << j) ? 1 : -1;
+    subsets.forEach((subset, index) => {
+      signs[base + index] = subset.reduce((product, j) => product * signs[j], 1);
+    });
+    return signs;
+  });
+  const foldSigns = (signs: number[]): number[] =>
+    fold === 'full' ? signs.map((value) => -value) : signs.map((value, j) => (j === fold ? -value : value));
+
+  const generated: GeneratedRun[] = [];
+  let standardOrder = 1;
+  const pushRuns = (block: number, transform: (signs: number[]) => number[]) => {
+    for (let r = 0; r < reps; r++) {
+      for (const signs of signRows) {
+        const finalSigns = transform(signs);
+        generated.push({
+          standardOrder: standardOrder++,
+          block,
+          pointType: '因子点',
+          factorValues: factors.map((factor, j) => (finalSigns[j] > 0 ? factor.high : factor.low)),
+        });
+      }
+    }
+  };
+  pushRuns(1, (signs) => signs);
+  if (fold !== 'none') pushRuns(2, foldSigns);
+
+  const blockCount = fold !== 'none' ? 2 : 1;
+  const byBlock = Array.from({ length: blockCount }, (_, i) => generated.filter((run) => run.block === i + 1));
+  if (opts.randomize) lcgShuffleByBlock(byBlock, opts.seed);
+  const finalRuns = byBlock.flat();
+  const colNames = ['标准序', '运行序', '区组', ...names, '响应(待录入)'];
+  const rows = finalRuns.map((run, index) => [run.standardOrder, index + 1, run.block, ...run.factorValues, 0]);
+  return {
+    colNames,
+    rows,
+    textCols: [{ name: '点类型', values: finalRuns.map((run) => run.pointType) }],
+    responseCol: colNames.length - 1,
+    blockCount,
+    resolutionLabel: spec.resolutionLabel,
+    generators: spec.generators,
+    folded: fold !== 'none',
+  };
 }

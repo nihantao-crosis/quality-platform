@@ -97,7 +97,8 @@ describe('正式表黄金夹具来源', () => {
 describe('正式表 2-A / 2-B / 2-C 逐格核对', () => {
   const fixture = loadTsv('gbt2828-1-2012-tables-2abc.tsv');
 
-  expect(AQL_COLS).toEqual([0.01, 0.015, 0.025, 0.04, 0.065, 0.1, 0.15, 0.25, 0.4, 0.65, 1.0, 1.5, 2.5, 4.0, 6.5, 10]);
+  // K2:AQL_COLS 扩为 26 档;前 16 档(百分不合格品)顺序与数值不变,后 10 档为每百单位不合格数体系。
+  expect(AQL_COLS).toEqual([0.01, 0.015, 0.025, 0.04, 0.065, 0.1, 0.15, 0.25, 0.4, 0.65, 1.0, 1.5, 2.5, 4.0, 6.5, 10, 15, 25, 40, 65, 100, 150, 250, 400, 650, 1000]);
   for (const state of ['normal', 'tightened', 'reduced'] as InspectionState[]) {
     it(`${state}: 16 个初始字码 × 6 个 AQL 全部一致`, () => {
       const rows = fixture.rows.filter((row) => row.state === state);
@@ -112,9 +113,13 @@ describe('正式表 2-A / 2-B / 2-C 逐格核对', () => {
     });
   }
 
-  it('非正式 AQL 不得静默回落二项近似(15 属每百单位不合格数体系,K2 前不支持)', () => {
-    expect(masterPlanByState('normal', 'F', 15)).toBeNull();
-    expect(() => aqlPlanByState(120, 'II', 15, 'normal')).toThrow(/不支持/);
+  it('非正式 AQL(非 26 档之一)不得静默回落二项近似;15 档 K2 起属正式主表', () => {
+    // 17 不是国标档位:正式路径必须显式报错,绝不静默近似
+    expect(masterPlanByState('normal', 'F', 17)).toBeNull();
+    expect(() => aqlPlanByState(120, 'II', 17, 'normal')).toThrow(/不支持/);
+    // K2:AQL 15(每百单位不合格数体系)已由正式主表覆盖
+    expect(masterPlanByState('normal', 'F', 15)).toEqual({ code: 'F', n: 20, ac: 7, re: 8 });
+    expect(aqlPlanByState(120, 'II', 15, 'normal')).toEqual({ code: 'F', n: 20, ac: 7, re: 8 });
   });
 
   it('表 2-C 使用独立样本量序列，并保留箭头解析后的执行字码', () => {
@@ -125,7 +130,8 @@ describe('正式表 2-A / 2-B / 2-C 逐格核对', () => {
 
 describe('转移得分的严一档 AQL', () => {
   it('六个产品 AQL 的严一档映射完整，0.65 使用正式 0.40 列', () => {
-    expect(AQL_COLS.map(oneStepTighterAql)).toEqual([null, 0.01, 0.015, 0.025, 0.04, 0.065, 0.1, 0.15, 0.25, 0.4, 0.65, 1.0, 1.5, 2.5, 4.0, 6.5]);
+    // K2:26 档的严一档 = 左邻一列;AQL 15 的严一档是 10(跨每百单位/百分体系边界,见 aql.ts 注释)。
+    expect(AQL_COLS.map(oneStepTighterAql)).toEqual([null, 0.01, 0.015, 0.025, 0.04, 0.065, 0.1, 0.15, 0.25, 0.4, 0.65, 1.0, 1.5, 2.5, 4.0, 6.5, 10, 15, 25, 40, 65, 100, 150, 250, 400, 650]);
     const fixture = loadTsv('gbt2828-1-2012-table-2a-aql-0.40.tsv');
     for (const row of fixture.rows) {
       const context = `2-A/${row.initial_code}/AQL0.40`;

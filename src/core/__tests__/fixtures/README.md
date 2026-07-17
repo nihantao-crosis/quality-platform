@@ -30,3 +30,12 @@
 ## SPC 控制图常数
 
 `spc-control-constant-bases.tsv` 保存 n=2…10 的独立 d2/d3/c4 基础值。测试侧按 ASTM E2587、[Minitab 对 d2/d3 的定义](https://support.minitab.com/en-us/minitab/help-and-how-to/quality-and-process-improvement/control-charts/how-to/variables-charts-for-subgroups/xbar-r-chart/methods-and-formulas/unbiasing-constants-d2-d3-and-d4/)以及 [NIST 控制限公式](https://www.itl.nist.gov/div898/handbook/pmc/section3/pmc321.htm)，推导 A2、A3、D3、D4、B3、B4，并连同 d2/c4 对 `CONTROL_CONSTANTS` 的 72 个字段逐项核对。夹具只保存基础常数，不从生产 `spc.ts` 生成。
+
+## gbt2828-1-2012-tables-2abc-full16.tsv(v1.36 起)
+- 49 行(2-A 16 + 2-B 17 含 S 行 + 2-C 16)× 16 AQL 列(0.010–10),cell=final_code/n/Ac/Re,`-`=国标留白。
+- 血统:工厂修订版 xlsx 转录 + 国标扫描件核对;含勘误#2(2-C Q/0.025 ↓→长↑→N/200/0/1)。
+
+## gbt2828-1-2012-tables-2abc-aql15-1000.tsv(v1.38 起,批次716-R3 K2)
+- 49 行 × 10 AQL 列(15–1000,每百单位不合格数体系),cell 格式同上;留白仅 2-B S 行(勘误#3:工厂 xlsx 该 10 格误填 ↑,国标扫描件像素级确认箭杆止于 R 行)。
+- 血统:国标扫描件(物理页21–23,300dpi)每表 2 名独立转录员双盲转录(490 格零分歧)+ 与工厂 xlsx 三方机器 diff + 仲裁员像素复核;头部注释含 pdf_sha256 与方法说明。
+- 维护:任何修改必须重走「独立转录 + 机器 diff」流程,禁止按规律或记忆改格。

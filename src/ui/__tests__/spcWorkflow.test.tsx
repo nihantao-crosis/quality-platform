@@ -40,8 +40,10 @@ describe('SPC 页面端到端数据角色', () => {
     expect(html).toContain('变量：直径');
     expect(html).toContain('子组大小 n = 5');
     expect(html).not.toContain('子组大小 n = 6');
-    expect(html).toContain('直径 的均值控制图');
+    // 批次716-R3:X̄ 与 R 合并为上下双面板单标题(人工反馈716 PPT 第4页)
+    expect(html).toContain('直径 的 Xbar-R 控制图');
     expect(html).toContain('直径 · 子组均值');
+    expect(html).toContain('直径 · 子组极差');
     expect(html).toContain('判读顺序：先看 R 图');
   });
 

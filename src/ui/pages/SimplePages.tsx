@@ -7,7 +7,7 @@ import { gageReport, anovaReport, tReport, regReport, paretoReport } from '../re
 import {
   nf, anovaGroups, DEFECTS, gageStudyData, GAGE_TOLERANCE,
   computeGageRR, oneWayAnova, anovaResiduals, anovaGroupSummaries, buildAnovaGroups, wideScaleDisparate, oneSampleT, twoSampleT, linearRegression,
-  resolveAnovaMode, resolveAnovaNumericRoles, countAnovaPendingCells, isDoeAnalysisColumn, prepareGageStudy, listGageCategoryColumns,
+  resolveAnovaMode, resolveAnovaNumericRoles, countAnovaPendingCells, isDoeAnalysisColumn, prepareGageStudy, listGageCategoryColumns, recommendGageRoles, effectiveGageSelection,
   type TTestResult, type AnovaMode, type AnovaGroup,
 } from '../../core';
 import { ScatterPlot } from '../charts/ScatterPlot';
@@ -83,16 +83,39 @@ function GageRRInner({ T }: { T: ChartTokens }) {
   const {
     lsl, usl, lslOn, uslOn, gageUseReal, gageValueName, gagePartName, gageOperatorName, setGageOptions,
   } = useApp();
-  const namedValueIndex = gageValueName ? model.colNames.indexOf(gageValueName) : -1;
+  // 批次716-R3 P1-2:默认角色不再按列序猜(工厂列序「部件、测试人、螺钉高度」曾被推荐反),
+  // 改用 recommendGageRoles 的可解释打分做「预填」;store 字段非 null(用户手动选过)时绝不覆盖。
+  const recommend = useMemo(() => recommendGageRoles(model, textCols), [model, textCols]);
+  // 生效角色统一走 effectiveGageSelection(与壳层状态栏/保存记录/专项报告同一来源,716-R3 收口)
+  const effective = useMemo(() => effectiveGageSelection(model, textCols,
+    { value: gageValueName, part: gagePartName, operator: gageOperatorName }),
+  [model, textCols, gageValueName, gagePartName, gageOperatorName]);
+  const effValueName = effective.valueColumn;
+  const namedValueIndex = effValueName ? model.colNames.indexOf(effValueName) : -1;
   const valCol = namedValueIndex >= 0 ? namedValueIndex : 0;
   const selectedValueName = model.colNames[valCol] ?? null;
   const categoryColumns = listGageCategoryColumns(model, textCols, selectedValueName);
   // 部件/操作员可以是文本编码或数字 ID，但必须是测量列以外的两列。
   const canReal = model.colNames.length >= 1 && categoryColumns.length >= 2;
-  const namedPartIndex = gagePartName ? categoryColumns.findIndex((column) => column.name === gagePartName) : -1;
-  const namedOperatorIndex = gageOperatorName ? categoryColumns.findIndex((column) => column.name === gageOperatorName) : -1;
+  const recPartName = effective.partColumn !== gagePartName ? effective.partColumn : (gagePartName == null ? effective.partColumn : null);
+  const recOperatorName = effective.operatorColumn !== gageOperatorName ? effective.operatorColumn : (gageOperatorName == null ? effective.operatorColumn : null);
+  const effPartName = effective.partColumn;
+  const effOperatorName = effective.operatorColumn;
+  const namedPartIndex = effPartName ? categoryColumns.findIndex((column) => column.name === effPartName) : -1;
+  const namedOperatorIndex = effOperatorName ? categoryColumns.findIndex((column) => column.name === effOperatorName) : -1;
   const partCol = namedPartIndex >= 0 ? namedPartIndex : 0;
   const operCol = namedOperatorIndex >= 0 ? namedOperatorIndex : 1;
+  // 任一角色用了推荐值(而非用户手选)时,展示推荐依据小字请用户确认
+  const usedRecommend = canReal && !model.isDemo && recommend.reasons.length > 0 && (
+    (gageValueName == null && recommend.value != null)
+    || (gagePartName == null && recPartName != null)
+    || (gageOperatorName == null && recOperatorName != null)
+  );
+  const recommendHint = usedRecommend ? (
+    <div style={{ margin: '8px 16px 0', fontSize: 11, color: '#8a929d', lineHeight: 1.6 }}>
+      自动推荐:{recommend.reasons.join('；')},请确认
+    </div>
+  ) : null;
   const controls = (!model.isDemo || canReal) ? (
     <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#5b6472' }}>
       <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
@@ -117,12 +140,13 @@ function GageRRInner({ T }: { T: ChartTokens }) {
       )}
     </div>
   ) : null;
+  // 计算与下拉显示同源:用户手选优先,未选过的角色用推荐预填(仍可被下拉修改)
   const prepared = useMemo(() => prepareGageStudy(model, textCols, {
-    valueColumn: gageValueName,
-    partColumn: gagePartName,
-    operatorColumn: gageOperatorName,
+    valueColumn: effective.valueColumn,
+    partColumn: effective.partColumn,
+    operatorColumn: effective.operatorColumn,
     pendingCells,
-  }), [model, textCols, gageValueName, gagePartName, gageOperatorName, pendingCells]);
+  }), [model, textCols, effective, pendingCells]);
   const requestedReal = !model.isDemo && gageUseReal;
   let real: ReturnType<typeof computeGageRR> | null = null;
   let realError = requestedReal && !prepared.ok ? prepared.reason : '';
@@ -141,6 +165,7 @@ function GageRRInner({ T }: { T: ChartTokens }) {
             <div style={{ fontWeight: 600, color: '#33404f' }}>交叉 Gage R&R (ANOVA 法)</div>
             {controls}
           </div>
+          {recommendHint && <div style={{ paddingBottom: 10 }}>{recommendHint}</div>}
         </Card>
         <Card style={{ padding: '18px 20px', fontSize: 12.5, color: '#b0620f', background: '#fff8e8', lineHeight: 1.7 }}>
           <b>Gage R&R 尚未运行：</b>{realError}。系统不会静默回落到演示研究；可修正列角色/数据，或取消“用导入数据”明确查看示例。
@@ -176,6 +201,7 @@ function GageRRInner({ T }: { T: ChartTokens }) {
           <SourceBadge real={isReal} />
           {controls}
         </div>
+        {recommendHint}
         {!isReal && <div style={{ margin: '10px 16px 0' }}><DemoBadge /></div>}
         {isReal && !hasTolerance && (
           <div role="status" style={{ margin: '10px 16px 0', padding: '8px 10px', color: '#8a5a00', background: '#fff8e8', borderRadius: 4, fontSize: 12 }}>

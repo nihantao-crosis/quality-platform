@@ -44,13 +44,15 @@ export interface ControlChartProps {
   /** 第二序列（CUSUM 的 C⁻，用 curve2 色绘制） */
   series2?: number[];
   series2Label?: string;
+  /** 合并双面板的上面板:隐藏 X 轴刻度与轴题,压缩底边距,与下面板共享横轴(批次716-R3)。 */
+  hideXAxis?: boolean;
 }
 
 function ControlChartImpl(cfg: ControlChartProps) {
   const T = cfg.T;
   const W = 960;
   const H = cfg.h ?? 260;
-  const m = { t: 24, r: 104, b: cfg.xLabel ? 48 : 30, l: cfg.yLabel ? 78 : 60 };
+  const m = { t: 24, r: 104, b: cfg.hideXAxis ? 12 : cfg.xLabel ? 48 : 30, l: cfg.yLabel ? 78 : 60 };
   const pw = W - m.l - m.r;
   const ph = H - m.t - m.b;
   const data = cfg.data;
@@ -213,12 +215,12 @@ function ControlChartImpl(cfg: ControlChartProps) {
           </Fragment>
         );
       })}
-      {idx.map((i) =>
+      {!cfg.hideXAxis && idx.map((i) =>
         i % lblStep === 0 || i === data.length - 1 ? (
           <Txt key={'x' + i} x={X(i)} y={H - (cfg.xLabel ? 25 : 10)} s={tickLabel(i)} fill={T.axis} size={10} anchor="middle" />
         ) : null,
       )}
-      {cfg.xLabel && <Txt x={m.l + pw / 2} y={H - 8} s={cfg.xLabel} fill={T.text} size={10.5} anchor="middle" weight={600} />}
+      {!cfg.hideXAxis && cfg.xLabel && <Txt x={m.l + pw / 2} y={H - 8} s={cfg.xLabel} fill={T.text} size={10.5} anchor="middle" weight={600} />}
       {cfg.yLabel && (
         <text
           x={18} y={m.t + ph / 2} fill={T.text} fontSize={10.5} textAnchor="middle"

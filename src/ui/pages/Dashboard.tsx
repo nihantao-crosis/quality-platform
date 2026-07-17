@@ -1,10 +1,10 @@
 /** 质量总览 — KPI / X̄ 趋势 / 帕累托 / 分析记录 / 告警，全部指标实时计算。 */
 import { useMemo } from 'react';
 import { useApp } from '../../store/appStore';
-import { useData } from '../../store/dataStore';
+import { useData, resolveCapabilityMeasurementData } from '../../store/dataStore';
 import {
   nf, DEFECTS, evalRules, evalLimitedRules, capabilityInputError, computeCapability, oneWayAnova, anovaGroups, andersonDarling,
-  prepareSpcData,
+  prepareSpcData, countCapabilityViolations,
 } from '../../core';
 import type { ChartTokens } from '../tokens';
 import { Card, Badge } from '../common';
@@ -16,7 +16,7 @@ import { paretoReport } from '../reportData';
 export function Dashboard({ T }: { T: ChartTokens }) {
   const {
     goTo, lsl, usl, tgt, lslOn, uslOn, spcRules, spcRuleK, spcDataLayout, spcValueCol, spcSubgroupCol,
-    paretoMergeOther, paretoThreshold,
+    paretoMergeOther, paretoThreshold, capSubgroupMode, capSubgroupSize, capValueCol, capSubgroupIdCol,
   } = useApp();
   const { model: M, textCols, pendingCells } = useData();
   const prepared = prepareSpcData(M, textCols, {
@@ -24,9 +24,17 @@ export function Dashboard({ T }: { T: ChartTokens }) {
     pendingCells,
   });
   const SM = prepared.model;
+  // 批次716-R3:Cpk/PPM 卡改走能力口径解析(resolveCapabilityMeasurementData),与能力页/
+  // 保存记录/专项报告同源;趋势图与 SPC 告警仍属 SPC 口径,继续使用上面的 prepared/SM。
+  // resolver 从 store 内部读取以下口径/角色字段,依赖需手工列全以便口径变化时失效。
+  const capPrepared = useMemo(
+    () => resolveCapabilityMeasurementData(M, textCols),
+    [M, textCols, pendingCells, capSubgroupMode, capSubgroupSize, capValueCol, capSubgroupIdCol, spcDataLayout, spcValueCol, spcSubgroupCol], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+  const CM = capPrepared.model;
   const capSpec = { lsl: lslOn ? lsl : null, tgt, usl: uslOn ? usl : null };
-  const capError = SM ? capabilityInputError(SM.all, SM.sigmaWithin, capSpec) : prepared.error ?? 'SPC 数据角色有歧义';
-  const cap = SM && capError == null ? computeCapability(SM.all, SM.sigmaWithin, capSpec) : null;
+  const capError = CM ? capabilityInputError(CM.all, CM.sigmaWithin, capSpec) : capPrepared.error ?? '能力数据角色有歧义';
+  const cap = CM && capError == null ? computeCapability(CM.all, CM.sigmaWithin, capSpec) : null;
   const anova = useMemo(() => oneWayAnova(anovaGroups().map((g) => g.vals)), []);
 
   // 与 SPC 页共用数据角色和判异口径。离散图失控时先告警，不把均值图单独解释为“受控”。
@@ -61,19 +69,27 @@ export function Dashboard({ T }: { T: ChartTokens }) {
 
   const cpkGood = cap != null && cap.cpk >= 1.33;
   // P0-4:过程失控/非正态时 Cpk 卡不得给绿色「达标」——与能力页/保存记录同一口径。
-  const dashSpcViol = (dispersion?.viol.size ?? 0) + (mainRules?.viol.size ?? 0);
+  // 716-R3:失控计数与正态性检验同步切到能力口径模型(countCapabilityViolations 与能力页/保存记录共用)。
+  const dashSpcViol = CM ? countCapabilityViolations(CM, spcRules, spcRuleK) : 0;
   const cpkStable = dashSpcViol === 0;
-  const dashAd = cap && SM && SM.all.length >= 8 ? andersonDarling(SM.all) : null;
+  const dashAd = cap && CM && CM.all.length >= 8 ? andersonDarling(CM.all) : null;
   const dashNonNormal = dashAd != null && !dashAd.normal;
+  // 716-R3:能力口径与 SPC 口径不同时,小字注明当前口径,让用户知道这个 Cpk 属于哪份数据。
+  const capCaliberNote = capSubgroupMode === 'const'
+    ? `能力口径:单列「${capPrepared.variableName}」×子组${capSubgroupSize}`
+    : capSubgroupMode === 'stacked'
+      ? `能力口径:单列「${capPrepared.variableName}」+子组 ID`
+      : null;
+  const capStatusText = !cpkStable ? `控制图 ${dashSpcViol} 个失控点,Cpk 仅描述当前样本`
+    : dashNonNormal ? '数据偏离正态,Cpk 需谨慎解释' : '目标 ≥ 1.33';
   const kpis = [
     {
       label: '过程能力 Cpk', value: cap ? nf(cap.cpk, 2) : '—',
       tag: cap ? (!cpkStable ? '不稳定' : dashNonNormal ? '非正态' : cpkGood ? '达标' : '预警') : '未运行',
       color: cap ? (!cpkStable || dashNonNormal ? '#e0902a' : cpkGood ? '#2c8a45' : '#e0902a') : '#8a929d',
       sub: cap
-        ? (!cpkStable ? `控制图 ${dashSpcViol} 个失控点,Cpk 仅描述当前样本`
-          : dashNonNormal ? '数据偏离正态,Cpk 需谨慎解释' : '目标 ≥ 1.33')
-        : capError ?? '能力输入无效',
+        ? (capCaliberNote ? `${capStatusText} · ${capCaliberNote}` : capStatusText)
+        : `${capError ?? '能力输入无效'}${capCaliberNote ? ` · ${capCaliberNote}` : ''}`,
     },
     M.isDemo
       ? { label: '一次合格率', value: '98.6%', tag: '演示', color: '#2c8a45', sub: '内置看板示例，不代表当前生产批次' }

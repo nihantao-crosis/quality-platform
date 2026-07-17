@@ -1,16 +1,18 @@
 /** 抽样检验 AQL—正式主表、实际批判定、责任追溯与第 9.3/9.4 条转移规则。 */
-import { useState } from 'react';
+import { Fragment, useState } from 'react';
 import { useApp } from '../../store/appStore';
 import {
   rqlForResult, producerRiskPct, masterPlanByState, CODE_LETTER_TABLE, MAX_LOT_SIZE, TABLE_BY_STATE, AQL_COLS,
+  aqlRegime, ocPa, maxNonconforming,
   decideLot, recordInspection, plansByState, normalizeSwitchStatus,
   AQL_TRACE_LIMITS,
   restoreNormalInspection, resumeTightenedInspection, setSwitchConditions,
-  type InspectionLevel, type InspState, type NonconformingDisposition,
+  type InspectionLevel, type InspState, type NonconformingDisposition, type SamplingPlan,
 } from '../../core';
 import type { ChartTokens } from '../tokens';
 import { Card, CardHeader, KvRows, tabStyle } from '../common';
 import { OcCurveChart } from '../charts/OcCurveChart';
+import { Svg, Ln, Txt } from '../charts/primitives';
 
 const STATE_META: Record<InspState, { label: string; bg: string; color: string }> = {
   normal: { label: '正常检验', bg: '#e7f0f9', color: '#1f6fb2' },
@@ -18,8 +20,68 @@ const STATE_META: Record<InspState, { label: string; bg: string; color: string }
   reduced: { label: '放宽检验', bg: '#e8f4ea', color: '#2c8a45' },
 };
 
-// 全部 16 档(百分不合格品体系,GB/T 2828.1 §5.2:AQL≤10);常用 6 档保留为快捷芯片。
+// K2:下拉覆盖全部 26 档(0.010–10 百分不合格品 + 15–1000 每百单位不合格数);常用 6 档保留为快捷芯片不变。
 const AQL_QUICK = [0.65, 1.0, 1.5, 2.5, 4.0, 6.5];
+
+/**
+ * per100 体系专用 OC 曲线:Pa(λ) = poissonCdf(Ac, n·λ/100),横轴为「每百单位不合格数 λ」。
+ * 既有 OcCurveChart 内部固定二项 CDF 与「批不良率」横轴(K2 不在其文件属权内),
+ * 故 per100 在本页用同一套 SVG 基元内联绘制,视觉风格与其保持一致。
+ */
+function OcCurvePer100({ T, plan, aql, rqlLambda }: { T: ChartTokens; plan: SamplingPlan; aql: number; rqlLambda?: number }) {
+  const W = 960;
+  const H = 330;
+  const m = { t: 24, r: 34, b: 50, l: 56 };
+  const pw = W - m.l - m.r;
+  const ph = H - m.t - m.b;
+  // 横轴上限:覆盖 AQL 点与 RQL 点并留边;RQL 未达到时以 3×AQL 展示曲线形状
+  const lmax = Math.max(aql * 1.6, (rqlLambda ?? aql * 3) * 1.25);
+  const X = (l: number) => m.l + (l / lmax) * pw;
+  const Y = (pa: number) => m.t + (1 - pa) * ph;
+  const fmtL = (l: number) => (lmax >= 100 ? l.toFixed(0) : l.toFixed(1));
+  const pts: string[] = [];
+  for (let i = 0; i <= 140; i++) {
+    const l = (lmax * i) / 140;
+    pts.push(X(l) + ',' + Y(ocPa(plan, l, 'per100')));
+  }
+  const mark = (l: number, col: string, lab: string) => {
+    const pa = ocPa(plan, l, 'per100');
+    return (
+      <Fragment key={lab}>
+        <Ln x1={X(l)} y1={m.t} x2={X(l)} y2={m.t + ph} stroke={col} sw={1.3} dash="4 3" />
+        <Ln x1={m.l} y1={Y(pa)} x2={X(l)} y2={Y(pa)} stroke={col} sw={1.3} dash="4 3" />
+        <circle cx={X(l)} cy={Y(pa)} r={T.r + 1.5} fill={col} />
+        <Txt x={X(l) + 6} y={Y(pa) - 9} s={lab + ' ' + (pa * 100).toFixed(0) + '%'} fill={col} size={10.5} weight={700} />
+      </Fragment>
+    );
+  };
+  return (
+    <Svg w={W} h={H}>
+      <rect x={0} y={0} width={W} height={H} fill={T.bg} />
+      {Array.from({ length: 6 }, (_, g) => {
+        const yy = m.t + (g / 5) * ph;
+        return (
+          <Fragment key={'g' + g}>
+            <Ln x1={m.l} y1={yy} x2={m.l + pw} y2={yy} stroke={T.grid} sw={1} />
+            <Txt x={m.l - 8} y={yy} s={100 - g * 20 + '%'} fill={T.axis} size={10} anchor="end" />
+          </Fragment>
+        );
+      })}
+      {Array.from({ length: 7 }, (_, g) => {
+        const l = (lmax * g) / 6;
+        return <Txt key={'x' + g} x={X(l)} y={H - 18} s={fmtL(l)} fill={T.axis} size={10} anchor="middle" />;
+      })}
+      <polyline points={pts.join(' ')} fill="none" stroke={T.point} strokeWidth={T.sw + 1} />
+      {/* AQL 点语义是「绿线」(与二项版一致),不跟随主题中心线色 */}
+      {mark(aql, '#1a8a3a', 'AQL')}
+      {rqlLambda != null && mark(rqlLambda, T.limit, 'RQL')}
+      <Txt x={m.l} y={m.t - 9} s="接收概率 Pa(泊松)" fill={T.text} size={11} weight={600} />
+      <Txt x={m.l + pw} y={H - 2} s="每百单位不合格数 λ →" fill={T.axis} size={10} anchor="end" />
+      <Ln x1={m.l} y1={m.t + ph} x2={m.l + pw} y2={m.t + ph} stroke={T.axis} sw={1} />
+      <Ln x1={m.l} y1={m.t} x2={m.l} y2={m.t + ph} stroke={T.axis} sw={1} />
+    </Svg>
+  );
+}
 const DISPOSITION_LABEL: Record<NonconformingDisposition, string> = {
   none: '无不合格品', unrecorded: '未记录处置状态', pending: '已隔离，待负责部门处置', reworked: '已返工并按要求复验',
   replaced: '已替换不合格品', scrapped: '已报废不合格品', concession: '已取得让步接收批准',
@@ -52,16 +114,21 @@ export function Aql({ T }: { T: ChartTokens }) {
   const [referenceState, setReferenceState] = useState<InspState>('normal');
   const statePlans = plansByState(aqlLot, aqlLevel, aqlAQL);
   const plan = statePlans[sw.state];
+  // K2 体系分流:≤10 百分不合格品(二项,d≤n);≥15 每百单位不合格数(泊松,d 可大于 n)
+  const regime = aqlRegime(aqlAQL);
+  const per100 = regime === 'per100';
   const aqlP = aqlAQL / 100;
-  const rql = rqlForResult(plan);
+  const rql = rqlForResult(plan, 0.1, undefined, regime);
   const rqlP = rql.status === 'found' ? rql.p : undefined;
   const prodRisk = producerRiskPct(plan, aqlAQL);
   const meta = STATE_META[sw.state];
   const nonconforming = Number(nonconformingDraft);
   const hasNonconforming = nonconformingDraft.trim() !== '';
+  // per100 体系录入上限放宽到 n×100(计点,d 可大于样本量);percent 仍以 n 为上限
+  const dMax = maxNonconforming(plan, regime);
   const batchValid = hasNonconforming
-    && Number.isSafeInteger(nonconforming) && nonconforming >= 0 && nonconforming <= plan.n;
-  const decision = batchValid ? decideLot(plan, nonconforming) : null;
+    && Number.isSafeInteger(nonconforming) && nonconforming >= 0 && nonconforming <= dMax;
+  const decision = batchValid ? decideLot(plan, nonconforming, regime) : null;
   const dispositionRequired = plan.fullInspect && batchValid && nonconforming > 0;
   const batchReady = batchValid && batchId.trim().length > 0 && inspector.trim().length > 0
     && (!dispositionRequired || nonconformingDisposition !== '') && !sw.suspended;
@@ -69,7 +136,9 @@ export function Aql({ T }: { T: ChartTokens }) {
 
   const submitInspection = () => {
     if (!batchValid) {
-      setBatchError(`不合格品数必须是 0–${plan.n} 的整数`);
+      setBatchError(per100
+        ? `不合格数必须是 0–${dMax} 的整数(每百单位体系允许大于样本量 n=${plan.n})`
+        : `不合格品数必须是 0–${plan.n} 的整数`);
       return;
     }
     if (!batchId.trim()) {
@@ -104,7 +173,8 @@ export function Aql({ T }: { T: ChartTokens }) {
     }
   };
 
-  const fmtAql = (a: number) => 'AQL ' + (a < 0.1 ? String(a) : a.toFixed(2).replace(/0$/, '').replace(/\.$/, '.0'));
+  // per100 十档均为整数(15–1000),直接原样显示;percent 档维持既有格式不变
+  const fmtAql = (a: number) => 'AQL ' + (a >= 15 ? String(a) : a < 0.1 ? String(a) : a.toFixed(2).replace(/0$/, '').replace(/\.$/, '.0'));
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -170,17 +240,26 @@ export function Aql({ T }: { T: ChartTokens }) {
           <select
             aria-label="全部 AQL 档位"
             disabled={schemeLocked}
-            title={schemeLocked ? '须按正式转移规则恢复正常检验后才能更改检验体系' : '全部 16 档 AQL(0.010–10,百分不合格品体系)'}
+            title={schemeLocked ? '须按正式转移规则恢复正常检验后才能更改检验体系' : '全部 26 档 AQL(0.010–10 百分不合格品;15–1000 每百单位不合格数)'}
             value={aqlAQL}
             onChange={(e) => setAql({ aqlAQL: Number(e.target.value) })}
             style={{ padding: '5px 8px', border: `1px solid ${AQL_QUICK.includes(aqlAQL) ? '#cfd5dd' : '#1f6fb2'}`, borderRadius: 4, fontSize: 12, color: AQL_QUICK.includes(aqlAQL) ? '#5b6472' : '#1f6fb2', background: '#fff', cursor: schemeLocked ? 'not-allowed' : 'pointer' }}
           >
-            {AQL_COLS.map((a) => <option key={a} value={a}>{fmtAql(a)}</option>)}
+            <optgroup label="百分不合格品(AQL ≤ 10,二项)">
+              {AQL_COLS.filter((a) => aqlRegime(a) === 'percent').map((a) => <option key={a} value={a}>{fmtAql(a)}</option>)}
+            </optgroup>
+            <optgroup label="每百单位不合格数(AQL 15–1000,泊松)">
+              {AQL_COLS.filter((a) => aqlRegime(a) === 'per100').map((a) => <option key={a} value={a}>{fmtAql(a)}</option>)}
+            </optgroup>
           </select>
         </div>
         <span style={{ width: 1, height: 22, background: '#e5e9ee' }} />
         <span style={{ padding: '5px 9px', borderRadius: 4, background: '#eef5fb', color: '#1f6fb2', fontSize: 11.5, fontWeight: 600 }}>
           GB/T 2828.1-2012 · 表 1 + {TABLE_BY_STATE[sw.state]}
+        </span>
+        {/* K2 体系徽标:per100 时明确提示计数口径变化(d 可大于 n) */}
+        <span style={{ padding: '5px 9px', borderRadius: 4, background: per100 ? '#f3eefb' : '#f2f4f7', color: per100 ? '#7a4fb5' : '#5b6472', fontSize: 11.5, fontWeight: 600 }}>
+          {per100 ? '每百单位不合格数体系 · 泊松(d 可大于 n)' : '百分不合格品体系 · 二项'}
         </span>
         {schemeLocked && (
           <span role="status" style={{ fontSize: 11.5, color: sw.suspended ? '#8a6414' : '#6b7480' }}>
@@ -193,7 +272,8 @@ export function Aql({ T }: { T: ChartTokens }) {
         {[
           { k: plan.fullInspect ? '参考字码' : '样本字码', v: plan.code },
           { k: plan.fullInspect ? '全检数量 N' : '样本量 n', v: String(plan.n) },
-          { k: plan.fullInspect ? '允许不合格 Ac' : '接收数 Ac', v: String(plan.ac) },
+          // per100:Ac 是「不合格数」(计点)门槛,可大于样本量 n
+          { k: plan.fullInspect ? '允许不合格 Ac' : per100 ? '接收数 Ac(不合格数,可大于样本量)' : '接收数 Ac', v: String(plan.ac) },
           { k: plan.fullInspect ? '拒收门槛 Re' : '拒收数 Re', v: String(plan.re) },
         ].map((c) => (
           <Card key={c.k} style={{ padding: '14px 16px' }}>
@@ -212,16 +292,24 @@ export function Aql({ T }: { T: ChartTokens }) {
       {!plan.fullInspect && (
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 16 }}>
           <Card>
-            <CardHeader title="OC 特性曲线 · 接收概率 vs 批质量" />
+            <CardHeader title={per100 ? 'OC 特性曲线 · 接收概率 vs 每百单位不合格数 λ' : 'OC 特性曲线 · 接收概率 vs 批质量'} />
             <div style={{ padding: '14px 16px 6px' }}>
-              <OcCurveChart T={T} n={plan.n} ac={plan.ac} pmax={Math.min(1, Math.max(0.1, (rqlP ?? 0.4) * 1.25))} aqlP={aqlP} rqlP={rqlP} />
+              {per100
+                ? <OcCurvePer100 T={T} plan={plan} aql={aqlAQL} rqlLambda={rqlP} />
+                : <OcCurveChart T={T} n={plan.n} ac={plan.ac} pmax={Math.min(1, Math.max(0.1, (rqlP ?? 0.4) * 1.25))} aqlP={aqlP} rqlP={rqlP} />}
             </div>
           </Card>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
             <Card style={{ padding: 16 }}>
               <div style={{ fontWeight: 600, color: '#33404f', marginBottom: 10 }}>风险指标</div>
               <KvRows
-                rows={[
+                rows={per100 ? [
+                  // per100:AQL/RQL 单位都是「每百单位不合格数 λ」,不是百分数
+                  { k: 'AQL (每百单位不合格数)', v: String(aqlAQL) },
+                  { k: '生产方风险 α', v: prodRisk.toFixed(1) + '%' },
+                  { k: 'RQL / LTPD (Pa≤10%)', v: rql.status === 'found' ? `λ=${rql.p.toFixed(1)} /100 单位` : `未达到（λ≤${rql.searchMax.toFixed(0)}）` },
+                  { k: '使用方风险 β@RQL', v: rql.status === 'found' ? (rql.pa * 100).toFixed(2) + '%' : `>${(rql.targetPa * 100).toFixed(1)}%` },
+                ] : [
                   { k: 'AQL (可接收质量)', v: (aqlP * 100).toFixed(2) + '%' },
                   { k: '生产方风险 α', v: prodRisk.toFixed(1) + '%' },
                   { k: 'RQL / LTPD (Pa≤10%)', v: rql.status === 'found' ? (rql.p * 100).toFixed(2) + '%' : `未达到（p≤${(rql.searchMax * 100).toFixed(0)}%）` },
@@ -229,7 +317,9 @@ export function Aql({ T }: { T: ChartTokens }) {
                 ]}
               />
               <div style={{ marginTop: 12, padding: 11, background: '#f7f9fb', border: '1px solid #eef1f4', borderRadius: 4, fontSize: 11.5, color: '#6b7480', lineHeight: 1.55 }}>
-                OC 曲线描述在不同批质量 p 下该抽样方案的接收概率 Pa。绿线为 AQL 点；{rql.status === 'found' ? '红线为计算得到的 RQL 点，右侧 β 为该点的实际接收概率。' : '在搜索范围内未达到目标接收概率，因此不绘制伪 RQL 标记。'}
+                {per100
+                  ? <>每百单位不合格数体系:Pa(λ) = PoissonCDF(Ac, n·λ/100),λ 为每百单位不合格数,可大于 100(即平均每单位超过 1 个不合格)。绿线为 AQL 点；{rql.status === 'found' ? '红线为计算得到的 RQL 点,右侧 β 为该点的实际接收概率。' : '在搜索范围内未达到目标接收概率,因此不绘制伪 RQL 标记。'}</>
+                  : <>OC 曲线描述在不同批质量 p 下该抽样方案的接收概率 Pa。绿线为 AQL 点；{rql.status === 'found' ? '红线为计算得到的 RQL 点，右侧 β 为该点的实际接收概率。' : '在搜索范围内未达到目标接收概率，因此不绘制伪 RQL 标记。'}</>}
               </div>
             </Card>
           </div>
@@ -266,8 +356,9 @@ export function Aql({ T }: { T: ChartTokens }) {
                     <input aria-label="检验人" maxLength={AQL_TRACE_LIMITS.inspector} value={inspector} onChange={(e) => { setInspector(e.target.value); setBatchError(null); }} placeholder="姓名 / 工号" style={{ display: 'block', width: '100%', boxSizing: 'border-box', marginTop: 4, padding: '6px 8px', border: '1px solid #cfd5dd', borderRadius: 4 }} />
                   </label>
                   <label style={{ fontSize: 11.5, color: '#6b7480' }}>
-                    {plan.fullInspect ? '全检不合格品数' : '样本中不合格品数'} *
-                    <input aria-label="实际不合格品数" type="number" min={0} max={plan.n} step={1} value={nonconformingDraft} onChange={(e) => { setNonconformingDraft(e.target.value); setNonconformingDisposition(''); setBatchError(null); }} className="mono" style={{ display: 'block', width: '100%', boxSizing: 'border-box', marginTop: 4, padding: '6px 8px', border: `1px solid ${batchValid ? '#cfd5dd' : '#c22f2f'}`, borderRadius: 4 }} />
+                    {/* per100 体系录入的是「不合格数」(计点),可大于样本量;max 相应放宽到 dMax */}
+                    {plan.fullInspect ? (per100 ? '全检不合格数(计点)' : '全检不合格品数') : per100 ? '样本中不合格数(计点,可大于 n)' : '样本中不合格品数'} *
+                    <input aria-label="实际不合格品数" type="number" min={0} max={dMax} step={1} value={nonconformingDraft} onChange={(e) => { setNonconformingDraft(e.target.value); setNonconformingDisposition(''); setBatchError(null); }} className="mono" style={{ display: 'block', width: '100%', boxSizing: 'border-box', marginTop: 4, padding: '6px 8px', border: `1px solid ${batchValid ? '#cfd5dd' : '#c22f2f'}`, borderRadius: 4 }} />
                   </label>
                   <div style={{ padding: '7px 10px', alignSelf: 'end', borderRadius: 4, background: decision === 'accepted' ? '#e8f4ea' : decision === 'rejected' ? '#fdecec' : '#f7f9fb', color: decision === 'accepted' ? '#2c8a45' : decision === 'rejected' ? '#c22f2f' : '#8a929d', fontWeight: 700, fontSize: 12.5 }}>
                     自动判定：{decision === 'accepted' ? `接收（d=${nonconforming} ≤ Ac=${plan.ac}）` : decision === 'rejected' ? `不接收（d=${nonconforming} ≥ Re=${plan.re}）` : '请输入有效整数'}

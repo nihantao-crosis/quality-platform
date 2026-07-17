@@ -20,6 +20,6 @@ export const PAGES: PageMeta[] = [
   { key: 'gagerr', label: '测量系统分析', group: '分析模块', icon: 'gauge', title: '测量系统分析 · Gage R&R', sub: '交叉设计 · ANOVA 法 · 3 操作员 × 10 部件 × 2 次' },
   { key: 'anova', label: '假设检验 / ANOVA', group: '分析模块', icon: 'box', title: '单因子方差分析', sub: '按当前数据比较组间均值差异' },
   { key: 'pareto', label: '帕累托图', group: '分析模块', icon: 'bars', title: '帕累托图 · 缺陷分析', sub: '按缺陷类别的数量与累计占比' },
-  { key: 'doe', label: '实验设计 (DOE)', group: '分析模块', icon: 'flask', title: '实验设计 (DOE)', sub: '两水平全因子:创建设计 · 分析主效应/交互/效应帕累托' },
+  { key: 'doe', label: '实验设计 (DOE)', group: '分析模块', icon: 'flask', title: '实验设计 (DOE)', sub: '两水平/一般/分数因子:创建设计 · 主效应/交互/效应图/未编码方程' },
   { key: 'aql', label: '抽样检验 (AQL)', group: '分析模块', icon: 'check', title: '抽样检验 · AQL 方案', sub: 'GB/T 2828.1 · 一般检验水平 II · AQL 1.0' },
 ];

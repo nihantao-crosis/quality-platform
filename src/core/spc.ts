@@ -111,6 +111,9 @@ export function ruleKDesc(rule: RuleNo, K: NelsonRuleK): string {
 export function evalLimitedRules(
   data: number[], cl: number, ucl: number | number[], lcl: number | number[], rules: NelsonRules,
   k: Partial<NelsonRuleK> = DEFAULT_RULE_K,
+  /** 逐点真实 σ(未截断)。P 图上下限都可能被 [0,1] 钳位,从展示用限值反推 σ 在
+   * 双侧同时截断时仍会低估(Codex v1.37 P2-1);P/C 图调用方应直接传入真 σ。 */
+  sigmas?: number | number[],
 ): { viol: Set<number>; list: RuleViolation[] } {
   const ucls = Array.isArray(ucl) ? ucl : Array.from({ length: data.length }, () => ucl);
   const lcls = Array.isArray(lcl) ? lcl : Array.from({ length: data.length }, () => lcl);
@@ -130,8 +133,14 @@ export function evalLimitedRules(
     // 标准差」语义一致。两侧同时截断仅 P 图 n 极小(p̄=0.5 时 n≤8)才会发生,σ̂ 仍轻度
     // 低估——属退化输入,K1=3 默认路径不受影响。
     const scale = K.k1 / 3;
+    const sigmaAt = (i: number): number | null => {
+      const raw = sigmas == null ? null : Array.isArray(sigmas) ? sigmas[i] : sigmas;
+      return raw != null && Number.isFinite(raw) && raw > 0 ? raw : null;
+    };
     data.forEach((v, i) => {
-      const kSigma = Math.max(ucls[i] - cl, cl - lcls[i]) * scale;
+      // 调用方给了真 σ 就直接用(彻底修复双侧同时截断的退化情形);否则按 max 限距回退。
+      const truth = sigmaAt(i);
+      const kSigma = truth != null ? truth * K.k1 : Math.max(ucls[i] - cl, cl - lcls[i]) * scale;
       const out = K.k1 === 3
         ? v > ucls[i] || v < lcls[i]
         : v - cl > kSigma || cl - v > kSigma;

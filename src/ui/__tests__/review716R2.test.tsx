@@ -128,7 +128,7 @@ describe('P1:MSA 工作表按导入原列序交错显示', () => {
     ]);
   });
 
-  it('工作表按 部件/测试人/螺钉高度 原序渲染表头,首列非行式口径显示「行」', () => {
+  it('工作表按 部件/测试人/螺钉高度 原序渲染表头,行号槽无标题(716-R3 P1-1 收口)', () => {
     const parsed = parseMatrix('部件\t测试人\t螺钉高度\n1\t邹德玉\t10.1\n2\t邹德玉\t10.2\n3\t邹德玉\t10.0');
     if ('error' in parsed) throw new Error(parsed.error);
     useData.getState().importMatrix('工厂GRR', parsed.colNames, parsed.rows, parsed.textCols);
@@ -139,7 +139,9 @@ describe('P1:MSA 工作表按导入原列序交错显示', () => {
     expect(iPart).toBeGreaterThan(-1);
     expect(iPart).toBeLessThan(iOp);
     expect(iOp).toBeLessThan(iHeight);
-    expect(html).toContain('>行</th>');
+    // 716-R3 P1-1(人工审核 PPT 10 页):重复的 ID/行 数据列已删除,行号槽为 Minitab 式无标题;
+    // 原断言「显示>行</th>」随该收口作废,行式子组口径的「子组」语义由行号槽表头承载。
+    expect(html).not.toContain('>行</th>');
     expect(html).not.toContain('>子组</th>');
   });
 });

@@ -6,9 +6,10 @@
  * 4) 完整交叉 3×10×2 推断 p/o/r 防回归。
  */
 import { describe, it, expect } from 'vitest';
-import { columnDisplayDp, prepareGageStudy } from '../gageData';
+import { columnDisplayDp, prepareGageStudy, recommendGageRoles } from '../gageData';
 import type { GageTextColumn } from '../gageData';
 import { computeVarModel } from '../model';
+import { computeGageRR } from '../gage';
 
 // ---------- 1. 列显示精度纯函数 ----------
 
@@ -172,5 +173,99 @@ describe('prepareGageStudy — 完整交叉设计防回归', () => {
     expect(result.study.valueName).toBe('测量值');
     expect(result.study.partName).toBe('部件');
     expect(result.study.operatorName).toBe('操作员');
+  });
+});
+
+// ---------- 5. 批次716-R3 P1-2:MSA 默认角色推荐(recommendGageRoles) ----------
+
+/** 工厂原列序「部件、测试人、螺钉高度」:旧默认(第一数值列当测量)会把「部件」推荐成测量列。 */
+function factoryOrderColumns(operators: string[], parts: number, repeats: number) {
+  const rows: number[][] = [];
+  const operatorValues: string[] = [];
+  for (const operator of operators) {
+    for (let part = 1; part <= parts; part++) {
+      for (let trial = 0; trial < repeats; trial++) {
+        // 部件在前、螺钉高度在后,复现工厂导入列序
+        rows.push([part, 10 + part * 0.1 + trial * 0.01 + (operator === '李四' ? 0.02 : 0)]);
+        operatorValues.push(operator);
+      }
+    }
+  }
+  const model = computeVarModel('工厂GRR.csv', ['部件', '螺钉高度'], rows);
+  const textCols: GageTextColumn[] = [{ name: '测试人', values: operatorValues, sourceIndex: 1 } as GageTextColumn];
+  return { model, textCols };
+}
+
+describe('recommendGageRoles — 工厂列序不再推荐反(716-R3 P1-2)', () => {
+  it('工厂场景 30 行「部件(1-10 整数)/测试人(文本 邹德玉)/螺钉高度(10.x 小数)」→ value=螺钉高度、part=部件、operator=测试人', () => {
+    const { model, textCols } = factoryOrderColumns(['邹德玉'], 10, 3);
+    const rec = recommendGageRoles(model, textCols);
+    expect(rec.value).toBe('螺钉高度');
+    expect(rec.part).toBe('部件');
+    expect(rec.operator).toBe('测试人');
+    // 推荐依据可解释,供 UI 小字展示
+    expect(rec.reasons.length).toBeGreaterThan(0);
+    const joined = rec.reasons.join('');
+    expect(joined).toContain('螺钉高度');
+    expect(joined).toContain('部件');
+    expect(joined).toContain('测试人');
+  });
+
+  it('Codex 场景:2 操作员×3 部件×2 次 → 推荐正确,且按推荐能直接算出 GRR', () => {
+    const { model, textCols } = factoryOrderColumns(['张三', '李四'], 3, 2);
+    const rec = recommendGageRoles(model, textCols);
+    expect(rec.value).toBe('螺钉高度');
+    expect(rec.part).toBe('部件');
+    expect(rec.operator).toBe('测试人');
+    // 平衡交叉结构也应进入推荐依据
+    expect(rec.reasons.join('')).toContain('交叉平衡');
+    const prepared = prepareGageStudy(model, textCols, {
+      valueColumn: rec.value, partColumn: rec.part, operatorColumn: rec.operator,
+    });
+    expect(prepared.ok).toBe(true);
+    if (!prepared.ok) return;
+    expect(prepared.study.partLabels).toHaveLength(3);
+    expect(prepared.study.operatorLabels).toHaveLength(2);
+    expect(prepared.study.repeats).toBe(2);
+    const g = computeGageRR(prepared.study.observations, null);
+    expect(Number.isFinite(g.totalGageRR)).toBe(true);
+    expect(g.totalGageRR).toBeGreaterThan(0);
+  });
+
+  it('列名无关键词时按结构信号推荐:小数连续列=测量、小整数均衡列=部件、少水平文本列=操作员', () => {
+    const rows: number[][] = [];
+    const groupValues: string[] = [];
+    for (const group of ['甲', '乙']) {
+      for (let level = 1; level <= 5; level++) {
+        for (let trial = 0; trial < 2; trial++) {
+          rows.push([level, 10 + level * 0.5 + trial * 0.03 + (group === '乙' ? 0.02 : 0)]);
+          groupValues.push(group);
+        }
+      }
+    }
+    const model = computeVarModel('无关键词.csv', ['X1', 'X2'], rows);
+    const textCols: GageTextColumn[] = [{ name: 'G', values: groupValues }];
+    const rec = recommendGageRoles(model, textCols);
+    expect(rec.value).toBe('X2');
+    expect(rec.part).toBe('X1');
+    expect(rec.operator).toBe('G');
+  });
+
+  it('信号不足并列时明确 null,不瞎猜:两条同形态小数列', () => {
+    const rows = [[1.15, 2.15], [1.32, 2.32], [1.58, 2.58], [1.71, 2.71], [1.94, 2.94], [1.27, 2.27]];
+    const model = computeVarModel('并列.csv', ['X1', 'X2'], rows);
+    const rec = recommendGageRoles(model, [] as GageTextColumn[]);
+    expect(rec.value).toBeNull();
+    expect(rec.part).toBeNull();
+    expect(rec.operator).toBeNull();
+  });
+
+  it('唯一数值列即使无关键词也锁定为测量列;类别信号不足时部件/操作员为 null', () => {
+    const model = computeVarModel('单列.csv', ['D1'], [[1.11], [1.32], [1.53], [1.24]]);
+    const rec = recommendGageRoles(model, [] as GageTextColumn[]);
+    expect(rec.value).toBe('D1');
+    expect(rec.part).toBeNull();
+    expect(rec.operator).toBeNull();
+    expect(rec.reasons.join('')).toContain('唯一数值列');
   });
 });

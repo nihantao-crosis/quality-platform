@@ -318,9 +318,11 @@ export function Spc({ T }: { T: ChartTokens }) {
     violList = spec.coreList;
   } else if (spec.shewhart) {
     const r = effType === 'p'
-      ? evalLimitedRules(main.props.data, main.props.cl, pModel.pUcls, pModel.pLcls, spcRules, spcRuleK)
+      ? evalLimitedRules(main.props.data, main.props.cl, pModel.pUcls, pModel.pLcls, spcRules, spcRuleK,
+          // P 图限值被 [0,1] 钳位后不可反推 σ:直传逐批真实 σᵢ=√(p̄(1−p̄)/nᵢ)
+          pModel.pNs.map((n) => Math.sqrt(main.props.cl * (1 - main.props.cl) / n)))
       : effType === 'c'
-        ? evalLimitedRules(main.props.data, main.props.cl, main.props.ucl, main.props.lcl, spcRules, spcRuleK)
+        ? evalLimitedRules(main.props.data, main.props.cl, main.props.ucl, main.props.lcl, spcRules, spcRuleK, Math.sqrt(main.props.cl))
       : evalRules(main.props.data, main.props.cl, (main.props.ucl - main.props.cl) / 3, spcRules, spcRuleK);
     viol = r.viol;
     violList = r.list;
@@ -629,27 +631,56 @@ export function Spc({ T }: { T: ChartTokens }) {
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 300px', gap: 16 }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-          {spec.charts.map((ch) => {
-            const chartSelection = ch.main ? sel : effType === 'i-mr' ? (sel != null && sel > 0 ? sel - 1 : null) : sel;
-            const selectChartPoint = (index: number) => setSelSub(effType === 'i-mr' && !ch.main ? index + 1 : index);
-            return <Card key={ch.t}>
-              <div style={{ display: 'flex', alignItems: 'center', padding: '11px 16px', borderBottom: '1px solid #edf0f3' }}>
-                <div style={{ fontWeight: 600, color: '#33404f' }}>{ch.t}</div>
-                <div style={{ marginLeft: 'auto', fontSize: 11, color: '#a3abb5' }}>点击数据点查看明细</div>
-              </div>
-              <div style={{ padding: '8px 14px 4px' }}>
+          {(() => {
+            const renderChart = (ch: (typeof spec.charts)[number], hideXAxis: boolean) => {
+              const chartSelection = ch.main ? sel : effType === 'i-mr' ? (sel != null && sel > 0 ? sel - 1 : null) : sel;
+              const selectChartPoint = (index: number) => setSelSub(effType === 'i-mr' && !ch.main ? index + 1 : index);
+              return (
                 <ControlChart
                   T={T}
                   {...ch.props}
                   dec={ch.dec}
+                  hideXAxis={hideXAxis}
                   violations={ch.main ? viol : dispViolByChart.get(ch.t)}
                   sel={chartSelection}
                   onPoint={selectChartPoint}
                   ptLabel={effType === 'i-mr' && !ch.main ? (i) => ptLab(i + 1) : ptLab}
                 />
-              </div>
-            </Card>;
-          })}
+              );
+            };
+            // 批次716-R3(人工反馈716 PPT 第4页):X̄ 与 R/S 合并为上下双面板单标题,
+            // 共享横轴(两面板点数相同,X 定位一致;上面板隐藏 X 轴刻度)。
+            // I-MR 的 MR 序列比 I 少一点,横轴无法逐点对齐,保持独立卡片。
+            const combined = (effType === 'xbar-r' || effType === 'xbar-s') && spec.charts.length === 2;
+            if (combined) {
+              const [top, bottom] = spec.charts;
+              const comboLabel = effType === 'xbar-r' ? 'Xbar-R' : 'Xbar-S';
+              const stagedNote = top.t.includes('分阶段') ? ' · 分阶段' : '';
+              return (
+                <Card>
+                  <div style={{ display: 'flex', alignItems: 'center', padding: '11px 16px', borderBottom: '1px solid #edf0f3' }}>
+                    <div style={{ fontWeight: 600, color: '#33404f' }}>{`${variableName} 的 ${comboLabel} 控制图${stagedNote}`}</div>
+                    <div style={{ marginLeft: 'auto', fontSize: 11, color: '#a3abb5' }}>上:均值 X̄ / 下:{effType === 'xbar-r' ? '极差 R' : '标准差 S'} · 点击数据点查看明细</div>
+                  </div>
+                  <div style={{ padding: '8px 14px 4px' }}>
+                    {renderChart(top, true)}
+                    {renderChart(bottom, false)}
+                  </div>
+                </Card>
+              );
+            }
+            return spec.charts.map((ch) => (
+              <Card key={ch.t}>
+                <div style={{ display: 'flex', alignItems: 'center', padding: '11px 16px', borderBottom: '1px solid #edf0f3' }}>
+                  <div style={{ fontWeight: 600, color: '#33404f' }}>{ch.t}</div>
+                  <div style={{ marginLeft: 'auto', fontSize: 11, color: '#a3abb5' }}>点击数据点查看明细</div>
+                </div>
+                <div style={{ padding: '8px 14px 4px' }}>
+                  {renderChart(ch, false)}
+                </div>
+              </Card>
+            ));
+          })()}
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>

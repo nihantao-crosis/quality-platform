@@ -57,6 +57,33 @@ export function binomCdf(k: number, n: number, p: number): number {
 }
 
 /**
+ * 泊松累积分布 P(X≤k)，X~Poisson(λ)。
+ * 用于 AQL「每百单位不合格数」体系(GB/T 2828.1 AQL≥15,λ=n·AQL/100,d 可大于 n)。
+ *
+ * 逐项概率在对数空间生成:log p_i = −λ + i·lnλ − lnΓ(i+1)，再按 log-sum-exp
+ * 折回线性域。λ 较大时单项 e^{−λ} 在线性域直接下溢为 0(λ>745 时 e^{−λ} 即为 0)，
+ * 朴素递推会把整段 CDF 算成 0/NaN;对数空间先减最大项则对任意 λ 数值稳定。
+ * k 就地向下取整;λ≤0 时全部概率质量在 X=0，P(X≤k)=1(k≥0)。
+ */
+export function poissonCdf(k: number, lambda: number): number {
+  const kk = Math.floor(k);
+  if (kk < 0) return 0;
+  if (!(lambda > 0)) return 1;
+  const logLambda = Math.log(lambda);
+  const logs = new Array<number>(kk + 1);
+  let maxLog = -Infinity;
+  for (let i = 0; i <= kk; i++) {
+    const lp = -lambda + i * logLambda - lgamma(i + 1);
+    logs[i] = lp;
+    if (lp > maxLog) maxLog = lp;
+  }
+  let sum = 0;
+  for (let i = 0; i <= kk; i++) sum += Math.exp(logs[i] - maxLog);
+  // 理论上 maxLog + log(sum) ≤ 0;浮点噪声用 min(1,·) 截断
+  return Math.min(1, Math.exp(maxLog + Math.log(sum)));
+}
+
+/**
  * 以首个观测为原点并对偏移量做 Neumaier 补偿求和。
  *
  * 直接累加大基准数据（例如 1e15±1）会先丢掉低位，再除以 n，导致均值和所有

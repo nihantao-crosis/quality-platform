@@ -107,10 +107,209 @@ export function listGageCategoryColumns(
   return resolvedGageCategoryColumns(model, textCols, valueColumn).map(({ name, source }) => ({ name, source }));
 }
 
+// ---------- 批次716-R3 P1-2:MSA 默认角色推荐(可解释打分) ----------
+
+export interface GageRoleRecommendation {
+  value: string | null;
+  part: string | null;
+  operator: string | null;
+  /** 推荐依据(给 UI 小字展示):每个已推荐角色一条,外加交叉结构一条 */
+  reasons: string[];
+}
+
+/** 列名关键词(命中即强加分)。全部按小写匹配,中文原样匹配。 */
+const VALUE_KEYWORDS = ['测量', '值', '实测', '读数', '高度', '直径', '长度', '宽度', '厚度', '重量', '尺寸', '深度', '硬度', '温度', '压力', '扭矩', '粗糙度', 'value', 'meas', 'height', 'dia', 'length', 'width', 'thickness', 'weight', 'hardness', 'size'];
+const PART_KEYWORDS = ['部件', '零件', '工件', '样品', '样件', '试样', 'part', 'piece', 'sample', 'item', 'unit'];
+const OPERATOR_KEYWORDS = ['操作员', '操作者', '测试人', '检验员', '作业员', '测量员', '检测员', '评价人', 'operator', 'tester', 'inspector', 'appraiser', 'technician'];
+
+const hitKeyword = (name: string, keywords: string[]) => {
+  const lower = name.toLowerCase();
+  return keywords.some((keyword) => lower.includes(keyword));
+};
+
+interface RoleCandidate {
+  name: string;
+  kind: 'numeric' | 'text';
+  labels: string[]; // 行级标签(数值列为字符串化的值)
+  unique: number;
+  balanced: boolean; // 每个水平出现次数相等
+  allInt: boolean; // 数值列专用;文本列恒 false
+  hasDecimals: boolean;
+}
+
+function candidateOf(name: string, kind: 'numeric' | 'text', labels: string[], numericValues: number[] | null): RoleCandidate {
+  const counts = new Map<string, number>();
+  for (const label of labels) counts.set(label, (counts.get(label) ?? 0) + 1);
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const count of counts.values()) {
+    if (count < lo) lo = count;
+    if (count > hi) hi = count;
+  }
+  const allInt = numericValues != null && numericValues.length > 0 && numericValues.every((v) => Number.isInteger(v));
+  return {
+    name,
+    kind,
+    labels,
+    unique: counts.size,
+    balanced: counts.size > 0 && lo === hi,
+    allInt,
+    hasDecimals: numericValues != null && !allInt,
+  };
+}
+
+/** 测量角色打分:列名关键词 > 数值连续性(含小数、唯一值多);小整数 ID 形态倒扣。 */
+function valueScore(col: RoleCandidate, n: number): { score: number; why: string[] } {
+  const why: string[] = [];
+  let score = 0;
+  if (hitKeyword(col.name, VALUE_KEYWORDS)) { score += 6; why.push('列名含测量特征词'); }
+  if (col.hasDecimals) { score += 3; why.push('含小数'); }
+  if (n > 0 && col.unique / n >= 0.5) { score += 2; why.push('唯一值多'); }
+  if (col.allInt && col.unique < n / 2) { score -= 3; } // 小整数重复形态更像 ID,不像连续测量
+  return { score, why };
+}
+
+/** 部件/操作员共用的类别形态分:小数连续列不适合当类别;水平重复均衡加分。 */
+function categoryBaseScore(col: RoleCandidate, n: number): { score: number; why: string[] } {
+  const why: string[] = [];
+  let score = col.kind === 'text' ? 1 : 0;
+  if (col.kind === 'numeric') score += col.hasDecimals ? -4 : 1;
+  if (col.unique >= 2 && col.unique <= n / 2 && col.balanced) {
+    score += 2;
+    why.push(`${col.unique} 个水平重复均衡`);
+  }
+  if (col.unique === 1) score -= 1; // 单水平可当角色占位,但结构证据弱
+  if (col.unique > n / 2 && n >= 4) score -= 3; // 几乎逐行不同,当不了类别
+  return { score, why };
+}
+
+function partScore(col: RoleCandidate, n: number): { score: number; why: string[] } {
+  const base = categoryBaseScore(col, n);
+  const why = [...base.why];
+  let score = base.score;
+  if (hitKeyword(col.name, PART_KEYWORDS)) { score += 6; why.unshift('列名含部件特征词'); }
+  if (col.unique >= 4) score += 1; // MSA 常规:部件水平数多于操作员
+  return { score, why };
+}
+
+function operatorScore(col: RoleCandidate, n: number): { score: number; why: string[] } {
+  const base = categoryBaseScore(col, n);
+  const why = [...base.why];
+  let score = base.score;
+  if (hitKeyword(col.name, OPERATOR_KEYWORDS)) { score += 6; why.unshift('列名含操作员特征词'); }
+  if (col.unique >= 2 && col.unique <= 4) score += 1; // 操作员通常 2–4 人
+  return { score, why };
+}
+
+/** (part,operator) 交叉结构:每胞行数相等且 ≥1(平衡交叉设计)加分。 */
+function crossBalance(part: RoleCandidate, operator: RoleCandidate): number | null {
+  const cells = new Map<string, number>();
+  for (let row = 0; row < part.labels.length; row++) {
+    const key = `${part.labels[row]}\u0000${operator.labels[row]}`;
+    cells.set(key, (cells.get(key) ?? 0) + 1);
+  }
+  if (cells.size !== part.unique * operator.unique) return null;
+  let repeats = -1;
+  for (const count of cells.values()) {
+    if (repeats < 0) repeats = count;
+    else if (count !== repeats) return null;
+  }
+  return repeats >= 1 ? repeats : null;
+}
+
+/**
+ * MSA 默认角色推荐:对「测量/部件/操作员」三个角色做可解释打分,返回推荐列名与依据。
+ * 只做预填——UI 仍以用户手动选择优先;信号不足或并列时对应角色明确返回 null,不瞎猜。
+ * 背景:工厂列序「部件、测试人、螺钉高度」曾被列序默认(第一数值列当测量)推荐反(716-R3 P1-2)。
+ */
+export function recommendGageRoles(model: VarModel, textCols: GageTextColumn[]): GageRoleRecommendation {
+  const n = model.k;
+  const numeric: RoleCandidate[] = model.colNames.map((name, index) => {
+    const values = model.subs.map((row) => row.vals[index]);
+    return candidateOf(name, 'numeric', values.map((v) => Object.is(v, -0) ? '0' : String(v)), values);
+  });
+  const text: RoleCandidate[] = textCols.map((column) =>
+    candidateOf(column.name, 'text', column.values.map((value) => value.trim()), null));
+  const all = [...text, ...numeric]; // 与 resolvedGageCategoryColumns 一致:文本列在前
+  if (numeric.length === 0 || n === 0) return { value: null, part: null, operator: null, reasons: [] };
+
+  // 1) 测量列:数值列中独立打分,唯一数值列直接锁定;最高分并列则不猜
+  const valueScored = numeric.map((col) => ({ col, ...valueScore(col, n) }));
+  let valuePick: { col: RoleCandidate; score: number; why: string[] } | null = null;
+  if (numeric.length === 1) {
+    valuePick = { ...valueScored[0], why: ['唯一数值列', ...valueScored[0].why] };
+  } else {
+    const best = Math.max(...valueScored.map((s) => s.score));
+    const top = valueScored.filter((s) => s.score === best);
+    if (top.length === 1 && best > 0) valuePick = top[0];
+  }
+
+  // 2) 部件/操作员:在测量列之外的候选里按角色独立打分,再用交叉结构定夺方向
+  const categories = all.filter((col) => !valuePick || col !== valuePick.col);
+  const partScored = categories.map((col) => ({ col, ...partScore(col, n) }));
+  const operScored = categories.map((col) => ({ col, ...operatorScore(col, n) }));
+  let bestPair: { part: typeof partScored[number]; oper: typeof operScored[number]; total: number; repeats: number | null } | null = null;
+  for (const p of partScored) {
+    if (p.score <= 0) continue;
+    for (const o of operScored) {
+      if (o.score <= 0 || o.col === p.col) continue;
+      const repeats = crossBalance(p.col, o.col);
+      const total = p.score + o.score + (repeats != null ? 3 : 0);
+      if (!bestPair || total > bestPair.total) bestPair = { part: p, oper: o, total, repeats };
+    }
+  }
+  // 并列不猜:存在得分相同但列分配不同的组合时,部件/操作员都返回 null
+  if (bestPair) {
+    const b = bestPair;
+    const tied = partScored.some((p) => p.score > 0 && operScored.some((o) => {
+      if (o.score <= 0 || o.col === p.col) return false;
+      if (p.col === b.part.col && o.col === b.oper.col) return false; // 跳过最优组合本身
+      return p.score + o.score + (crossBalance(p.col, o.col) != null ? 3 : 0) === b.total;
+    }));
+    if (tied) bestPair = null;
+  }
+
+  const reasons: string[] = [];
+  if (valuePick) reasons.push(`测量=「${valuePick.col.name}」(${valuePick.why.join('、')})`);
+  if (bestPair) {
+    reasons.push(`部件=「${bestPair.part.col.name}」(${bestPair.part.why.join('、') || '类别形态'})`);
+    reasons.push(`操作员=「${bestPair.oper.col.name}」(${bestPair.oper.why.join('、') || '类别形态'})`);
+    if (bestPair.repeats != null) reasons.push(`部件×操作员交叉平衡(每胞 ${bestPair.repeats} 次)`);
+  }
+  return {
+    value: valuePick ? valuePick.col.name : null,
+    part: bestPair ? bestPair.part.col.name : null,
+    operator: bestPair ? bestPair.oper.col.name : null,
+    reasons,
+  };
+}
+
 /**
  * 把活动工作表解析为完整、平衡的交叉 Gage R&R 研究。
  * 页面、保存摘要和专项导出共用此入口，避免各自猜列或把占位 0 当实测值。
  */
+/** 「生效 Gage 角色」单一来源(批次716-R3 收口):store 手选优先,否则用可解释推荐
+ * (推荐与生效测量列撞车时作废,退回 prepareGageStudy 的位置默认)。
+ * MSA 页、壳层状态栏、保存记录与专项报告都必须经此函数,否则用户未手选时
+ * 页面按推荐算、其他路径按列序算,同一数据两种角色口径。 */
+export function effectiveGageSelection(
+  model: VarModel,
+  textCols: GageTextColumn[],
+  stored: { value: string | null; part: string | null; operator: string | null },
+): { valueColumn: string | null; partColumn: string | null; operatorColumn: string | null } {
+  const rec = recommendGageRoles(model, textCols);
+  const valueColumn = stored.value ?? rec.value;
+  const namedValueIndex = valueColumn ? model.colNames.indexOf(valueColumn) : -1;
+  const selectedValueName = model.colNames[namedValueIndex >= 0 ? namedValueIndex : 0] ?? null;
+  const recPart = rec.part !== selectedValueName ? rec.part : null;
+  const recOperator = rec.operator !== selectedValueName ? rec.operator : null;
+  return {
+    valueColumn,
+    partColumn: stored.part ?? recPart,
+    operatorColumn: stored.operator ?? recOperator,
+  };
+}
+
 export function prepareGageStudy(
   model: VarModel,
   textCols: GageTextColumn[],

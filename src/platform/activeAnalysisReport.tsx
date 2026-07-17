@@ -20,7 +20,7 @@ import {
   countAnovaPendingCells,
   DEFECTS,
   DOE_DESIGN,
-  detectFactorial,
+  detectFactorial, detectGeneralFactorial, analyzeGeneralFactorial, detectFractionalFactorial, analyzeFractionalFactorial, resolveDoeColumnsWide, MAX_FRACTIONAL_FACTORS,
   cusumSeries,
   evalLimitedRules,
   evalRules,
@@ -35,11 +35,10 @@ import {
   isDoeAnalysisColumn,
   linearRegression,
   oneSampleT,
-  prepareGageStudy,
+  prepareGageStudy, effectiveGageSelection,
   prepareSpcData,
   resolveAnovaMode,
   resolveAnovaNumericRoles,
-  resolveDoeColumns,
   resolveDoeBlockValues,
   resolveNumericColumn,
   stageValidationError,
@@ -166,7 +165,9 @@ function buildAqlPayload(): AnalysisReportPayload {
     `${report.stateLabel} · ${report.sourceTable} · 初始字码 ${report.initialCode} → 执行字码 ${p.code}`,
     p.fullInspect
       ? `查表样本量达到批量，执行 100% 全检：N=${p.n}，Ac=${p.ac}，Re=${p.re}`
-      : `抽样方案 n=${p.n}，Ac=${p.ac}，Re=${p.re}；生产方风险 α=${fmt(report.producerRiskPct, 2)}%，RQL(β=10%)=${fmt(report.rqlPct, 2)}%`,
+      : report.regime === 'per100'
+        ? `抽样方案 n=${p.n}，Ac=${p.ac}，Re=${p.re}(每百单位不合格数体系,d 可大于 n);生产方风险 α=${fmt(report.producerRiskPct, 2)}%,RQL(β=10%)=λ ${report.rqlPer100 == null ? '—' : fmt(report.rqlPer100, 1)}(每百单位不合格数)`
+        : `抽样方案 n=${p.n}，Ac=${p.ac}，Re=${p.re}；生产方风险 α=${fmt(report.producerRiskPct, 2)}%，RQL(β=10%)=${fmt(report.rqlPct, 2)}%`,
     latest
       ? `最近批次 ${latest.batchId}：抽检/全检 ${latest.sampleSize} 件，不合格 ${latest.nonconforming} 件，判定${latest.decision === 'accepted' ? '接收' : '不接收'}，检验人 ${latest.inspector}`
       : '尚未记录实际批次检验结果；当前仅为方案设计结果。',
@@ -180,7 +181,9 @@ function buildAqlPayload(): AnalysisReportPayload {
       ? '转移得分已达到 30，但生产稳定/负责部门批准条件未同时满足，不能转放宽检验。'
       : '',
   ].filter(Boolean);
-  const charts = p.fullInspect || report.suspended ? [] : [
+  // per100 体系的 OC 是泊松模型且横轴为 λ(每百单位不合格数),二项 OcCurveChart 画出来是错的:
+  // 页面已有专用 OcCurvePer100(页内组件),导出报告先以数据表述为准、不放错误曲线。
+  const charts = p.fullInspect || report.suspended || report.regime === 'per100' ? [] : [
     svgChart(
       'OC 特性曲线',
       <OcCurveChart T={T} n={p.n} ac={p.ac} pmax={Math.min(1, Math.max(0.1, (report.rqlPct ?? 40) / 80))} aqlP={report.aql / 100} rqlP={report.rqlPct == null ? undefined : report.rqlPct / 100} />,
@@ -495,18 +498,57 @@ function buildDoePayload(): AnalysisReportPayload {
     };
   }
   const rows = M.subs.map((sub) => sub.vals);
-  const { factorIdx, respIdx } = resolveDoeColumns(M.colNames, app.doeFactorCols, app.doeRespCol);
+  // 716-R3 自查:与分析页同用 Wide 解析(上限 7)。旧 resolveDoeColumns 截到 4 因子会让
+  // 2^(5-1) 的 E 效应在正式报告里冒充 A×B×C×D。
+  const { factorIdx, respIdx } = resolveDoeColumnsWide(M.colNames, app.doeFactorCols, app.doeRespCol, MAX_FRACTIONAL_FACTORS);
   if (factorIdx.length < 2 || respIdx < 0) {
     return unrunPayload('doe', '因子试验设计（DOE）专项报告', M.name, '需要至少 2 个合法因子列和 1 个响应列；标准序、运行序、区组及旧的 DOE 输出列不会被当作因子。');
   }
   const response = rows.map((row) => row[respIdx]);
   const blocks = resolveDoeBlockValues(M.colNames, rows, data.textCols);
-  const detected = detectFactorial(
-    factorIdx.map((index) => ({ name: M.colNames[index], values: rows.map((row) => row[index]) })),
-    response,
-    { blocks },
-  );
+  const doeFacs = factorIdx.map((index) => ({ name: M.colNames[index], values: rows.map((row) => row[index]) }));
+  const detected = doeFacs.length <= 4
+    ? detectFactorial(doeFacs, response, { blocks })
+    : detectFractionalFactorial(doeFacs, response, { blocks });
   if (!detected.ok) {
+    // 716-R3:两水平识别失败时按一般全因子回落,与分析页/保存卡同口径
+    const gen = detectGeneralFactorial(
+      factorIdx.map((index) => ({ name: M.colNames[index], values: rows.map((row) => row[index]) })),
+      response,
+    );
+    if (gen.ok) {
+      const genPending = data.pendingCells.filter((cell) => cell.col === respIdx).length;
+      if (genPending > 0 || new Set(response).size < 2) {
+        return unrunPayload('doe', '因子试验设计（DOE）专项报告', M.name,
+          genPending > 0 ? `响应列还有 ${genPending} 个待录入单元格。` : '响应列没有变异,无法估计因子效应。');
+      }
+      const gr = analyzeGeneralFactorial(gen.design);
+      const fmtP = (value: number | null) => value == null ? '—' : value < 0.001 ? '<0.001' : fmt(value, 3);
+      return {
+        kind: 'doe',
+        title: '因子试验设计（DOE）专项报告 · 一般全因子',
+        subtitle: `${M.colNames[respIdx]} · ${gen.design.factorNames.join(' / ')} · ${gr.nRuns} 次运行`,
+        generatedAt: now(),
+        summary: [
+          gr.rows.some((row) => row.sig)
+            ? `显著项(α=0.05):${gr.rows.filter((row) => row.sig).map((row) => row.name).join('、')};R² = ${fmt(gr.r2 * 100, 1)}%。`
+            : `未检出显著项(α=0.05);R² = ${fmt(gr.r2 * 100, 1)}%。`,
+          ...(gr.interactionNote ? [gr.interactionNote] : []),
+        ],
+        warnings: gr.inestimableTerms?.length ? [`以下项因缺格/别名不可估计:${gr.inestimableTerms.join('、')}`] : [],
+        tables: [{
+          title: '方差分析(Adj SS,与 Minitab GLM 默认口径一致)',
+          headers: ['来源', 'DF', 'Adj SS', 'Adj MS', 'F', 'P'],
+          rows: [
+            ...gr.rows.map((row) => [row.name, row.df, fmt(row.adjSS, 4), row.adjMS == null ? '—' : fmt(row.adjMS, 4), row.f == null ? '—' : fmt(row.f, 2), fmtP(row.p)]),
+            ['误差', gr.error.df, fmt(gr.error.adjSS, 4), gr.error.adjMS == null ? '—' : fmt(gr.error.adjMS, 4), '', ''],
+            ['合计', gr.total.df, fmt(gr.total.adjSS, 4), '', '', ''],
+          ],
+          note: '主效应图与残差诊断见 DOE 分析页。',
+        }],
+        charts: [],
+      };
+    }
     return unrunPayload('doe', '因子试验设计（DOE）专项报告', M.name, `无法识别当前因子设计：${detected.reason}`);
   }
   const pendingCount = data.pendingCells.filter((cell) => cell.col === respIdx).length;
@@ -520,10 +562,14 @@ function buildDoePayload(): AnalysisReportPayload {
         : '响应列没有变异，无法估计因子效应；请确认已录入实测响应。',
     );
   }
-  const available = factorialModelTerms(detected.design.factorNames);
+  const allTerms = factorialModelTerms(detected.design.factorNames);
+  // 与分析页同口径:5 因子以上默认仅主效应+二因子交互入模
+  const available = detected.design.factorNames.length > 4
+    ? allTerms.filter((term) => term.split('×').length <= 2)
+    : allTerms;
   const selected = app.doeModelTerms?.filter((term) => available.includes(term));
-  const result = analyzeFactorial(detected.design, {
-    terms: selected?.length ? selected : undefined,
+  const result = (detected.design.factorNames.length <= 4 ? analyzeFactorial : analyzeFractionalFactorial)(detected.design, {
+    terms: selected?.length ? selected : available,
     includeCurvature: app.doeIncludeCurvature,
   });
   const responseName = M.colNames[respIdx];
@@ -764,10 +810,10 @@ function buildGagePayload(): AnalysisReportPayload {
   const app = useApp.getState();
   const data = useData.getState();
   const requestedReal = !data.model.isDemo && app.gageUseReal;
+  // 与 MSA 页同源(716-R3):未手选角色用推荐补齐
   const prepared = prepareGageStudy(data.model, data.textCols, {
-    valueColumn: app.gageValueName,
-    partColumn: app.gagePartName,
-    operatorColumn: app.gageOperatorName,
+    ...effectiveGageSelection(data.model, data.textCols,
+      { value: app.gageValueName, part: app.gagePartName, operator: app.gageOperatorName }),
     pendingCells: data.pendingCells,
   });
   if (requestedReal && !prepared.ok) {
@@ -847,6 +893,8 @@ function buildSpcPayload(): AnalysisReportPayload | undefined {
       isP ? data.pModel.pLcls : lcl,
       app.spcRules,
       app.spcRuleK,
+      // P/C 图控制限有钳位,判异用真实 σ(与 SPC 页同口径)
+      isP ? data.pModel.pNs.map((n) => Math.sqrt(cl * (1 - cl) / n)) : Math.sqrt(cl),
     );
     const items = expandSpcRuleItems(evaluated.viol, evaluated.list, isP ? 'P' : 'C', app.spcRuleK);
     const typeLabel = isP ? 'P' : 'C';

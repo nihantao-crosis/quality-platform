@@ -1,15 +1,22 @@
 /** 实验设计 DOE — 接真实数据:分析因子设计(选因子/响应列)+ 创建因子设计(生成到工作表)。
- * 出厂演示集显示 2³ 示例;导入用户数据后按实际因子/响应分析,标题与结论全部动态。 */
-import { useMemo, useState } from 'react';
+ * 出厂演示集显示 2³ 示例;导入用户数据后按实际因子/响应分析,标题与结论全部动态。
+ * 716-R3:创建页扩展为设计类型选择(两水平全因子/一般全因子/分数因子 2^(k−p) 含折叠);
+ * 分析页在两水平检测失败且数据为多水平(每因子 2–5 水平)时自动走一般全因子 ANOVA,
+ * 5–7 个两水平因子(分数因子)走同一 OLS 引擎的放宽版;既有 2–4 因子两水平路径与文案不回归。 */
+import { Fragment, useMemo, useState } from 'react';
 import { useApp, type DoeView } from '../../store/appStore';
 import { useData } from '../../store/dataStore';
 import {
   nf, tInv,
   analyzeDoe, mainEffectMeans, interactionMeans, DOE_DESIGN,
   detectFactorial, analyzeFactorial, factorialAdjustedMainMeans, factorialAdjustedInteractionMeans, factorialCornerPredictions, generateFactorialDesign,
-  resolveDoeColumns, resolveDoeBlockValues, factorialModelTerms, factorialOptimizationDecision, isDoeAnalysisColumn, buildDoeWorksheetOutput,
+  resolveDoeColumnsWide, resolveDoeBlockValues, factorialModelTerms, factorialOptimizationDecision, isDoeAnalysisColumn, buildDoeWorksheetOutput,
   uncodedEquation, lenthPseFromEffects, studentizedDeletedResiduals,
+  detectFractionalFactorial, analyzeFractionalFactorial, MAX_FRACTIONAL_FACTORS,
+  detectGeneralFactorial, analyzeGeneralFactorial, generateGeneralFactorialDesign,
+  fractionalDesignOptions, generateFractionalFactorialDesign,
   type CodedDesign, type FactorialResult, type FactorDef,
+  type GeneralFactorialDesign, type GeneralFactorialResult,
 } from '../../core';
 import type { ChartTokens } from '../tokens';
 import { Card, CardHeader, tabStyle, EmptyStateCard, DemoBadge, numInput } from '../common';
@@ -18,6 +25,7 @@ import { EffectsNormalPlot } from '../charts/EffectsNormalPlot';
 import { ScatterPlot } from '../charts/ScatterPlot';
 import { MiniHist } from '../charts/misc';
 import { MainEffects, InteractionPlot, EffectsBar, CubePlot } from '../charts/doe';
+import { Svg, Ln, Txt } from '../charts/primitives';
 
 const VIEWS: Array<[DoeView, string]> = [
   ['main', '主效应图'],
@@ -48,6 +56,8 @@ function DoeInner({ T }: { T: ChartTokens }) {
           <button type="button" aria-pressed={tab === 'analyze'} style={tabStyle(tab === 'analyze')} onClick={() => setTab('analyze')}>分析因子设计</button>
           <button type="button" aria-pressed={tab === 'create'} style={tabStyle(tab === 'create')} onClick={() => setTab('create')}>创建因子设计</button>
         </div>
+        {/* 716-R3 标题据实:能力不再只有两水平全因子 */}
+        <span style={{ fontSize: 11.5, color: '#9aa2ad' }}>两水平全因子 · 一般全因子(2–5 水平)· 分数因子 2^(k−p)</span>
         {M.isDemo && tab === 'analyze' && <div style={{ marginLeft: 'auto' }}><DemoBadge /></div>}
       </Card>
       {tab === 'create' ? <CreateDesign /> : <AnalyzeDesign T={T} />}
@@ -71,14 +81,17 @@ function AnalyzeDesign({ T }: { T: ChartTokens }) {
     () => M.colNames.map((name, index) => ({ name, index })).filter(({ name }) => isDoeAnalysisColumn(name)).map(({ index }) => index),
     [M.colNames],
   );
+  // 716-R3:因子解析上限放宽到 7(分数因子);≤4 因子时与旧 resolveDoeColumns 行为完全一致。
   const { factorIdx, respIdx } = useMemo(
-    () => resolveDoeColumns(M.colNames, doeFactorCols, doeRespCol),
+    () => resolveDoeColumnsWide(M.colNames, doeFactorCols, doeRespCol, MAX_FRACTIONAL_FACTORS),
     [M.colNames, doeFactorCols, doeRespCol],
   );
   const curFactorNames = factorIdx.map((i) => M.colNames[i]);
   const toggleFactor = (i: number, on: boolean) => {
     const name = M.colNames[i];
-    if (on && curFactorNames.length >= 4) { showToast('DOE 因子设计最多支持 4 个因子'); return; }
+    if (on && curFactorNames.length >= MAX_FRACTIONAL_FACTORS) {
+      showToast(`DOE 两水平因子设计最多支持 ${MAX_FRACTIONAL_FACTORS} 个因子(一般全因子 2–4 个)`); return;
+    }
     setDoeCols(on ? [...curFactorNames, name] : curFactorNames.filter((n) => n !== name), doeRespCol);
   };
   const setResp = (v: number) => {
@@ -101,18 +114,34 @@ function AnalyzeDesign({ T }: { T: ChartTokens }) {
     const resp = M.subs.map((s) => s.vals[respIdx]);
     if (facs.length < 2) return { ok: false as const, reason: '请至少勾选 2 个因子列(且不与响应列相同)' };
     const blocks = resolveDoeBlockValues(M.colNames, M.subs.map((sub) => sub.vals), textCols);
-    return detectFactorial(facs, resp, { blocks });
+    // 716-R3:≤4 因子明确只走既有 detectFactorial(零回归);5–7 因子(分数因子)走同一逻辑的放宽版。
+    return facs.length <= 4 ? detectFactorial(facs, resp, { blocks }) : detectFractionalFactorial(facs, resp, { blocks });
   }, [isDemo, factorIdx, respIdx, M, textCols]);
+
+  // 716-R3:两水平检测失败时尝试一般全因子(每因子 2–5 水平)。两水平数据永远优先走既有引擎。
+  const generalDetect = useMemo(() => {
+    if (isDemo || !detect || detect.ok) return null;
+    const facs = factorIdx.map((i) => ({ name: M.colNames[i], values: M.subs.map((s) => s.vals[i]) }));
+    if (facs.length < 2) return null;
+    return detectGeneralFactorial(facs, M.subs.map((s) => s.vals[respIdx]));
+  }, [isDemo, detect, factorIdx, respIdx, M]);
 
   // 演示:沿用内置 2³(hook 必须在任何早返回之前)
   const demoRes = useMemo(() => (isDemo ? analyzeDoe() : null), [isDemo]);
 
   const design: CodedDesign | null = detect && detect.ok ? detect.design : null;
-  const availableTerms = design ? factorialModelTerms(design.factorNames) : [];
+  const allModelTerms = design ? factorialModelTerms(design.factorNames) : [];
+  // 5–7 因子时模型默认只含主效应与二因子交互:分数设计中高阶交互几乎必然与低阶项混杂,
+  // 且 2^7−1=127 个复选项会让模型面板不可用;2–4 因子保持原有全项行为不变。
+  const availableTerms = design && design.factorNames.length > 4
+    ? allModelTerms.filter((term) => term.split('×').length <= 2)
+    : allModelTerms;
   const storedTerms = doeModelTerms?.filter((term) => availableTerms.includes(term)) ?? null;
   const selectedTerms = storedTerms && storedTerms.length > 0 ? storedTerms : availableTerms;
   const real: FactorialResult | null = design
-    ? analyzeFactorial(design, { terms: selectedTerms, includeCurvature: doeIncludeCurvature })
+    ? (design.factorNames.length <= 4
+      ? analyzeFactorial(design, { terms: selectedTerms, includeCurvature: doeIncludeCurvature })
+      : analyzeFractionalFactorial(design, { terms: selectedTerms, includeCurvature: doeIncludeCurvature }))
     : null;
 
   // 空态:非演示且可分析列不足(元数据/旧输出列不计入因子或响应)
@@ -120,7 +149,7 @@ function AnalyzeDesign({ T }: { T: ChartTokens }) {
     return (
       <EmptyStateCard
         title="因子设计分析需要因子列 + 响应列"
-        need="至少 2 个因子列(各为 2 水平,可含中心点)+ 1 个响应列。可用「创建因子设计」生成规范的设计表,按运行序试验并录入响应后回此分析。"
+        need="至少 2 个因子列(两水平可含中心点;一般全因子每因子 2–5 水平;两水平分数因子最多 7 个因子)+ 1 个响应列。可用「创建因子设计」生成规范的设计表,按运行序试验并录入响应后回此分析。"
         current={`当前数据集 ${nCols} 个数值列，其中 ${eligibleIdx.length} 个可作为因子/响应（元数据和 DOE 输出已排除）`}
         actions={[]}
       />
@@ -147,6 +176,19 @@ function AnalyzeDesign({ T }: { T: ChartTokens }) {
     </Card>
   );
 
+  // 716-R3:两水平检测失败但数据是合法的多水平(2–5 水平)全因子 → 自动走一般全因子 ANOVA
+  if (!isDemo && detect && !detect.ok && generalDetect?.ok) {
+    return (
+      <GeneralAnalyzeSection
+        T={T}
+        design={generalDetect.design}
+        respIdx={respIdx}
+        respName={M.colNames[respIdx]}
+        picker={picker}
+      />
+    );
+  }
+
   // 检测失败(数据形态不对):给出原因 + 引导
   if (!isDemo && detect && !detect.ok) {
     return (
@@ -154,8 +196,12 @@ function AnalyzeDesign({ T }: { T: ChartTokens }) {
         {picker}
         <Card style={{ padding: '18px 20px', fontSize: 13, color: '#8a6520', background: '#fffdf7', lineHeight: 1.7 }}>
           <b>无法识别为因子设计:</b>{detect.reason}
+          {generalDetect && !generalDetect.ok && (
+            <div style={{ marginTop: 6 }}>一般全因子检测:{generalDetect.reason}</div>
+          )}
           <div style={{ fontSize: 12, color: '#9aa2ad', marginTop: 8 }}>
-            DOE 因子设计要求每个因子恰好 2 个水平(可加一个中值作中心点)。若数据尚未按设计采集,请到「创建因子设计」生成设计表,
+            DOE 因子设计要求每个因子恰好 2 个水平(可加一个中值作中心点);每因子 2–5 个水平的数据会自动尝试
+            「一般全因子」多水平 ANOVA。若数据尚未按设计采集,请到「创建因子设计」生成设计表,
             按运行序试验并录入响应后再来分析。
           </div>
         </Card>
@@ -319,6 +365,9 @@ function AnalyzeDesign({ T }: { T: ChartTokens }) {
             <span style={{ color: res.droppedTerms?.length ? '#b0620f' : '#2c8a45' }}>
               可估计 {res.terms.length}/{selectedTerms.length} 项
             </span>
+            {!isDemo && design!.factorNames.length > 4 && (
+              <span style={{ color: '#9aa2ad' }}>5 因子以上(分数因子)默认仅主效应+二因子交互入模</span>
+            )}
             <button type="button" className="hov-act-primary" onClick={storeOutputs}
               style={{ marginLeft: 'auto', padding: '6px 12px', border: 0, borderRadius: 5, background: '#1f6fb2', color: '#fff', cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>
               将存储项写回工作表
@@ -614,9 +663,16 @@ function AnalyzeDesign({ T }: { T: ChartTokens }) {
 /** 随机化种子默认值:沿用原实现的固定 LCG 种子,保证默认行为不变。 */
 const DEFAULT_DOE_SEED = 20260713;
 
+/** 716-R3:创建页扩展为设计类型选择;两水平全因子路径的输入/文案/生成行为保持原样。 */
+type CreateDesignType = 'two-level' | 'general' | 'fractional';
+
+/** 一般全因子的因子编辑草稿:水平数与各水平值均为「文本态」,生成时统一解析校验(参考 kText 模式)。 */
+interface GeneralFactorDraft { name: string; countText: string; levelTexts: string[] }
+
 function CreateDesign() {
   const { importMatrix } = useData();
   const { goTo, showToast } = useApp();
+  const [designType, setDesignType] = useState<CreateDesignType>('two-level');
   // 因子数改为手动数字输入:文本态允许自由编辑,实际生效值钳制在 2–4 并给出提示。
   const [kText, setKText] = useState('2');
   const [factors, setFactors] = useState<FactorDef[]>([
@@ -624,12 +680,33 @@ function CreateDesign() {
     { name: '轴硬度', low: 28, high: 32 },
     { name: '因子C', low: 0, high: 1 },
     { name: '因子D', low: 0, high: 1 },
+    // 716-R3:E–G 仅供分数因子(3–7 因子)使用;两水平全因子仍只取前 2–4 个,行为不变
+    { name: '因子E', low: 0, high: 1 },
+    { name: '因子F', low: 0, high: 1 },
+    { name: '因子G', low: 0, high: 1 },
   ]);
   const [center, setCenter] = useState(3);
   const [reps, setReps] = useState(1);
   const [blocks, setBlocks] = useState(1);
   const [randomize, setRandomize] = useState(true);
   const [seedText, setSeedText] = useState(String(DEFAULT_DOE_SEED));
+
+  // —— 一般全因子(716-R3 ①):每因子 2–5 个自定义水平 ——
+  const [gKText, setGKText] = useState('2');
+  const [gFactors, setGFactors] = useState<GeneralFactorDraft[]>([
+    { name: '因子A', countText: '3', levelTexts: ['1', '2', '3'] },
+    { name: '因子B', countText: '3', levelTexts: ['1', '2', '3'] },
+    { name: '因子C', countText: '2', levelTexts: ['1', '2'] },
+    { name: '因子D', countText: '2', levelTexts: ['1', '2'] },
+  ]);
+  const [gRepsText, setGRepsText] = useState('2');
+
+  // —— 分数因子(716-R3 ②):2^(k−p) 标准生成元 + 折叠 ——
+  const [fKText, setFKText] = useState('4');
+  const [fP, setFP] = useState(1);
+  const [fRepsText, setFRepsText] = useState('1');
+  const [foldMode, setFoldMode] = useState<'none' | 'full' | 'factor'>('none');
+  const [foldFactorIdx, setFoldFactorIdx] = useState(0);
 
   const parsedK = Number.parseInt(kText, 10);
   const kOutOfRange = !(Number.isInteger(parsedK) && parsedK >= 2 && parsedK <= 4);
@@ -657,9 +734,277 @@ function CreateDesign() {
     showToast(`已生成 ${d.rows.length} 运行 / ${d.blockCount} 区组的因子设计（含标准序、运行序、区组、点类型），请录入响应后回 DOE→分析`);
   };
 
+  // —— 一般全因子:派生值与生成 ——
+  const gParsedK = Number.parseInt(gKText, 10);
+  const gOutOfRange = !(Number.isInteger(gParsedK) && gParsedK >= 2 && gParsedK <= 4);
+  const gK = Number.isInteger(gParsedK) ? Math.max(2, Math.min(4, gParsedK)) : 2;
+  const gParsedReps = Number.parseInt(gRepsText, 10);
+  const gReps = Number.isInteger(gParsedReps) ? Math.max(1, Math.min(10, gParsedReps)) : 1;
+  const gRuns = gFactors.slice(0, gK).reduce((product, f) => product * f.levelTexts.length, 1) * gReps;
+  const setGF = (i: number, patch: Partial<GeneralFactorDraft>) =>
+    setGFactors((prev) => prev.map((f, j) => (j === i ? { ...f, ...patch } : f)));
+  const setGLevelCount = (i: number, text: string) =>
+    setGFactors((prev) => prev.map((f, j) => {
+      if (j !== i) return f;
+      const parsed = Number.parseInt(text, 10);
+      // 文本态自由编辑;仅当解析为合法 2–5 时立即调整水平输入框数量(新增位给出递增默认值)
+      if (!Number.isInteger(parsed) || parsed < 2 || parsed > 5) return { ...f, countText: text };
+      const levelTexts = f.levelTexts.slice(0, parsed);
+      while (levelTexts.length < parsed) levelTexts.push(String(levelTexts.length + 1));
+      return { ...f, countText: text, levelTexts };
+    }));
+  const setGLevelValue = (i: number, li: number, text: string) =>
+    setGFactors((prev) => prev.map((f, j) => (j === i
+      ? { ...f, levelTexts: f.levelTexts.map((t, ti) => (ti === li ? text : t)) }
+      : f)));
+
+  const createGeneral = () => {
+    const facs = gFactors.slice(0, gK);
+    if (facs.some((f) => !f.name.trim())) { showToast('请填写所有因子名'); return; }
+    if (new Set(facs.map((f) => f.name.trim())).size !== facs.length) { showToast('因子名不能重复'); return; }
+    const parsed = facs.map((f) => ({ name: f.name.trim(), levels: f.levelTexts.map((t) => Number.parseFloat(t)) }));
+    for (const f of parsed) {
+      if (f.levels.length < 2 || f.levels.length > 5) { showToast(`因子「${f.name}」的水平数须在 2–5 之间`); return; }
+      if (f.levels.some((v) => !Number.isFinite(v))) { showToast(`因子「${f.name}」的水平值必须全部为有效数值`); return; }
+      if (new Set(f.levels).size !== f.levels.length) { showToast(`因子「${f.name}」的水平值不能重复`); return; }
+    }
+    try {
+      const d = generateGeneralFactorialDesign(parsed, { replicates: gReps, randomize, seed });
+      const stamp = new Date().toLocaleTimeString('zh-CN', { hour12: false }).replace(/:/g, '');
+      const pending = d.rows.map((_, row) => ({ row, col: d.responseCol }));
+      importMatrix(`DOE一般全因子_${stamp}`, d.colNames, d.rows, d.textCols, pending);
+      goTo('worksheet');
+      showToast(`已生成 ${d.rows.length} 运行的一般全因子设计（标准序、运行序、点类型;区组恒为 1），请录入响应后回 DOE→分析,多水平数据自动走一般全因子 ANOVA`);
+    } catch (error) { showToast((error as Error).message); }
+  };
+
+  // —— 分数因子:派生值与生成 ——
+  const fParsedK = Number.parseInt(fKText, 10);
+  const fOutOfRange = !(Number.isInteger(fParsedK) && fParsedK >= 3 && fParsedK <= MAX_FRACTIONAL_FACTORS);
+  const fK = Number.isInteger(fParsedK) ? Math.max(3, Math.min(MAX_FRACTIONAL_FACTORS, fParsedK)) : 4;
+  const fOptions = fractionalDesignOptions(fK);
+  // 因子数变化后原 p 可能不存在(如 3 因子无 p=2):回落到全因子行,避免静默生成另一种设计
+  const fPEff = fOptions.some((option) => option.p === fP) ? fP : 0;
+  const fSpec = fOptions.find((option) => option.p === fPEff)!;
+  const fParsedReps = Number.parseInt(fRepsText, 10);
+  const fReps = Number.isInteger(fParsedReps) ? Math.max(1, Math.min(10, fParsedReps)) : 1;
+  const foldEff: 'none' | 'full' | 'factor' = fSpec.p === 0 ? 'none' : foldMode;
+  const foldFactorEff = Math.min(foldFactorIdx, fK - 1);
+  const fRuns = fSpec.runs * fReps * (foldEff !== 'none' ? 2 : 1);
+
+  const createFractional = () => {
+    const facs = factors.slice(0, fK);
+    if (facs.some((f) => !f.name.trim())) { showToast('请填写所有因子名'); return; }
+    if (new Set(facs.map((f) => f.name.trim())).size !== facs.length) { showToast('因子名不能重复'); return; }
+    if (facs.some((f) => !(f.low < f.high))) { showToast('每个因子必须满足低水平 < 高水平'); return; }
+    try {
+      const d = generateFractionalFactorialDesign(
+        facs.map((f) => ({ name: f.name.trim(), low: f.low, high: f.high })),
+        fSpec.p,
+        {
+          fold: foldEff === 'none' ? 'none' : foldEff === 'full' ? 'full' : foldFactorEff,
+          replicates: fReps, randomize, seed,
+        },
+      );
+      const stamp = new Date().toLocaleTimeString('zh-CN', { hour12: false }).replace(/:/g, '');
+      const pending = d.rows.map((_, row) => ({ row, col: d.responseCol }));
+      importMatrix(`DOE分数因子_${stamp}`, d.colNames, d.rows, d.textCols, pending);
+      goTo('worksheet');
+      showToast(`已生成 ${fSpec.p === 0 ? `2^${fK} 全因子` : `${fSpec.label} ${d.resolutionLabel} 分数因子`}设计,共 ${d.rows.length} 运行${d.folded ? '（折叠追加运行记为区组 2）' : ''};${d.generators.length ? `生成元 ${d.generators.join('、')},别名项在分析时按低阶优先自动剔除` : '无别名'}。请录入响应后回 DOE→分析`);
+    } catch (error) { showToast((error as Error).message); }
+  };
+
   const inp: React.CSSProperties = { ...numInput, width: 90 };
+  const randomizeControls = (
+    <>
+      <label style={{ display: 'inline-flex', alignItems: 'center', gap: 5, cursor: 'pointer' }}>
+        <input type="checkbox" checked={randomize} onChange={(e) => setRandomize(e.target.checked)} /> 随机化运行序
+      </label>
+      <label title="随机化使用确定性 LCG 伪随机数:种子相同 → 打乱后的运行序完全相同,便于复现与审计;默认沿用平台固定种子" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        随机化种子
+        <input type="number" value={seedText} onChange={(e) => setSeedText(e.target.value)} disabled={!randomize}
+          style={{ ...inp, width: 100, ...(randomize ? {} : { opacity: 0.5 }) }} />
+      </label>
+    </>
+  );
+
+  // —— 一般全因子创建卡内容 ——
+  const generalSection = (
+    <>
+      <div style={{ fontWeight: 600, color: '#33404f', marginBottom: 14 }}>创建一般全因子设计(每因子 2–5 个自定义水平)</div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14, fontSize: 12.5, color: '#5b6472', maxWidth: 780 }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          因子数
+          <input type="number" min={2} max={4} step={1} value={gKText}
+            onChange={(e) => setGKText(e.target.value)} style={{ ...inp, width: 64 }} />
+          <span style={{ color: '#8a929d' }}>(运行数 = 各因子水平数之积 × 仿行数)</span>
+          {gOutOfRange && <span style={{ color: '#b0620f', fontWeight: 600 }}>一般全因子支持 2–4 因子</span>}
+        </label>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {gFactors.slice(0, gK).map((f, i) => {
+            const parsedCount = Number.parseInt(f.countText, 10);
+            const countBad = !(Number.isInteger(parsedCount) && parsedCount >= 2 && parsedCount <= 5);
+            return (
+              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                <span style={{ width: 40, color: '#8a929d' }}>因子{i + 1}</span>
+                <input value={f.name} onChange={(e) => setGF(i, { name: e.target.value })}
+                  style={{ width: 110, padding: '5px 8px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12.5 }} />
+                <span>水平数</span>
+                <input type="number" min={2} max={5} step={1} value={f.countText}
+                  onChange={(e) => setGLevelCount(i, e.target.value)} style={{ ...inp, width: 56 }} />
+                <span>水平值</span>
+                {f.levelTexts.map((t, li) => (
+                  <input key={li} value={t} inputMode="decimal" aria-label={`因子${i + 1}水平${li + 1}`}
+                    onChange={(e) => setGLevelValue(i, li, e.target.value)}
+                    style={{ ...inp, width: 64 }} />
+                ))}
+                {countBad && <span style={{ color: '#b0620f' }}>水平数须为 2–5</span>}
+              </div>
+            );
+          })}
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
+          <label title="每个水平组合的完整重复运行次数;仿行 ≥2 才能把二因子交互与误差分离" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            仿行数
+            <input type="number" min={1} max={10} value={gRepsText} onChange={(e) => setGRepsText(e.target.value)} style={{ ...inp, width: 64 }} />
+          </label>
+          {randomizeControls}
+          <span style={{ color: '#1c4e7a' }}>共 <b className="mono">{gRuns}</b> 次试验</span>
+        </div>
+        <div style={{ fontSize: 11.5, color: '#9aa2ad', lineHeight: 1.6 }}>
+          一般全因子按「混合水平全交叉」生成:标准序为因子 1 变化最快的全组合序,运行序为实际执行顺序。
+          本版一般全因子不支持多区组(两水平的 2 的幂区组生成元不适用于混合水平),区组列恒为 1;
+          没有「角点/中心点」之分——弯曲信息由 ≥3 水平主效应 ANOVA 本身承载,点类型统一记为「因子点」。
+          随机化沿用确定性 LCG,同一种子重新生成得到完全相同的运行序。录入响应后回「分析因子设计」,
+          多水平数据自动走一般全因子 ANOVA(各项 DF / Adj SS / Adj MS / F / P,Adj SS 与 Minitab GLM 口径一致)。
+        </div>
+        <div>
+          <button type="button" className="hov-act-primary" onClick={createGeneral}
+            style={{ display: 'inline-block', padding: '9px 20px', border: 0, background: '#1f6fb2', color: '#fff', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit', fontSize: 13, fontWeight: 600 }}>
+            生成设计表 → 工作表
+          </button>
+        </div>
+      </div>
+    </>
+  );
+
+  // —— 分数因子创建卡内容 ——
+  const fractionalSection = (
+    <>
+      <div style={{ fontWeight: 600, color: '#33404f', marginBottom: 14 }}>创建分数因子设计 2^(k−p)(3–7 因子 · 标准生成元)</div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14, fontSize: 12.5, color: '#5b6472', maxWidth: 780 }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          因子数
+          <input type="number" min={3} max={MAX_FRACTIONAL_FACTORS} step={1} value={fKText}
+            onChange={(e) => setFKText(e.target.value)} style={{ ...inp, width: 64 }} />
+          <span style={{ color: '#8a929d' }}>(字母 A–{String.fromCharCode(64 + fK)} 用于生成元记号)</span>
+          {fOutOfRange && <span style={{ color: '#b0620f', fontWeight: 600 }}>分数因子支持 3–7 因子</span>}
+        </label>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {factors.slice(0, fK).map((f, i) => (
+            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ width: 56, color: '#8a929d' }}>{String.fromCharCode(65 + i)} 因子{i + 1}</span>
+              <input value={f.name} onChange={(e) => setF(i, { name: e.target.value })}
+                style={{ width: 130, padding: '5px 8px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12.5 }} />
+              <span>低</span>
+              <input type="number" step="any" value={f.low} onChange={(e) => setF(i, { low: parseFloat(e.target.value) || 0 })} style={inp} />
+              <span>高</span>
+              <input type="number" step="any" value={f.high} onChange={(e) => setF(i, { high: parseFloat(e.target.value) || 0 })} style={inp} />
+            </div>
+          ))}
+        </div>
+        <div>
+          <div style={{ fontWeight: 600, color: '#33404f', marginBottom: 6 }}>设计选择表</div>
+          <table style={{ borderCollapse: 'collapse', fontSize: 12.5, minWidth: 520 }}>
+            <thead>
+              <tr style={{ color: '#98a1ac', textAlign: 'left' }}>
+                <th style={{ padding: '6px 10px', fontWeight: 600 }}>选择</th>
+                <th style={{ padding: '6px 10px', fontWeight: 600 }}>设计</th>
+                <th style={{ padding: '6px 10px', fontWeight: 600, textAlign: 'right' }}>运行次数</th>
+                <th style={{ padding: '6px 10px', fontWeight: 600, textAlign: 'center' }}>分辨率</th>
+                <th style={{ padding: '6px 10px', fontWeight: 600 }}>生成元</th>
+              </tr>
+            </thead>
+            <tbody>
+              {fOptions.map((option) => (
+                <tr key={option.p} onClick={() => setFP(option.p)}
+                  style={{ borderTop: '1px solid #f0f2f5', cursor: 'pointer', background: option.p === fPEff ? '#f2f7fc' : undefined }}>
+                  <td style={{ padding: '6px 10px' }}>
+                    <input type="radio" name="frac-design" checked={option.p === fPEff} onChange={() => setFP(option.p)} />
+                  </td>
+                  <td style={{ padding: '6px 10px', color: '#33404f', fontWeight: 600 }} className="mono">
+                    {option.p === 0 ? `${option.label} 全因子` : `${option.label} 分数因子`}
+                  </td>
+                  <td style={{ padding: '6px 10px', textAlign: 'right' }} className="mono">{option.runs}</td>
+                  <td style={{ padding: '6px 10px', textAlign: 'center', fontWeight: 600, color: option.resolution == null ? '#2c8a45' : option.resolution >= 5 ? '#2c8a45' : option.resolution === 4 ? '#8a6520' : '#c22f2f' }}>
+                    {option.resolutionLabel}
+                  </td>
+                  <td style={{ padding: '6px 10px', color: '#5b6472' }} className="mono">{option.generators.join('、') || '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
+          <label title="折叠通过追加符号取反的镜像运行解除混杂:全折叠使分辨率 III→IV(主效应与二因子交互解除混杂);指定因子折叠解除该因子与二因子交互的混杂" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            折叠
+            <select style={selStyle} value={foldEff === 'none' && fSpec.p === 0 ? 'none' : foldMode} disabled={fSpec.p === 0}
+              onChange={(e) => setFoldMode(e.target.value as 'none' | 'full' | 'factor')}>
+              <option value="none">不折叠</option>
+              <option value="full">全折叠(全部因子取反)</option>
+              <option value="factor">指定因子折叠</option>
+            </select>
+          </label>
+          {fSpec.p > 0 && foldMode === 'factor' && (
+            <select style={selStyle} value={foldFactorEff} onChange={(e) => setFoldFactorIdx(+e.target.value)}>
+              {factors.slice(0, fK).map((f, i) => <option key={i} value={i}>{String.fromCharCode(65 + i)} {f.name}</option>)}
+            </select>
+          )}
+          <label title="每个分数组合的完整重复运行次数" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            仿行数
+            <input type="number" min={1} max={10} value={fRepsText} onChange={(e) => setFRepsText(e.target.value)} style={{ ...inp, width: 64 }} />
+          </label>
+          {randomizeControls}
+          <span style={{ color: '#1c4e7a' }}>共 <b className="mono">{fRuns}</b> 次试验</span>
+        </div>
+        <div style={{ fontSize: 11.5, color: '#9aa2ad', lineHeight: 1.6 }}>
+          生成元与分辨率取自公认的教科书标准最小失真设计表(Box–Hunter–Hunter / Montgomery,与 Minitab 默认一致),
+          例如 2^(5-2) III 8 次:D=AB、E=AC。分辨率 III 表示主效应与二因子交互混杂,IV 表示二因子交互相互混杂,V 及以上主效应与二因子交互均清晰。
+          折叠追加的镜像运行记为区组 2(折叠块可作区组吸收两批试验的批次差);标准序在原设计后顺延,随机化按区组内 LCG 洗牌,同种子可复现。
+          分析时别名项(如 C=AB 时的 A×B)由分析引擎按低阶优先自动剔除并报告混杂关系。
+        </div>
+        <div>
+          <button type="button" className="hov-act-primary" onClick={createFractional}
+            style={{ display: 'inline-block', padding: '9px 20px', border: 0, background: '#1f6fb2', color: '#fff', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit', fontSize: 13, fontWeight: 600 }}>
+            生成设计表 → 工作表
+          </button>
+        </div>
+      </div>
+    </>
+  );
+
+  if (designType !== 'two-level') {
+    return (
+      <Card style={{ padding: '18px 20px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 12, color: '#8a929d', fontWeight: 600 }}>设计类型</span>
+          {([['two-level', '两水平全因子'], ['general', '一般全因子'], ['fractional', '分数因子 2^(k−p)']] as const).map(([key, label]) => (
+            <button type="button" key={key} aria-pressed={designType === key} style={tabStyle(designType === key)} onClick={() => setDesignType(key)}>{label}</button>
+          ))}
+        </div>
+        {designType === 'general' ? generalSection : fractionalSection}
+      </Card>
+    );
+  }
+
   return (
     <Card style={{ padding: '18px 20px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14, flexWrap: 'wrap' }}>
+        <span style={{ fontSize: 12, color: '#8a929d', fontWeight: 600 }}>设计类型</span>
+        {([['two-level', '两水平全因子'], ['general', '一般全因子'], ['fractional', '分数因子 2^(k−p)']] as const).map(([key, label]) => (
+          <button type="button" key={key} aria-pressed={designType === key} style={tabStyle(designType === key)} onClick={() => setDesignType(key)}>{label}</button>
+        ))}
+      </div>
       <div style={{ fontWeight: 600, color: '#33404f', marginBottom: 14 }}>创建两水平全因子设计</div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14, fontSize: 12.5, color: '#5b6472', maxWidth: 620 }}>
         <label style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -721,5 +1066,287 @@ function CreateDesign() {
         </div>
       </div>
     </Card>
+  );
+}
+
+// ---------- 一般全因子分析(716-R3 ①) ----------
+
+/** P 值展示:与既有 DOE/ANOVA 表格同一口径。 */
+const fmtP = (p: number | null) => (p == null ? '—' : p < 0.001 ? '<0.001' : nf(p, 3));
+const fmtF = (f: number | null) => (f == null ? '—' : Number.isFinite(f) ? nf(f, 2) : '∞');
+
+/** 一般全因子(≥3 水平因子)的分析视图:多向 ANOVA(Adj SS)+ 主效应图 + 结论。
+ * 纯两水平数据不会进入本组件(两水平检测优先),保证既有两水平路径零回归。 */
+function GeneralAnalyzeSection({ T, design, respIdx, respName, picker }: {
+  T: ChartTokens;
+  design: GeneralFactorialDesign;
+  respIdx: number;
+  respName: string;
+  picker: React.ReactNode;
+}) {
+  const { pendingCells } = useData();
+
+  // 与两水平路径同一套「响应尚未录入」拦截:全列无变异 / 设计生成器的待录入标记未清空。
+  const noVariance = new Set(design.response).size < 2;
+  const pendingRows = pendingCells.filter((p) => p.col === respIdx).length;
+  if (noVariance || pendingRows > 0) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+        {picker}
+        <Card style={{ padding: '18px 20px', fontSize: 13, color: '#8a6520', background: '#fffdf7', lineHeight: 1.7 }}>
+          <b>响应列「{respName}」尚未录入完成:</b>
+          {noVariance
+            ? '该列所有值相同(如刚生成设计时的占位 0),无变异,无法估计效应。'
+            : `还有 ${pendingRows} 行标记为尚未录入实测响应,此时分析会把占位值当成实测值、给出无意义的显著结论。`}
+          <div style={{ fontSize: 12, color: '#9aa2ad', marginTop: 8 }}>
+            请到「数据工作表」按运行序逐行录满实测响应后再回此分析。
+            {pendingRows > 0 ? '若某运行实测值确为 0,仍请在该单元格中确认录入 0,系统会清除该格的待录入标记。' : ''}
+          </div>
+        </Card>
+      </div>
+    );
+  }
+
+  let res: GeneralFactorialResult | null = null;
+  let analysisError: string | null = null;
+  try {
+    res = analyzeGeneralFactorial(design);
+  } catch (error) {
+    analysisError = (error as Error).message;
+  }
+  if (!res) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+        {picker}
+        <Card style={{ padding: '18px 20px', fontSize: 13, color: '#8a6520', background: '#fffdf7', lineHeight: 1.7 }}>
+          <b>一般全因子分析未运行:</b>{analysisError}
+        </Card>
+      </div>
+    );
+  }
+
+  const sig = res.rows.filter((row) => row.sig);
+  const sigInteractions = sig.filter((row) => row.kind === 'interaction');
+  const k = design.factorNames.length;
+  // α=0.05 结论文案与既有 ANOVA 风格一致:显著项带 P 值,给出建议方向。
+  const bestSettings = sig
+    .filter((row) => row.kind === 'main')
+    .map((row) => {
+      const lm = res!.levelMeans.find((factor) => factor.name === row.name)!;
+      const best = lm.means.reduce((bi, value, index) => (value > lm.means[bi] ? index : bi), 0);
+      return `「${row.name}」取 ${nf(lm.levels[best], 6)}(均值 ${nf(lm.means[best], 3)})`;
+    })
+    .join('、');
+  const conclusion = res.error.df === 0
+    ? '当前模型无残差自由度(设计饱和),F/P 无法计算;请增加仿行后再判定显著性。'
+    : sig.length === 0
+      ? `各项 P ≥ 0.05,在 α=0.05 下未发现显著的因子或交互作用(误差自由度 ${res.error.df});可增加仿行提高检验功效。`
+      : `在 α=0.05 下,显著项:${sig.map((row) => `${row.name}(P ${row.p! < 0.001 ? '< 0.001' : `= ${nf(row.p!, 3)}`})`).join('、')}。${
+        sigInteractions.length
+          ? '存在显著交互作用,应结合具体水平组合选择设置,不宜按主效应独立取优。'
+          : bestSettings
+            ? `若目标为响应最大化,按水平均值建议 ${bestSettings};最小化则取均值最低的水平,并用确认试验验证。`
+            : ''}`;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {picker}
+      <Card style={{ padding: '12px 16px', fontSize: 12, color: '#5b6472' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          <span style={{ fontWeight: 600, color: '#33404f' }}>一般全因子设计</span>
+          <span>{k} 因子 · {res.nRuns} 运行 · R² = {nf(res.r2, 3)}{res.r2Adj != null ? ` · 调整 R² = ${nf(res.r2Adj, 3)}` : ''}</span>
+          <span style={{ color: '#8a929d' }}>
+            {design.factorNames.map((name, f) => `${name}:${design.levels[f].map((v) => nf(v, 6)).join('/')}`).join(' · ')}
+          </span>
+        </div>
+        <div style={{ marginTop: 7, color: '#8a929d', lineHeight: 1.55 }}>
+          检测到 ≥3 水平因子,自动使用一般全因子多向 ANOVA(OLS 效应编码;各项 Adj SS 为边际平方和,与 Minitab GLM 默认口径一致,平衡设计下等于经典分组均值公式)。
+          两水平数据仍走原两水平引擎,两条路径互不影响。
+        </div>
+        {res.interactionNote && (
+          <div style={{ marginTop: 6, color: '#8a6520' }}>二因子交互:{res.interactionNote}</div>
+        )}
+        {res.inestimableTerms && (
+          <div style={{ marginTop: 6, color: '#b0620f' }}>
+            以下项因缺格/别名无法单独估计:{res.inestimableTerms.join('、')}(表中 DF=0,F/P 不给出)。
+          </div>
+        )}
+      </Card>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1.3fr 1fr', gap: 16 }}>
+        <Card>
+          <CardHeader title={`方差分析 · 响应 = ${respName}`}
+            right={<span style={{ fontSize: 11.5, color: '#98a1ac' }}>Adj SS(调整平方和)· α=0.05</span>} />
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
+            <thead>
+              <tr style={{ color: '#98a1ac', textAlign: 'right' }}>
+                <th style={{ padding: '8px 16px', fontWeight: 600, textAlign: 'left' }}>来源</th>
+                <th style={{ padding: '8px 12px', fontWeight: 600 }}>DF</th>
+                <th style={{ padding: '8px 12px', fontWeight: 600 }}>Adj SS</th>
+                <th style={{ padding: '8px 12px', fontWeight: 600 }}>Adj MS</th>
+                <th style={{ padding: '8px 12px', fontWeight: 600 }}>F</th>
+                <th style={{ padding: '8px 12px', fontWeight: 600 }}>P</th>
+                <th style={{ padding: '8px 16px', fontWeight: 600, textAlign: 'center' }}>显著性</th>
+              </tr>
+            </thead>
+            <tbody>
+              {res.rows.map((row) => (
+                <tr key={row.name} className="mono" style={{ borderTop: '1px solid #f0f2f5', textAlign: 'right' }}>
+                  <td style={{ padding: '8px 16px', textAlign: 'left', color: '#33404f', fontFamily: 'IBM Plex Sans', fontWeight: 500 }}>{row.name}</td>
+                  <td style={{ padding: '8px 12px', color: '#5b6472' }}>{row.df}</td>
+                  <td style={{ padding: '8px 12px', color: '#2a333f', fontWeight: 600 }}>{nf(row.adjSS, 3)}</td>
+                  <td style={{ padding: '8px 12px', color: '#5b6472' }}>{row.adjMS == null ? '—' : nf(row.adjMS, 3)}</td>
+                  <td style={{ padding: '8px 12px', color: '#5b6472' }}>{fmtF(row.f)}</td>
+                  <td style={{ padding: '8px 12px', color: row.sig ? '#c22f2f' : '#5b6472' }}>{fmtP(row.p)}</td>
+                  <td style={{ padding: '8px 16px', textAlign: 'center' }}>
+                    <span style={{ fontFamily: 'IBM Plex Sans', fontSize: 11, fontWeight: 600, padding: '2px 9px', borderRadius: 9, ...(row.sig ? { background: '#e8f4ea', color: '#2c8a45' } : { background: '#f4f6f8', color: '#9aa2ad' }) }}>
+                      {row.sig ? '显著' : row.p == null ? '不可检验' : '不显著'}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+              <tr className="mono" style={{ borderTop: '1px solid #e4e8ec', textAlign: 'right', color: '#5b6472' }}>
+                <td style={{ padding: '8px 16px', textAlign: 'left', fontFamily: 'IBM Plex Sans', fontWeight: 500 }}>误差</td>
+                <td style={{ padding: '8px 12px' }}>{res.error.df}</td>
+                <td style={{ padding: '8px 12px' }}>{nf(res.error.adjSS, 3)}</td>
+                <td style={{ padding: '8px 12px' }}>{res.error.adjMS == null ? '—' : nf(res.error.adjMS, 3)}</td>
+                <td style={{ padding: '8px 12px' }}>—</td>
+                <td style={{ padding: '8px 12px' }}>—</td>
+                <td />
+              </tr>
+              <tr className="mono" style={{ borderTop: '1px solid #f0f2f5', textAlign: 'right', color: '#5b6472' }}>
+                <td style={{ padding: '8px 16px', textAlign: 'left', fontFamily: 'IBM Plex Sans', fontWeight: 500 }}>合计</td>
+                <td style={{ padding: '8px 12px' }}>{res.total.df}</td>
+                <td style={{ padding: '8px 12px' }}>{nf(res.total.adjSS, 3)}</td>
+                <td style={{ padding: '8px 12px' }}>—</td>
+                <td style={{ padding: '8px 12px' }}>—</td>
+                <td style={{ padding: '8px 12px' }}>—</td>
+                <td />
+              </tr>
+            </tbody>
+          </table>
+        </Card>
+        <Card style={{ padding: 16 }}>
+          <div style={{ fontWeight: 600, color: '#33404f', marginBottom: 8 }}>结论(α=0.05)</div>
+          <div style={{ fontSize: 12.5, color: '#5b6472', lineHeight: 1.65 }}>{conclusion}</div>
+          <div style={{ fontSize: 11.5, color: '#9aa2ad', lineHeight: 1.6, marginTop: 8, paddingTop: 8, borderTop: '1px dashed #eceff2' }}>
+            {res.includeInteractions
+              ? '模型已纳入全部二因子交互(设计有仿行,残差自由度充足);三因子及以上交互本版不纳入。'
+              : '模型仅含主效应;二因子交互未纳入(原因见上方说明),其变异并入误差项。'}
+          </div>
+        </Card>
+      </div>
+
+      <Card>
+        <CardHeader title={`主效应图 · 响应 = ${respName}`}
+          right={<span style={{ fontSize: 11.5, color: '#98a1ac' }}>均值按水平计算 · 虚线为总均值 {nf(res.grand, 3)}</span>} />
+        <div style={{ padding: '16px 16px 8px' }}>
+          <GeneralMainEffects T={T} factors={res.levelMeans} grand={res.grand} />
+        </div>
+        <div style={{ overflowX: 'auto', padding: '0 16px 12px' }}>
+          <table className="mono" style={{ borderCollapse: 'collapse', fontSize: 12, whiteSpace: 'nowrap' }}>
+            <tbody>
+              {res.levelMeans.map((factor) => (
+                <tr key={factor.name} style={{ borderTop: '1px solid #f0f2f5' }}>
+                  <td style={{ padding: '6px 12px 6px 0', color: '#33404f', fontFamily: 'IBM Plex Sans', fontWeight: 500 }}>{factor.name}</td>
+                  {factor.levels.map((level, j) => (
+                    <td key={j} style={{ padding: '6px 14px', color: '#5b6472' }}>
+                      {nf(level, 6)} → <b style={{ color: '#2a333f' }}>{nf(factor.means[j], 3)}</b>
+                      <span style={{ color: '#9aa2ad' }}> (n={factor.counts[j]})</span>
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+
+      <Card>
+        <CardHeader title={`设计矩阵 · ${k} 因子 (${res.nRuns} 运行,实际水平值)`} />
+        <div style={{ overflowX: 'auto' }}>
+          <table className="mono" style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5, whiteSpace: 'nowrap' }}>
+            <thead>
+              <tr style={{ color: '#98a1ac', textAlign: 'center', fontFamily: 'IBM Plex Sans' }}>
+                <th style={{ padding: '8px 12px', fontWeight: 600 }}>运行</th>
+                {design.factorNames.map((n) => <th key={n} style={{ padding: '8px 12px', fontWeight: 600 }}>{n}</th>)}
+                <th style={{ padding: '8px 12px', fontWeight: 600, textAlign: 'right' }}>{respName}</th>
+                <th style={{ padding: '8px 12px', fontWeight: 600, textAlign: 'right' }}>拟合值</th>
+                <th style={{ padding: '8px 12px', fontWeight: 600, textAlign: 'right' }}>残差</th>
+              </tr>
+            </thead>
+            <tbody>
+              {design.levelIndex.map((row, i) => (
+                <tr key={i} style={{ borderTop: '1px solid #f0f2f5', textAlign: 'center' }}>
+                  <td style={{ padding: '7px 12px', color: '#9aa2ad' }}>{i + 1}</td>
+                  {row.map((levelIdx, f) => (
+                    <td key={f} style={{ padding: '7px 12px', color: '#2a333f' }}>{nf(design.levels[f][levelIdx], 6)}</td>
+                  ))}
+                  <td style={{ padding: '7px 12px', color: '#2a333f', fontWeight: 600, textAlign: 'right' }}>{nf(design.response[i], 3)}</td>
+                  <td style={{ padding: '7px 12px', color: '#5b6472', textAlign: 'right' }}>{nf(res!.fits[i], 3)}</td>
+                  <td style={{ padding: '7px 12px', color: '#5b6472', textAlign: 'right' }}>{nf(res!.residuals[i], 3)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+/** 多水平主效应图:每因子一个面板,按水平画均值折线(2–5 点);扩展自两水平 MainEffects 的视觉语言。 */
+function GeneralMainEffects({ T, factors, grand }: {
+  T: ChartTokens;
+  factors: { name: string; levels: number[]; means: number[] }[];
+  grand: number;
+}) {
+  const W = 960;
+  const H = 240;
+  const pn = factors.length;
+  const pad = 30;
+  const gap = 26;
+  const panelW = (W - pad * 2 - gap * (pn - 1)) / pn;
+  const m = { t: 20, b: 40 };
+  const allMeans = factors.flatMap((f) => f.means).filter(Number.isFinite);
+  let lo = Math.min(...allMeans, grand);
+  let hi = Math.max(...allMeans, grand);
+  if (!(hi > lo)) {
+    const center = Number.isFinite(lo) ? lo : 0;
+    const half = Math.abs(center) > 0 ? Math.abs(center) * 0.1 || Number.MIN_VALUE : 1;
+    lo = center - half;
+    hi = center + half;
+  } else {
+    const p = (hi - lo) * 0.25;
+    lo -= p;
+    hi += p;
+  }
+  const ph = H - m.t - m.b;
+  const Y = (v: number) => m.t + (1 - (v - lo) / (hi - lo)) * ph;
+  return (
+    <Svg w={W} h={H}>
+      <rect x={0} y={0} width={W} height={H} fill={T.bg} />
+      {factors.map((f, i) => {
+        const x0 = pad + i * (panelW + gap);
+        const L = f.levels.length;
+        const X = (j: number) => x0 + panelW * ((j + 0.5) / L);
+        return (
+          <Fragment key={f.name}>
+            {/* 总均值参考线是语义线,不能随经典主题的网格一起透明 */}
+            <Ln x1={x0} y1={Y(grand)} x2={x0 + panelW} y2={Y(grand)} stroke={T.classic ? '#ccd2d9' : T.grid} sw={1} dash="4 3" />
+            {f.means.slice(1).map((mv, j) => (
+              <Ln key={j} x1={X(j)} y1={Y(f.means[j])} x2={X(j + 1)} y2={Y(mv)} stroke={T.point} sw={T.sw + 0.6} />
+            ))}
+            {f.means.map((mv, j) => <circle key={j} cx={X(j)} cy={Y(mv)} r={T.r + 0.5} fill={T.point} />)}
+            {f.levels.map((lv, j) => (
+              <Txt key={j} x={X(j)} y={H - 24} s={nf(lv, 4)} fill={T.axis} size={10} anchor="middle" />
+            ))}
+            <Txt x={x0 + panelW / 2} y={H - 8} s={f.name} fill={T.text} size={11} anchor="middle" weight={600} />
+            <Ln x1={x0} y1={m.t} x2={x0} y2={m.t + ph} stroke={T.axis} sw={1} />
+          </Fragment>
+        );
+      })}
+      <Ln x1={0} y1={m.t + ph} x2={W} y2={m.t + ph} stroke={T.axis} sw={1} />
+    </Svg>
   );
 }

@@ -5,9 +5,9 @@
  * 加严检验累计 5 批不接收时按 9.4 暂停抽样检验。
  */
 import {
-  AQL_COLS, TABLE_BY_STATE, aqlPlanByState, codeLetterGB,
+  AQL_COLS, PER100_MAX_D_PER_UNIT, TABLE_BY_STATE, aqlPlanByState, aqlRegime, codeLetterGB,
   normalPlanOneStepTighter, producerRiskPct, rqlForResult,
-  type AqlMasterTable, type InspectionLevel, type InspectionState, type SamplingPlan,
+  type AqlMasterTable, type AqlRegime, type InspectionLevel, type InspectionState, type SamplingPlan,
 } from './aql';
 
 export type InspState = InspectionState;
@@ -132,13 +132,19 @@ function normalizeAqlBatchRecord(value: unknown, fallbackSequenceId: string): Aq
   const resultOk = x.result === 'A' || x.result === 'R';
   const stateOk = INSPECTION_STATES.has(x.stateBefore as InspState)
     && INSPECTION_STATES.has(x.stateAfter as InspState);
+  // K2:d 的上限按体系分流——percent 体系 d ≤ n;per100 体系(AQL≥15,计点)d 可大于 n,
+  // 只设工程上限 n×PER100_MAX_D_PER_UNIT。体系由记录自身的 aql 判定(先验证其为正式档位)。
+  const aqlOk = typeof x.aql === 'number' && AQL_COLS.includes(x.aql);
+  const dMax = aqlOk && Number.isSafeInteger(x.sampleSize)
+    ? (aqlRegime(x.aql as number) === 'per100' ? x.sampleSize! * PER100_MAX_D_PER_UNIT : x.sampleSize!)
+    : 0;
   const integerOk = Number.isSafeInteger(x.lot) && x.lot! >= 2
     && Number.isSafeInteger(x.sampleSize) && x.sampleSize! >= 1 && x.sampleSize! <= x.lot!
     && Number.isSafeInteger(x.acceptanceNumber) && x.acceptanceNumber! >= 0
     && Number.isSafeInteger(x.rejectionNumber) && x.rejectionNumber === x.acceptanceNumber! + 1
-    && Number.isSafeInteger(x.nonconforming) && x.nonconforming! >= 0 && x.nonconforming! <= x.sampleSize!
+    && Number.isSafeInteger(x.nonconforming) && x.nonconforming! >= 0 && x.nonconforming! <= dMax
     && Number.isSafeInteger(x.switchingScoreAfter) && x.switchingScoreAfter! >= 0;
-  if (!decisionOk || !resultOk || !stateOk || !integerOk) return null;
+  if (!decisionOk || !resultOk || !stateOk || !integerOk || !aqlOk) return null;
   if (typeof x.id !== 'string' || !x.id.trim()
     || x.id.length > AQL_TRACE_LIMITS.inspectedAt + AQL_TRACE_LIMITS.batchId
     || typeof x.batchId !== 'string' || !x.batchId.trim() || x.batchId.length > AQL_TRACE_LIMITS.batchId
@@ -260,9 +266,23 @@ export function plansByState(
   };
 }
 
-export function decideLot(plan: SamplingPlan, nonconforming: number): LotDecision {
-  if (!Number.isSafeInteger(nonconforming) || nonconforming < 0 || nonconforming > plan.n) {
-    throw new RangeError(`不合格数必须是 0–${plan.n} 的整数`);
+/** per100 体系录入 d 的工程上限:d ≤ n × PER100_MAX_D_PER_UNIT(计点体系 d 可大于 n)。 */
+export function maxNonconforming(plan: SamplingPlan, regime: AqlRegime): number {
+  return regime === 'per100' ? plan.n * PER100_MAX_D_PER_UNIT : plan.n;
+}
+
+/**
+ * 批判定。K2 起按体系分流录入上限:
+ * · percent(AQL≤10,不合格品数):d 是样本中的不合格品件数,必然 ≤ n;
+ * · per100(AQL≥15,每百单位不合格数):d 是样本中的不合格(缺陷)总数,一件产品可有
+ *   多个不合格,故 d 允许大于 n,只设远超实际的工程上限(见 PER100_MAX_D_PER_UNIT)。
+ */
+export function decideLot(plan: SamplingPlan, nonconforming: number, regime: AqlRegime = 'percent'): LotDecision {
+  const dMax = maxNonconforming(plan, regime);
+  if (!Number.isSafeInteger(nonconforming) || nonconforming < 0 || nonconforming > dMax) {
+    throw new RangeError(regime === 'per100'
+      ? `不合格数必须是 0–${dMax} 的整数(每百单位体系允许大于样本量 ${plan.n})`
+      : `不合格数必须是 0–${plan.n} 的整数`);
   }
   return nonconforming <= plan.ac ? 'accepted' : 'rejected';
 }
@@ -283,6 +303,12 @@ export interface RecordInspectionInput {
 
 type TighterAqlAssessment = 'accepted' | 'rejected' | 'not-comparable';
 
+/**
+ * 严一档评估(9.3.3.2 转移得分)。跨体系口径(K2):AQL=15 的严一档是 10,
+ * 恰好跨过 per100/percent 边界。此处只做“本批计数 d 与严一档 Ac 的数值比较”,
+ * 且要求严一档样本量与本批相同才可比;d 在两体系下都是同一份样本的计数
+ * (percent=不合格品件数、per100=不合格总数),机械比较成立,语义差异见帮助。
+ */
 function acceptedAtOneStepTighter(
   initialCode: string, aql: number, executedSampleSize: number, nonconforming: number,
 ): { assessment: TighterAqlAssessment; plan: SamplingPlan } {
@@ -310,7 +336,8 @@ export function recordInspection(status: SwitchStatus, input: RecordInspectionIn
   const originalInspection = input.originalInspection !== false;
   const stateBefore = s.state;
   const plan = plansByState(input.lot, input.level, input.aql)[stateBefore];
-  const decision = decideLot(plan, input.nonconforming);
+  // K2:per100 体系(AQL≥15)允许 d > n,decideLot 按体系分流录入上限。
+  const decision = decideLot(plan, input.nonconforming, aqlRegime(input.aql));
   const requestedDisposition = input.nonconformingDisposition as NonconformingDisposition | undefined;
   if (plan.fullInspect && input.nonconforming > 0
     && (!requestedDisposition || requestedDisposition === 'none' || requestedDisposition === 'unrecorded'
@@ -501,10 +528,15 @@ export interface AqlReportData {
   lot: number;
   level: InspectionLevel;
   aql: number;
+  /** AQL 体系:percent=百分不合格品(二项);per100=每百单位不合格数(泊松,d 可大于 n)。 */
+  regime: AqlRegime;
   initialCode: string;
   plan: SamplingPlan;
   producerRiskPct: number | null;
+  /** RQL(百分不合格品,%)。per100 体系单位不同,恒为 null,改用 rqlPer100。 */
   rqlPct: number | null;
+  /** RQL(每百单位不合格数 λ)。percent 体系恒为 null。 */
+  rqlPer100: number | null;
   switchingScore: number;
   productionSteady: boolean;
   reducedApproved: boolean;
@@ -519,7 +551,8 @@ export function buildAqlReportData(
 ): AqlReportData {
   const s = normalizeSwitchStatus(status);
   const plan = plansByState(lot, level, aql)[s.state];
-  const rql = rqlForResult(plan);
+  const regime = aqlRegime(aql);
+  const rql = rqlForResult(plan, 0.1, undefined, regime);
   // 参数切换后保留全部历史追溯，但不得把旧方案的批结果冒充当前方案最新批。
   const latestRecord = [...s.records].reverse().find((record) => (
     record.sequenceId === s.sequenceId
@@ -534,10 +567,13 @@ export function buildAqlReportData(
     lot,
     level,
     aql,
+    regime,
     initialCode: codeLetterGB(lot, level),
     plan: { ...plan },
     producerRiskPct: plan.fullInspect ? null : producerRiskPct(plan, aql),
-    rqlPct: rql.status === 'found' ? rql.p * 100 : null,
+    // 两体系 RQL 单位不同(%批不良率 vs 每百单位不合格数),各自独立成字段,绝不混用。
+    rqlPct: regime === 'percent' && rql.status === 'found' ? rql.p * 100 : null,
+    rqlPer100: regime === 'per100' && rql.status === 'found' ? rql.p : null,
     switchingScore: s.switchingScore,
     productionSteady: s.productionSteady,
     reducedApproved: s.reducedApproved,

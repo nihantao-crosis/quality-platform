@@ -1,5 +1,6 @@
 /** 数据工作表 — Excel 式表格（双层 sticky 表头）+ 手工录入编辑 + 数据来源 + 列统计。
- * 演示数据显示原型的 11 列布局；导入数据显示动态测量列 + 均值/极差。
+ * Minitab 式布局:左侧 sticky 行号槽(含删行按钮)+ 业务数据列,无重复的 ID/行 数据列(716-R3 P1-1);
+ * 导入数据显示动态测量列,行式子组口径追加 均值/极差。
  * 测量单元格双击可编辑（编辑演示集自动转「副本」），支持添加子组与删行。 */
 import { useState, useEffect, useRef, useMemo } from 'react';
 import type { CSSProperties } from 'react';
@@ -204,9 +205,10 @@ export function Worksheet() {
   // 公式引擎的 C1/C2…只指真实数值列；隐含子组标签不能占用 C1。
   // 批次716-R2 P1:列显示顺序按导入原列序交错(TextColumn.sourceIndex),
   // 「部件、测试人、螺钉高度」不再被强制排成「数值在前、文本在后」;C#/T# 代号仍按各自序号不变。
-  // 首列仅在行式子组口径下才是「子组」,其余数据集只是行号(对齐 Minitab 工作表的行号槽)。
+  // 批次716-R3 P1-1:删除与左侧 sticky 行号槽重复的「ID/行」数据列(人工审核 PPT 10 页)——
+  // Minitab 式工作表只有行号槽 + 业务数据列;行号槽表头在行式子组口径下显示「子组」语义,其余留空。
   const displayOrder = worksheetDisplayOrder(M.colNames.length, textCols);
-  const cols: { code: string; name: string; measIdx: number | null }[] = [{ code: 'ID', name: rowSpc ? '子组' : '行', measIdx: null }];
+  const cols: { code: string; name: string; measIdx: number | null }[] = [];
   displayOrder.forEach((ref) => {
     if (ref.kind === 'numeric') cols.push({ code: `C${ref.index + 1}`, name: M.colNames[ref.index], measIdx: ref.index });
     else cols.push({ code: `T${ref.index + 1}`, name: textCols[ref.index].name, measIdx: null });
@@ -241,7 +243,8 @@ export function Worksheet() {
                 ))}
               </tr>
               <tr>
-                <th style={{ ...thName, left: 0, zIndex: 3, border: '1px solid #d7dbe1' }} />
+                {/* 行号槽表头:Minitab 行号槽无标题;行式子组口径保留「子组」语义(716-R3 P1-1) */}
+                <th style={{ ...thName, left: 0, zIndex: 3, border: '1px solid #d7dbe1', textAlign: 'center' }}>{rowSpc ? '子组' : ''}</th>
                 {cols.map((c) => {
                   // measIdx 非空 = 数值测量列(可重命名/删除);列已按导入原序交错,不能再用位置推断
                   return c.measIdx != null ? (
@@ -294,7 +297,6 @@ export function Worksheet() {
                         </button>
                       )}
                     </td>
-                    <td style={{ ...numCell, color: '#9aa2ad' }}>{s.i}</td>
                     {displayOrder.map((ref) => ref.kind === 'numeric' ? (
                       <EditableCell key={'n' + ref.index} value={s.vals[ref.index]} dp={colDp[ref.index]} pending={pendingSet.has(`${i}:${ref.index}`)} onCommit={(nv) => updateCell(i, ref.index, nv)} />
                     ) : (
