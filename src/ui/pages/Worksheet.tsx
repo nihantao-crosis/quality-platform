@@ -5,7 +5,7 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 import type { CSSProperties } from 'react';
 import { useApp } from '../../store/appStore';
 import { useData } from '../../store/dataStore';
-import { nf, evalRules, parseMatrix, arrMin, arrMax, prepareSpcData, columnDisplayDp } from '../../core';
+import { nf, evalRules, parseMatrix, arrMin, arrMax, prepareSpcData, columnDisplayDp, worksheetDisplayOrder } from '../../core';
 import { Card, KvRows } from '../common';
 import { Icon, type IconName } from '../icons';
 
@@ -202,14 +202,20 @@ export function Worksheet() {
   const visibleSubs = virtual ? M.subs.slice(winStart, winEnd) : M.subs;
 
   // 公式引擎的 C1/C2…只指真实数值列；隐含子组标签不能占用 C1。
-  const cols: { code: string; name: string }[] = [{ code: 'ID', name: '子组' }];
-  M.colNames.forEach((n, i) => cols.push({ code: `C${i + 1}`, name: n }));
-  textCols.forEach((column, i) => cols.push({ code: `T${i + 1}`, name: column.name }));
+  // 批次716-R2 P1:列显示顺序按导入原列序交错(TextColumn.sourceIndex),
+  // 「部件、测试人、螺钉高度」不再被强制排成「数值在前、文本在后」;C#/T# 代号仍按各自序号不变。
+  // 首列仅在行式子组口径下才是「子组」,其余数据集只是行号(对齐 Minitab 工作表的行号槽)。
+  const displayOrder = worksheetDisplayOrder(M.colNames.length, textCols);
+  const cols: { code: string; name: string; measIdx: number | null }[] = [{ code: 'ID', name: rowSpc ? '子组' : '行', measIdx: null }];
+  displayOrder.forEach((ref) => {
+    if (ref.kind === 'numeric') cols.push({ code: `C${ref.index + 1}`, name: M.colNames[ref.index], measIdx: ref.index });
+    else cols.push({ code: `T${ref.index + 1}`, name: textCols[ref.index].name, measIdx: null });
+  });
   const extra: Array<[string, string]> = [
     ...(rowSpc ? ([['', '均值'], ['', '极差']] as Array<[string, string]>) : []),
     ...(M.isDemo ? ([['-T', '操作员'], ['-D', '日期'], ['-T', '班次']] as Array<[string, string]>) : []),
   ];
-  extra.forEach(([suffix, name], i) => cols.push({ code: `S${i + 1}${suffix}`, name }));
+  extra.forEach(([suffix, name], i) => cols.push({ code: `S${i + 1}${suffix}`, name, measIdx: null }));
 
   const sources: Array<{ icon: IconName; iconColor: string; label: string; status: string; statusColor: string; onClick: () => void }> = [
     { icon: 'grid', iconColor: '#2c8a45', label: 'Excel / CSV 导入', status: '已连接', statusColor: '#2c8a45', onClick: () => { setImportTab('csv'); openModal('import'); } },
@@ -236,17 +242,15 @@ export function Worksheet() {
               </tr>
               <tr>
                 <th style={{ ...thName, left: 0, zIndex: 3, border: '1px solid #d7dbe1' }} />
-                {cols.map((c, ci) => {
-                  // cols[0]=子组;cols[1..M.n]=测量列(可重命名/删除)
-                  const measIdx = ci - 1;
-                  const isMeasure = measIdx >= 0 && measIdx < M.colNames.length;
-                  return isMeasure ? (
+                {cols.map((c) => {
+                  // measIdx 非空 = 数值测量列(可重命名/删除);列已按导入原序交错,不能再用位置推断
+                  return c.measIdx != null ? (
                     <HeaderCell
                       key={c.code}
                       name={c.name}
                       canDelete={M.n > 1}
-                      onRename={(v) => renameColumn(measIdx, v)}
-                      onDelete={() => { deleteColumn(measIdx); showToast(`已删除测量列「${c.name}」`); }}
+                      onRename={(v) => renameColumn(c.measIdx!, v)}
+                      onDelete={() => { deleteColumn(c.measIdx!); showToast(`已删除测量列「${c.name}」`); }}
                     />
                   ) : (
                     <th key={c.code} style={thName}>{c.name}</th>
@@ -282,8 +286,8 @@ export function Worksheet() {
                         <button
                           type="button"
                           className="ws-del"
-                          aria-label={`删除子组 ${s.i}`}
-                          onClick={() => { deleteRow(i); showToast(`已删除子组 ${s.i}`); }}
+                          aria-label={`删除${rowSpc ? '子组' : '行'} ${s.i}`}
+                          onClick={() => { deleteRow(i); showToast(`已删除${rowSpc ? '子组' : '行'} ${s.i}`); }}
                           style={{ border: 0, padding: 0, background: 'transparent', cursor: 'pointer', color: '#c22f2f', fontWeight: 700, fontFamily: 'inherit' }}
                         >
                           ×
@@ -291,10 +295,11 @@ export function Worksheet() {
                       )}
                     </td>
                     <td style={{ ...numCell, color: '#9aa2ad' }}>{s.i}</td>
-                    {s.vals.map((v, j) => (
-                      <EditableCell key={j} value={v} dp={colDp[j]} pending={pendingSet.has(`${i}:${j}`)} onCommit={(nv) => updateCell(i, j, nv)} />
+                    {displayOrder.map((ref) => ref.kind === 'numeric' ? (
+                      <EditableCell key={'n' + ref.index} value={s.vals[ref.index]} dp={colDp[ref.index]} pending={pendingSet.has(`${i}:${ref.index}`)} onCommit={(nv) => updateCell(i, ref.index, nv)} />
+                    ) : (
+                      <td key={'t' + ref.index} style={txtCell}>{textCols[ref.index].values[i] ?? ''}</td>
                     ))}
-                    {textCols.map((column) => <td key={column.name} style={txtCell}>{column.values[i] ?? ''}</td>)}
                     {rowSpc && (
                       <>
                         <td title={String(rowSpc.subs[i].mean)} style={{ ...numCell, fontWeight: 600, ...(ooc ? { background: '#fdecec', color: '#c22f2f' } : { color: '#1f6fb2' }) }}>{nf(rowSpc.subs[i].mean, meanDp)}</td>
@@ -328,10 +333,10 @@ export function Worksheet() {
           <div style={{ display: 'flex', gap: 8 }}>
             <button
               type="button"
-              onClick={() => { addSubgroupRow(); showToast('已添加子组（复制末行,双击单元格修改）'); }}
+              onClick={() => { addSubgroupRow(); showToast(`已添加${rowSpc ? '子组' : '行'}（复制末行,双击单元格修改）`); }}
               style={{ flex: 1, border: 0, padding: '7px 0', textAlign: 'center', background: '#1f6fb2', color: '#fff', borderRadius: 5, fontSize: 12.5, fontWeight: 600, fontFamily: 'inherit', cursor: 'pointer' }}
             >
-              ＋ 子组
+              ＋ {rowSpc ? '子组' : '行'}
             </button>
             <button
               type="button"

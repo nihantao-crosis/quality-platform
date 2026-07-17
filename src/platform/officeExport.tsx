@@ -8,7 +8,7 @@ import {
 } from 'docx';
 import PptxGenJS from 'pptxgenjs';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { nf, fmtCap, computeCapability, evalRules, DEFAULT_RULES, andersonDarling, type VarModel, assessCapability, countCapabilityViolations } from '../core';
+import { nf, fmtCap, computeCapability, capabilityInputError, evalRules, DEFAULT_RULES, andersonDarling, type VarModel, assessCapability, countCapabilityViolations } from '../core';
 import { chartTokens } from '../ui/tokens';
 import { ControlChart } from '../ui/charts/ControlChart';
 import { Histogram } from '../ui/charts/Histogram';
@@ -26,13 +26,16 @@ export interface ReportImages {
 }
 
 interface ReportStats {
-  cap: ReturnType<typeof computeCapability>;
+  /** 能力输入闸门未通过(如 1000σ 量纲哨兵)时为 null,capError 给出原因;其余章节照常导出。 */
+  cap: ReturnType<typeof computeCapability> | null;
+  capError: string | null;
   viol: { i: number; rule: number; desc: string }[];
   adText: string;
 }
 
 function collectStats(M: VarModel, spec: ReportSpec): ReportStats {
-  const cap = computeCapability(M.all, M.sigmaWithin, spec);
+  const capError = capabilityInputError(M.all, M.sigmaWithin, spec);
+  const cap = capError ? null : computeCapability(M.all, M.sigmaWithin, spec);
   const data = M.hasSubgroups ? M.subs.map((s) => s.mean) : M.indiv;
   const cl = M.hasSubgroups ? M.xbarbar : M.indMean;
   const sigma = M.hasSubgroups ? (M.uclX - M.xbarbar) / 3 : M.iSig;
@@ -42,7 +45,7 @@ function collectStats(M: VarModel, spec: ReportSpec): ReportStats {
     const ad = andersonDarling(M.all);
     adText = `Anderson-Darling A²* = ${nf(ad.a2star, 3)}, P ${ad.p < 0.005 ? '< 0.005' : '= ' + nf(ad.p, 3)} → ${ad.normal ? '未拒绝正态假设' : '显著偏离正态,建议 Box-Cox'}`;
   }
-  return { cap, viol, adText };
+  return { cap, capError, viol, adText };
 }
 
 /** 浏览器路径：渲染三张图为 PNG（经典主题,与界面一致） */
@@ -77,7 +80,7 @@ export async function renderReportImages(
   };
 }
 
-const capPairs = (cap: ReportStats['cap']): Array<[string, string]> => [
+const capPairs = (cap: NonNullable<ReportStats['cap']>): Array<[string, string]> => [
   ['Cp', fmtCap(cap.cp)], ['Cpk', nf(cap.cpk, 2)], ['Pp', fmtCap(cap.pp)], ['Ppk', nf(cap.ppk, 2)],
   ['Cpm', fmtCap(cap.cpm)], ['CPU', fmtCap(cap.cpu)], ['CPL', fmtCap(cap.cpl)],
   ['Z.bench', nf(cap.zBench, 2)], ['σ 水平', nf(cap.sigmaLevel, 2)],
@@ -85,7 +88,7 @@ const capPairs = (cap: ReportStats['cap']): Array<[string, string]> => [
 ];
 
 // P0-4:判定消费唯一判定器,失控时不得写无警示的「能力充足」。
-const capabilityVerdictText = (M: VarModel, cap: ReportStats['cap']) => {
+const capabilityVerdictText = (M: VarModel, cap: NonNullable<ReportStats['cap']>) => {
   const ad = M.all.length >= 8 ? andersonDarling(M.all) : null;
   const a = assessCapability({
     cpk: cap.cpk, verdict: cap.verdict, adP: ad ? ad.p : null, n: M.all.length,
@@ -157,7 +160,7 @@ export async function buildDocx(
     return new Uint8Array(await blob.arrayBuffer());
   }
 
-  const { cap, viol, adText } = collectStats(M, spec);
+  const { cap, capError, viol, adText } = collectStats(M, spec);
 
   const children: (Paragraph | Table)[] = [
     new Paragraph({ heading: HeadingLevel.HEADING_1, children: [new TextRun({ text: '质量分析报告', size: 40, bold: true })] }),
@@ -165,14 +168,14 @@ export async function buildDocx(
     h('1. 过程概览'),
     kvTable([
       ['均值', nf(M.oMean, 4)], ['σ 组内', nf(M.sigmaWithin, 4)], ['σ 整体', nf(M.oSd, 4)],
-      ['规格', `${nf(spec.lsl, 2)} / ${nf(spec.tgt, 2)} / ${nf(spec.usl, 2)}`], ['判定', `${capabilityVerdictText(M, cap)} (Cpk ${nf(cap.cpk, 2)})`],
+      ['规格', `${nf(spec.lsl, 2)} / ${nf(spec.tgt, 2)} / ${nf(spec.usl, 2)}`], ['判定', cap ? `${capabilityVerdictText(M, cap)} (Cpk ${nf(cap.cpk, 2)})` : '能力分析未运行'],
     ]),
     h('2. SPC 控制图与判异'),
     ...img(images.xbar),
     p(viol.length === 0 ? '未检出失控点，过程受控（当前启用的 Nelson 准则）。' : `检出 ${viol.length} 项失控：` + viol.map((v) => `点${v.i + 1}(准则${v.rule})`).join('、')),
     h('3. 过程能力'),
     ...img(images.hist, 620, 194),
-    kvTable(capPairs(cap)),
+    cap ? kvTable(capPairs(cap)) : p(`能力分析未运行: ${capError}`),
     h('4. 正态性检验'),
     ...img(images.prob, 620, 181),
     p(adText),
@@ -268,7 +271,7 @@ export async function buildPptx(
     return new Uint8Array(buf);
   }
 
-  const { cap, viol, adText } = collectStats(M, spec);
+  const { cap, capError, viol, adText } = collectStats(M, spec);
 
   // 封面
   const cover = pptx.addSlide();
@@ -286,14 +289,18 @@ export async function buildPptx(
       { text: '均值', options: { bold: true } }, { text: 'σ 组内', options: { bold: true } },
       { text: 'σ 整体', options: { bold: true } }, { text: '规格 L/T/U', options: { bold: true } }, { text: '判定', options: { bold: true } },
     ],
-    [nf(M.oMean, 4), nf(M.sigmaWithin, 4), nf(M.oSd, 4), `${nf(spec.lsl, 2)} / ${nf(spec.tgt, 2)} / ${nf(spec.usl, 2)}`, `${capabilityVerdictText(M, cap)} (Cpk ${nf(cap.cpk, 2)})`].map((t) => ({ text: t })),
+    [nf(M.oMean, 4), nf(M.sigmaWithin, 4), nf(M.oSd, 4), `${nf(spec.lsl, 2)} / ${nf(spec.tgt, 2)} / ${nf(spec.usl, 2)}`, cap ? `${capabilityVerdictText(M, cap)} (Cpk ${nf(cap.cpk, 2)})` : '能力分析未运行'].map((t) => ({ text: t })),
   ];
   s2.addTable(rows, { x: 0.6, y: 1.1, w: 12.1, fontSize: 14, border: { type: 'solid', color: 'E2E5EA', pt: 1 }, fill: { color: 'FFFFFF' } });
-  const capRows: PptxGenJS.TableRow[] = [
-    capPairs(cap).map(([k]) => ({ text: k, options: { bold: true } })),
-    capPairs(cap).map(([, v]) => ({ text: v })),
-  ];
-  s2.addTable(capRows, { x: 0.6, y: 2.6, w: 12.1, fontSize: 14, border: { type: 'solid', color: 'E2E5EA', pt: 1 } });
+  if (cap) {
+    const capRows: PptxGenJS.TableRow[] = [
+      capPairs(cap).map(([k]) => ({ text: k, options: { bold: true } })),
+      capPairs(cap).map(([, v]) => ({ text: v })),
+    ];
+    s2.addTable(capRows, { x: 0.6, y: 2.6, w: 12.1, fontSize: 14, border: { type: 'solid', color: 'E2E5EA', pt: 1 } });
+  } else {
+    s2.addText(`能力分析未运行: ${capError}`, { x: 0.6, y: 2.6, w: 12.1, h: 0.6, fontSize: 14, color: 'B0620F' });
+  }
   s2.addText(adText, { x: 0.6, y: 4.3, w: 12.1, h: 0.5, fontSize: 13, color: GRAY });
 
   chartSlide(`SPC 控制图（${M.hasSubgroups ? 'X̄' : 'I'}）`, images.xbar, 250 / 960,

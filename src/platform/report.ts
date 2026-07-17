@@ -4,7 +4,7 @@
  */
 import type { ExportFmt } from '../store/appStore';
 import {
-  nf, fmtCap, computeCapability, evalRules, DEFAULT_RULES, oneWayAnova, computeGageRR,
+  nf, fmtCap, computeCapability, capabilityInputError, evalRules, DEFAULT_RULES, oneWayAnova, computeGageRR,
   anovaGroups, gageStudyData, GAGE_TOLERANCE, type VarModel,
   assessCapability, countCapabilityViolations, andersonDarling,
 } from '../core';
@@ -32,7 +32,9 @@ export function worksheetCsv(M: VarModel): string {
 }
 
 export function textReport(M: VarModel, spec: ReportSpec): string {
-  const cap = computeCapability(M.all, M.sigmaWithin, spec);
+  // 能力输入闸门:规格与数据量纲不匹配(1000σ 哨兵)等情况下,能力章节写「未运行」而非让整份导出失败
+  const capError = capabilityInputError(M.all, M.sigmaWithin, spec);
+  const cap = capError ? null : computeCapability(M.all, M.sigmaWithin, spec);
   const spc = M.hasSubgroups
     ? { values: M.subs.map((s) => s.mean), cl: M.xbarbar, sigma: (M.uclX - M.xbarbar) / 3 }
     : { values: M.indiv, cl: M.indMean, sigma: M.iSig };
@@ -66,10 +68,12 @@ export function textReport(M: VarModel, spec: ReportSpec): string {
   }
   L.push('');
   L.push('【过程能力】规格 ' + nf(spec.lsl, 2) + ' / ' + nf(spec.tgt, 2) + ' / ' + nf(spec.usl, 2));
-  L.push(`  Cp ${fmtCap(cap.cp)} · Cpk ${nf(cap.cpk, 2)} · Pp ${fmtCap(cap.pp)} · Ppk ${nf(cap.ppk, 2)}`);
-  L.push(`  CPU ${fmtCap(cap.cpu)} · CPL ${fmtCap(cap.cpl)} · Z.bench ${nf(cap.zBench, 2)} · 西格玛水平 ${nf(cap.sigmaLevel, 2)}σ`);
-  L.push(`  PPM 合计（整体）${Math.round(cap.ppm.overall.total).toLocaleString()}`);
-  {
+  if (!cap) {
+    L.push(`  能力分析未运行: ${capError}`);
+  } else {
+    L.push(`  Cp ${fmtCap(cap.cp)} · Cpk ${nf(cap.cpk, 2)} · Pp ${fmtCap(cap.pp)} · Ppk ${nf(cap.ppk, 2)}`);
+    L.push(`  CPU ${fmtCap(cap.cpu)} · CPL ${fmtCap(cap.cpl)} · Z.bench ${nf(cap.zBench, 2)} · 西格玛水平 ${nf(cap.sigmaLevel, 2)}σ`);
+    L.push(`  PPM 合计（整体）${Math.round(cap.ppm.overall.total).toLocaleString()}`);
     // P0-4:判定必须消费唯一判定器——失控时不得写无警示的「能力充足」。
     const capAd = M.all.length >= 8 ? andersonDarling(M.all) : null;
     const capAssessment = assessCapability({

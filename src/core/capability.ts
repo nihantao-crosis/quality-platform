@@ -59,6 +59,13 @@ export function capabilityInputError(
   if (!Number.isFinite(sigmaWithin) || sigmaWithin <= 0) {
     return '过程组内标准差为 0 或不可估计，无法计算 Cp/Cpk';
   }
+  // 量纲哨兵(批次716-R2 P0):启用的规格限与数据均值相距超过 1000σ,几乎必然是规格
+  // 不属于当前测量特性(典型场景:能力页切换测量列后沿用了另一量纲的旧规格,会产出
+  // |Cpk| 数千的虚假结论)。真实过程哪怕极端糟糕/极端优秀也只在几十~几百 σ 量级。
+  const sanity = 1000 * sigmaOverall;
+  if ((spec.lsl != null && Math.abs(mu - spec.lsl) > sanity) || (spec.usl != null && Math.abs(mu - spec.usl) > sanity)) {
+    return '启用的规格限与当前数据相距超过 1000 倍标准差，规格几乎可以肯定不属于本测量特性（常见于切换测量列后沿用旧规格）；请确认或复位 LSL/Target/USL 后再计算';
+  }
   return null;
 }
 

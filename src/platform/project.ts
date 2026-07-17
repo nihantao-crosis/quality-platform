@@ -127,6 +127,10 @@ function worksheetValidationError(raw: unknown, requireSavedAt: boolean): string
         || !isStringArray(column.values) || column.values.length !== raw.rows.length) {
         return '数据集文本列名称或行数与矩阵不一致';
       }
+      if (column.sourceIndex !== undefined
+        && (!Number.isInteger(column.sourceIndex) || (column.sourceIndex as number) < 0)) {
+        return '数据集文本列 sourceIndex 无效';
+      }
     }
   }
   const textNames = Array.isArray(raw.textCols)

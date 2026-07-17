@@ -26,7 +26,7 @@ export interface AnalysisSourceData {
   name: string;
   colNames: string[];
   rows: number[][];
-  textCols: { name: string; values: string[] }[];
+  textCols: { name: string; values: string[]; sourceIndex?: number }[];
   pendingCells?: { row: number; col: number }[];
   isDemo?: boolean;
   /** 演示原型等场景的 I-MR 序列可能不同于行优先展平值，需一并保存。 */
@@ -216,7 +216,7 @@ function attachWorksheetSnapshot(snapshot: AnalysisSnapshot) {
     name: data.model.name,
     colNames: [...data.model.colNames],
     rows,
-    textCols: data.textCols.map((column) => ({ name: column.name, values: [...column.values] })),
+    textCols: data.textCols.map((column) => ({ name: column.name, values: [...column.values], ...(Number.isInteger(column.sourceIndex) ? { sourceIndex: column.sourceIndex } : {}) })),
     pendingCells: data.pendingCells.map((cell) => ({ ...cell })),
     isDemo: data.model.isDemo || undefined,
     indivSeries: hasDistinctIndiv ? [...data.model.indiv] : undefined,
@@ -893,7 +893,7 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
         source.name,
         [...source.colNames],
         restoredRows,
-        source.textCols.map((column) => ({ name: column.name, values: [...column.values] })),
+        source.textCols.map((column) => ({ name: column.name, values: [...column.values], ...(Number.isInteger(column.sourceIndex) ? { sourceIndex: column.sourceIndex } : {}) })),
         source.pendingCells?.map((cell) => ({ ...cell })) ?? [],
         {
           isDemo: source.isDemo === true,

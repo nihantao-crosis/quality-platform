@@ -6,7 +6,7 @@ import { useApp, type SpcType } from '../../store/appStore';
 import { syncSpecForActiveMeasurement, useData } from '../../store/dataStore';
 import { expandSpcRuleItems, uniqueSpcPointCount, type SpcViolationItem } from '../../store/analyses';
 import {
-  nf, evalRules, evalLimitedRules, RULE_DEFS, DEFAULT_RULE_K, ewmaSeries, cusumSeries, stagedXbar, stagedRange, stageValidationError,
+  nf, evalRules, evalLimitedRules, RULE_DEFS, DEFAULT_RULE_K, ruleKDesc, ewmaSeries, cusumSeries, stagedXbar, stagedRange, stageValidationError,
   prepareSpcData, spcMeasurementColumnNames, spcRoleOptions,
   type NelsonRuleK, type RuleNo, type SpcDataLayout, type SpcPreparedData, type VarModel, type TextColumn,
 } from '../../core';
@@ -601,10 +601,10 @@ export function Spc({ T }: { T: ChartTokens }) {
             const kKey = `k${n}` as keyof NelsonRuleK;
             return (
               <span key={n}>
-                <b style={{ color: '#5b6472' }}>{RULE_DEFS[n].name}</b>:{RULE_DEFS[n].def}({RULE_DEFS[n].points})
-                {spcRuleK[kKey] !== DEFAULT_RULE_K[kKey] && (
-                  <b style={{ color: '#8a5a00' }}> [当前 K={spcRuleK[kKey]}]</b>
-                )}
+                <b style={{ color: '#5b6472' }}>{RULE_DEFS[n].name}</b>:{ruleKDesc(n, spcRuleK)}
+                {spcRuleK[kKey] === DEFAULT_RULE_K[kKey]
+                  ? <>（{RULE_DEFS[n].points}）</>
+                  : <b style={{ color: '#8a5a00' }}> [自定义 K，标准值 {DEFAULT_RULE_K[kKey]}]</b>}
               </span>
             );
           })}

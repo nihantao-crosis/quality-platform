@@ -4,7 +4,7 @@
  */
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
-  nf, fmtCap, computeCapability, evalRules, DEFAULT_RULES, andersonDarling, type VarModel,
+  nf, fmtCap, computeCapability, capabilityInputError, evalRules, DEFAULT_RULES, andersonDarling, type VarModel,
   assessCapability, countCapabilityViolations,
 } from '../core';
 import { chartTokens } from '../ui/tokens';
@@ -74,7 +74,9 @@ ${charts}
 export function buildHtmlReport(M: VarModel, spec: ReportSpec, analysis?: AnalysisReportPayload): string {
   if (analysis) return buildAnalysisHtml(M, analysis);
   const T = chartTokens('经典', true);
-  const cap = computeCapability(M.all, M.sigmaWithin, spec);
+  // 能力输入闸门:规格与数据量纲不匹配(1000σ 哨兵)等情况写「未运行」,其余章节照常导出
+  const capError = capabilityInputError(M.all, M.sigmaWithin, spec);
+  const cap = capError ? null : computeCapability(M.all, M.sigmaWithin, spec);
   const spc = M.hasSubgroups
     ? { data: M.subs.map((s) => s.mean), cl: M.xbarbar, ucl: M.uclX, lcl: M.lclX, sigma: (M.uclX - M.xbarbar) / 3, label: 'X̄' }
     : { data: M.indiv, cl: M.indMean, ucl: M.iUcl, lcl: M.iLcl, sigma: M.iSig, label: 'I' };
@@ -90,18 +92,20 @@ export function buildHtmlReport(M: VarModel, spec: ReportSpec, analysis?: Analys
   const probSvg = renderToStaticMarkup(<NormalProbPlot T={T} data={M.all} h={280} />);
 
   // P0-4:判定消费唯一判定器(含位置+离散图稳定性与正态性),失控时不得绿色「能力充足」。
-  const capAssessment = assessCapability({
+  const capAssessment = cap ? assessCapability({
     cpk: cap.cpk, verdict: cap.verdict, adP: ad ? ad.p : null, n: M.all.length,
     spcViolations: countCapabilityViolations(M, DEFAULT_RULES),
-  });
-  const verdictCls = capAssessment.level === 'ok' ? 'verdict-ok' : capAssessment.level === 'warn' ? 'verdict-warn' : 'verdict-bad';
-  const verdictTxt = capAssessment.status;
+  }) : null;
+  const verdictCls = !capAssessment ? 'verdict-warn' : capAssessment.level === 'ok' ? 'verdict-ok' : capAssessment.level === 'warn' ? 'verdict-warn' : 'verdict-bad';
+  const verdictTxt = capAssessment ? capAssessment.status : '能力分析未运行';
 
-  const capRows: Array<[string, string]> = [
+  const capRows: Array<[string, string]> = cap ? [
     ['Cp', fmtCap(cap.cp)], ['Cpk', nf(cap.cpk, 2)], ['Pp', fmtCap(cap.pp)], ['Ppk', nf(cap.ppk, 2)],
     ['Cpm (望目)', fmtCap(cap.cpm)], ['CPU', fmtCap(cap.cpu)], ['CPL', fmtCap(cap.cpl)],
     ['Z.bench', nf(cap.zBench, 2)], ['西格玛水平', nf(cap.sigmaLevel, 2) + 'σ'],
     ['PPM 合计（整体）', Math.round(cap.ppm.overall.total).toLocaleString()],
+  ] : [
+    ['能力分析未运行', capError ?? ''],
   ];
 
   const violHtml = viol.length === 0
@@ -129,7 +133,7 @@ export function buildHtmlReport(M: VarModel, spec: ReportSpec, analysis?: Analys
     <td class="num">${nf(M.sigmaWithin, 4)}</td>
     <td class="num">${nf(M.oSd, 4)}</td>
     <td class="num">${nf(spec.lsl, 2)} / ${nf(spec.tgt, 2)} / ${nf(spec.usl, 2)}</td>
-    <td><span class="${verdictCls}">${verdictTxt}</span>（Cpk ${nf(cap.cpk, 2)}）</td>
+    <td><span class="${verdictCls}">${verdictTxt}</span>${cap ? `（Cpk ${nf(cap.cpk, 2)}）` : ''}</td>
   </tr>
 </table>
 

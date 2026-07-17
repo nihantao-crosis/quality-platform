@@ -2,7 +2,7 @@
 import type React from 'react';
 import { useState } from 'react';
 import { useApp } from '../../store/appStore';
-import { useData, suggestedSpec, rememberSpecForActiveMeasurement, resolveCapabilityMeasurementData } from '../../store/dataStore';
+import { useData, suggestedSpec, rememberSpecForCapabilityMeasurement, resolveCapabilityMeasurementData, syncSpecForCapabilityMeasurement, capabilitySpecKey } from '../../store/dataStore';
 import { nf, fmtCap, capabilityInputError, computeCapability, andersonDarling, bestLambda, transformWithSpec, stdev, countCapabilityViolations, spcMeasurementColumnNames } from '../../core';
 import { ReportCard } from '../ReportCard';
 import { capabilityReport } from '../reportData';
@@ -30,11 +30,23 @@ function SubgroupSizeInput({ value, onCommit }: { value: number; onCommit: (z: n
 
 export function Capability({ T }: { T: ChartTokens }) {
   const { lsl, usl, tgt, lslOn, uslOn, toggleSide, setSpec: setSpecRaw, spcRules, spcRuleK, goTo, capabilityBins: bins, setCapabilityBins: setBins,
-    capSubgroupMode, capSubgroupSize, capValueCol, capSubgroupIdCol, setCapabilitySubgroup } = useApp();
+    capSubgroupMode, capSubgroupSize, capValueCol, capSubgroupIdCol, setCapabilitySubgroup, showToast } = useApp();
   const rawModel = useData((s) => s.model);
   const textCols = useData((s) => s.textCols);
   const prepared = resolveCapabilityMeasurementData(rawModel, textCols);
   const M = prepared.model;
+  // 批次716-R2 P0:子组口径(模式/测量列/ID 列)变化 = 测量特性可能变化,规格必须跟随切换,
+  // 否则沿用旧量纲规格会产出虚假 Cpk。有该特性的记忆规格用记忆,否则按新口径 μ±4σ 重建议。
+  const updateSubgroup = (patch: Parameters<typeof setCapabilitySubgroup>[0]) => {
+    // 只有口径键真的变化才同步规格:重复点击已选中的模式/同一测量列不得触发,
+    // 否则历史回放刚恢复的快照规格会被今天的记忆/建议值冲掉(违反下方 91-93 行不变式)。
+    const keyBefore = capabilitySpecKey(rawModel, textCols);
+    setCapabilitySubgroup(patch);
+    const keyAfter = capabilitySpecKey(rawModel, textCols);
+    if (keyBefore !== keyAfter && syncSpecForCapabilityMeasurement()) {
+      showToast('测量口径已变化,规格限已切换为该特性的记忆/建议值(μ±4σ),请确认后再判读 Cpk');
+    }
+  };
   // 批次716-N:能力页显式子组配置(对齐 Minitab 能力分析对话框的「子组大小」)。
   const modeTab = (on: boolean): React.CSSProperties => ({
     padding: '4px 11px', borderRadius: 4, fontSize: 12, cursor: 'pointer', border: 0, fontFamily: 'inherit',
@@ -46,13 +58,13 @@ export function Capability({ T }: { T: ChartTokens }) {
       {([['spc', '沿用 SPC 数据角色'], ['const', '单列 + 子组大小'], ['stacked', '单列 + 子组 ID 列']] as const).map(([m, label]) => (
         <button key={m} type="button" style={modeTab(capSubgroupMode === m)}
           title={m === 'spc' ? '与控制图共用同一数据口径(默认)' : m === 'const' ? '按行序把单列测量值每 z 个分为一个子组(Minitab「子组大小(使用常量)」)' : '一列测量值 + 一列子组 ID(Minitab「使用 ID 列」)'}
-          onClick={() => setCapabilitySubgroup({ capSubgroupMode: m })}>{label}</button>
+          onClick={() => updateSubgroup({ capSubgroupMode: m })}>{label}</button>
       ))}
       {capSubgroupMode !== 'spc' && (
         <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12.5, color: '#5b6472' }}>
           测量列
           {/* 只列业务测量列:设计元数据/分析输出列(标准序、运行序等)不得作为能力测量值 */}
-          <select value={capValueCol ?? ''} onChange={(e) => setCapabilitySubgroup({ capValueCol: e.target.value || null })}
+          <select value={capValueCol ?? ''} onChange={(e) => updateSubgroup({ capValueCol: e.target.value || null })}
             style={{ padding: '4px 8px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12 }}>
             <option value="">(沿用 SPC 测量列)</option>
             {spcMeasurementColumnNames(rawModel).map((n) => <option key={n} value={n}>{n}</option>)}
@@ -62,7 +74,7 @@ export function Capability({ T }: { T: ChartTokens }) {
       {capSubgroupMode === 'const' && (
         <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12.5, color: '#5b6472' }}>
           子组大小
-          <SubgroupSizeInput key={capSubgroupSize} value={capSubgroupSize} onCommit={(z) => setCapabilitySubgroup({ capSubgroupSize: z })} />
+          <SubgroupSizeInput key={capSubgroupSize} value={capSubgroupSize} onCommit={(z) => updateSubgroup({ capSubgroupSize: z })} />
           <span style={{ fontSize: 11, color: '#9aa2ad' }}>(2–10,按行序分组;末尾不足一组不参与)</span>
         </label>
       )}
@@ -70,7 +82,7 @@ export function Capability({ T }: { T: ChartTokens }) {
         <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12.5, color: '#5b6472' }}>
           子组 ID 列
           {/* option 值使用 numeric:/text: 角色引用(与 SPC 页同约定),裸列名无法被 resolveRole 命中 */}
-          <select value={capSubgroupIdCol ?? ''} onChange={(e) => setCapabilitySubgroup({ capSubgroupIdCol: e.target.value || null })}
+          <select value={capSubgroupIdCol ?? ''} onChange={(e) => updateSubgroup({ capSubgroupIdCol: e.target.value || null })}
             style={{ padding: '4px 8px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12 }}>
             <option value="">(未选择)</option>
             {rawModel.colNames.map((n) => <option key={'n:' + n} value={`numeric:${n}`}>{n}（数值）</option>)}
@@ -105,14 +117,14 @@ export function Capability({ T }: { T: ChartTokens }) {
   const setSpec = (patch: Partial<{ lsl: number; usl: number; tgt: number }>) => {
     setSpecRaw(patch);
     const s = useApp.getState();
-    rememberSpecForActiveMeasurement(rawModel, textCols, {
+    rememberSpecForCapabilityMeasurement(rawModel, textCols, {
       lsl: s.lsl, tgt: s.tgt, usl: s.usl, lslOn: s.lslOn, uslOn: s.uslOn,
     });
   };
   const toggleSpecSide = (side: 'lslOn' | 'uslOn') => {
     toggleSide(side);
     const s = useApp.getState();
-    rememberSpecForActiveMeasurement(rawModel, textCols, {
+    rememberSpecForCapabilityMeasurement(rawModel, textCols, {
       lsl: s.lsl, tgt: s.tgt, usl: s.usl, lslOn: s.lslOn, uslOn: s.uslOn,
     });
   };
@@ -213,8 +225,13 @@ export function Capability({ T }: { T: ChartTokens }) {
       const tr = transformWithSpec(M.all, lsl, usl, bl.lambda);
       if (!('error' in tr)) {
         const tSd = stdev(tr.data, true);
-        const tCap = computeCapability(tr.data, tSd, { lsl: tr.lsl, usl: tr.usl, tgt: (tr.lsl + tr.usl) / 2 });
-        boxcox = { lambda: bl.lambda, ppk: tCap.ppk, adAfter: andersonDarling(tr.data).p };
+        const tSpec = { lsl: tr.lsl, usl: tr.usl, tgt: (tr.lsl + tr.usl) / 2 };
+        // 变换域也要先过输入闸门:负 λ 会把近零规格映射成巨值,量纲哨兵在变换域触发时
+        // 只应跳过 Box-Cox 补充卡,不能让 computeCapability 抛异常炸掉整页(含规格编辑器)。
+        if (capabilityInputError(tr.data, tSd, tSpec) === null) {
+          const tCap = computeCapability(tr.data, tSd, tSpec);
+          boxcox = { lambda: bl.lambda, ppk: tCap.ppk, adAfter: andersonDarling(tr.data).p };
+        }
       }
     }
   }

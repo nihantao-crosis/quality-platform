@@ -4,7 +4,7 @@
  */
 import { create } from 'zustand';
 import {
-  buildData, computeVarModel, computePChart, computeCChart, evalFormula, truthy, FormulaError, prepareSpcData, isDoeAnalysisColumn,
+  buildData, computeVarModel, computePChart, computeCChart, evalFormula, truthy, FormulaError, prepareSpcData, isDoeAnalysisColumn, worksheetDisplayOrder,
   type VarModel, type PChartModel, type CChartModel, type TextColumn, type SpcPreparedData,
 } from '../core';
 import { useApp } from './appStore';
@@ -474,6 +474,54 @@ export function rememberSpecForActiveMeasurement(
   const map = loadValidatedStoreJson<SpecMap>(LS_SPECS) ?? {};
   map[key] = spec;
   saveJson(LS_SPECS, map);
+}
+
+/** 能力页规格键:跟随能力口径(capSubgroup*)解析出的测量特性;默认「沿用 SPC 角色」时与 SPC 键一致。
+ * 批次716-R2 P0:规格必须绑定能力口径,否则切换能力测量列后沿用旧量纲规格会产出虚假 Cpk。
+ * 导出供能力页比较口径键是否真的变化——零变化的点击不得触发规格同步(否则会冲掉历史回放的快照规格)。 */
+export function capabilitySpecKey(model: VarModel, textCols: TextColumn[]): string | null {
+  const prepared = resolveCapabilityMeasurementData(model, textCols);
+  if (!prepared.model || prepared.error) return null;
+  return `v2:${encodeURIComponent(model.name)}:${encodeURIComponent(prepared.variableName)}`;
+}
+
+/** 能力页编辑规格时按「数据集 + 能力口径测量特性」记忆,不再写入 SPC 口径的键(防反向污染)。 */
+export function rememberSpecForCapabilityMeasurement(
+  model: VarModel,
+  textCols: TextColumn[],
+  spec: { lsl: number; tgt: number; usl: number; lslOn: boolean; uslOn: boolean },
+): void {
+  const key = capabilitySpecKey(model, textCols);
+  if (!key) return;
+  const map = loadValidatedStoreJson<SpecMap>(LS_SPECS) ?? {};
+  map[key] = spec;
+  saveJson(LS_SPECS, map);
+}
+
+/** 能力口径变化(切换子组模式/测量列/ID 列)后同步规格:该特性有记忆用记忆,否则按新口径
+ * μ±4σ 重建议;口径解析失败时不动当前规格(页面会显示错误卡)。返回规格是否发生变化。 */
+export function syncSpecForCapabilityMeasurement(): boolean {
+  const { model, textCols } = useData.getState();
+  const prepared = resolveCapabilityMeasurementData(model, textCols);
+  if (!prepared.model || prepared.error) return false;
+  const key = `v2:${encodeURIComponent(model.name)}:${encodeURIComponent(prepared.variableName)}`;
+  const map = loadValidatedStoreJson<SpecMap>(LS_SPECS) ?? {};
+  const app0 = useApp.getState();
+  // 旧版仅按数据集名保存的记忆规格:与 specForActiveMeasurement 同口径兼容读取
+  // (仅默认「沿用 SPC 角色」且完全自动、无显式角色时),避免建议值顶掉用户的图纸规格。
+  const legacy = app0.capSubgroupMode === 'spc' && app0.spcDataLayout === 'auto'
+    && app0.spcValueCol == null && app0.spcSubgroupCol == null
+    ? map[model.name]
+    : undefined;
+  const saved = map[key] ?? legacy;
+  const next = saved
+    ? { lsl: saved.lsl, tgt: saved.tgt, usl: saved.usl, lslOn: saved.lslOn ?? true, uslOn: saved.uslOn ?? true }
+    : { ...suggestedSpec(prepared.model), lslOn: true, uslOn: true };
+  const app = useApp.getState();
+  const changed = next.lsl !== app.lsl || next.usl !== app.usl || next.tgt !== app.tgt
+    || next.lslOn !== app.lslOn || next.uslOn !== app.uslOn;
+  if (changed) useApp.setState(next);
+  return changed;
 }
 
 /** 切换数据集时恢复其规格限;没有记忆则按当前测量角色的 μ±4σ 建议。 */
@@ -1241,7 +1289,15 @@ export const useData = create<DataState>((set, get) => ({
     const pendingCells = get().pendingCells
       .filter((p) => p.col !== col)
       .map((p) => ({ ...p, col: p.col > col ? p.col - 1 : p.col }));
-    applyEdit(set, get, rows, get().textCols, colNames, pendingCells);
+    // 删除数值列会让文本列的 sourceIndex 锚点漂移(批次716-R2 自查):
+    // 按删除前的显示序剔除被删列后重编号,保持文本列与其余数值列的相对显示序不变。
+    const keptOrder = worksheetDisplayOrder(m.n, get().textCols)
+      .filter((ref) => !(ref.kind === 'numeric' && ref.index === col));
+    const textCols = get().textCols.map((column, ti) => ({
+      ...column,
+      sourceIndex: keptOrder.findIndex((ref) => ref.kind === 'text' && ref.index === ti),
+    }));
+    applyEdit(set, get, rows, textCols, colNames, pendingCells);
     useApp.setState({ selSub: null });
   },
 

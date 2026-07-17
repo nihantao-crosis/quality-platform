@@ -4,7 +4,7 @@
  */
 import * as XLSX from 'xlsx';
 import {
-  nf, computeCapability, evalRules, DEFAULT_RULES, type VarModel,
+  nf, computeCapability, capabilityInputError, evalRules, DEFAULT_RULES, type VarModel,
   assessCapability, countCapabilityViolations, andersonDarling,
 } from '../core';
 import type { ReportSpec } from './report';
@@ -55,13 +55,28 @@ export function buildXlsx(M: VarModel, spec: ReportSpec, analysis?: AnalysisRepo
 
   appendDataSheet();
 
-  // Sheet 2: 统计摘要
-  const cap = computeCapability(M.all, M.sigmaWithin, spec);
+  // Sheet 2: 统计摘要(能力输入闸门:规格不匹配等情况写「未运行」,数据 sheet 与其余章节照常导出)
+  const capError = capabilityInputError(M.all, M.sigmaWithin, spec);
+  const cap = capError ? null : computeCapability(M.all, M.sigmaWithin, spec);
   const xlsxAd = M.all.length >= 8 ? andersonDarling(M.all) : null;
-  const capAssessment = assessCapability({
+  const capAssessment = cap ? assessCapability({
     cpk: cap.cpk, verdict: cap.verdict, adP: xlsxAd ? xlsxAd.p : null, n: M.all.length,
     spcViolations: countCapabilityViolations(M, DEFAULT_RULES),
-  });
+  }) : null;
+  const capRows: (string | number)[][] = cap && capAssessment ? [
+    ['Cp', cap.cp == null ? '—' : Number(nf(cap.cp, 3))],
+    ['Cpk', Number(nf(cap.cpk, 3))],
+    ['Pp', cap.pp == null ? '—' : Number(nf(cap.pp, 3))],
+    ['Ppk', Number(nf(cap.ppk, 3))],
+    ['Cpm', cap.cpm == null ? '—' : Number(nf(cap.cpm, 3))],
+    ['Z.bench', Number(nf(cap.zBench, 3))],
+    ['西格玛水平', Number(nf(cap.sigmaLevel, 3))],
+    ['PPM 合计（整体）', Math.round(cap.ppm.overall.total)],
+    ['判定', capAssessment.status],
+    ['过程稳定性', capAssessment.spcViolations > 0 ? `控制图 ${capAssessment.spcViolations} 个失控点——能力值仅描述当前样本` : '控制图无失控信号'],
+  ] : [
+    ['过程能力', `未运行: ${capError}`],
+  ];
   const summary: (string | number)[][] = [
     ['质量分析平台 · 统计摘要', ''],
     ['工作表', M.name],
@@ -73,16 +88,7 @@ export function buildXlsx(M: VarModel, spec: ReportSpec, analysis?: AnalysisRepo
     ['σ 整体', Number(nf(M.oSd, 5))],
     ['', ''],
     ['规格 LSL / 目标 / USL', `${spec.lsl} / ${spec.tgt} / ${spec.usl}`],
-    ['Cp', cap.cp == null ? '—' : Number(nf(cap.cp, 3))],
-    ['Cpk', Number(nf(cap.cpk, 3))],
-    ['Pp', cap.pp == null ? '—' : Number(nf(cap.pp, 3))],
-    ['Ppk', Number(nf(cap.ppk, 3))],
-    ['Cpm', cap.cpm == null ? '—' : Number(nf(cap.cpm, 3))],
-    ['Z.bench', Number(nf(cap.zBench, 3))],
-    ['西格玛水平', Number(nf(cap.sigmaLevel, 3))],
-    ['PPM 合计（整体）', Math.round(cap.ppm.overall.total)],
-    ['判定', capAssessment.status],
-    ['过程稳定性', capAssessment.spcViolations > 0 ? `控制图 ${capAssessment.spcViolations} 个失控点——能力值仅描述当前样本` : '控制图无失控信号'],
+    ...capRows,
   ];
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(summary), '统计摘要');
 

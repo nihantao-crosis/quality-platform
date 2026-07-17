@@ -91,8 +91,9 @@ export interface RuleViolation {
   desc: string;
 }
 
-/** 判异描述:K 为标准值时逐字沿用 RULE_DEFS(向后兼容),自定义时如实写出实际参数。 */
-function ruleKDesc(rule: RuleNo, K: NelsonRuleK): string {
+/** 判异描述:K 为标准值时逐字沿用 RULE_DEFS(向后兼容),自定义时如实写出实际参数。
+ * 导出供 SPC 页说明区使用:说明文案必须随当前 K 变化,不能标准描述与自定义 K 并存两个数字。 */
+export function ruleKDesc(rule: RuleNo, K: NelsonRuleK): string {
   const std = RULE_DEFS[rule].def;
   switch (rule) {
     case 1: return K.k1 === DEFAULT_RULE_K.k1 ? std : `1 点落在中心线任一侧 ${K.k1}σ 之外`;
@@ -124,11 +125,13 @@ export function evalLimitedRules(
   const list: RuleViolation[] = [];
   if (rules.r1) {
     // k1 只缩放准则 1 的检测阈(以图上 3σ 限距推 σ̂ 再取 K1σ);UCL/LCL 本身不变。
-    // σ̂ 只能取上侧限距:MR/R/S/P/C 等图 LCL 常被钳位为 0,(cl−lcl)/3 会严重低估 σ 造成下侧误报;
-    // 上侧 UCL 恒为真 3σ 距,两侧共用同一 σ̂ 才与 Minitab「检验 1,K 个标准差」语义一致。
+    // σ̂ 取两侧限距的最大值:MR/R/S/C 图的 LCL 常被钳位为 0,P 图的 UCL 会被截断到 1,
+    // 单侧截断时另一侧仍是真 3σ 距;取 max 同时覆盖两类截断,才与 Minitab「检验 1,K 个
+    // 标准差」语义一致。两侧同时截断仅 P 图 n 极小(p̄=0.5 时 n≤8)才会发生,σ̂ 仍轻度
+    // 低估——属退化输入,K1=3 默认路径不受影响。
     const scale = K.k1 / 3;
     data.forEach((v, i) => {
-      const kSigma = (ucls[i] - cl) * scale;
+      const kSigma = Math.max(ucls[i] - cl, cl - lcls[i]) * scale;
       const out = K.k1 === 3
         ? v > ucls[i] || v < lcls[i]
         : v - cl > kSigma || cl - v > kSigma;

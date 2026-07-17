@@ -6,6 +6,38 @@
 export interface TextColumn {
   name: string;
   values: string[]; // 与保留的数据行对齐
+  /** 该文本列在导入表「保留列」(数值+文本)中的原始位置(0 基)。
+   * 批次716-R2 P1:工作表按此交错显示,还原 Minitab 式导入原列序(如 部件/测试人/螺钉高度);
+   * 旧数据/程序生成数据集可缺省 → 回落「数值列在前」的历史顺序。 */
+  sourceIndex?: number;
+}
+
+/** 工作表显示列引用:kind 指向数值矩阵列或文本列的下标。 */
+export interface WorksheetColumnRef { kind: 'numeric' | 'text'; index: number }
+
+/** 工作表显示列序:按 TextColumn.sourceIndex 把文本列交错回导入原位。
+ * 任一文本列缺 sourceIndex 或位置冲突时整体回落「数值在前、文本在后」的历史顺序;
+ * 后加的数值列(公式列/插入列)没有原位信息,始终排在数值序尾部。 */
+export function worksheetDisplayOrder(numericCount: number, textCols: TextColumn[]): WorksheetColumnRef[] {
+  const fallback: WorksheetColumnRef[] = [
+    ...Array.from({ length: numericCount }, (_, i) => ({ kind: 'numeric' as const, index: i })),
+    ...textCols.map((_, i) => ({ kind: 'text' as const, index: i })),
+  ];
+  if (!textCols.length) return fallback;
+  const known = textCols.every((t) => Number.isInteger(t.sourceIndex) && (t.sourceIndex as number) >= 0);
+  const unique = new Set(textCols.map((t) => t.sourceIndex)).size === textCols.length;
+  if (!known || !unique) return fallback;
+  const sorted = textCols.map((t, i) => ({ i, s: t.sourceIndex as number })).sort((a, b) => a.s - b.s);
+  const out: WorksheetColumnRef[] = [];
+  let emitted = 0;
+  sorted.forEach(({ i, s }, order) => {
+    // 原始位置 s 的文本列前面有 s−order 个数值列(order = 排在它前面的文本列数)
+    const numsBefore = Math.min(numericCount, Math.max(emitted, s - order));
+    while (emitted < numsBefore) out.push({ kind: 'numeric', index: emitted++ });
+    out.push({ kind: 'text', index: i });
+  });
+  while (emitted < numericCount) out.push({ kind: 'numeric', index: emitted++ });
+  return out;
 }
 
 export interface ParsedMatrix {
@@ -86,7 +118,9 @@ export function parseMatrix(text: string): ParsedMatrix | { error: string } {
   }
   if (rows.length < 2) return { error: '有效数据行不足 2 行' };
 
-  const textCols: TextColumn[] = textColIdx.map((_, t) => ({ name: textNames[t], values: textVals[t] }));
+  // sourceIndex = 在「保留列」(数值∪文本,按原表列位升序)中的位置,供工作表交错还原原列序
+  const keptOrder = [...numericCols, ...textColIdx].sort((a, b) => a - b);
+  const textCols: TextColumn[] = textColIdx.map((j, t) => ({ name: textNames[t], values: textVals[t], sourceIndex: keptOrder.indexOf(j) }));
   return { colNames, rows, textCols, sourceColumnCount: nCols, totalLines: body.length, skippedRows: skipped, droppedCols: textCols.length };
 }
 
