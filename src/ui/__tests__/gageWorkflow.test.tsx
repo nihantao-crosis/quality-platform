@@ -50,7 +50,8 @@ describe('Gage R&R 当前研究闭环', () => {
     expect(report?.subtitle).toContain('测量值 · 部件 部件 · 操作员 操作员 · 2×2×2');
     expect(report?.warnings).toHaveLength(0);
     expect(report?.tables.find((table) => table.title.includes('原始观测'))?.rows).toHaveLength(8);
-    expect(report?.charts).toHaveLength(6); // 3 操作员研究 → 6 联图形报告(v1.40)
+    expect(report?.charts).toHaveLength(1); // v1.40.1:单张 Minitab 式整图
+    expect(report?.charts[0].title).toContain('量具 R&R(ANOVA) 图形报告');
   });
 
   it('待录入或无效交叉设计明确阻断，不静默回落演示结果', () => {

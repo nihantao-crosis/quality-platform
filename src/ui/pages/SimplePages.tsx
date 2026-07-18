@@ -20,8 +20,8 @@ import { useData } from '../../store/dataStore';
 import type { ChartTokens } from '../tokens';
 import { paretoColors } from '../tokens';
 import { Card, CardHeader, KvRows, Badge, tabStyle, numInput, EmptyStateCard, DemoBadge } from '../common';
-import { ParetoChart, GroupedBars, BoxPlot, IndividualValuePlot, IntervalPlot, MiniHist } from '../charts/misc';
-import { GageRPanel, GageXbarPanel, GageByPartPanel, GageByOperatorPanel, GageInteractionPanel } from '../charts/gagePanels';
+import { ParetoChart, BoxPlot, IndividualValuePlot, IntervalPlot, MiniHist } from '../charts/misc';
+import { GageReportFigure } from '../charts/gagePanels';
 
 const selStyle: CSSProperties = {
   padding: '4px 8px', border: '1px solid #cfd5dd', borderRadius: 4,
@@ -220,7 +220,6 @@ function GageRRInner({ T }: { T: ChartTokens }) {
   const tolModeOptions: Array<[typeof gageTolMode, string]> = [
     ['auto', '联动规格限'], ['width', '双侧宽度'], ['upper', '仅上限'], ['lower', '仅下限'], ['none', '不设'],
   ];
-  const panelProps = { T, panel, partLabels, operatorLabels };
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <ReportCard data={gageReport({ primary, reference, ndc: g.ndc, grr: g.totalGageRR })} />
@@ -326,25 +325,15 @@ function GageRRInner({ T }: { T: ChartTokens }) {
       </div>
       <Card>
         <div style={{ padding: '11px 16px', borderBottom: '1px solid #edf0f3', fontWeight: 600, color: '#33404f' }}>
-          图形报告（{single ? '4 联 · 单操作员' : '6 联'} · 与 Minitab 图窗同构）
+          图形报告（{single ? '4 联 · 单操作员' : '6 联'} · Minitab 图窗样式）
         </div>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, padding: '14px 16px' }}>
-          <div><GroupedBars T={T} cats={cats} /></div>
-          {single ? (
-            <>
-              <div><GageRPanel {...panelProps} /></div>
-              <div><GageByPartPanel {...panelProps} /></div>
-              <div><GageXbarPanel {...panelProps} /></div>
-            </>
-          ) : (
-            <>
-              <div><GageByPartPanel {...panelProps} /></div>
-              <div><GageRPanel {...panelProps} /></div>
-              <div><GageByOperatorPanel {...panelProps} /></div>
-              <div><GageXbarPanel {...panelProps} /></div>
-              <div><GageInteractionPanel {...panelProps} /></div>
-            </>
-          )}
+        <div style={{ padding: '14px 16px' }}>
+          <GageReportFigure
+            T={T} panel={panel} partLabels={partLabels} operatorLabels={operatorLabels} cats={cats}
+            valueName={valueLabel}
+            partName={realStudy?.partName ?? '部件'}
+            operatorName={realStudy ? (realStudy.operatorName ?? '操作员') : '操作员'}
+          />
         </div>
       </Card>
     </div>

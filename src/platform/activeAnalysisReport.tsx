@@ -60,8 +60,8 @@ import { paretoReport, spcReport } from '../ui/reportData';
 import { chartTokens } from '../ui/tokens';
 import { ControlChart } from '../ui/charts/ControlChart';
 import { NormalProbPlot } from '../ui/charts/NormalProbPlot';
-import { BoxPlot, GroupedBars, IndividualValuePlot, IntervalPlot, ParetoChart } from '../ui/charts/misc';
-import { GageRPanel, GageXbarPanel, GageByPartPanel, GageByOperatorPanel, GageInteractionPanel } from '../ui/charts/gagePanels';
+import { BoxPlot, IndividualValuePlot, IntervalPlot, ParetoChart } from '../ui/charts/misc';
+import { GageReportFigure } from '../ui/charts/gagePanels';
 import { ScatterPlot } from '../ui/charts/ScatterPlot';
 import { Histogram } from '../ui/charts/Histogram';
 import { EffectsBar, MainEffects } from '../ui/charts/doe';
@@ -851,7 +851,12 @@ function buildGagePayload(): AnalysisReportPayload {
       study: component.pctStudyVar,
       tol: component.pctTolerance,
     }));
-  const panelProps = { T, panel: panelData, partLabels, operatorLabels, w: 960, h: 300 } as const;
+  const figureProps = {
+    T, panel: panelData, partLabels, operatorLabels, cats,
+    valueName: realStudy?.valueName ?? '演示测量',
+    partName: realStudy?.partName ?? '部件',
+    operatorName: realStudy ? (realStudy.operatorName ?? '操作员') : '操作员',
+  } as const;
   return {
     kind: 'gagerr',
     usesWorksheet: requestedReal,
@@ -905,20 +910,14 @@ function buildGagePayload(): AnalysisReportPayload {
             : '判定阈值按 AIAG：<10% 可接受 / 10–30% 临界 / >30% 不可接受。'),
       },
     ],
-    // 图形报告与 Minitab 图窗同构:单操作员 4 联,多操作员 6 联
+    // 图形报告:与工厂 Minitab 17 图窗同布局的单张整图(单操作员 4 联/多操作员 6 联)
     charts: [
-      svgChart('变异分量', <GroupedBars T={T} cats={cats} />, 960, 300),
-      ...(single ? [
-        svgChart('R 控制图', <GageRPanel {...panelProps} />, 960, 300),
-        svgChart('按部件的测量值', <GageByPartPanel {...panelProps} />, 960, 300),
-        svgChart('Xbar 控制图', <GageXbarPanel {...panelProps} />, 960, 300),
-      ] : [
-        svgChart('按部件的测量值', <GageByPartPanel {...panelProps} />, 960, 300),
-        svgChart('R 控制图（按操作员）', <GageRPanel {...panelProps} />, 960, 300),
-        svgChart('按操作员的测量值', <GageByOperatorPanel {...panelProps} />, 960, 300),
-        svgChart('Xbar 控制图（按操作员）', <GageXbarPanel {...panelProps} />, 960, 300),
-        svgChart('部件×操作员交互作用', <GageInteractionPanel {...panelProps} />, 960, 300),
-      ]),
+      svgChart(
+        `量具 R&R(ANOVA) 图形报告（${single ? '4 联' : '6 联'}）`,
+        <GageReportFigure {...figureProps} />,
+        1160,
+        single ? 690 : 1030,
+      ),
     ],
   };
 }

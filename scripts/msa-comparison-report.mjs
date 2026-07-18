@@ -43,7 +43,7 @@ export { computeGageRR, assessGage, computeGagePanelData } from '${join(root, 's
 export { CONTROL_CONSTANTS } from '${join(root, 'src/core/spc.ts')}';
 export { chartTokens } from '${join(root, 'src/ui/tokens.ts')}';
 export { GroupedBars } from '${join(root, 'src/ui/charts/misc.tsx')}';
-export { GageRPanel, GageXbarPanel, GageByPartPanel, GageByOperatorPanel, GageInteractionPanel } from '${join(root, 'src/ui/charts/gagePanels.tsx')}';
+export { GageReportFigure } from '${join(root, 'src/ui/charts/gagePanels.tsx')}';
 export { renderToStaticMarkup } from 'react-dom/server';
 export { createElement } from 'react';
 `;
@@ -52,11 +52,11 @@ buildSync({ stdin: { contents: entry, resolveDir: root, loader: 'ts' }, bundle: 
 const app = require(bundle);
 
 const CASES = [
-  { block: 0, value: '螺钉高度', tol: { mode: 'width', value: 1 }, tolText: '过程公差 = 1（双侧宽度）', png: 's3_2.png' },
-  { block: 1, value: '平衡量值', tol: { mode: 'upper', value: 100 }, tolText: '过程公差上限 = 100（单侧）', png: 's4_4.png' },
-  { block: 2, value: '电阻值', tol: { mode: 'width', value: 3 }, tolText: '过程公差 = 3（双侧宽度）', png: 's5_6.png' },
-  { block: 3, value: '窜动值', tol: { mode: 'width', value: 1.4 }, tolText: '过程公差 = 1.4（双侧宽度）', png: 's6_8.png' },
-  { block: 4, value: '螺钉高度', tol: { mode: 'width', value: 4 }, tolText: '过程公差 = 4（双侧宽度）', png: 's7_10.png', alias: '工厂 Minitab 输出列名为「反电势值4」' },
+  { block: 0, value: '螺钉高度', tol: { mode: 'width', value: 1 }, tolText: '过程公差 = 1（双侧宽度）', png: 's3_2.png', graph: 's3_1.png' },
+  { block: 1, value: '平衡量值', tol: { mode: 'upper', value: 100 }, tolText: '过程公差上限 = 100（单侧）', png: 's4_4.png', graph: 's4_3.png' },
+  { block: 2, value: '电阻值', tol: { mode: 'width', value: 3 }, tolText: '过程公差 = 3（双侧宽度）', png: 's5_6.png', graph: 's5_5.png' },
+  { block: 3, value: '窜动值', tol: { mode: 'width', value: 1.4 }, tolText: '过程公差 = 1.4（双侧宽度）', png: 's6_8.png', graph: 's6_7.png' },
+  { block: 4, value: '螺钉高度', tol: { mode: 'width', value: 4 }, tolText: '过程公差 = 4（双侧宽度）', png: 's7_10.png', graph: 's7_9.png', alias: '工厂 Minitab 输出列名为「反电势值4」' },
 ];
 
 const fmtSig = (value) => (value === 0 ? '0' : Number(value.toPrecision(6)).toString());
@@ -86,13 +86,15 @@ for (const spec of CASES) {
     .filter((c) => ['grr', 'repeatability', 'reproducibility', 'part'].includes(c.key))
     .map((c) => ({ name: c.source.trim(), contrib: c.pctContribution, study: c.pctStudyVar, tol: c.pctTolerance }));
   const render = (component, props) => app.renderToStaticMarkup(app.createElement(component, props));
-  const charts = [
-    render(app.GroupedBars, { T, cats }),
-    ...(single
-      ? [render(app.GageRPanel, panelProps), render(app.GageByPartPanel, panelProps), render(app.GageXbarPanel, panelProps)]
-      : [render(app.GageByPartPanel, panelProps), render(app.GageRPanel, panelProps), render(app.GageByOperatorPanel, panelProps),
-         render(app.GageXbarPanel, panelProps), render(app.GageInteractionPanel, panelProps)]),
-  ];
+  const figureSvg = render(app.GageReportFigure, {
+    ...panelProps, cats,
+    valueName: spec.value,
+    partName: study.study.partName,
+    operatorName: study.study.operatorName ?? '操作员',
+  });
+  const factoryGraph = leftDir && existsSync(join(leftDir, spec.graph))
+    ? `<figure><figcaption>工厂 Minitab 17 图形窗口（PPT 原始 EMF 矢量形状渲染;文字层为字形索引故未显示,布局/图形/配色为原样）</figcaption><img src="data:image/png;base64,${readFileSync(join(leftDir, spec.graph)).toString('base64')}"/></figure>`
+    : '';
   const rows = result.components.map((c) => `<tr><td class="src">${esc(c.key === 'operator' ? '    ' + (study.study.operatorName ?? '操作员') : c.source)}</td><td>${fmtSig(c.sd)}</td><td>${fmtSig(c.studyVar)}</td><td>${nf2(c.pctStudyVar)}</td><td>${c.pctTolerance == null ? '—' : nf2(c.pctTolerance)}</td></tr>`).join('');
   const leftPng = leftDir && existsSync(join(leftDir, spec.png))
     ? `<figure><figcaption>工厂 Minitab 17 会话窗口（MSA案例结果5个7.18.pptx 原图）</figcaption><img src="data:image/png;base64,${readFileSync(join(leftDir, spec.png)).toString('base64')}"/></figure>`
@@ -109,8 +111,11 @@ for (const spec of CASES) {
       <div class="mono">可区分的类别数 = ${result.ndc === Infinity ? '∞' : result.ndc} ｜ 工厂标准判定：<b>${esc(assessment.label)}</b></div>
     </div>
   </div>
-  <div class="cap" style="margin-top:10px">应用图形报告实抓（${single ? '4 联' : '6 联'}，react-dom/server 渲染，与应用「导出报表」同一代码路径）</div>
-  <div class="charts">${charts.map((svg) => `<div class="chart">${svg}</div>`).join('')}</div>
+  <div class="cap" style="margin-top:10px">图形窗口对比（左=工厂 Minitab 原图,右=本应用整图实抓,react-dom/server 渲染,与「导出报表」同一代码路径）</div>
+  <div class="pair">
+    ${factoryGraph || '<div class="noimg">（工厂图形窗口目录未提供）</div>'}
+    <div class="chart">${figureSvg}</div>
+  </div>
 </section>`);
   const grr = result.components.find((c) => c.key === 'grr');
   summary.push(`<tr><td>${spec.block + 1} ${esc(spec.value)}</td><td>${single ? '单人' : '三人'}</td><td>${nf2(result.totalGageRR)}</td><td>${grr.pctTolerance == null ? '—' : nf2(grr.pctTolerance)}</td><td>${result.ndc}</td><td>${esc(assessment.label)}</td></tr>`);
