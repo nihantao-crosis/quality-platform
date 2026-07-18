@@ -3,7 +3,7 @@
  * 红绿灯结论:一句人话 headline + 逐项体检 checks。各分析页用手头已算好的
  * 结果就地构建;不读 store,便于单测。
  */
-import { nf, assessCapability } from '../core';
+import { nf, assessCapability, type GageAssessment } from '../core';
 
 export type Level = 'ok' | 'warn' | 'bad';
 
@@ -252,28 +252,57 @@ export function capabilityReport(args: {
 
 // ---------- Gage R&R ----------
 export function gageReport(args: {
+  primary: GageAssessment;
+  reference: GageAssessment;
+  ndc: number;
   grr: number;
-  verdict: 'acceptable' | 'marginal' | 'unacceptable';
 }): ReportData {
-  const { grr, verdict } = args;
-  const level: Level = verdict === 'acceptable' ? 'ok' : verdict === 'marginal' ? 'warn' : 'bad';
+  const { primary, reference, ndc, grr } = args;
+  const level: Level = primary.grade === 'good' ? 'ok' : primary.grade === 'warn' ? 'warn' : 'bad';
+  const standardName = primary.standard === 'factory' ? '工厂标准' : 'AIAG';
+  if (primary.blocked) {
+    return {
+      verdict: 'bad',
+      headline: `规格状态异常,测量系统判定不能完成(GRR=${nf(grr, 1)}%,${standardName}口径)——数据总均值已达到或越过单侧规格限,请先修正过程公差设置再判定。`,
+      checks: [
+        { name: `判定依据(${standardName})`, level: 'bad', note: primary.detail },
+        {
+          name: '可区分的类别数 ndc',
+          level: ndc >= 5 ? 'ok' : 'warn',
+          note: ndc === Infinity ? '测量变异为 0,区分能力不受限' : `ndc=${ndc}(AIAG 建议 ≥5;不足时区分部件差异的能力受限)`,
+        },
+        {
+          name: `对照口径(${reference.standard === 'factory' ? '工厂标准' : 'AIAG'})`,
+          level: reference.grade === 'good' ? 'ok' : reference.grade === 'warn' ? 'warn' : 'bad',
+          note: `${reference.label}:${reference.detail}`,
+        },
+      ],
+    };
+  }
   return {
     verdict: level,
     headline: level === 'ok'
-      ? `测量系统可接受(GRR=${nf(grr, 1)}% < 10%),测量数据可信,可用于过程分析与判定。`
+      ? `测量系统${primary.label}(GRR=${nf(grr, 1)}%,${standardName}口径),测量数据可信,可用于过程分析与判定。`
       : level === 'warn'
-        ? `测量系统有条件接受(GRR=${nf(grr, 1)}%,10–30%)——一般用途可用;关键特性建议改进量具或作业规范。`
-        : `测量系统不可接受(GRR=${nf(grr, 1)}% > 30%)——先改进测量系统,当前数据不宜用于过程判定。`,
+        ? `测量系统${primary.label}(GRR=${nf(grr, 1)}%,${standardName}口径)——一般用途可用;关键特性建议改进量具或作业规范。`
+        : `测量系统${primary.label}(GRR=${nf(grr, 1)}%,${standardName}口径)——先改进测量系统,当前数据不宜用于过程判定。`,
     checks: [
       {
-        name: '测量系统变异 GRR%',
+        name: `判定依据(${standardName})`,
         level,
-        note: `占研究变异 ${nf(grr, 1)}%(AIAG 判据:<10% 可接受,10–30% 临界,>30% 不可接受)`,
+        note: primary.detail,
       },
       {
-        name: '区分能力',
-        level: level === 'ok' ? 'ok' : 'warn',
-        note: level === 'ok' ? '测量变异小,足以区分部件差异' : '测量变异偏大,区分部件差异的能力受限',
+        name: '可区分的类别数 ndc',
+        level: ndc >= 5 ? 'ok' : 'warn',
+        note: ndc === Infinity
+          ? '测量变异为 0,区分能力不受限'
+          : `ndc=${ndc}(AIAG 建议 ≥5;不足时区分部件差异的能力受限)`,
+      },
+      {
+        name: `对照口径(${reference.standard === 'factory' ? '工厂标准' : 'AIAG'})`,
+        level: reference.grade === 'good' ? 'ok' : reference.grade === 'warn' ? 'warn' : 'bad',
+        note: `${reference.label}:${reference.detail}`,
       },
     ],
   };

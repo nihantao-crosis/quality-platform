@@ -69,13 +69,13 @@ describe('单因子 ANOVA', () => {
 });
 
 describe('Gage R&R（交叉 ANOVA 法）', () => {
-  const g = computeGageRR(gageStudyData(), GAGE_TOLERANCE);
+  const g = computeGageRR(gageStudyData(), { mode: 'width', value: GAGE_TOLERANCE });
   it('演示研究：合计 GRR < 10%（可接受）', () => {
     expect(g.totalGageRR).toBeGreaterThan(5);
     expect(g.totalGageRR).toBeLessThan(10);
     expect(g.totalGageRR).toBeCloseTo(8.776934972010649, 10);
     expect(g.verdict).toBe('acceptable');
-    expect(g.interaction.retained).toBe(false);
+    expect(g.interaction?.retained).toBe(false);
   });
   it('2×2×2 可手算交叉数据：不显著交互合并到重复性误差', () => {
     const handCalculated = [
@@ -91,10 +91,14 @@ describe('Gage R&R（交叉 ANOVA 法）', () => {
     // 手算 ANOVA：MS_part=200, MS_operator=2, SS_interaction=0, SS_error=8。
     // p_interaction=1，缩减模型 MSE=(0+8)/(1+4)=1.6；因此
     // σ²_repeat=1.6, σ²_operator=(2-1.6)/4=0.1, σ²_part=(200-1.6)/4=49.6。
-    const exact = computeGageRR(handCalculated, 100);
-    [1.7, 1.6, 0.1, 49.6, 51.3].forEach((expected, index) => {
-      expect(exact.components[index].variance).toBeCloseTo(expected, 12);
-    });
+    const exact = computeGageRR(handCalculated, { mode: 'width', value: 100 });
+    const exactVar = Object.fromEntries(exact.components.map((c) => [c.key, c.variance]));
+    expect(exactVar.grr).toBeCloseTo(1.7, 12);
+    expect(exactVar.repeatability).toBeCloseTo(1.6, 12);
+    expect(exactVar.reproducibility).toBeCloseTo(0.1, 12);
+    expect(exactVar.operator).toBeCloseTo(0.1, 12);
+    expect(exactVar.part).toBeCloseTo(49.6, 12);
+    expect(exactVar.total).toBeCloseTo(51.3, 12);
     expect(exact.totalGageRR).toBeCloseTo(Math.sqrt(1.7 / 51.3) * 100, 12);
     expect(exact.interaction).toMatchObject({ pValue: 1, retained: false, alpha: 0.05 });
     expect(exact.verdict).toBe('marginal');
@@ -110,20 +114,25 @@ describe('Gage R&R（交叉 ANOVA 法）', () => {
       { part: 1, operator: 1, trial: 0, value: 0 },
       { part: 1, operator: 1, trial: 1, value: 2 },
     ];
-    const base = computeGageRR(interactionStudy, 20);
-    expect(base.interaction.retained).toBe(true);
-    expect(base.interaction.fStat).toBeCloseTo(81, 12);
-    expect(base.interaction.pValue).toBeLessThan(0.001);
-    [82, 2, 80, 0, 82].forEach((expected, index) => {
-      expect(base.components[index].variance).toBeCloseTo(expected, 12);
-    });
+    const base = computeGageRR(interactionStudy, { mode: 'width', value: 20 });
+    expect(base.interaction?.retained).toBe(true);
+    expect(base.interaction!.fStat).toBeCloseTo(81, 12);
+    expect(base.interaction!.pValue).toBeLessThan(0.001);
+    const baseVar = Object.fromEntries(base.components.map((c) => [c.key, c.variance]));
+    expect(baseVar.grr).toBeCloseTo(82, 12);
+    expect(baseVar.repeatability).toBeCloseTo(2, 12);
+    expect(baseVar.reproducibility).toBeCloseTo(80, 12);
+    expect(baseVar.operator).toBeCloseTo(0, 12);
+    expect(baseVar.interaction).toBeCloseTo(80, 12);
+    expect(baseVar.part).toBeCloseTo(0, 12);
+    expect(baseVar.total).toBeCloseTo(82, 12);
 
     const shiftedScaled = computeGageRR(
       interactionStudy.map((row) => ({ ...row, value: 1_000_000 + row.value * 100 })),
-      2_000,
+      { mode: 'width', value: 2_000 },
     );
-    expect(shiftedScaled.interaction.fStat).toBeCloseTo(base.interaction.fStat, 10);
-    expect(shiftedScaled.interaction.pValue).toBeCloseTo(base.interaction.pValue, 12);
+    expect(shiftedScaled.interaction!.fStat).toBeCloseTo(base.interaction!.fStat, 10);
+    expect(shiftedScaled.interaction!.pValue).toBeCloseTo(base.interaction!.pValue, 12);
     expect(shiftedScaled.totalGageRR).toBeCloseTo(base.totalGageRR, 12);
     shiftedScaled.components.forEach((component, index) => {
       expect(component.variance).toBeCloseTo(base.components[index].variance * 10_000, 6);
@@ -143,15 +152,16 @@ describe('Gage R&R（交叉 ANOVA 法）', () => {
       return { part: Number(partText) - 1, operator: operators.indexOf(operatorText), trial, value: Number(valueText) };
     });
     expect(observations).toHaveLength(90);
-    const result = computeGageRR(observations, 8);
-    expect(result.interaction.retained).toBe(false);
-    expect(result.interaction.pValue).toBeCloseTo(0.974, 3);
-    const variances = result.components.map((component) => component.variance);
-    expect(variances[0]).toBeCloseTo(0.09143, 5);
-    expect(variances[1]).toBeCloseTo(0.03997, 5);
-    expect(variances[2]).toBeCloseTo(0.05146, 5);
-    expect(variances[3]).toBeCloseTo(1.08645, 5);
-    expect(variances[4]).toBeCloseTo(1.17788, 5);
+    const result = computeGageRR(observations, { mode: 'width', value: 8 });
+    expect(result.interaction?.retained).toBe(false);
+    expect(result.interaction!.pValue).toBeCloseTo(0.974, 3);
+    const varByKey = Object.fromEntries(result.components.map((component) => [component.key, component.variance]));
+    expect(varByKey.grr).toBeCloseTo(0.09143, 5);
+    expect(varByKey.repeatability).toBeCloseTo(0.03997, 5);
+    expect(varByKey.reproducibility).toBeCloseTo(0.05146, 5);
+    expect(varByKey.operator).toBeCloseTo(0.05146, 5);
+    expect(varByKey.part).toBeCloseTo(1.08645, 5);
+    expect(varByKey.total).toBeCloseTo(1.17788, 5);
     expect(result.totalGageRR).toBeCloseTo(27.86, 2);
   });
   it('未给双侧公差时仍计算研究变异，%Tolerance 明确为 null', () => {
@@ -160,9 +170,9 @@ describe('Gage R&R（交叉 ANOVA 法）', () => {
     expect(withoutTolerance.components.every((component) => component.pctTolerance === null)).toBe(true);
   });
   it('%贡献相加 = 100（GRR + 部件间 = 合计）', () => {
-    const grr = g.components[0];
-    const part = g.components[3];
-    const total = g.components[4];
+    const grr = g.components.find((c) => c.key === 'grr')!;
+    const part = g.components.find((c) => c.key === 'part')!;
+    const total = g.components.find((c) => c.key === 'total')!;
     expect(grr.pctContribution + part.pctContribution).toBeCloseTo(100, 6);
     expect(total.pctContribution).toBeCloseTo(100, 6);
     expect(total.pctStudyVar).toBeCloseTo(100, 6);
@@ -172,7 +182,7 @@ describe('Gage R&R（交叉 ANOVA 法）', () => {
     for (let p = 0; p < 4; p++)
       for (let o = 0; o < 2; o++)
         for (let t = 0; t < 2; t++) data.push({ part: p, operator: o, trial: t, value: 10 + p });
-    expect(computeGageRR(data, 1).totalGageRR).toBeCloseTo(0, 6);
+    expect(computeGageRR(data, { mode: 'width', value: 1 }).totalGageRR).toBeCloseTo(0, 6);
   });
 
   const balancedStudy = () => {
@@ -186,38 +196,46 @@ describe('Gage R&R（交叉 ANOVA 法）', () => {
   it('拒绝非有限测量值、编号与非正/非有限公差', () => {
     const data = balancedStudy();
     for (const value of [Number.NaN, Infinity, -Infinity]) {
-      expect(() => computeGageRR(data.map((row, i) => i === 0 ? { ...row, value } : row), 1)).toThrow('测量值必须全部为有限数值');
+      expect(() => computeGageRR(data.map((row, i) => i === 0 ? { ...row, value } : row), { mode: 'width', value: 1 })).toThrow('测量值必须全部为有限数值');
     }
-    expect(() => computeGageRR(data.map((row, i) => i === 0 ? { ...row, trial: Infinity } : row), 1)).toThrow('编号必须全部为有限数值');
-    for (const tolerance of [0, -1, Number.NaN, Infinity]) {
-      expect(() => computeGageRR(data, tolerance)).toThrow('公差必须是大于 0');
+    expect(() => computeGageRR(data.map((row, i) => i === 0 ? { ...row, trial: Infinity } : row), { mode: 'width', value: 1 })).toThrow('编号必须全部为有限数值');
+    for (const tolerance of [0, -1]) {
+      expect(() => computeGageRR(data, { mode: 'width', value: tolerance })).toThrow('公差宽度必须大于 0');
     }
-    expect(() => computeGageRR(data.map((row, i) => i === 0 ? { ...row, part: -1 } : row), 1)).toThrow('非负安全整数');
-    expect(() => computeGageRR(data.map((row, i) => i === 0 ? { ...row, operator: 0.5 } : row), 1)).toThrow('非负安全整数');
+    for (const tolerance of [Number.NaN, Infinity]) {
+      expect(() => computeGageRR(data, { mode: 'width', value: tolerance })).toThrow('公差必须是有限数值');
+    }
+    expect(() => computeGageRR(data.map((row, i) => i === 0 ? { ...row, part: -1 } : row), { mode: 'width', value: 1 })).toThrow('非负安全整数');
+    expect(() => computeGageRR(data.map((row, i) => i === 0 ? { ...row, operator: 0.5 } : row), { mode: 'width', value: 1 })).toThrow('非负安全整数');
   });
 
-  it('至少要求 2 个部件 × 2 名操作员 × 2 次重复试验', () => {
+  it('至少要求 2 个部件 × 2 次重复试验;单操作员合法(退化单因子模型)', () => {
     const data = balancedStudy();
-    expect(() => computeGageRR(data.filter((row) => row.part === 0), 1)).toThrow('至少需要 2 个部件');
-    expect(() => computeGageRR(data.filter((row) => row.operator === 0), 1)).toThrow('2 名操作员');
-    expect(() => computeGageRR(data.filter((row) => row.trial === 0), 1)).toThrow('2 次重复试验');
+    expect(() => computeGageRR(data.filter((row) => row.part === 0), { mode: 'width', value: 1 })).toThrow('至少需要 2 个部件');
+    expect(() => computeGageRR(data.filter((row) => row.trial === 0), { mode: 'width', value: 1 })).toThrow('2 次重复试验');
+    const singleOperator = computeGageRR(data.filter((row) => row.operator === 0), { mode: 'width', value: 1 });
+    expect(singleOperator.interaction).toBeNull();
+    expect(singleOperator.components.map((component) => component.key)).toEqual(['grr', 'repeatability', 'part', 'total']);
+    const grrRow = singleOperator.components.find((component) => component.key === 'grr')!;
+    const repeatRow = singleOperator.components.find((component) => component.key === 'repeatability')!;
+    expect(grrRow.variance).toBeCloseTo(repeatRow.variance, 12);
   });
 
   it('拒绝缺失、重复或不等重复的交叉组合', () => {
     const data = balancedStudy();
-    expect(() => computeGageRR(data.slice(1), 1)).toThrow('完整且等重复');
-    expect(() => computeGageRR([...data, { ...data[0] }], 1)).toThrow('组合不能重复');
+    expect(() => computeGageRR(data.slice(1), { mode: 'width', value: 1 })).toThrow('完整且等重复');
+    expect(() => computeGageRR([...data, { ...data[0] }], { mode: 'width', value: 1 })).toThrow('组合不能重复');
 
     const unbalanced = data.filter((row) => !(row.part === 1 && row.operator === 1 && row.trial === 1));
     unbalanced.push({ part: 1, operator: 1, trial: 2, value: 11.12 });
-    expect(() => computeGageRR(unbalanced, 1)).toThrow('完整且等重复');
+    expect(() => computeGageRR(unbalanced, { mode: 'width', value: 1 })).toThrow('完整且等重复');
   });
 
   it('拒绝 0-based 水平编号缺号，并拒绝合计变异为 0', () => {
     const skippedTrial = balancedStudy().map((row) => ({ ...row, trial: row.trial * 2 }));
-    expect(() => computeGageRR(skippedTrial, 1)).toThrow('重复试验编号必须从 0 开始连续');
-    expect(() => computeGageRR(balancedStudy().map((row) => ({ ...row, value: 10 })), 1)).toThrow('合计变异为 0');
-    expect(() => computeGageRR(balancedStudy().map((row) => ({ ...row, value: 0.1 })), 1)).toThrow('合计变异为 0');
+    expect(() => computeGageRR(skippedTrial, { mode: 'width', value: 1 })).toThrow('重复试验编号必须从 0 开始连续');
+    expect(() => computeGageRR(balancedStudy().map((row) => ({ ...row, value: 10 })), { mode: 'width', value: 1 })).toThrow('合计变异为 0');
+    expect(() => computeGageRR(balancedStudy().map((row) => ({ ...row, value: 0.1 })), { mode: 'width', value: 1 })).toThrow('合计变异为 0');
   });
 });
 

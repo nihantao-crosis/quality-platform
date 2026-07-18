@@ -55,14 +55,15 @@ describe('GageRR 默认角色推荐(716-R3 P1-2)', () => {
     expect(text).toContain('测试人');
   });
 
-  it('工厂 30 行单操作员场景:推荐 value=螺钉高度/part=部件/operator=测试人,报错落在“仅 1 个操作员”而非乱配角色', () => {
+  it('工厂 30 行单操作员场景:推荐 value=螺钉高度/part=部件/operator=测试人,按单因子退化模型直接计算(v1.40)', () => {
     importFactory(['邹德玉'], 10, 3);
     const container = renderPage();
     const text = container.textContent ?? '';
-    // 若推荐反(部件当测量),报错会是交叉设计类;推荐正确时才可能精确命中单操作员提示
-    expect(text).toContain('Gage R&R 尚未运行');
-    expect(text).toContain('仅检测到 1 个操作员(邹德玉)');
-    // 阻断页同样展示推荐依据小字,便于工厂确认角色没配反
+    // 推荐正确 + 单操作员合法:不再阻断,GRR=重复性、无再现性行
+    expect(text).not.toContain('Gage R&R 尚未运行');
+    expect(text).toContain('合计 Gage R&R');
+    expect(text).toContain('单操作员研究');
+    expect(text).toContain('不估计再现性');
     expect(text).toContain('自动推荐');
     expect(text).toContain('请确认');
   });
@@ -77,7 +78,8 @@ describe('GageRR 默认角色推荐(716-R3 P1-2)', () => {
     expect(text).toContain('合计 Gage R&R');
     // 下拉显示的是手选值而非推荐值:部件下拉=测试人,操作员下拉=部件
     const selects = [...container.querySelectorAll('select')];
-    expect(selects).toHaveLength(3);
+    expect(selects).toHaveLength(4); // 测量/部件/操作员 + 过程公差口径(v1.40)
+
     const selectedText = (i: number) => selects[i].selectedOptions[0]?.textContent ?? '';
     expect(selectedText(0)).toBe('螺钉高度');
     expect(selectedText(1)).toContain('测试人');

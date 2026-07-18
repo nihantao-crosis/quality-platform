@@ -349,6 +349,7 @@ function prefsValidationError(raw: unknown): string | null {
   const allowedStateKeys = new Set([
     'chartStyle', 'showGrid', 'projectName', 'lsl', 'usl', 'tgt', 'lslOn', 'uslOn', 'capabilityBins',
     'gageUseReal', 'gageValueName', 'gagePartName', 'gageOperatorName',
+    'gageTolMode', 'gageTolValue', 'gageStandard',
     'aqlLot', 'aqlLevel', 'aqlAQL', 'aqlRegime', 'aqlMethod', 'aqlAcMethod', 'aqlSwitch',
     'spcRules', 'spcRuleK', 'spcDataLayout', 'spcValueCol', 'spcSubgroupCol', 'spcStageCol',
     'doeView', 'doeTab', 'doeFactorCols', 'doeRespCol', 'doeModelTerms', 'doeIncludeCurvature',
@@ -372,6 +373,8 @@ function prefsValidationError(raw: unknown): string | null {
     ['aqlMethod', new Set(['shift', 'gb'])],
     ['aqlAcMethod', new Set(['binom', 'gb'])],
     ['aqlRegime', new Set(['percent', 'per100'])],
+    ['gageTolMode', new Set(['auto', 'width', 'upper', 'lower', 'none'])],
+    ['gageStandard', new Set(['factory', 'aiag'])],
   ];
   for (const [key, allowed] of enums) {
     if (state[key] !== undefined && (typeof state[key] !== 'string' || !allowed.has(state[key]))) {
@@ -423,6 +426,10 @@ function prefsValidationError(raw: unknown): string | null {
   if ('aqlLevel' in state && !['S-1', 'S-2', 'S-3', 'S-4', 'I', 'II', 'III'].includes(state.aqlLevel as string)) {
     return 'AQL 检验水平无效';
   }
+  if (state.gageTolValue !== undefined && state.gageTolValue !== null
+    && (typeof state.gageTolValue !== 'number' || !Number.isFinite(state.gageTolValue))) {
+    return 'MSA 过程公差数值无效';
+  }
   if ('aqlAQL' in state && (typeof state.aqlAQL !== 'number' || !AQL_COLS.includes(state.aqlAQL))) {
     return 'AQL 值不在正式主表范围';
   }
@@ -463,6 +470,8 @@ function snapshotValidationError(raw: unknown): string | null {
     ['aqlMethod', new Set(['shift', 'gb'])],
     ['aqlAcMethod', new Set(['binom', 'gb'])],
     ['aqlRegime', new Set(['percent', 'per100'])],
+    ['gageTolMode', new Set(['auto', 'width', 'upper', 'lower', 'none'])],
+    ['gageStandard', new Set(['factory', 'aiag'])],
     ['doeView', new Set(['main', 'interact', 'pareto', 'cube'])],
     ['doeTab', new Set(['analyze', 'create'])],
     ['hypoTab', new Set(['anova', 't1', 't2', 'reg'])],
@@ -492,6 +501,10 @@ function snapshotValidationError(raw: unknown): string | null {
     || (raw.aqlLot as number) < 2 || (raw.aqlLot as number) > MAX_LOT_SIZE)) return '分析 AQL 批量无效';
   if (raw.aqlAQL !== undefined && (typeof raw.aqlAQL !== 'number' || !AQL_COLS.includes(raw.aqlAQL))) {
     return '分析 AQL 值不在正式主表范围';
+  }
+  if (raw.gageTolValue !== undefined && raw.gageTolValue !== null
+    && (typeof raw.gageTolValue !== 'number' || !Number.isFinite(raw.gageTolValue))) {
+    return '分析 MSA 过程公差数值无效';
   }
   if (raw.aqlRegime !== undefined && typeof raw.aqlAQL === 'number'
     && !aqlRegimeAllows(raw.aqlRegime as AqlRegime, raw.aqlAQL)) {

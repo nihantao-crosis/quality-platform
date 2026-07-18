@@ -1,6 +1,6 @@
 /** 应用外壳 — 菜单栏 → 工具栏 → (左导航 + 主内容) → 状态栏 + 弹窗/Toast + 全局快捷键。 */
 import { useEffect, useMemo } from 'react';
-import { useApp } from './store/appStore';
+import { useApp, resolveGageTolerance } from './store/appStore';
 import { useData, resolveCapabilityMeasurementData } from './store/dataStore';
 import {
   capabilityInputError, computeCapability, computeGageRR, gageStudyData, GAGE_TOLERANCE, nf,
@@ -32,7 +32,7 @@ export default function App() {
   const {
     page, openMenu, varOpen, setOpenMenu, setVarOpen, openModal, showToast, chartStyle, showGrid, lsl, usl, tgt, lslOn, busyOverlay, uslOn,
     spcType, spcDataLayout, spcValueCol, spcSubgroupCol, hypoTab, aqlLevel, aqlAQL, aqlRegime,
-    gageUseReal, gageValueName, gagePartName, gageOperatorName, activeVar,
+    gageUseReal, gageValueName, gagePartName, gageOperatorName, gageTolMode, gageTolValue, activeVar,
     capSubgroupMode, capSubgroupSize, capValueCol, capSubgroupIdCol,
   } = useApp();
   const { model: M, textCols, pendingCells } = useData();
@@ -63,10 +63,10 @@ export default function App() {
   const requestedRealGage = !M.isDemo && gageUseReal;
   let gageRR: number | null = null;
   if (!requestedRealGage) {
-    gageRR = computeGageRR(gageStudyData(), GAGE_TOLERANCE).totalGageRR;
+    gageRR = computeGageRR(gageStudyData(), { mode: 'width', value: GAGE_TOLERANCE }).totalGageRR;
   } else if (preparedGage.ok) {
     try {
-      gageRR = computeGageRR(preparedGage.study.observations, lslOn && uslOn ? usl - lsl : null).totalGageRR;
+      gageRR = computeGageRR(preparedGage.study.observations, resolveGageTolerance({ gageTolMode, gageTolValue, lsl, usl, lslOn, uslOn })).totalGageRR;
     } catch { /* 状态栏显示未运行；页面负责给出具体原因 */ }
   }
 

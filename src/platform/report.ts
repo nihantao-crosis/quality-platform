@@ -40,7 +40,7 @@ export function textReport(M: VarModel, spec: ReportSpec): string {
     : { values: M.indiv, cl: M.indMean, sigma: M.iSig };
   const { list } = evalRules(spc.values, spc.cl, spc.sigma, DEFAULT_RULES);
   const anova = M.isDemo ? oneWayAnova(anovaGroups().map((g) => g.vals)) : null;
-  const gage = M.isDemo ? computeGageRR(gageStudyData(), GAGE_TOLERANCE) : null;
+  const gage = M.isDemo ? computeGageRR(gageStudyData(), { mode: 'width', value: GAGE_TOLERANCE }) : null;
   const L: string[] = [];
   L.push('════════════════════════════════════════');
   L.push('  质量分析报告 · ' + M.name);

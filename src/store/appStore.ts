@@ -3,7 +3,7 @@
  */
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
-import type { NelsonRules, NelsonRuleK, InspectionLevel, CalcState, AnovaMode, AqlMethod, AqlAcMethod, AqlRegime, SwitchStatus, SpcDataLayout } from '../core';
+import type { NelsonRules, NelsonRuleK, InspectionLevel, CalcState, AnovaMode, AqlMethod, AqlAcMethod, AqlRegime, SwitchStatus, SpcDataLayout, GageStandard, GageToleranceSpec } from '../core';
 import {
   AQL_COLS, MAX_LOT_SIZE, aqlRegime, aqlRegimeAllows, calcKey as coreCalcKey, CALC_INIT,
   freshSwitchStatus, normalizeSwitchStatus, DEFAULT_RULE_K, normalizeRuleK,
@@ -64,6 +64,12 @@ interface AppState {
   gageValueName: string | null;
   gagePartName: string | null;
   gageOperatorName: string | null;
+  /** MSA 过程公差口径：auto=联动全局规格限（双开=宽度，单开=对应单侧），width/upper/lower=手动值，none=不设。 */
+  gageTolMode: 'auto' | 'width' | 'upper' | 'lower' | 'none';
+  /** width/upper/lower 手动模式的数值；auto/none 模式忽略。 */
+  gageTolValue: number | null;
+  /** MSA 判定标准：factory=工厂口径（≤10 理想/≤20 可接受，%SV 与 %公差取较差），aiag=AIAG（10/30，%SV）。 */
+  gageStandard: GageStandard;
   doeView: DoeView;
   doeTab: DoeTab;
   doeFactorCols: string[] | null; // DOE 分析选中的因子列名(null=默认前 k-1 列);按名存储,换数据集自动失效回落默认
@@ -127,7 +133,7 @@ interface AppState {
   toggleSide(side: 'lslOn' | 'uslOn'): void;
   setCapabilityBins(v: number): void;
   setCapabilitySubgroup(patch: Partial<Pick<AppState, 'capSubgroupMode' | 'capSubgroupSize' | 'capValueCol' | 'capSubgroupIdCol'>>): void;
-  setGageOptions(patch: Partial<Pick<AppState, 'gageUseReal' | 'gageValueName' | 'gagePartName' | 'gageOperatorName'>>): void;
+  setGageOptions(patch: Partial<Pick<AppState, 'gageUseReal' | 'gageValueName' | 'gagePartName' | 'gageOperatorName' | 'gageTolMode' | 'gageTolValue' | 'gageStandard'>>): void;
   setDoeView(v: DoeView): void;
   setDoeTab(v: DoeTab): void;
   setDoeCols(factorCols: string[] | null, respCol: string | null): void;
@@ -245,6 +251,9 @@ function persistedPrefsOf(s: AppState) {
     gageValueName: s.gageValueName,
     gagePartName: s.gagePartName,
     gageOperatorName: s.gageOperatorName,
+    gageTolMode: s.gageTolMode,
+    gageTolValue: s.gageTolValue,
+    gageStandard: s.gageStandard,
     spcRules: s.spcRules,
     spcRuleK: s.spcRuleK,
     spcDataLayout: s.spcDataLayout,
@@ -340,6 +349,9 @@ export const useApp = create<AppState>()(persist((set, get) => ({
   gageValueName: null,
   gagePartName: null,
   gageOperatorName: null,
+  gageTolMode: 'auto',
+  gageTolValue: null,
+  gageStandard: 'factory',
   doeView: 'main',
   doeTab: 'analyze',
   doeFactorCols: null,
@@ -538,6 +550,13 @@ export const useApp = create<AppState>()(persist((set, get) => ({
     merged.gageValueName = stringOrNull(p.gageValueName, current.gageValueName);
     merged.gagePartName = stringOrNull(p.gagePartName, current.gagePartName);
     merged.gageOperatorName = stringOrNull(p.gageOperatorName, current.gageOperatorName);
+    // v1.40:MSA 公差口径/数值/判定标准——写入侧(partialize/.qproj)与读取侧必须对称,漏一侧就是「保存端带、回放端丢」
+    merged.gageTolMode = p.gageTolMode === 'auto' || p.gageTolMode === 'width' || p.gageTolMode === 'upper'
+      || p.gageTolMode === 'lower' || p.gageTolMode === 'none' ? p.gageTolMode : current.gageTolMode;
+    merged.gageTolValue = p.gageTolValue === null || (typeof p.gageTolValue === 'number' && Number.isFinite(p.gageTolValue))
+      ? p.gageTolValue as number | null
+      : current.gageTolValue;
+    merged.gageStandard = p.gageStandard === 'factory' || p.gageStandard === 'aiag' ? p.gageStandard : current.gageStandard;
     const rules = p.spcRules && typeof p.spcRules === 'object' && !Array.isArray(p.spcRules)
       ? p.spcRules as Partial<NelsonRules>
       : {};
@@ -676,6 +695,7 @@ export function resetUiPreferences(): void {
     chartStyle: '经典', showGrid: true, projectName: '质检项目 2026-Q2',
     lsl: 24.9, usl: 25.1, tgt: 25, lslOn: true, uslOn: true, capabilityBins: 13,
     gageUseReal: true, gageValueName: null, gagePartName: null, gageOperatorName: null,
+    gageTolMode: 'auto', gageTolValue: null, gageStandard: 'factory',
     spcRules: { ...DEFAULT_SPC_RULES }, spcRuleK: { ...DEFAULT_RULE_K },
     spcDataLayout: 'auto', spcValueCol: null, spcSubgroupCol: null, spcStageCol: null,
     capSubgroupMode: 'spc', capSubgroupSize: 5, capValueCol: null, capSubgroupIdCol: null,
@@ -686,6 +706,27 @@ export function resetUiPreferences(): void {
 }
 
 /** 清业务数据时立即清空内存中的连续检验流，并确保随后普通 UI set 不会把旧账本写回来。 */
+/**
+ * 解析 MSA 生效过程公差（页面/状态栏/报告/快照摘要共用的唯一口径）：
+ * auto 联动全局规格限——双侧都启用取宽度 USL−LSL；仅一侧启用取对应单侧限（Minitab 单边规格行为）；
+ * width/upper/lower 用手动值；数值不合法（宽度≤0、非有限数）时返回 null 而不是抛错。
+ */
+export function resolveGageTolerance(
+  s: Pick<AppState, 'gageTolMode' | 'gageTolValue' | 'lsl' | 'usl' | 'lslOn' | 'uslOn'>,
+): GageToleranceSpec | null {
+  if (s.gageTolMode === 'none') return null;
+  if (s.gageTolMode === 'auto') {
+    if (s.lslOn && s.uslOn) return Number.isFinite(s.usl - s.lsl) && s.usl - s.lsl > 0 ? { mode: 'width', value: s.usl - s.lsl } : null;
+    if (s.uslOn) return Number.isFinite(s.usl) ? { mode: 'upper', value: s.usl } : null;
+    if (s.lslOn) return Number.isFinite(s.lsl) ? { mode: 'lower', value: s.lsl } : null;
+    return null;
+  }
+  const value = s.gageTolValue;
+  if (value == null || !Number.isFinite(value)) return null;
+  if (s.gageTolMode === 'width') return value > 0 ? { mode: 'width', value } : null;
+  return { mode: s.gageTolMode, value };
+}
+
 export function clearAqlBusinessState(): void {
   aqlStateCorrupt = false;
   aqlPersistenceDirty = false;

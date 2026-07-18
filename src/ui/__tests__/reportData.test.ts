@@ -129,16 +129,31 @@ describe('能力结论', () => {
   });
 });
 
-describe('Gage 结论', () => {
-  it('GRR 9% → 可接受', () => {
-    const r = gageReport({ grr: 9.0, verdict: 'acceptable' });
-    expect(r.verdict).toBe('ok');
-    expect(r.headline).toContain('可接受');
+describe('Gage 结论(双判定标准,v1.40)', () => {
+  const assessment = (standard: 'factory' | 'aiag', grade: 'good' | 'warn' | 'bad', label: string, detail = '判定细节'): import('../../core').GageAssessment => ({
+    standard, grade, label, detail, judgedOnTolerance: true,
   });
-  it('GRR 35% → 不可接受', () => {
-    const r = gageReport({ grr: 35, verdict: 'unacceptable' });
+  it('工厂口径 GRR 9%/公差内 → 理想', () => {
+    const r = gageReport({ primary: assessment('factory', 'good', '理想'), reference: assessment('aiag', 'good', '可接受'), ndc: 13, grr: 9.0 });
+    expect(r.verdict).toBe('ok');
+    expect(r.headline).toContain('理想');
+    expect(r.headline).toContain('工厂标准');
+    expect(r.checks.find((c) => c.name.includes('ndc'))!.level).toBe('ok');
+    expect(r.checks.find((c) => c.name.includes('对照'))!.note).toContain('可接受');
+  });
+  it('AIAG 口径 GRR 35% → 不可接受;ndc<5 提示受限', () => {
+    const r = gageReport({ primary: assessment('aiag', 'bad', '不可接受'), reference: assessment('factory', 'bad', '不可接受'), ndc: 1, grr: 35 });
     expect(r.verdict).toBe('bad');
     expect(r.headline).toContain('先改进测量');
+    const ndcCheck = r.checks.find((c) => c.name.includes('ndc'))!;
+    expect(ndcCheck.level).toBe('warn');
+    expect(ndcCheck.note).toContain('ndc=1');
+  });
+  it('工厂口径 GRR 10.51% → 可接受(warn 级),对照 AIAG 临界', () => {
+    const r = gageReport({ primary: assessment('factory', 'warn', '可接受'), reference: assessment('aiag', 'warn', '临界'), ndc: 13, grr: 10.51 });
+    expect(r.verdict).toBe('warn');
+    expect(r.headline).toContain('可接受');
+    expect(r.checks.find((c) => c.name.includes('对照'))!.note).toContain('临界');
   });
 });
 

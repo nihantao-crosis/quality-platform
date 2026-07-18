@@ -6,9 +6,13 @@ export interface GageTextColumn {
   values: string[];
 }
 
+/** 操作员角色哨兵：显式声明「单操作员研究，不选操作员列」（Minitab 允许操作员留空）。 */
+export const GAGE_SINGLE_OPERATOR = '__single_operator__';
+
 export interface GageStudySelection {
   valueColumn: string | null;
   partColumn: string | null;
+  /** 列名 / GAGE_SINGLE_OPERATOR（单操作员，无列） / null（用推荐或位置默认） */
   operatorColumn: string | null;
   pendingCells?: Array<{ row: number; col: number }>;
 }
@@ -17,7 +21,8 @@ export interface PreparedGageStudy {
   observations: GageObservation[];
   valueName: string;
   partName: string;
-  operatorName: string;
+  /** 单操作员且未选列时为 null。 */
+  operatorName: string | null;
   partLabels: string[];
   operatorLabels: string[];
   repeats: number;
@@ -323,9 +328,12 @@ export function prepareGageStudy(
     return { ok: false, reason: `已选测量列“${selection.valueColumn}”已不存在` };
   }
   const valueIndex = namedValue >= 0 ? namedValue : 0;
+  const singleOperator = selection.operatorColumn === GAGE_SINGLE_OPERATOR;
   const categories = resolvedGageCategoryColumns(model, textCols, model.colNames[valueIndex]);
-  if (categories.length < 2) {
-    return { ok: false, reason: '真实 Gage R&R 除测量列外还需要 2 个类别列（部件、操作员）；类别可以是数字 ID 或文本' };
+  if (categories.length < (singleOperator ? 1 : 2)) {
+    return { ok: false, reason: singleOperator
+      ? '真实 Gage R&R 除测量列外还需要 1 个部件类别列；类别可以是数字 ID 或文本'
+      : '真实 Gage R&R 除测量列外还需要 2 个类别列（部件、操作员）；类别可以是数字 ID 或文本，单操作员研究可将操作员选为「无（单操作员）」' };
   }
   const resolveCategory = (requested: string | null, fallback: number) => {
     if (!requested) return categories[fallback] ?? null;
@@ -334,27 +342,27 @@ export function prepareGageStudy(
     return found;
   };
   const partColumn = resolveCategory(selection.partColumn, 0);
-  const operatorColumn = resolveCategory(selection.operatorColumn, 1);
-  if (!partColumn || !operatorColumn) {
+  const operatorColumn = singleOperator ? null : resolveCategory(selection.operatorColumn, 1);
+  if (!partColumn || (!singleOperator && !operatorColumn)) {
     const role = !partColumn ? '部件' : '操作员';
     const requested = !partColumn ? selection.partColumn : selection.operatorColumn;
     return { ok: false, reason: requested === model.colNames[valueIndex]
       ? `测量列不能同时作为${role}列`
       : `已选${role}列“${requested ?? ''}”已不存在` };
   }
-  if (partColumn.name === operatorColumn.name) return { ok: false, reason: '部件列与操作员列不能相同' };
+  if (operatorColumn && partColumn.name === operatorColumn.name) return { ok: false, reason: '部件列与操作员列不能相同' };
 
   const selectedNumericIndices = new Set([
     valueIndex,
     partColumn.numericIndex,
-    operatorColumn.numericIndex,
+    operatorColumn?.numericIndex ?? null,
   ].filter((index): index is number => index != null));
   const pending = (selection.pendingCells ?? []).filter((cell) =>
     cell.row >= 0 && cell.row < model.k && selectedNumericIndices.has(cell.col)).length;
   if (pending > 0) return { ok: false, reason: `所选 Gage 角色列还有 ${pending} 个待录入单元格` };
 
   const parts = partColumn.values;
-  const operators = operatorColumn.values;
+  const operators = operatorColumn ? operatorColumn.values : new Array<string>(model.k).fill('单操作员');
   if (parts.length !== model.k || operators.length !== model.k) {
     return { ok: false, reason: '部件/操作员列的行数必须与测量列一致' };
   }
@@ -364,10 +372,8 @@ export function prepareGageStudy(
     return { ok: false, reason: '部件/操作员列不能包含空白标签' };
   }
   const partLabels = [...new Set(partValues)];
+  // 单操作员研究合法(操作员列为常数或显式选「无」):退化为单因子模型,GRR=重复性,不估计再现性。
   const operatorLabels = [...new Set(operatorValues)];
-  if (operatorLabels.length < 2) {
-    return { ok: false, reason: `仅检测到 1 个操作员(${operatorLabels[0]}):交叉 Gage R&R 需 ≥2 名操作员对同批部件重复测量;请补充其他操作员数据` };
-  }
   if (partLabels.length < 2) {
     return { ok: false, reason: `仅检测到 1 个部件(${partLabels[0]}):交叉 Gage R&R 需 ≥2 个部件供各操作员重复测量;请补充其他部件数据` };
   }
@@ -436,7 +442,7 @@ export function prepareGageStudy(
       observations,
       valueName: model.colNames[valueIndex],
       partName: partColumn.name,
-      operatorName: operatorColumn.name,
+      operatorName: operatorColumn ? operatorColumn.name : null,
       partLabels,
       operatorLabels,
       repeats,

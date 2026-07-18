@@ -16,7 +16,7 @@ import {
   computeCapability,
   computeDescriptive,
   computeVarModel,
-  computeGageRR,
+  computeGageRR, assessGage, computeGagePanelData, CONTROL_CONSTANTS,
   countAnovaPendingCells,
   DEFECTS,
   DOE_DESIGN,
@@ -53,7 +53,7 @@ import {
   type VarModel,
   assessCapability, countCapabilityViolations,
 } from '../core';
-import { useApp } from '../store/appStore';
+import { useApp, resolveGageTolerance } from '../store/appStore';
 import { resolveCapabilityMeasurementData, useData } from '../store/dataStore';
 import { expandSpcRuleItems } from '../store/analyses';
 import { paretoReport, spcReport } from '../ui/reportData';
@@ -61,6 +61,7 @@ import { chartTokens } from '../ui/tokens';
 import { ControlChart } from '../ui/charts/ControlChart';
 import { NormalProbPlot } from '../ui/charts/NormalProbPlot';
 import { BoxPlot, GroupedBars, IndividualValuePlot, IntervalPlot, ParetoChart } from '../ui/charts/misc';
+import { GageRPanel, GageXbarPanel, GageByPartPanel, GageByOperatorPanel, GageInteractionPanel } from '../ui/charts/gagePanels';
 import { ScatterPlot } from '../ui/charts/ScatterPlot';
 import { Histogram } from '../ui/charts/Histogram';
 import { EffectsBar, MainEffects } from '../ui/charts/doe';
@@ -826,8 +827,8 @@ function buildGagePayload(): AnalysisReportPayload {
   }
   const observations = requestedReal && prepared.ok ? prepared.study.observations : gageStudyData();
   const tolerance = requestedReal
-    ? app.lslOn && app.uslOn ? app.usl - app.lsl : null
-    : GAGE_TOLERANCE;
+    ? resolveGageTolerance(app)
+    : { mode: 'width' as const, value: GAGE_TOLERANCE };
   let result: ReturnType<typeof computeGageRR>;
   try {
     result = computeGageRR(observations, tolerance);
@@ -835,32 +836,48 @@ function buildGagePayload(): AnalysisReportPayload {
     return unrunPayload('gagerr', '测量系统分析 Gage R&R 专项报告', data.model.name, (error as Error).message, requestedReal);
   }
   const realStudy = requestedReal && prepared.ok ? prepared.study : null;
-  const verdict = result.verdict === 'acceptable' ? '可接受（<10%）' : result.verdict === 'marginal' ? '临界（10–30%）' : '不可接受（>30%）';
-  const cats = result.components.slice(0, 4).map((component) => ({
-    name: component.source.trim(),
-    contrib: component.pctContribution,
-    study: component.pctStudyVar,
-    tol: component.pctTolerance,
-  }));
+  const primary = assessGage(result, app.gageStandard);
+  const reference = assessGage(result, app.gageStandard === 'factory' ? 'aiag' : 'factory');
+  const single = result.operatorCount === 1;
+  const operatorRowLabel = realStudy?.operatorName ?? '操作员';
+  const panelData = computeGagePanelData(observations, CONTROL_CONSTANTS[result.trialCount] ?? null);
+  const partLabels = realStudy?.partLabels ?? Array.from({ length: panelData.partCount }, (_, index) => String(index + 1));
+  const operatorLabels = realStudy?.operatorLabels ?? ['A', 'B', 'C'];
+  const cats = result.components
+    .filter((component) => component.key === 'grr' || component.key === 'repeatability' || component.key === 'reproducibility' || component.key === 'part')
+    .map((component) => ({
+      name: component.source.trim(),
+      contrib: component.pctContribution,
+      study: component.pctStudyVar,
+      tol: component.pctTolerance,
+    }));
+  const panelProps = { T, panel: panelData, partLabels, operatorLabels, w: 960, h: 300 } as const;
   return {
     kind: 'gagerr',
     usesWorksheet: requestedReal,
     title: '测量系统分析 Gage R&R 专项报告',
     subtitle: requestedReal && realStudy
-      ? `${realStudy.valueName} · 部件 ${realStudy.partName} · 操作员 ${realStudy.operatorName} · ${realStudy.partLabels.length}×${realStudy.operatorLabels.length}×${realStudy.repeats}`
+      ? `${realStudy.valueName} · 部件 ${realStudy.partName} · 操作员 ${realStudy.operatorName ?? '单操作员'} · ${realStudy.partLabels.length}×${realStudy.operatorLabels.length}×${realStudy.repeats}`
       : '内置 10 部件 × 3 操作员 × 2 重复演示研究 · 非用户数据',
     generatedAt: now(),
     summary: [
-      `合计 Gage R&R=${fmt(result.totalGageRR, 3)}%（研究变异），测量系统${verdict}。`,
-      `部件×操作员交互项 p=${fmt(result.interaction.pValue, 4)}（α=${fmt(result.interaction.alpha, 2)}），${result.interaction.retained ? '显著，最终模型保留交互分量' : '不显著，已将交互 SS/df 合并到重复性误差'}。`,
+      `合计 Gage R&R=${fmt(result.totalGageRR, 3)}%（研究变异），${primary.standard === 'factory' ? '工厂标准' : 'AIAG'}判定：${primary.label}。${primary.detail}`,
+      `对照口径（${reference.standard === 'factory' ? '工厂标准' : 'AIAG'}）：${reference.label}。`,
+      `可区分的类别数 ndc = ${result.ndc === Infinity ? '∞' : result.ndc}（AIAG 建议 ≥5）。`,
+      result.interaction
+        ? `部件×操作员交互项 p=${fmt(result.interaction.pValue, 4)}（α=${fmt(result.interaction.alpha, 2)}），${result.interaction.retained ? '显著，最终模型保留交互分量' : '不显著，已将交互 SS/df 合并到重复性误差'}。`
+        : '单操作员研究：按单因子随机效应模型计算，合计量具 R&R = 重复性，不估计再现性。',
     ],
     warnings: [
       ...(!requestedReal ? ['本报告使用内置交叉 Gage R&R 演示研究，不得当作用户测量系统结论。'] : []),
-      ...(requestedReal && tolerance == null ? ['未同时启用 LSL 和 USL，没有双侧公差宽度；% 公差不可计算，报表以“—”显示。'] : []),
+      ...(requestedReal && tolerance == null ? ['未提供过程公差（可在 MSA 页设置双侧宽度或单侧限）；% 公差不可计算，报表以“—”显示。'] : []),
+      ...(result.toleranceNote ? [result.toleranceNote] : []),
     ],
     tables: [
       {
-        title: requestedReal ? '导入的交叉研究原始观测' : '演示交叉研究原始观测',
+        title: requestedReal
+          ? single ? '导入的单操作员研究原始观测' : '导入的交叉研究原始观测'
+          : '演示交叉研究原始观测',
         headers: ['部件', '操作员', '重复', realStudy?.valueName ?? '测量值'],
         rows: observations.map((observation) => [
           realStudy?.partLabels[observation.part] ?? observation.part + 1,
@@ -871,14 +888,38 @@ function buildGagePayload(): AnalysisReportPayload {
       },
       {
         title: '方差分量与研究变异',
-        headers: ['来源', '方差分量', '%贡献', '%研究变异', '%公差'],
-        rows: result.components.map((component) => [component.source, fmt(component.variance, 8), fmt(component.pctContribution), fmt(component.pctStudyVar), fmt(component.pctTolerance)]),
-        note: tolerance == null
-          ? '未提供双侧公差宽度，% 公差不可计算；研究变异与 AIAG <10% / 10–30% / >30% 判定不受影响。'
-          : `公差宽度=${fmt(tolerance, 8)}；判定阈值按 AIAG 常用的 <10% / 10–30% / >30%。`,
+        headers: ['来源', '标准差(SD)', '研究变异(6×SD)', '方差分量', '%贡献', '%研究变异', '%公差(SV/Toler)'],
+        rows: result.components.map((component) => [
+          component.key === 'operator' ? `    ${operatorRowLabel}` : component.source,
+          fmt(component.sd, 6), fmt(component.studyVar, 6),
+          fmt(component.variance, 8), fmt(component.pctContribution), fmt(component.pctStudyVar), fmt(component.pctTolerance),
+        ]),
+        // 备注必须写实际使用的判定标准,不能固定 AIAG(Codex 复审 P1)
+        note: (tolerance == null
+          ? '未提供过程公差，% 公差不可计算；研究变异与判定不受影响。'
+          : tolerance.mode === 'width'
+            ? `过程公差宽度=${fmt(tolerance.value, 8)}。`
+            : `过程公差${tolerance.mode === 'upper' ? '上限' : '下限'}=${fmt(tolerance.value, 8)}（单侧：%公差=3×SD/|限值−总均值|，总均值=${fmt(result.grandMean, 6)}，实际公差距离=${fmt(Math.abs(tolerance.value - result.grandMean), 6)}）。`)
+          + (app.gageStandard === 'factory'
+            ? '判定阈值按工厂标准：主要(%研究变异)与次要(%公差)均 ≤10% 理想、≤20% 可接受，取两项较差。'
+            : '判定阈值按 AIAG：<10% 可接受 / 10–30% 临界 / >30% 不可接受。'),
       },
     ],
-    charts: [svgChart('Gage R&R 变异分量', <GroupedBars T={T} cats={cats} />, 960, 300)],
+    // 图形报告与 Minitab 图窗同构:单操作员 4 联,多操作员 6 联
+    charts: [
+      svgChart('变异分量', <GroupedBars T={T} cats={cats} />, 960, 300),
+      ...(single ? [
+        svgChart('R 控制图', <GageRPanel {...panelProps} />, 960, 300),
+        svgChart('按部件的测量值', <GageByPartPanel {...panelProps} />, 960, 300),
+        svgChart('Xbar 控制图', <GageXbarPanel {...panelProps} />, 960, 300),
+      ] : [
+        svgChart('按部件的测量值', <GageByPartPanel {...panelProps} />, 960, 300),
+        svgChart('R 控制图（按操作员）', <GageRPanel {...panelProps} />, 960, 300),
+        svgChart('按操作员的测量值', <GageByOperatorPanel {...panelProps} />, 960, 300),
+        svgChart('Xbar 控制图（按操作员）', <GageXbarPanel {...panelProps} />, 960, 300),
+        svgChart('部件×操作员交互作用', <GageInteractionPanel {...panelProps} />, 960, 300),
+      ]),
+    ],
   };
 }
 

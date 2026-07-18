@@ -6,7 +6,7 @@
  * 4) 完整交叉 3×10×2 推断 p/o/r 防回归。
  */
 import { describe, it, expect } from 'vitest';
-import { columnDisplayDp, prepareGageStudy, recommendGageRoles } from '../gageData';
+import { columnDisplayDp, prepareGageStudy, recommendGageRoles, GAGE_SINGLE_OPERATOR } from '../gageData';
 import type { GageTextColumn } from '../gageData';
 import { computeVarModel } from '../model';
 import { computeGageRR } from '../gage';
@@ -92,16 +92,38 @@ function toStudyInputs(rows: Array<{ value: number; part: string; operator: stri
 const SELECTION = { valueColumn: '测量值', partColumn: '部件', operatorColumn: '操作员' };
 
 describe('prepareGageStudy — 报错文案指名道姓(工厂第三轮反馈 PPT 11 页)', () => {
-  it('工厂场景:单操作员(邹德玉)30 行 → 明确说“仅 1 个操作员…需 ≥2 名”', () => {
+  it('工厂场景:单操作员(邹德玉)30 行 → 按单因子退化模型可算,GRR=重复性、无再现性行(v1.40)', () => {
     const { model, textCols } = singleOperatorWorksheet();
     const result = prepareGageStudy(model, textCols, {
       valueColumn: '螺钉高度', partColumn: '部件', operatorColumn: '测试人',
     });
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.reason).toContain('仅检测到 1 个操作员(邹德玉)');
-    expect(result.reason).toContain('≥2 名操作员');
-    expect(result.reason).toContain('请补充其他操作员数据');
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.study.operatorLabels).toEqual(['邹德玉']);
+    expect(result.study.operatorName).toBe('测试人');
+    expect(result.study.repeats).toBe(3);
+    expect(result.study.observations).toHaveLength(30);
+    const g = computeGageRR(result.study.observations, null);
+    expect(g.interaction).toBeNull();
+    expect(g.operatorCount).toBe(1);
+    expect(g.components.map((component) => component.key)).toEqual(['grr', 'repeatability', 'part', 'total']);
+  });
+
+  it('显式选「无(单操作员)」哨兵:不占用类别列,操作员名为 null', () => {
+    const rows: number[][] = [];
+    for (let part = 1; part <= 5; part++) {
+      for (let trial = 0; trial < 2; trial++) rows.push([10 + part * 0.1 + trial * 0.01, part]);
+    }
+    const model = computeVarModel('单人.csv', ['测量值', '部件'], rows);
+    const result = prepareGageStudy(model, [], {
+      valueColumn: '测量值', partColumn: '部件', operatorColumn: GAGE_SINGLE_OPERATOR,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.study.operatorName).toBeNull();
+    expect(result.study.operatorLabels).toEqual(['单操作员']);
+    expect(result.study.observations).toHaveLength(10);
+    expect(computeGageRR(result.study.observations, null).operatorCount).toBe(1);
   });
 
   it('单部件也指名具体部件标签', () => {

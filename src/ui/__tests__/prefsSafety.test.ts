@@ -47,6 +47,23 @@ describe('偏好持久化安全', () => {
     expect(useApp.getState().spcRules).toMatchObject({ ...DEFAULT_SPC_RULES, r2: false });
   });
 
+  it('v1.40 MSA 公差口径/数值/判定标准持久化往返;非法值回落(防「保存端带、回放端丢」回归)', async () => {
+    localStorage.setItem('qp-prefs-v1', JSON.stringify({
+      version: 3,
+      state: { gageTolMode: 'upper', gageTolValue: 100, gageStandard: 'aiag' },
+    }));
+    await useApp.persist.rehydrate();
+    expect(useApp.getState()).toMatchObject({ gageTolMode: 'upper', gageTolValue: 100, gageStandard: 'aiag' });
+
+    useApp.setState({ gageTolMode: 'auto', gageTolValue: null, gageStandard: 'factory' });
+    localStorage.setItem('qp-prefs-v1', JSON.stringify({
+      version: 3,
+      state: { gageTolMode: '任意', gageTolValue: 'NaN', gageStandard: 7 },
+    }));
+    await useApp.persist.rehydrate();
+    expect(useApp.getState()).toMatchObject({ gageTolMode: 'auto', gageTolValue: null, gageStandard: 'factory' });
+  });
+
   it('合法偏好仍能恢复', async () => {
     localStorage.setItem('qp-prefs-v1', JSON.stringify({
       version: 3,

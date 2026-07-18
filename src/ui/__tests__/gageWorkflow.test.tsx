@@ -33,6 +33,7 @@ beforeEach(() => {
   useApp.setState({
     page: 'dashboard', lsl: 0, usl: 30, lslOn: true, uslOn: true,
     gageUseReal: true, gageValueName: null, gagePartName: null, gageOperatorName: null,
+    gageTolMode: 'auto', gageTolValue: null, gageStandard: 'factory',
   });
 });
 
@@ -49,7 +50,7 @@ describe('Gage R&R 当前研究闭环', () => {
     expect(report?.subtitle).toContain('测量值 · 部件 部件 · 操作员 操作员 · 2×2×2');
     expect(report?.warnings).toHaveLength(0);
     expect(report?.tables.find((table) => table.title.includes('原始观测'))?.rows).toHaveLength(8);
-    expect(report?.charts).toHaveLength(1);
+    expect(report?.charts).toHaveLength(6); // 3 操作员研究 → 6 联图形报告(v1.40)
   });
 
   it('待录入或无效交叉设计明确阻断，不静默回落演示结果', () => {
@@ -126,20 +127,50 @@ describe('Gage R&R 当前研究闭环', () => {
     expect(report?.tables[0].rows[0]).toEqual(['101', '1', 1, '10.00000000']);
   });
 
-  it('单侧规格不会伪造公差宽度：GRR 继续计算，页面/报告 %公差都明确不可计算', () => {
+  it('单侧规格按 Minitab 单边口径计算 %公差(v1.40);公差模式 none 时明确不计算', () => {
     importStudy();
-    useApp.setState({ lslOn: true, uslOn: false, lsl: 0, usl: 30 });
+    useApp.setState({ lslOn: true, uslOn: false, lsl: 0, usl: 30, gageTolMode: 'auto' });
     const view = render(createElement(GageRR, { T: chartTokens('经典', true) }));
     expect(view.container.textContent).toContain('合计 Gage R&R');
     expect(view.container.textContent).not.toContain('Gage R&R 尚未运行');
-    expect(view.container.textContent).toContain('% 公差明确不计算');
-
+    // auto + 仅 LSL → 单侧下限口径:%公差=3×SD/(总均值−LSL),不再显示“不可计算”
     const report = buildActiveAnalysisReport();
-    expect(report?.warnings.join(' ')).toContain('% 公差不可计算');
     const componentTable = report?.tables.find((table) => table.title === '方差分量与研究变异');
-    expect(componentTable?.rows.every((row) => row[4] === '—')).toBe(true);
-    expect(componentTable?.note).toContain('未提供双侧公差宽度');
-    expect(useAnalyses.getState().saveCurrent()).toMatchObject({ status: '可接受' });
+    expect(componentTable?.note).toContain('过程公差下限');
+    expect(componentTable?.note).toContain('3×SD');
+    expect(componentTable?.rows.every((row) => row[6] !== '—')).toBe(true);
+
+    cleanup();
+    useApp.setState({ gageTolMode: 'none' });
+    const view2 = render(createElement(GageRR, { T: chartTokens('经典', true) }));
+    expect(view2.container.textContent).toContain('% 公差明确不计算');
+    const report2 = buildActiveAnalysisReport();
+    expect(report2?.warnings.join(' ')).toContain('% 公差不可计算');
+    const table2 = report2?.tables.find((table) => table.title === '方差分量与研究变异');
+    expect(table2?.rows.every((row) => row[6] === '—')).toBe(true);
+    expect(table2?.note).toContain('未提供过程公差');
+    expect(useAnalyses.getState().saveCurrent()).toMatchObject({ status: '理想' }); // 工厂口径默认:GRR≈1.6% 且无公差→仅按 %SV 判为理想
+  });
+
+  it('v1.39 旧快照回放:无公差口径/判定标准字段时按保存时行为固化(双侧宽度+AIAG),不继承当前设置', () => {
+    importStudy();
+    useApp.setState({ lsl: 9, usl: 21, lslOn: true, uslOn: true });
+    const saved = useAnalyses.getState().saveCurrent()!;
+    // 模拟 v1.39 快照:删除 v1.40 新增的三个字段(旧记录本来就没有)
+    useAnalyses.setState({
+      saved: useAnalyses.getState().saved.map((entry) => {
+        if (entry.id !== saved.id) return entry;
+        const snapshot = { ...entry.snapshot } as Record<string, unknown>;
+        delete snapshot.gageTolMode;
+        delete snapshot.gageTolValue;
+        delete snapshot.gageStandard;
+        return { ...entry, snapshot: snapshot as typeof entry.snapshot };
+      }),
+    });
+    // 当前会话切换成完全不同的口径,回放不得继承当前设置
+    useApp.setState({ gageTolMode: 'upper', gageTolValue: 100, gageStandard: 'factory' });
+    useAnalyses.getState().restore(saved.id);
+    expect(useApp.getState()).toMatchObject({ gageTolMode: 'width', gageTolValue: 12, gageStandard: 'aiag' });
   });
 
   it('真实研究保存后精确恢复数据与列角色，不受后来数据覆盖', () => {

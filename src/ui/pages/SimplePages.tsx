@@ -8,18 +8,20 @@ import {
   nf, anovaGroups, DEFECTS, gageStudyData, GAGE_TOLERANCE,
   computeGageRR, oneWayAnova, anovaResiduals, anovaGroupSummaries, buildAnovaGroups, wideScaleDisparate, oneSampleT, twoSampleT, linearRegression,
   resolveAnovaMode, resolveAnovaNumericRoles, countAnovaPendingCells, isDoeAnalysisColumn, prepareGageStudy, listGageCategoryColumns, recommendGageRoles, effectiveGageSelection,
+  GAGE_SINGLE_OPERATOR, assessGage, computeGagePanelData, CONTROL_CONSTANTS,
   type TTestResult, type AnovaMode, type AnovaGroup,
 } from '../../core';
 import { ScatterPlot } from '../charts/ScatterPlot';
 import { NormalProbPlot } from '../charts/NormalProbPlot';
 import { Fishbone } from './Fishbone';
 import { loadFishboneState } from '../../store/fishboneStore';
-import { useApp } from '../../store/appStore';
+import { useApp, resolveGageTolerance } from '../../store/appStore';
 import { useData } from '../../store/dataStore';
 import type { ChartTokens } from '../tokens';
 import { paretoColors } from '../tokens';
 import { Card, CardHeader, KvRows, Badge, tabStyle, numInput, EmptyStateCard, DemoBadge } from '../common';
 import { ParetoChart, GroupedBars, BoxPlot, IndividualValuePlot, IntervalPlot, MiniHist } from '../charts/misc';
+import { GageRPanel, GageXbarPanel, GageByPartPanel, GageByOperatorPanel, GageInteractionPanel } from '../charts/gagePanels';
 
 const selStyle: CSSProperties = {
   padding: '4px 8px', border: '1px solid #cfd5dd', borderRadius: 4,
@@ -81,7 +83,8 @@ export function GageRR({ T }: { T: ChartTokens }) {
 function GageRRInner({ T }: { T: ChartTokens }) {
   const { model, textCols, pendingCells } = useData();
   const {
-    lsl, usl, lslOn, uslOn, gageUseReal, gageValueName, gagePartName, gageOperatorName, setGageOptions,
+    lsl, usl, lslOn, uslOn, gageUseReal, gageValueName, gagePartName, gageOperatorName,
+    gageTolMode, gageTolValue, gageStandard, setGageOptions,
   } = useApp();
   // 批次716-R3 P1-2:默认角色不再按列序猜(工厂列序「部件、测试人、螺钉高度」曾被推荐反),
   // 改用 recommendGageRoles 的可解释打分做「预填」;store 字段非 null(用户手动选过)时绝不覆盖。
@@ -95,8 +98,8 @@ function GageRRInner({ T }: { T: ChartTokens }) {
   const valCol = namedValueIndex >= 0 ? namedValueIndex : 0;
   const selectedValueName = model.colNames[valCol] ?? null;
   const categoryColumns = listGageCategoryColumns(model, textCols, selectedValueName);
-  // 部件/操作员可以是文本编码或数字 ID，但必须是测量列以外的两列。
-  const canReal = model.colNames.length >= 1 && categoryColumns.length >= 2;
+  // 部件/操作员可以是文本编码或数字 ID;单操作员研究可只有部件一个类别列(操作员选「无」)。
+  const canReal = model.colNames.length >= 1 && categoryColumns.length >= 1;
   const recPartName = effective.partColumn !== gagePartName ? effective.partColumn : (gagePartName == null ? effective.partColumn : null);
   const recOperatorName = effective.operatorColumn !== gageOperatorName ? effective.operatorColumn : (gageOperatorName == null ? effective.operatorColumn : null);
   const effPartName = effective.partColumn;
@@ -104,7 +107,7 @@ function GageRRInner({ T }: { T: ChartTokens }) {
   const namedPartIndex = effPartName ? categoryColumns.findIndex((column) => column.name === effPartName) : -1;
   const namedOperatorIndex = effOperatorName ? categoryColumns.findIndex((column) => column.name === effOperatorName) : -1;
   const partCol = namedPartIndex >= 0 ? namedPartIndex : 0;
-  const operCol = namedOperatorIndex >= 0 ? namedOperatorIndex : 1;
+  const operCol = Math.min(namedOperatorIndex >= 0 ? namedOperatorIndex : 1, Math.max(0, categoryColumns.length - 1));
   // 任一角色用了推荐值(而非用户手选)时,展示推荐依据小字请用户确认
   const usedRecommend = canReal && !model.isDemo && recommend.reasons.length > 0 && (
     (gageValueName == null && recommend.value != null)
@@ -133,8 +136,13 @@ function GageRRInner({ T }: { T: ChartTokens }) {
             {categoryColumns.map((c, i) => <option key={c.name} value={i}>{c.name}{c.source === 'numeric' ? ' (数字 ID)' : ''}</option>)}
           </select>
           操作员
-          <select style={selStyle} value={operCol} onChange={(e) => setGageOptions({ gageOperatorName: categoryColumns[+e.target.value].name })}>
+          <select
+            style={selStyle}
+            value={effOperatorName === GAGE_SINGLE_OPERATOR ? -1 : operCol}
+            onChange={(e) => setGageOptions({ gageOperatorName: +e.target.value === -1 ? GAGE_SINGLE_OPERATOR : categoryColumns[+e.target.value].name })}
+          >
             {categoryColumns.map((c, i) => <option key={c.name} value={i}>{c.name}{c.source === 'numeric' ? ' (数字 ID)' : ''}</option>)}
+            <option value={-1}>无（单操作员）</option>
           </select>
         </>
       )}
@@ -148,11 +156,12 @@ function GageRRInner({ T }: { T: ChartTokens }) {
     pendingCells,
   }), [model, textCols, effective, pendingCells]);
   const requestedReal = !model.isDemo && gageUseReal;
+  const tolSpec = resolveGageTolerance({ gageTolMode, gageTolValue, lsl, usl, lslOn, uslOn });
   let real: ReturnType<typeof computeGageRR> | null = null;
   let realError = requestedReal && !prepared.ok ? prepared.reason : '';
   if (requestedReal && prepared.ok) {
     try {
-      real = computeGageRR(prepared.study.observations, lslOn && uslOn ? usl - lsl : null);
+      real = computeGageRR(prepared.study.observations, tolSpec);
     } catch (error) {
       realError = (error as Error).message;
     }
@@ -174,81 +183,170 @@ function GageRRInner({ T }: { T: ChartTokens }) {
     );
   }
 
-  const g = real ?? computeGageRR(gageStudyData(), GAGE_TOLERANCE);
+  const g = real ?? computeGageRR(gageStudyData(), { mode: 'width', value: GAGE_TOLERANCE });
   const isReal = real != null;
-  const hasTolerance = !isReal || (lslOn && uslOn);
-  const verdictText = { acceptable: '可接受', marginal: '临界', unacceptable: '不可接受' }[g.verdict];
-  const verdictStyle = {
-    acceptable: { background: '#e8f4ea', color: '#2c8a45' },
-    marginal: { background: '#fcf3e3', color: '#d98324' },
-    unacceptable: { background: '#fdecec', color: '#c22f2f' },
-  }[g.verdict];
-  const bigColor = { acceptable: '#2c8a45', marginal: '#d98324', unacceptable: '#c22f2f' }[g.verdict];
-  // 图表取前四个分量（不含合计变异），名称去缩进
-  const cats = g.components.slice(0, 4).map((c) => ({
-    name: c.source.trim(),
-    contrib: c.pctContribution,
-    study: c.pctStudyVar,
-    tol: c.pctTolerance,
-  }));
+  const realStudy = isReal && prepared.ok ? prepared.study : null;
+  const valueLabel = realStudy ? realStudy.valueName : '演示测量';
+  const operatorLabel = realStudy ? (realStudy.operatorName ?? '操作员') : '操作员';
+  const primary = assessGage(g, gageStandard);
+  const reference = assessGage(g, gageStandard === 'factory' ? 'aiag' : 'factory');
+  const gradeStyle = {
+    good: { background: '#e8f4ea', color: '#2c8a45' },
+    warn: { background: '#fcf3e3', color: '#d98324' },
+    bad: { background: '#fdecec', color: '#c22f2f' },
+  }[primary.grade];
+  const bigColor = { good: '#2c8a45', warn: '#d98324', bad: '#c22f2f' }[primary.grade];
+  // 变异分量柱图取 GRR/重复性/再现性/部件间 分量（单操作员无再现性行,自动收缩）,名称去缩进
+  const cats = g.components
+    .filter((c) => c.key === 'grr' || c.key === 'repeatability' || c.key === 'reproducibility' || c.key === 'part')
+    .map((c) => ({
+      name: c.source.trim(),
+      contrib: c.pctContribution,
+      study: c.pctStudyVar,
+      tol: c.pctTolerance,
+    }));
+  // 4/6 联图与引擎同一套观测(演示=内置研究);控制图常数表覆盖 n=2..10,超界时不画控制限
+  const panelObservations = realStudy ? realStudy.observations : gageStudyData();
+  const panel = computeGagePanelData(panelObservations, CONTROL_CONSTANTS[g.trialCount] ?? null);
+  const partLabels = realStudy ? realStudy.partLabels : Array.from({ length: panel.partCount }, (_, i) => String(i + 1));
+  const operatorLabels = realStudy ? realStudy.operatorLabels : ['A', 'B', 'C'];
+  const single = g.operatorCount === 1;
+  const fmtSig = (value: number) => (value === 0 ? '0' : Number(value.toPrecision(6)).toString());
+  const tolLabel = g.tolerance == null
+    ? '未设置过程公差：%公差未计算'
+    : g.tolerance.mode === 'width'
+      ? `过程公差 = ${fmtSig(g.tolerance.value)}`
+      : `过程公差${g.tolerance.mode === 'upper' ? '上限' : '下限'} = ${fmtSig(g.tolerance.value)}（总均值 ${fmtSig(g.grandMean)}；单侧口径 %公差 = 3×SD/|限值−均值|）`;
+  const tolModeOptions: Array<[typeof gageTolMode, string]> = [
+    ['auto', '联动规格限'], ['width', '双侧宽度'], ['upper', '仅上限'], ['lower', '仅下限'], ['none', '不设'],
+  ];
+  const panelProps = { T, panel, partLabels, operatorLabels };
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-      <ReportCard data={gageReport({ grr: g.totalGageRR, verdict: g.verdict })} />
+      <ReportCard data={gageReport({ primary, reference, ndc: g.ndc, grr: g.totalGageRR })} />
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 16 }}>
       <Card>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 16px', borderBottom: '1px solid #edf0f3', flexWrap: 'wrap' }}>
-          <div style={{ fontWeight: 600, color: '#33404f' }}>变异分量 · 交叉 Gage R&R (ANOVA 法)</div>
+          <div style={{ fontWeight: 600, color: '#33404f' }}>{single ? '量具 R&R (ANOVA 法 · 单操作员)' : '交叉 Gage R&R (ANOVA 法)'}</div>
           <SourceBadge real={isReal} />
           {controls}
         </div>
         {recommendHint}
         {!isReal && <div style={{ margin: '10px 16px 0' }}><DemoBadge /></div>}
-        {isReal && !hasTolerance && (
+        {isReal && g.toleranceNote && (
+          <div role="alert" style={{ margin: '10px 16px 0', padding: '8px 10px', color: '#8a5a00', background: '#fff8e8', borderRadius: 4, fontSize: 12 }}>{g.toleranceNote}</div>
+        )}
+        {isReal && g.tolerance == null && (
           <div role="status" style={{ margin: '10px 16px 0', padding: '8px 10px', color: '#8a5a00', background: '#fff8e8', borderRadius: 4, fontSize: 12 }}>
-            未同时启用 LSL 和 USL：研究变异仍可计算，但没有双侧公差宽度，% 公差明确不计算。
+            未设置过程公差：研究变异仍可计算，% 公差明确不计算。可在右侧「过程公差」设置双侧宽度或单侧限。
           </div>
         )}
         <div style={{ margin: '10px 16px 0', color: '#697382', fontSize: 11.5 }}>
-          部件×操作员交互项 p={nf(g.interaction.pValue, 4)}（α={nf(g.interaction.alpha, 2)}）；
-          {g.interaction.retained ? '交互显著，已保留在再现性中。' : '交互不显著，已合并到重复性误差。'}
+          {g.interaction
+            ? <>部件×操作员交互项 p={nf(g.interaction.pValue, 4)}（α={nf(g.interaction.alpha, 2)}）；
+              {g.interaction.retained ? '交互显著，已保留在再现性中。' : '交互不显著，已合并到重复性误差。'}</>
+            : '单操作员研究：按单因子随机效应模型计算，合计量具 R&R = 重复性，不估计再现性。'}
         </div>
-        <div style={{ padding: '14px 16px 6px' }}>
-          <GroupedBars T={T} cats={cats} />
-        </div>
-      </Card>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-        <Card style={{ padding: 16 }}>
-          <div style={{ display: 'flex', alignItems: 'baseline', marginBottom: 12 }}>
-            <div style={{ fontWeight: 600, color: '#33404f' }}>系统评定</div>
-            <div style={{ marginLeft: 'auto', padding: '2px 10px', borderRadius: 11, fontSize: 12, fontWeight: 700, ...verdictStyle }}>{verdictText}</div>
-          </div>
-          <div className="mono" style={{ fontSize: 34, fontWeight: 700, color: bigColor }}>{nf(g.totalGageRR, 1)}%</div>
-          <div style={{ fontSize: 12, color: '#8a929d', marginTop: 2 }}>合计 Gage R&R (%研究变异)</div>
-          <div style={{ fontSize: 11.5, color: '#9aa2ad', marginTop: 10, lineHeight: 1.5 }}>&lt; 10% 可接受 · 10–30% 临界（结合用途评估）· &gt; 30% 不可接受 (AIAG)</div>
-        </Card>
-        <Card>
-          <div style={{ padding: '11px 16px', borderBottom: '1px solid #edf0f3', fontWeight: 600, color: '#33404f', fontSize: 12.5 }}>方差分量</div>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+        <div className="mono" style={{ margin: '12px 16px 4px', fontSize: 12.5, color: '#33404f' }}>{tolLabel}</div>
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, minWidth: 560 }}>
             <thead>
               <tr style={{ color: '#98a1ac', textAlign: 'left' }}>
                 <th style={{ padding: '7px 16px', fontWeight: 600 }}>来源</th>
+                <th style={{ padding: '7px 8px', fontWeight: 600, textAlign: 'right' }}>标准差(SD)</th>
+                <th style={{ padding: '7px 8px', fontWeight: 600, textAlign: 'right' }}>研究变异(6×SD)</th>
                 <th style={{ padding: '7px 8px', fontWeight: 600, textAlign: 'right' }}>%贡献</th>
-                <th style={{ padding: '7px 16px', fontWeight: 600, textAlign: 'right' }}>%研究</th>
+                <th style={{ padding: '7px 8px', fontWeight: 600, textAlign: 'right' }}>%研究变异</th>
+                <th style={{ padding: '7px 16px', fontWeight: 600, textAlign: 'right' }}>%公差(SV/Toler)</th>
               </tr>
             </thead>
             <tbody>
               {g.components.map((c) => (
-                <tr key={c.source} style={{ borderTop: '1px solid #f0f2f5' }}>
-                  <td style={{ padding: '7px 16px', color: '#33404f', whiteSpace: 'pre' }}>{c.source}</td>
+                <tr key={c.key} style={{ borderTop: '1px solid #f0f2f5' }}>
+                  <td style={{ padding: '7px 16px', color: '#33404f', whiteSpace: 'pre' }}>{c.key === 'operator' ? `    ${operatorLabel}` : c.source}</td>
+                  <td className="mono" style={{ padding: '7px 8px', textAlign: 'right', color: '#2a333f' }}>{fmtSig(c.sd)}</td>
+                  <td className="mono" style={{ padding: '7px 8px', textAlign: 'right', color: '#2a333f' }}>{fmtSig(c.studyVar)}</td>
                   <td className="mono" style={{ padding: '7px 8px', textAlign: 'right', color: '#5b6472' }}>{nf(c.pctContribution, 2)}</td>
-                  <td className="mono" style={{ padding: '7px 16px', textAlign: 'right', color: '#2a333f', fontWeight: 600 }}>{nf(c.pctStudyVar, 2)}</td>
+                  <td className="mono" style={{ padding: '7px 8px', textAlign: 'right', color: '#2a333f', fontWeight: 600 }}>{nf(c.pctStudyVar, 2)}</td>
+                  <td className="mono" style={{ padding: '7px 16px', textAlign: 'right', color: '#2a333f' }}>{c.pctTolerance == null ? '—' : nf(c.pctTolerance, 2)}</td>
                 </tr>
               ))}
             </tbody>
           </table>
+        </div>
+        <div className="mono" style={{ margin: '10px 16px 0', fontSize: 12.5, color: '#33404f' }}>可区分的类别数 = {g.ndc === Infinity ? '∞' : g.ndc}</div>
+        <div style={{ margin: '8px 16px 14px', fontWeight: 700, color: '#33404f', fontSize: 13 }}>{valueLabel} 的量具 R&R</div>
+      </Card>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <Card style={{ padding: 16 }}>
+          <div style={{ display: 'flex', alignItems: 'baseline', marginBottom: 10 }}>
+            <div style={{ fontWeight: 600, color: '#33404f' }}>系统评定</div>
+            <div style={{ marginLeft: 'auto', padding: '2px 10px', borderRadius: 11, fontSize: 12, fontWeight: 700, ...gradeStyle }}>{primary.label}</div>
+          </div>
+          <div style={{ display: 'flex', gap: 6, marginBottom: 10 }}>
+            {([['factory', '工厂标准'], ['aiag', 'AIAG']] as const).map(([value, label]) => (
+              <button type="button" key={value} aria-pressed={gageStandard === value} style={tabStyle(gageStandard === value)} onClick={() => setGageOptions({ gageStandard: value })}>{label}</button>
+            ))}
+          </div>
+          <div className="mono" style={{ fontSize: 34, fontWeight: 700, color: bigColor }}>{nf(g.totalGageRR, 1)}%</div>
+          <div style={{ fontSize: 12, color: '#8a929d', marginTop: 2 }}>合计 Gage R&R (%研究变异)</div>
+          <div style={{ fontSize: 11.5, color: '#697382', marginTop: 10, lineHeight: 1.6 }}>{primary.detail}</div>
+          <div style={{ fontSize: 11, color: '#9aa2ad', marginTop: 8, lineHeight: 1.5 }}>
+            对照：{reference.standard === 'aiag' ? 'AIAG' : '工厂标准'} 口径为「{reference.label}」。
+          </div>
+        </Card>
+        <Card style={{ padding: 16 }}>
+          <div style={{ fontWeight: 600, color: '#33404f', marginBottom: 10 }}>过程公差</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: 12, color: '#5b6472' }}>
+            <select aria-label="过程公差口径" style={selStyle} value={gageTolMode} onChange={(e) => setGageOptions({ gageTolMode: e.target.value as typeof gageTolMode })}>
+              {tolModeOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+            </select>
+            {(gageTolMode === 'width' || gageTolMode === 'upper' || gageTolMode === 'lower') && (
+              <input
+                type="number" aria-label="过程公差数值" value={gageTolValue ?? ''} placeholder={gageTolMode === 'width' ? '宽度' : '限值'}
+                onChange={(e) => setGageOptions({ gageTolValue: e.target.value.trim() === '' ? null : Number(e.target.value) })}
+                style={{ width: 110, padding: '5px 8px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12 }}
+              />
+            )}
+          </div>
+          <div style={{ fontSize: 11, color: '#9aa2ad', marginTop: 8, lineHeight: 1.6 }}>
+            {isReal
+              ? tolSpec == null
+                ? gageTolMode === 'none'
+                  ? '已选择不设公差：%公差列不计算。'
+                  : gageTolMode === 'auto'
+                    ? '联动规格限：当前 LSL/USL 均未启用，%公差不计算；可启用全局规格限或改选手动口径。'
+                    : '当前未生效：请提供有效数值（宽度需大于 0）。'
+                : `生效：${tolSpec.mode === 'width' ? `双侧宽度 ${fmtSig(tolSpec.value)}` : `${tolSpec.mode === 'upper' ? '上限' : '下限'} ${fmtSig(tolSpec.value)}`}。`
+              : `演示研究固定公差宽度 ${GAGE_TOLERANCE}（USL−LSL），此设置对演示不生效。`}
+            「联动规格限」：双侧都启用取 USL−LSL；仅启用一侧按 Minitab 单边规格口径（3×SD/|限值−均值|）。
+          </div>
         </Card>
       </div>
-    </div>
+      </div>
+      <Card>
+        <div style={{ padding: '11px 16px', borderBottom: '1px solid #edf0f3', fontWeight: 600, color: '#33404f' }}>
+          图形报告（{single ? '4 联 · 单操作员' : '6 联'} · 与 Minitab 图窗同构）
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, padding: '14px 16px' }}>
+          <div><GroupedBars T={T} cats={cats} /></div>
+          {single ? (
+            <>
+              <div><GageRPanel {...panelProps} /></div>
+              <div><GageByPartPanel {...panelProps} /></div>
+              <div><GageXbarPanel {...panelProps} /></div>
+            </>
+          ) : (
+            <>
+              <div><GageByPartPanel {...panelProps} /></div>
+              <div><GageRPanel {...panelProps} /></div>
+              <div><GageByOperatorPanel {...panelProps} /></div>
+              <div><GageXbarPanel {...panelProps} /></div>
+              <div><GageInteractionPanel {...panelProps} /></div>
+            </>
+          )}
+        </div>
+      </Card>
     </div>
   );
 }

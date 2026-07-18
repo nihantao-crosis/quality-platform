@@ -67,24 +67,104 @@ function isNum(s: string): boolean {
 }
 
 function detectDelimiter(line: string): string {
+  // 只统计引号外的分隔符:RFC-4180 引号字段内的逗号不是分隔符(Excel→SheetJS 的主要形态)
   const counts: Array<[string, number]> = [
-    ['\t', (line.match(/\t/g) || []).length],
-    [',', (line.match(/,/g) || []).length],
-    [';', (line.match(/;/g) || []).length],
+    ['\t', delimiterCountOutsideQuotes(line, '\t')],
+    [',', delimiterCountOutsideQuotes(line, ',')],
+    [';', delimiterCountOutsideQuotes(line, ';')],
   ];
   counts.sort((a, b) => b[1] - a[1]);
   return counts[0][1] > 0 ? counts[0][0] : ',';
 }
 
+export interface CsvBlock {
+  /** 显示名:块最后一个表头(工厂三列块即测量项名) */
+  name: string;
+  headers: string[];
+  /** 0-based:块在原文中的表头行号与起始列号 */
+  headerRow: number;
+  colStart: number;
+  /** 数据行数(不含表头) */
+  rows: number;
+  /** 该块重组的 CSV 文本,可直接走 parseMatrix */
+  csv: string;
+}
+
+/**
+ * 检测「并排多表格块 / 带前置说明区」的工作表(v1.40 工厂 MSA 案例工作簿):
+ * 列按「全空列」分隔成组;每组内找首个「整组各列连续两行均非空」的行作表头,
+ * 表头前的说明区(合并单元格残留)忽略,数据行取到该组首个不完整行为止。
+ * 返回全部候选块;导入层约定:>1 块必须让用户显式选择,恰 1 块仅在整表解析失败时作为回退。
+ */
+export function detectCsvBlocks(text: string): CsvBlock[] {
+  const logical = splitQuotedRecords(text.replace(/^\uFEFF/, ''));
+  if (logical.unclosedQuote) return [];
+  const lines = logical.records;
+  const firstContent = lines.find((line) => line.trim() !== '');
+  if (!firstContent) return [];
+  const delim = detectDelimiter(firstContent);
+  const grid = lines.map((line) => splitDelimitedLine(line, delim));
+  let width = 0;
+  for (const row of grid) if (row.length > width) width = row.length;
+  if (width < 2 || grid.length < 3) return [];
+  const used = Array.from({ length: width }, (_, j) => grid.some((row) => (row[j] ?? '') !== ''));
+  const groups: Array<[number, number]> = [];
+  let start = -1;
+  for (let j = 0; j <= width; j++) {
+    const on = j < width && used[j];
+    if (on && start < 0) start = j;
+    if (!on && start >= 0) { groups.push([start, j - 1]); start = -1; }
+  }
+  const blocks: CsvBlock[] = [];
+  for (const [c0, c1] of groups) {
+    if (c1 - c0 + 1 < 2) continue; // 单列组构不成「表头+数据」矩阵
+    const full = (row: string[]) => {
+      for (let j = c0; j <= c1; j++) if ((row[j] ?? '') === '') return false;
+      return true;
+    };
+    let headerRow = -1;
+    for (let r = 0; r + 1 < grid.length; r++) {
+      if (full(grid[r]) && full(grid[r + 1])) { headerRow = r; break; }
+    }
+    if (headerRow < 0) continue;
+    const headers = grid[headerRow].slice(c0, c1 + 1);
+    const dataRows: string[][] = [];
+    for (let r = headerRow + 1; r < grid.length; r++) {
+      if (!full(grid[r])) break;
+      dataRows.push(grid[r].slice(c0, c1 + 1));
+    }
+    if (dataRows.length < 2) continue;
+    // 重组用原分隔符 + RFC-4180 引号转义:引号感知拆分后单元格可能含分隔符/引号/换行,
+    // 必须规范转义;消费方 parseMatrix 已支持解引号,往返无损(Codex 复审 P1 闭环)。
+    const headerless = headers.every((cell) => isNum(cell));
+    blocks.push({
+      name: headerless ? `第${c0 + 1}列起` : headers[headers.length - 1] || `第${c0 + 1}列起`,
+      headers: [...headers],
+      headerRow,
+      colStart: c0,
+      // 纯数字「表头」实为首个数据行(parseMatrix 同判),行数按数据行如实上报
+      rows: headerless ? dataRows.length + 1 : dataRows.length,
+      csv: [headers, ...dataRows].map((row) => row.map((cell) =>
+        cell.includes(delim) || cell.includes('"') || cell.includes('\n')
+          ? '"' + cell.replace(/"/g, '""') + '"'
+          : cell).join(delim)).join('\n'),
+    });
+  }
+  return blocks;
+}
+
 export function parseMatrix(text: string): ParsedMatrix | { error: string } {
-  const lines = text
-    .split(/\r?\n/)
+  // RFC-4180 引号支持(Codex 复审 P1):Excel→SheetJS 的 CSV 对含分隔符/换行的单元格加引号,
+  // 裸 split 会把「"OK, 复检"」劈成两列造成静默错列;按逻辑记录+引号感知拆分。
+  const logical = splitQuotedRecords(text.replace(/^\uFEFF/, ''));
+  if (logical.unclosedQuote) return { error: 'CSV 引号未闭合，请检查含分隔符或换行的引号字段。' };
+  const lines = logical.records
     .map((l) => l.trim())
     .filter((l) => l !== '');
   if (lines.length < 2) return { error: '数据不足：至少需要 2 行' };
 
   const delim = detectDelimiter(lines[0]);
-  const cells = lines.map((l) => l.split(delim).map((c) => c.trim()));
+  const cells = lines.map((l) => splitDelimitedLine(l, delim));
 
   // 表头：首行任一单元非数值即视为表头
   const hasHeader = cells[0].some((c) => c !== '' && !isNum(c));

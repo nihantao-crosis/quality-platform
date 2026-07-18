@@ -10,10 +10,10 @@ import {
   prepareGageStudy, effectiveGageSelection, listGageCategoryColumns, resolveNumericColumn,
   oneWayAnova, oneSampleT, twoSampleT, linearRegression, anovaGroups, buildAnovaGroups, wideScaleDisparate, resolveAnovaMode, countAnovaPendingCells, isDoeAnalysisColumn, analyzeDoe, detectFactorial, analyzeFactorial, detectGeneralFactorial, analyzeGeneralFactorial, detectFractionalFactorial, analyzeFractionalFactorial, resolveDoeColumnsWide, MAX_FRACTIONAL_FACTORS, factorialModelTerms, resolveDoeBlockValues, plansByState, computeDescriptive,
   ewmaSeries, cusumSeries, stagedXbar, stagedRange, stageValidationError, normalizeSwitchStatus,
-  DEFAULT_RULE_K, normalizeRuleK,
-  type InspectionLevel, type AnovaMode, type AqlMethod, type AqlAcMethod, type AqlRegime, type NelsonRules, type NelsonRuleK, type SwitchStatus, type SpcDataLayout,
+  DEFAULT_RULE_K, normalizeRuleK, assessGage,
+  type InspectionLevel, type AnovaMode, type AqlMethod, type AqlAcMethod, type AqlRegime, type GageStandard, type NelsonRules, type NelsonRuleK, type SwitchStatus, type SpcDataLayout,
 } from '../core';
-import { useApp, DEFAULT_SPC_RULES, type SpcType, type DoeView, type DoeTab, type HypoTab, type ParetoView } from './appStore';
+import { useApp, resolveGageTolerance, DEFAULT_SPC_RULES, type SpcType, type DoeView, type DoeTab, type HypoTab, type ParetoView } from './appStore';
 import { syncSpecForActiveMeasurement, useData, resolveCapabilityMeasurementData, type ParetoModel } from './dataStore';
 import { loadFishboneState, saveFishboneState, type FishboneData } from './fishboneStore';
 import { sessionLog } from './sessionLog';
@@ -60,6 +60,10 @@ export interface AnalysisSnapshot {
   gageOperatorName?: string | null;
   gageRequestedReal?: boolean;
   gageSourceReal?: boolean;
+  /** v1.40:MSA 过程公差口径与判定标准随快照固化;旧快照缺字段按保存时行为回放(双侧宽度/不设 + AIAG)。 */
+  gageTolMode?: 'auto' | 'width' | 'upper' | 'lower' | 'none';
+  gageTolValue?: number | null;
+  gageStandard?: GageStandard;
   aqlLot?: number; aqlLevel?: InspectionLevel; aqlAQL?: number; aqlRegime?: AqlRegime; aqlMethod?: AqlMethod; aqlAcMethod?: AqlAcMethod;
   aqlSwitch?: SwitchStatus;
   doeView?: DoeView; doeTab?: DoeTab; hypoTab?: HypoTab; paretoView?: ParetoView;
@@ -425,13 +429,14 @@ function buildSummary(kind: AnalysisKind): Omit<SavedAnalysis, 'id' | 'createdAt
           return { kind, title: '测量系统分析 Gage R&R', metric: prepared.reason, status: '未分析', ...pick(WARN) };
         }
         const g = requestedReal && prepared.ok
-          ? computeGageRR(prepared.study.observations, app.lslOn && app.uslOn ? app.usl - app.lsl : null)
-          : computeGageRR(gageStudyData(), GAGE_TOLERANCE);
-        const ok = g.verdict === 'acceptable';
+          ? computeGageRR(prepared.study.observations, resolveGageTolerance(app))
+          : computeGageRR(gageStudyData(), { mode: 'width', value: GAGE_TOLERANCE });
+        // 摘要判定随当前所选标准(工厂/AIAG);标准本身随快照固化,回放时按保存口径复现
+        const assessment = assessGage(g, app.gageStandard);
         return {
           kind, title: `测量系统分析 Gage R&R${requestedReal ? '' : '(示例)'}`, metric: `GRR ${nf(g.totalGageRR, 1)}%`,
-          status: requestedReal ? ok ? '可接受' : g.verdict === 'marginal' ? '临界' : '不可接受' : '演示',
-          ...pick(requestedReal ? ok ? OK : WARN : INFO),
+          status: requestedReal ? assessment.label : '演示',
+          ...pick(requestedReal ? assessment.grade === 'good' ? OK : assessment.grade === 'warn' ? WARN : BAD : INFO),
         };
       } catch (error) {
         return { kind, title: '测量系统分析 Gage R&R', metric: (error as Error).message, status: '未分析', ...pick(WARN) };
@@ -707,6 +712,9 @@ function snapshotOf(kind: AnalysisKind): AnalysisSnapshot {
     snap.gageOperatorName = a.gageOperatorName ?? current.effective.operatorColumn;
     snap.gageRequestedReal = current.requestedReal;
     snap.gageSourceReal = current.requestedReal && current.prepared.ok;
+    snap.gageTolMode = a.gageTolMode;
+    snap.gageTolValue = a.gageTolValue;
+    snap.gageStandard = a.gageStandard;
   }
   if (kind === 'aql') {
     snap.aqlLot = a.aqlLot; snap.aqlLevel = a.aqlLevel; snap.aqlAQL = a.aqlAQL; snap.aqlRegime = a.aqlRegime;
@@ -1004,7 +1012,7 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
     const appKeys: Array<keyof AnalysisSnapshot> = [
       'spcType', 'spcRules', 'spcStageCol', 'spcDataLayout', 'spcValueCol', 'spcSubgroupCol',
       'lsl', 'usl', 'tgt', 'lslOn', 'uslOn', 'capabilityBins',
-      'gageUseReal', 'gageValueName', 'gagePartName', 'gageOperatorName',
+      'gageUseReal', 'gageValueName', 'gagePartName', 'gageOperatorName', 'gageTolMode', 'gageTolValue', 'gageStandard',
       'doeView', 'doeTab', 'doeFactorCols', 'doeRespCol', 'doeModelTerms', 'doeIncludeCurvature',
       'hypoTab', 'anovaMode', 'anovaRespName', 'anovaFactorName', 'anovaShowDemo',
       't1ColName', 't1Mu0', 't2ColAName', 't2ColBName', 'regXName', 'regYName',
@@ -1019,6 +1027,13 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
       patch.capValueCol = s.capValueCol ?? null;
       patch.capSubgroupIdCol = s.capSubgroupIdCol ?? null;
     }
+    // v1.40 以前的 gage 快照没有公差口径/判定标准:按保存时行为固化(双侧宽度或不设 + AIAG),不继承当前设置。
+    if (a.kind === 'gagerr' && s.gageTolMode === undefined) {
+      const width = s.lslOn && s.uslOn && typeof s.usl === 'number' && typeof s.lsl === 'number' ? s.usl - s.lsl : null;
+      patch.gageTolMode = width != null && width > 0 ? 'width' : 'none';
+      patch.gageTolValue = width != null && width > 0 ? width : null;
+    }
+    if (a.kind === 'gagerr' && s.gageStandard === undefined) patch.gageStandard = 'aiag';
     // v1.30 以前的 SPC 记录没有规则/阶段快照：采用当时的产品默认，而非继承当前页面条件。
     if (a.kind === 'spc' && !s.spcRules) patch.spcRules = { ...DEFAULT_SPC_RULES };
     // K 值随记录还原;旧记录无该字段时回到 Nelson/Minitab 标准值,不继承当前页面设置。

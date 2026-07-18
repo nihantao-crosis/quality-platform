@@ -2,7 +2,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useApp, type ImportTab, type ExportFmt } from '../../store/appStore';
 import { markActiveDataReplaced, prepareVaultDatasetRemoval, useData } from '../../store/dataStore';
-import { parseMatrix, parseCategoryCounts, extractPChartColumns, evalFormula, truthy, arrMin, arrMax, FormulaError, worksheetNumericColumnCodes, type ParsedMatrix } from '../../core';
+import { parseMatrix, parseCategoryCounts, extractPChartColumns, evalFormula, truthy, arrMin, arrMax, FormulaError, worksheetNumericColumnCodes, detectCsvBlocks, type CsvBlock, type ParsedMatrix } from '../../core';
 import { platform } from '../../platform/adapter';
 import { buildExportJob } from '../../platform/report';
 import { mesStart, mesStop } from '../../platform/mes';
@@ -58,6 +58,7 @@ function ImportModal() {
   const { importTab, setImportTab, importKind, setImportKind, closeModal, goTo, showToast } = useApp();
   const { importMatrix, importCounts, importPareto, mesRunning, model } = useData();
   const [pending, setPending] = useState<{ name: string; raw: string; parsed?: ParsedMatrix; cats?: number } | null>(null);
+  const [blockChoices, setBlockChoices] = useState<{ name: string; raw: string; blocks: CsvBlock[] } | null>(null);
   const [clipText, setClipText] = useState('');
   const [dataKind, setDataKind] = useState<DataKind>(importKind);
   const [pSampleSize, setPSampleSize] = useState(50);
@@ -88,12 +89,56 @@ function ImportModal() {
       setPending({ name, raw: text, cats: r.rows.length });
       return;
     }
+    // v1.40:并排多数据块(工厂 MSA 五案例工作簿)先让用户显式选块,不做整表瞎猜
+    const blocks = detectCsvBlocks(text);
+    if (blocks.length > 1) {
+      setPending(null);
+      setBlockChoices({ name, raw: text, blocks });
+      return;
+    }
+    setBlockChoices(null);
     const r = parseMatrix(text);
     if ('error' in r) {
+      if (blocks.length === 1) {
+        const block = blocks[0];
+        const retried = parseMatrix(block.csv);
+        if (!('error' in retried)) {
+          setPending({ name: `${name} · ${block.name}`, raw: block.csv, parsed: retried });
+          showToast(`整表解析失败，已截取检测到的表格区域「${block.name}」(${block.rows} 行)`);
+          return;
+        }
+      }
       showToast('导入失败：' + r.error);
       return;
     }
     setPending({ name, raw: text, parsed: r });
+  };
+
+  const chooseBlock = (choice: { name: string; raw: string; blocks: CsvBlock[] }, block: CsvBlock) => {
+    const parsed = parseMatrix(block.csv);
+    if ('error' in parsed) {
+      showToast(`数据块「${block.name}」解析失败：` + parsed.error);
+      return;
+    }
+    if (importTab === 'clip') {
+      // 剪贴板流:把选中块写回文本框(所见即所导),不设隐藏 pending 压过文本框(对抗审查 P2)
+      setClipText(block.csv);
+      setBlockChoices(null);
+      showToast(`已选数据块「${block.name}」(${block.rows} 行),文本框已更新,请再点「导入」确认`);
+      return;
+    }
+    setPending({ name: `${choice.name} · ${block.name}`, raw: block.csv, parsed });
+    setBlockChoices(null);
+  };
+
+  // 逃生口:带装饰性空隔列的正常宽表会被拆成多块,必须保留 v1.39 的整表导入路径
+  const importWholeTable = (choice: { name: string; raw: string; blocks: CsvBlock[] }) => {
+    if (applyJob(choice.name, choice.raw)) {
+      setPending(null);
+      setBlockChoices(null);
+      setClipText('');
+      closeModal();
+    }
   };
 
   const handlePicked = async (name: string, contents?: string, bytes?: Uint8Array) => {
@@ -246,7 +291,25 @@ function ImportModal() {
     if (importTab === 'mes') return; // MES tab 有自己的控制按钮
     let job = pending;
     if (!job && importTab === 'clip' && clipText.trim() !== '') {
-      job = { name: '剪贴板数据', raw: clipText };
+      // v1.40:剪贴板与文件同权——并排多数据块先选块(芯片含「按整表导入」逃生口)
+      if (dataKind !== 'pareto') {
+        const blocks = detectCsvBlocks(clipText);
+        if (blocks.length > 1) {
+          setBlockChoices({ name: '剪贴板数据', raw: clipText, blocks });
+          return;
+        }
+        if (blocks.length === 1) {
+          const direct = parseMatrix(clipText);
+          if ('error' in direct) {
+            const retried = parseMatrix(blocks[0].csv);
+            if (!('error' in retried)) {
+              showToast(`整段解析失败，已截取检测到的表格区域「${blocks[0].name}」(${blocks[0].rows} 行)`);
+              job = { name: `剪贴板数据 · ${blocks[0].name}`, raw: blocks[0].csv };
+            }
+          }
+        }
+      }
+      job = job ?? { name: '剪贴板数据', raw: clipText };
     }
     if (!job) {
       showToast(importTab === 'clip' ? '请先粘贴数据' : '请先选择数据文件');
@@ -264,7 +327,7 @@ function ImportModal() {
       <span style={{ color: '#8a929d', fontWeight: 600, fontSize: 12 }}>数据类型</span>
       {([['var', '变量数据（子组矩阵）'], ['p', '不良数（P 图）'], ['c', '缺陷数（C 图）'], ['pareto', '缺陷类别+频数（帕累托）']] as Array<[DataKind, string]>).map(([k, l]) => (
         <label key={k} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, cursor: 'pointer', color: '#3a4350' }}>
-          <input type="radio" checked={dataKind === k} onChange={() => { setDataKind(k); setImportKind(k); setPending(null); }} />
+          <input type="radio" checked={dataKind === k} onChange={() => { setDataKind(k); setImportKind(k); setPending(null); setBlockChoices(null); }} />
           {l}
         </label>
       ))}
@@ -316,10 +379,36 @@ function ImportModal() {
       <div style={{ padding: '18px 20px' }}>
         <div style={{ display: 'flex', gap: 6, marginBottom: 16, flexWrap: 'wrap' }}>
           {tabs.map(([k, l]) => (
-            <button type="button" role="tab" aria-selected={importTab === k} key={k} style={tabStyle(importTab === k)} onClick={() => setImportTab(k)}>{l}</button>
+            <button type="button" role="tab" aria-selected={importTab === k} key={k} style={tabStyle(importTab === k)} onClick={() => { setImportTab(k); setBlockChoices(null); }}>{l}</button>
           ))}
         </div>
         {(importTab === 'csv' || importTab === 'excel' || importTab === 'clip') && kindSelector}
+        {blockChoices && dataKind !== 'pareto' && (importTab === 'csv' || importTab === 'excel' || importTab === 'clip') && (
+          <div role="group" aria-label="选择数据块" style={{ margin: '0 0 12px', padding: '10px 12px', border: '1px solid #cfe0f0', background: '#f4f9fe', borderRadius: 6 }}>
+            <div style={{ fontSize: 12.5, color: '#1c4e7a', fontWeight: 600, marginBottom: 8 }}>
+              「{blockChoices.name}」检测到 {blockChoices.blocks.length} 个并排数据块（工作表含说明区/多案例并排），请选择要导入的一块：
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+              {blockChoices.blocks.map((block, index) => (
+                <button
+                  type="button" key={index}
+                  onClick={() => chooseBlock(blockChoices, block)}
+                  style={{ padding: '6px 10px', border: '1px solid #9dbede', background: '#fff', color: '#1c4e7a', borderRadius: 5, cursor: 'pointer', fontFamily: 'inherit', fontSize: 12 }}
+                >
+                  {block.name}（{block.headers.join('/')} · {block.rows} 行）
+                </button>
+              ))}
+              <button
+                type="button"
+                onClick={() => importWholeTable(blockChoices)}
+                title="不选块,按 v1.39 行为把整个工作表按一张表解析导入"
+                style={{ padding: '6px 10px', border: '1px dashed #9aa2ad', background: '#fff', color: '#5b6472', borderRadius: 5, cursor: 'pointer', fontFamily: 'inherit', fontSize: 12 }}
+              >
+                按整表导入
+              </button>
+            </div>
+          </div>
+        )}
         {(importTab === 'csv' || importTab === 'excel') && (
           <div
             onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
