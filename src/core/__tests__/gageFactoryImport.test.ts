@@ -9,7 +9,7 @@ import { describe, expect, it } from 'vitest';
 import { detectCsvBlocks, parseMatrix } from '../csv';
 import { computeVarModel } from '../model';
 import { prepareGageStudy } from '../gageData';
-import { computeGageRR } from '../gage';
+import { computeGageRR, assessGage } from '../gage';
 import { xlsxBytesToCsv } from '../../platform/xlsxImport';
 
 const workbook = readFileSync(new URL('./fixtures/gage-factory-workbook-2026-07.xlsx', import.meta.url));
@@ -65,6 +65,34 @@ describe('工厂 5 案例工作簿端到端导入', () => {
     const grr = result.components.find((component) => component.key === 'grr')!;
     expect(grr.pctTolerance!).toBeCloseTo(17.819373977742917, 9);
     expect(result.ndc).toBe(13);
+  });
+
+  it('5 案例全部经真实 xlsx 链路重算:%SV/%Tol/ndc 与黄金值逐一命中(Codex 终审 P2 补齐)', () => {
+    if (!('csv' in converted)) return;
+    const expected: Array<{ block: number; value: string; tol: { mode: 'width' | 'upper'; value: number }; psv: number; ptol: number; ndc: number; factoryOk: boolean }> = [
+      { block: 0, value: '螺钉高度', tol: { mode: 'width', value: 1 }, psv: 3.347205459690695, ptol: 2.190890230019632, ndc: 42, factoryOk: true },
+      { block: 1, value: '平衡量值', tol: { mode: 'upper', value: 100 }, psv: 6.418635278981523, ptol: 17.226023816183183, ndc: 21, factoryOk: true },
+      { block: 2, value: '电阻值', tol: { mode: 'width', value: 3 }, psv: 43.80067113939886, ptol: 112.41115009938649, ndc: 2, factoryOk: false },
+      { block: 3, value: '窜动值', tol: { mode: 'width', value: 1.4 }, psv: 10.51344820502612, ptol: 17.819373977742917, ndc: 13, factoryOk: true },
+      { block: 4, value: '螺钉高度', tol: { mode: 'width', value: 4 }, psv: 68.21572536154446, ptol: 49.66409389309567, ndc: 1, factoryOk: false },
+    ];
+    const blocks = detectCsvBlocks(converted.csv);
+    for (const item of expected) {
+      const parsed = parseMatrix(blocks[item.block].csv);
+      expect('error' in parsed).toBe(false);
+      if ('error' in parsed) continue;
+      const model = computeVarModel(`案例${item.block + 1}.csv`, parsed.colNames, parsed.rows);
+      const textCols = parsed.textCols.map((column) => ({ name: column.name, values: column.values }));
+      const study = prepareGageStudy(model, textCols, { valueColumn: item.value, partColumn: '部件', operatorColumn: '测试人' });
+      expect(study.ok).toBe(true);
+      if (!study.ok) continue;
+      const result = computeGageRR(study.study.observations, item.tol);
+      expect(result.totalGageRR).toBeCloseTo(item.psv, 9);
+      const grr = result.components.find((component) => component.key === 'grr')!;
+      expect(grr.pctTolerance!).toBeCloseTo(item.ptol, 9);
+      expect(result.ndc).toBe(item.ndc);
+      expect(assessGage(result, 'factory').grade !== 'bad').toBe(item.factoryOk);
+    }
   });
 
   it('Tab 分隔工作表中含逗号的单元格:块重组用原分隔符直拼,选块导入往返无损(对抗审查 P1 回归)', () => {
