@@ -21,7 +21,7 @@ import type { ChartTokens } from '../tokens';
 import { paretoColors } from '../tokens';
 import { Card, CardHeader, KvRows, Badge, tabStyle, numInput, EmptyStateCard, DemoBadge } from '../common';
 import { ParetoChart, BoxPlot, IndividualValuePlot, IntervalPlot, MiniHist } from '../charts/misc';
-import { GageReportFigure } from '../charts/gagePanels';
+import { GageReportFigure, gageBarCategories } from '../charts/gagePanels';
 
 const selStyle: CSSProperties = {
   padding: '4px 8px', border: '1px solid #cfd5dd', borderRadius: 4,
@@ -196,15 +196,8 @@ function GageRRInner({ T }: { T: ChartTokens }) {
     bad: { background: '#fdecec', color: '#c22f2f' },
   }[primary.grade];
   const bigColor = { good: '#2c8a45', warn: '#d98324', bad: '#c22f2f' }[primary.grade];
-  // 变异分量柱图取 GRR/重复性/再现性/部件间 分量（单操作员无再现性行,自动收缩）,名称去缩进
-  const cats = g.components
-    .filter((c) => c.key === 'grr' || c.key === 'repeatability' || c.key === 'reproducibility' || c.key === 'part')
-    .map((c) => ({
-      name: c.source.trim(),
-      contrib: c.pctContribution,
-      study: c.pctStudyVar,
-      tol: c.pctTolerance,
-    }));
+  // 变异分量固定 4 类别(量具R&R/重复(Repeat)/再现性/部件间),单操作员再现性零柱占位——与 Minitab 报告一致
+  const cats = gageBarCategories(g);
   // 4/6 联图与引擎同一套观测(演示=内置研究);控制图常数表覆盖 n=2..10,超界时不画控制限
   const panelObservations = realStudy ? realStudy.observations : gageStudyData();
   const panel = computeGagePanelData(panelObservations, CONTROL_CONSTANTS[g.trialCount] ?? null);
@@ -332,7 +325,10 @@ function GageRRInner({ T }: { T: ChartTokens }) {
             T={T} panel={panel} partLabels={partLabels} operatorLabels={operatorLabels} cats={cats}
             valueName={valueLabel}
             partName={realStudy?.partName ?? '部件'}
-            operatorName={realStudy ? (realStudy.operatorName ?? '操作员') : '操作员'}
+            operatorName={realStudy ? (realStudy.operatorName ?? '测试人') : '测试人'}
+            reportBy={operatorLabels.join('')}
+            studyDate={new Date().toLocaleDateString('zh-CN')}
+            toleranceText={g.tolerance == null ? '' : g.tolerance.mode === 'width' ? String(g.tolerance.value) : `${g.tolerance.mode === 'upper' ? '上限' : '下限'} ${g.tolerance.value}`}
           />
         </div>
       </Card>

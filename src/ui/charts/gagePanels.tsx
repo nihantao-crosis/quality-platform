@@ -1,18 +1,21 @@
 /**
- * MSA 量具 R&R 图形报告（v1.40.1:对齐工厂 Minitab 17 图窗观感）。
+ * MSA 量具 R&R 图形报告(v1.40.2:对齐工厂 Minitab 17「量具 R&R(方差分析)报告」形制,
+ * 经 PPT 全保真渲染逐面板核对)。
  *
- * GageReportFigure 输出与 Minitab 一致的**单张整图**:
- * 主标题「量具 R&R(ANOVA): 〈测量项〉」+ 每面板灰色标题条;
- * 单操作员 4 联(左列 变异分量/R 图,右列 按部件/Xbar 图——与工厂 EMF 逐面板核对),
- * 多操作员 6 联(左列 变异分量/R/Xbar,右列 按部件/按操作员箱线/交互)。
- * 样式对齐要点(自工厂 EMF 渲染核对):整图浅灰底;按部件用灰色原始点簇+蓝⊕均值连线;
- * 箱线为浅蓝填充箱+⊕均值+均值连线+星号离群点;交互图三操作员实心 蓝●/深红■/绿◆+带框图例;
- * 变异分量为 浅蓝/红/黄 分组柱+面板内带框图例;控制图蓝点线/绿中心线/深红控制限。
+ * GageReportFigure 输出单张报告式整图:
+ * 主标题「〈测量项〉 的量具 R&R(方差分析)报告」+ 表头信息块(量具名称/研究日期/报表人/公差/其他);
+ * 面板标题无底色居中(变异分量 / R 控制图(按 测试人) / 〈测量项〉 × 部件 / Xbar 控制图(按 测试人) /
+ * 〈测量项〉 × 测试人 / 部件 乘 测试人 交互作用),带 y 轴标题(百分比/样本极差/样本均值/平均);
+ * 单操作员 4 联(变异分量/R 图/×部件/XBar),多操作员 6 联。
+ * 变异分量固定 4 类别(量具 R&R/重复(Repeat)/再现性/部件间)——单操作员时再现性为零高柱占位,与 Minitab 一致。
+ * 操作员/部件水平顺序由 gageData 按 Minitab 排序(数值/拼音),控制图分段与交互图例与工厂输出同序。
+ * 样式:白底;按部件灰点簇+蓝⊕均值连线;箱线浅蓝填充+⊕+星号离群点;交互实心 蓝●/深红■/绿◆+带框图例;
+ * 变异分量 浅蓝/红/黄 柱+带框图例;控制图蓝点线/绿中心线/深红控制限(色值自工厂 EMF 逐记录提取)。
  * 页面、专项报告导出与对比报告生成器共用本组件(react-dom/server 同一渲染路径)。
  */
 import { Fragment } from 'react';
 import type { ReactNode } from 'react';
-import type { GagePanelData } from '../../core';
+import type { GagePanelData, GageResult, GageComponentKey } from '../../core';
 import type { ChartTokens } from '../tokens';
 import { Ln, Svg, Txt } from './primitives';
 
@@ -28,7 +31,7 @@ interface PanelProps {
 /** 面板内容坐标系固定 560×300;组合图用 <g transform> 平移复用。 */
 const PW = 560;
 const PH = 300;
-const M = { t: 14, r: 64, b: 34, l: 50 };
+const M = { t: 14, r: 64, b: 40, l: 62 };
 
 /** Minitab 17 图窗配色(自工厂 EMF 逐记录提取):整图浅灰底,数据蓝,中心线绿,控制限深红,
  * 变异分量三色柱 浅蓝/红/黄,箱体浅蓝填充,交互标记 蓝●/深红■/绿◆。 */
@@ -66,8 +69,8 @@ function rangeOf(values: number[]): [number, number] {
 const fmtTick = (value: number, span: number) =>
   span >= 100 ? value.toFixed(0) : span >= 1 ? value.toFixed(2) : value.toFixed(3);
 
-/** 公共框架:白底、边框、水平网格与 Y 刻度。 */
-function panelFrame(T: ChartTokens, yLo: number, yHi: number) {
+/** 公共框架:白底、边框、水平网格与 Y 刻度;可带 Minitab 式 y 轴标题(旋转)与 x 轴标题。 */
+function panelFrame(T: ChartTokens, yLo: number, yHi: number, yTitle?: string, xTitle?: string) {
   const pw = PW - M.l - M.r;
   const ph = PH - M.t - M.b;
   const Y = (value: number) => M.t + ((yHi - value) / (yHi - yLo)) * ph;
@@ -85,6 +88,12 @@ function panelFrame(T: ChartTokens, yLo: number, yHi: number) {
           <Txt x={M.l - 6} y={tick.y} s={tick.label} fill={T.axis} size={9} anchor="end" />
         </Fragment>
       ))}
+      {yTitle && (
+        <text x={14} y={M.t + ph / 2} fill={T.text} fontSize={9.5}
+          textAnchor="middle" fontFamily="IBM Plex Mono, monospace"
+          transform={`rotate(-90 14 ${M.t + ph / 2})`}>{yTitle}</text>
+      )}
+      {xTitle && <Txt x={M.l + pw / 2} y={PH - 8} s={xTitle} fill={T.text} size={9.5} anchor="middle" />}
     </Fragment>
   );
   return { pw, ph, Y, frame };
@@ -110,6 +119,26 @@ export interface GageBarCategory {
   tol: number | null;
 }
 
+/** Minitab「报告」变体的变异分量固定 4 类别:量具 R&R/重复(Repeat)/再现性/部件间。
+ * 单操作员研究再现性以零高柱占位(与工厂 PPT 一致),不省略类别。 */
+export function gageBarCategories(result: GageResult): GageBarCategory[] {
+  const find = (key: GageComponentKey) => result.components.find((component) => component.key === key);
+  const grr = find('grr');
+  const hasTol = grr?.pctTolerance != null;
+  const rowOf = (name: string, component: ReturnType<typeof find>): GageBarCategory => ({
+    name,
+    contrib: component?.pctContribution ?? 0,
+    study: component?.pctStudyVar ?? 0,
+    tol: hasTol ? (component?.pctTolerance ?? 0) : null,
+  });
+  return [
+    rowOf('量具 R&R', grr),
+    rowOf('重复(Repeat)', find('repeatability')),
+    rowOf('再现性', find('reproducibility')),
+    rowOf('部件间', find('part')),
+  ];
+}
+
 function componentsBody(T: ChartTokens, cats: GageBarCategory[]): ReactNode {
   const hasTol = cats.some((cat) => cat.tol != null);
   const seriesDefs: Array<{ key: 'contrib' | 'study' | 'tol'; label: string; color: string }> = [
@@ -125,7 +154,7 @@ function componentsBody(T: ChartTokens, cats: GageBarCategory[]): ReactNode {
     }
   }
   const [yLo, yHi] = [0, maxValue * 1.08];
-  const { pw, ph, Y, frame } = panelFrame(T, yLo, yHi);
+  const { pw, ph, Y, frame } = panelFrame(T, yLo, yHi, '百分比');
   const groupWidth = pw / cats.length;
   const barWidth = Math.min(16, (groupWidth * 0.6) / seriesDefs.length);
   const legendW = 108;
@@ -164,6 +193,8 @@ function groupedControlBody(
   series: number[][],
   limits: { cl: number; ucl: number; lcl: number } | null,
   limitLabel: string,
+  yTitle?: string,
+  xTitle?: string,
 ): ReactNode {
   const o = panel.operatorCount;
   const p = panel.partCount;
@@ -172,7 +203,7 @@ function groupedControlBody(
   const dataLo = Math.min(flatLo, limits ? limits.lcl : Infinity);
   const dataHi = Math.max(flatHi, limits ? limits.ucl : -Infinity);
   const [yLo, yHi] = niceRange(dataLo, dataHi);
-  const { pw, Y, frame } = panelFrame(T, yLo, yHi);
+  const { pw, Y, frame } = panelFrame(T, yLo, yHi, yTitle, xTitle);
   const total = o * p;
   const X = (index: number) => M.l + ((index + 0.5) / total) * pw;
   const points: string[] = [];
@@ -212,12 +243,12 @@ function groupedControlBody(
 
 // ---------- 按部件:原始点簇 + ⊕ 均值连线(Minitab 样式) ----------
 
-function byPartBody(T: ChartTokens, panel: GagePanelData, partLabels: string[]): ReactNode {
+function byPartBody(T: ChartTokens, panel: GagePanelData, partLabels: string[], partName = '部件'): ReactNode {
   const p = panel.partCount;
   const all: number[] = panel.values.flat(2);
   const [allLo, allHi] = rangeOf(all);
   const [yLo, yHi] = niceRange(allLo, allHi);
-  const { pw, Y, frame } = panelFrame(T, yLo, yHi);
+  const { pw, Y, frame } = panelFrame(T, yLo, yHi, undefined, partName);
   const X = (part: number) => M.l + ((part + 0.5) / p) * pw;
   const meanPoints = panel.partMeans.map((mean, part) => `${X(part)},${Y(mean)}`);
   return (
@@ -280,12 +311,12 @@ export function boxplotStats(values: number[]): BoxplotStats {
   return { q1, median, q3, whiskerLo, whiskerHi, outliers };
 }
 
-function byOperatorBody(T: ChartTokens, panel: GagePanelData, operatorLabels: string[]): ReactNode {
+function byOperatorBody(T: ChartTokens, panel: GagePanelData, operatorLabels: string[], operatorName = '测试人'): ReactNode {
   const o = panel.operatorCount;
   const all: number[] = panel.values.flat(2);
   const [allLo, allHi] = rangeOf(all);
   const [yLo, yHi] = niceRange(allLo, allHi);
-  const { pw, Y, frame } = panelFrame(T, yLo, yHi);
+  const { pw, Y, frame } = panelFrame(T, yLo, yHi, undefined, operatorName);
   const X = (operator: number) => M.l + ((operator + 0.5) / o) * pw;
   const boxWidth = Math.min(64, (pw / o) * 0.42);
   const meanPoints = panel.operatorMeans.map((mean, operator) => `${X(operator)},${Y(mean)}`);
@@ -326,12 +357,12 @@ function interactionMarker(shape: number, x: number, y: number, color: string): 
   return <polygon points={`${x},${y - 4.4} ${x + 4.4},${y} ${x},${y + 4.4} ${x - 4.4},${y}`} fill={color} />;
 }
 
-function interactionBody(T: ChartTokens, panel: GagePanelData, partLabels: string[], operatorLabels: string[]): ReactNode {
+function interactionBody(T: ChartTokens, panel: GagePanelData, partLabels: string[], operatorLabels: string[], partName = '部件'): ReactNode {
   const p = panel.partCount;
   const flat = panel.cellMeans.flat();
   const [flatLo, flatHi] = rangeOf(flat);
   const [yLo, yHi] = niceRange(flatLo, flatHi);
-  const { pw, Y, frame } = panelFrame(T, yLo, yHi);
+  const { pw, Y, frame } = panelFrame(T, yLo, yHi, '平均', partName);
   const X = (part: number) => M.l + ((part + 0.5) / p) * pw;
   const colors = MTB.series;
   const legendW = 96;
@@ -372,58 +403,68 @@ export interface GageReportFigureProps {
   partLabels: string[];
   operatorLabels: string[];
   cats: GageBarCategory[];
-  /** 测量项列名(主标题「量具 R&R(ANOVA): 〈测量项〉」) */
+  /** 测量项列名(主标题「〈测量项〉 的量具 R&R(方差分析)报告」) */
   valueName: string;
   partName?: string;
   operatorName?: string;
+  /** 表头信息块(Minitab 报告字段);缺省留空 */
+  gaugeName?: string;
+  reportBy?: string;
+  studyDate?: string;
+  toleranceText?: string;
 }
 
 const TITLE_H = 20;
-const MASTER_H = 34;
-const CELL_GAP = 12;
-const FIG_M = 12;
+const HEADER_H = 92;
+const CELL_GAP = 8;
+const FIG_M = 14;
 
-/** 与工厂 Minitab 17 图窗同布局的单张整图。 */
+/** 与工厂 Minitab 17「量具 R&R(方差分析)报告」同形制的单张整图。 */
 export function GageReportFigure({
   T, panel, partLabels, operatorLabels, cats, valueName,
-  partName = '部件', operatorName = '操作员',
+  partName = '部件', operatorName = '测试人',
+  gaugeName = '', reportBy = '', studyDate = '', toleranceText = '',
 }: GageReportFigureProps) {
   const single = panel.operatorCount === 1;
   const cells: Array<{ title: string; body: ReactNode }> = single
     ? [
       { title: '变异分量', body: componentsBody(T, cats) },
-      { title: 'R 控制图', body: groupedControlBody(T, panel, operatorLabels, panel.cellRanges, panel.rLimits, 'R̄') },
-      { title: `按 ${partName} 的测量值`, body: byPartBody(T, panel, partLabels) },
-      { title: 'Xbar 控制图', body: groupedControlBody(T, panel, operatorLabels, panel.cellMeans, panel.xbarLimits, 'X̿') },
+      { title: 'R 控制图', body: groupedControlBody(T, panel, operatorLabels, panel.cellRanges, panel.rLimits, 'R̄', '样本极差', partName) },
+      { title: `${valueName} × ${partName}`, body: byPartBody(T, panel, partLabels, partName) },
+      { title: 'XBar 控制图', body: groupedControlBody(T, panel, operatorLabels, panel.cellMeans, panel.xbarLimits, 'X̿', '样本均值', partName) },
     ]
     : [
       { title: '变异分量', body: componentsBody(T, cats) },
-      { title: `按 ${partName} 的测量值`, body: byPartBody(T, panel, partLabels) },
-      { title: `R 控制图（按 ${operatorName}）`, body: groupedControlBody(T, panel, operatorLabels, panel.cellRanges, panel.rLimits, 'R̄') },
-      { title: `按 ${operatorName} 的测量值`, body: byOperatorBody(T, panel, operatorLabels) },
-      { title: `Xbar 控制图（按 ${operatorName}）`, body: groupedControlBody(T, panel, operatorLabels, panel.cellMeans, panel.xbarLimits, 'X̿') },
-      { title: `${partName} * ${operatorName} 交互作用`, body: interactionBody(T, panel, partLabels, operatorLabels) },
+      { title: `${valueName} × ${partName}`, body: byPartBody(T, panel, partLabels, partName) },
+      { title: `R 控制图（按 ${operatorName}）`, body: groupedControlBody(T, panel, operatorLabels, panel.cellRanges, panel.rLimits, 'R̄', '样本极差', partName) },
+      { title: `${valueName} × ${operatorName}`, body: byOperatorBody(T, panel, operatorLabels, operatorName) },
+      { title: `Xbar 控制图（按 ${operatorName}）`, body: groupedControlBody(T, panel, operatorLabels, panel.cellMeans, panel.xbarLimits, 'X̿', '样本均值', partName) },
+      { title: `${partName} 乘 ${operatorName} 交互作用`, body: interactionBody(T, panel, partLabels, operatorLabels, partName) },
     ];
   const rows = single ? 2 : 3;
   const width = FIG_M * 2 + PW * 2 + CELL_GAP;
-  const height = MASTER_H + rows * (TITLE_H + PH + CELL_GAP) + FIG_M;
+  const height = HEADER_H + rows * (TITLE_H + PH + CELL_GAP) + FIG_M;
   return (
     <Svg w={width} h={height}>
-      <rect x={0} y={0} width={width} height={height} fill={MTB.figureBg} />
-      <rect x={0} y={0} width={width} height={height} fill="none" stroke={T.axis} strokeWidth={1} />
-      {/* Minitab 主标题条 */}
-      <rect x={1} y={1} width={width - 2} height={MASTER_H - 6} fill="#d9dde3" />
-      <Txt x={width / 2} y={MASTER_H / 2 - 2} s={`量具 R&R(ANOVA): ${valueName}`} fill="#1c2733" size={14} anchor="middle" weight={700} />
+      {/* Minitab 报告:白底纸面 + 细边框 */}
+      <rect x={0} y={0} width={width} height={height} fill="#ffffff" stroke={T.axis} strokeWidth={1} />
+      <Txt x={FIG_M + 4} y={22} s={`${valueName} 的量具 R&R (方差分析) 报告`} fill="#111820" size={15} weight={700} />
+      {/* 表头信息块(量具名称/研究日期 | 报表人/公差/其他) */}
+      <Txt x={FIG_M + 4} y={50} s={`量具名称：${gaugeName}`} fill="#333c46" size={10.5} />
+      <Txt x={FIG_M + 4} y={68} s={`研究日期：${studyDate}`} fill="#333c46" size={10.5} />
+      <Txt x={width / 2 + 10} y={50} s={`报表人：${reportBy}`} fill="#333c46" size={10.5} />
+      <Txt x={width / 2 + 10} y={68} s={`公差：${toleranceText}`} fill="#333c46" size={10.5} />
+      <Txt x={width / 2 + 10} y={84} s="其他：" fill="#333c46" size={10.5} />
+      <Ln x1={FIG_M} y1={HEADER_H - 4} x2={width - FIG_M} y2={HEADER_H - 4} stroke="#c8cdd4" sw={1} />
       {cells.map((cell, index) => {
         const col = index % 2;
         const row = Math.floor(index / 2);
         const x = FIG_M + col * (PW + CELL_GAP);
-        const y = MASTER_H + row * (TITLE_H + PH + CELL_GAP);
+        const y = HEADER_H + row * (TITLE_H + PH + CELL_GAP);
         return (
           <g key={index} transform={`translate(${x},${y})`}>
-            {/* 灰色面板标题条(Minitab) */}
-            <rect x={0} y={0} width={PW} height={TITLE_H} fill="#cfd6dd" stroke={T.axis} strokeWidth={0.7} />
-            <Txt x={PW / 2} y={TITLE_H / 2 + 0.5} s={cell.title} fill="#1c2733" size={11} anchor="middle" weight={700} />
+            {/* Minitab 报告:面板标题无底色居中粗体 */}
+            <Txt x={PW / 2} y={TITLE_H / 2 + 1} s={cell.title} fill="#111820" size={11.5} anchor="middle" weight={700} />
             <g transform={`translate(0,${TITLE_H})`}>{cell.body}</g>
           </g>
         );

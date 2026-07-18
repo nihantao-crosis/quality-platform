@@ -61,7 +61,7 @@ import { chartTokens } from '../ui/tokens';
 import { ControlChart } from '../ui/charts/ControlChart';
 import { NormalProbPlot } from '../ui/charts/NormalProbPlot';
 import { BoxPlot, IndividualValuePlot, IntervalPlot, ParetoChart } from '../ui/charts/misc';
-import { GageReportFigure } from '../ui/charts/gagePanels';
+import { GageReportFigure, gageBarCategories } from '../ui/charts/gagePanels';
 import { ScatterPlot } from '../ui/charts/ScatterPlot';
 import { Histogram } from '../ui/charts/Histogram';
 import { EffectsBar, MainEffects } from '../ui/charts/doe';
@@ -843,19 +843,15 @@ function buildGagePayload(): AnalysisReportPayload {
   const panelData = computeGagePanelData(observations, CONTROL_CONSTANTS[result.trialCount] ?? null);
   const partLabels = realStudy?.partLabels ?? Array.from({ length: panelData.partCount }, (_, index) => String(index + 1));
   const operatorLabels = realStudy?.operatorLabels ?? ['A', 'B', 'C'];
-  const cats = result.components
-    .filter((component) => component.key === 'grr' || component.key === 'repeatability' || component.key === 'reproducibility' || component.key === 'part')
-    .map((component) => ({
-      name: component.source.trim(),
-      contrib: component.pctContribution,
-      study: component.pctStudyVar,
-      tol: component.pctTolerance,
-    }));
+  const cats = gageBarCategories(result);
   const figureProps = {
     T, panel: panelData, partLabels, operatorLabels, cats,
     valueName: realStudy?.valueName ?? '演示测量',
     partName: realStudy?.partName ?? '部件',
-    operatorName: realStudy ? (realStudy.operatorName ?? '操作员') : '操作员',
+    operatorName: realStudy ? (realStudy.operatorName ?? '测试人') : '测试人',
+    reportBy: operatorLabels.join(''),
+    studyDate: new Date().toLocaleDateString('zh-CN'),
+    toleranceText: tolerance == null ? '' : tolerance.mode === 'width' ? String(tolerance.value) : `${tolerance.mode === 'upper' ? '上限' : '下限'} ${tolerance.value}`,
   } as const;
   return {
     kind: 'gagerr',

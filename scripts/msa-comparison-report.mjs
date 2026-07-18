@@ -43,7 +43,7 @@ export { computeGageRR, assessGage, computeGagePanelData } from '${join(root, 's
 export { CONTROL_CONSTANTS } from '${join(root, 'src/core/spc.ts')}';
 export { chartTokens } from '${join(root, 'src/ui/tokens.ts')}';
 export { GroupedBars } from '${join(root, 'src/ui/charts/misc.tsx')}';
-export { GageReportFigure } from '${join(root, 'src/ui/charts/gagePanels.tsx')}';
+export { GageReportFigure, gageBarCategories } from '${join(root, 'src/ui/charts/gagePanels.tsx')}';
 export { renderToStaticMarkup } from 'react-dom/server';
 export { createElement } from 'react';
 `;
@@ -82,15 +82,16 @@ for (const spec of CASES) {
   const single = result.operatorCount === 1;
   const panel = app.computeGagePanelData(study.study.observations, app.CONTROL_CONSTANTS[result.trialCount] ?? null);
   const panelProps = { T, panel, partLabels: study.study.partLabels, operatorLabels: study.study.operatorLabels, w: 560, h: 300 };
-  const cats = result.components
-    .filter((c) => ['grr', 'repeatability', 'reproducibility', 'part'].includes(c.key))
-    .map((c) => ({ name: c.source.trim(), contrib: c.pctContribution, study: c.pctStudyVar, tol: c.pctTolerance }));
+  const cats = app.gageBarCategories(result);
   const render = (component, props) => app.renderToStaticMarkup(app.createElement(component, props));
   const figureSvg = render(app.GageReportFigure, {
     ...panelProps, cats,
     valueName: spec.value,
     partName: study.study.partName,
-    operatorName: study.study.operatorName ?? '操作员',
+    operatorName: study.study.operatorName ?? '测试人',
+    reportBy: study.study.operatorLabels.join(''),
+    studyDate: '20260718',
+    toleranceText: spec.tol.mode === 'width' ? String(spec.tol.value) : `上限 ${spec.tol.value}`,
   });
   const factoryGraph = leftDir && existsSync(join(leftDir, spec.graph))
     ? `<figure><figcaption>工厂 Minitab 17 图形窗口（PPT 原始 EMF 矢量形状渲染;文字层为字形索引故未显示,布局/图形/配色为原样）</figcaption><img src="data:image/png;base64,${readFileSync(join(leftDir, spec.graph)).toString('base64')}"/></figure>`

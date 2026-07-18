@@ -371,9 +371,16 @@ export function prepareGageStudy(
   if (partValues.some((value) => !value) || operatorValues.some((value) => !value)) {
     return { ok: false, reason: '部件/操作员列不能包含空白标签' };
   }
-  const partLabels = [...new Set(partValues)];
+  // 部件/操作员水平排序与 Minitab 一致:数值型按数值升序,文本按中文拼音
+  // (工厂案例的控制图分段与交互图例即按 谷春莉<韦小星<邹德玉 拼音序,不是数据出现序)。
+  const sortRoleLabels = (labels: string[]): string[] => {
+    const numeric = labels.every((label) => label !== '' && !Number.isNaN(Number(label)));
+    if (numeric) return [...labels].sort((a, b) => Number(a) - Number(b));
+    return [...labels].sort((a, b) => a.localeCompare(b, 'zh-Hans-CN-u-co-pinyin'));
+  };
+  const partLabels = sortRoleLabels([...new Set(partValues)]);
   // 单操作员研究合法(操作员列为常数或显式选「无」):退化为单因子模型,GRR=重复性,不估计再现性。
-  const operatorLabels = [...new Set(operatorValues)];
+  const operatorLabels = sortRoleLabels([...new Set(operatorValues)]);
   if (partLabels.length < 2) {
     return { ok: false, reason: `仅检测到 1 个部件(${partLabels[0]}):交叉 Gage R&R 需 ≥2 个部件供各操作员重复测量;请补充其他部件数据` };
   }
