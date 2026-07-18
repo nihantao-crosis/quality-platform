@@ -5,8 +5,9 @@
  * 加严检验累计 5 批不接收时按 9.4 暂停抽样检验。
  */
 import {
-  AQL_COLS, PER100_MAX_D_PER_UNIT, TABLE_BY_STATE, aqlPlanByState, aqlRegime, codeLetterGB,
+  AQL_COLS, PER100_MAX_D_PER_UNIT, TABLE_BY_STATE, aqlPlanByState, codeLetterGB,
   normalPlanOneStepTighter, producerRiskPct, rqlForResult,
+  resolveAqlRegime,
   type AqlMasterTable, type AqlRegime, type InspectionLevel, type InspectionState, type SamplingPlan,
 } from './aql';
 
@@ -40,6 +41,8 @@ export interface AqlBatchRecord {
   lot: number;
   level: InspectionLevel;
   aql: number;
+  /** 质量表示方式必须随责任记录固化；旧记录缺失时按 v1.38 历史默认迁移。 */
+  regime: AqlRegime;
   stateBefore: InspState;
   stateAfter: InspState;
   sourceTable: AqlMasterTable;
@@ -86,7 +89,7 @@ export const SWITCH_INIT: SwitchStatus = {
   records: [],
 };
 
-const INSPECTION_LEVELS = new Set<InspectionLevel>(['I', 'II', 'III']);
+const INSPECTION_LEVELS = new Set<InspectionLevel>(['S-1', 'S-2', 'S-3', 'S-4', 'I', 'II', 'III']);
 const INSPECTION_STATES = new Set<InspState>(['normal', 'tightened', 'reduced']);
 const SAMPLE_CODES = new Set(['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'J', 'K', 'L', 'M', 'N', 'P', 'Q', 'R']);
 const DISPOSITIONS = new Set<NonconformingDisposition>(['none', 'unrecorded', 'pending', 'reworked', 'replaced', 'scrapped', 'concession']);
@@ -132,11 +135,16 @@ function normalizeAqlBatchRecord(value: unknown, fallbackSequenceId: string): Aq
   const resultOk = x.result === 'A' || x.result === 'R';
   const stateOk = INSPECTION_STATES.has(x.stateBefore as InspState)
     && INSPECTION_STATES.has(x.stateAfter as InspState);
-  // K2:d 的上限按体系分流——percent 体系 d ≤ n;per100 体系(AQL≥15,计点)d 可大于 n,
-  // 只设工程上限 n×PER100_MAX_D_PER_UNIT。体系由记录自身的 aql 判定(先验证其为正式档位)。
+  // d 的上限按记录中固化的质量表示分流：percent 为 d≤n；per100 为计点制，d 可大于 n。
   const aqlOk = typeof x.aql === 'number' && AQL_COLS.includes(x.aql);
+  let regime: AqlRegime;
+  try {
+    regime = resolveAqlRegime(x.aql as number, x.regime);
+  } catch {
+    return null;
+  }
   const dMax = aqlOk && Number.isSafeInteger(x.sampleSize)
-    ? (aqlRegime(x.aql as number) === 'per100' ? x.sampleSize! * PER100_MAX_D_PER_UNIT : x.sampleSize!)
+    ? (regime === 'per100' ? x.sampleSize! * PER100_MAX_D_PER_UNIT : x.sampleSize!)
     : 0;
   const integerOk = Number.isSafeInteger(x.lot) && x.lot! >= 2
     && Number.isSafeInteger(x.sampleSize) && x.sampleSize! >= 1 && x.sampleSize! <= x.lot!
@@ -191,7 +199,7 @@ function normalizeAqlBatchRecord(value: unknown, fallbackSequenceId: string): Aq
     || x.result !== (expectedDecision === 'accepted' ? 'A' : 'R')
     || (x.fullInspection && x.nonconforming! > 0
       && (nonconformingDisposition === 'none' || nonconformingDisposition === 'unrecorded'))) return null;
-  const record = { ...(x as AqlBatchRecord), sequenceId, nonconformingDisposition };
+  const record = { ...(x as AqlBatchRecord), sequenceId, regime, nonconformingDisposition };
   return recordTransitionIsPossible(record) ? record : null;
 }
 
@@ -291,6 +299,8 @@ export interface RecordInspectionInput {
   lot: number;
   level: InspectionLevel;
   aql: number;
+  /** 新调用方必须显式传入；缺失仅用于旧 API/测试兼容并按历史默认解析。 */
+  regime?: AqlRegime;
   nonconforming: number;
   batchId?: string;
   inspector?: string;
@@ -332,12 +342,13 @@ export function recordInspection(status: SwitchStatus, input: RecordInspectionIn
   }
   if (!Number.isSafeInteger(input.lot) || input.lot < 2) throw new RangeError('批量必须是大于等于 2 的安全整数');
   if (!AQL_COLS.includes(input.aql)) throw new RangeError(`仅支持正式主表 AQL：${AQL_COLS.join('、')}`);
+  const regime = resolveAqlRegime(input.aql, input.regime);
 
   const originalInspection = input.originalInspection !== false;
   const stateBefore = s.state;
   const plan = plansByState(input.lot, input.level, input.aql)[stateBefore];
   // K2:per100 体系(AQL≥15)允许 d > n,decideLot 按体系分流录入上限。
-  const decision = decideLot(plan, input.nonconforming, aqlRegime(input.aql));
+  const decision = decideLot(plan, input.nonconforming, regime);
   const requestedDisposition = input.nonconformingDisposition as NonconformingDisposition | undefined;
   if (plan.fullInspect && input.nonconforming > 0
     && (!requestedDisposition || requestedDisposition === 'none' || requestedDisposition === 'unrecorded'
@@ -437,6 +448,7 @@ export function recordInspection(status: SwitchStatus, input: RecordInspectionIn
     lot: input.lot,
     level: input.level,
     aql: input.aql,
+    regime,
     stateBefore,
     stateAfter: state,
     sourceTable: TABLE_BY_STATE[stateBefore],
@@ -547,16 +559,16 @@ export interface AqlReportData {
 
 /** 专项报告/导出层可直接消费的结构化 AQL 数据，不依赖 React 或统一报告模块。 */
 export function buildAqlReportData(
-  lot: number, level: InspectionLevel, aql: number, status: SwitchStatus,
+  lot: number, level: InspectionLevel, aql: number, status: SwitchStatus, requestedRegime?: AqlRegime,
 ): AqlReportData {
   const s = normalizeSwitchStatus(status);
   const plan = plansByState(lot, level, aql)[s.state];
-  const regime = aqlRegime(aql);
+  const regime = resolveAqlRegime(aql, requestedRegime);
   const rql = rqlForResult(plan, 0.1, undefined, regime);
   // 参数切换后保留全部历史追溯，但不得把旧方案的批结果冒充当前方案最新批。
   const latestRecord = [...s.records].reverse().find((record) => (
     record.sequenceId === s.sequenceId
-    && record.lot === lot && record.level === level && record.aql === aql
+    && record.lot === lot && record.level === level && record.aql === aql && record.regime === regime
   ));
   return {
     standard: 'GB/T 2828.1-2012 / ISO 2859-1:1999',
@@ -570,7 +582,7 @@ export function buildAqlReportData(
     regime,
     initialCode: codeLetterGB(lot, level),
     plan: { ...plan },
-    producerRiskPct: plan.fullInspect ? null : producerRiskPct(plan, aql),
+    producerRiskPct: plan.fullInspect ? null : producerRiskPct(plan, aql, regime),
     // 两体系 RQL 单位不同(%批不良率 vs 每百单位不合格数),各自独立成字段,绝不混用。
     rqlPct: regime === 'percent' && rql.status === 'found' ? rql.p * 100 : null,
     rqlPer100: regime === 'per100' && rql.status === 'found' ? rql.p : null,

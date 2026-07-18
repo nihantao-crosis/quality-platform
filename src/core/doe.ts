@@ -1571,11 +1571,123 @@ export interface GeneratedFractionalDesign extends GeneratedFactorialDesign {
   resolutionLabel: string;
   generators: string[];
   folded: boolean;
+  /** 选中的分部（1-based）；共有 2^p 个互补分部。 */
+  fraction: number;
 }
 
-/** 生成 2^(k−p) 分数因子设计(p=0 时为 2^k 全因子),支持折叠:
+function validateFraction(k: number, p: number, fraction: number): void {
+  fractionalSpec(k, p);
+  const count = 1 << p;
+  if (!Number.isInteger(fraction) || fraction < 1 || fraction > count) {
+    throw new Error(`分部必须是 1–${count} 的整数`);
+  }
+}
+
+function fractionMultipliers(p: number, fraction: number): number[] {
+  const bits = fraction - 1;
+  return Array.from({ length: p }, (_, index) => (bits & (1 << index) ? -1 : 1));
+}
+
+function fractionGenerators(k: number, p: number, fraction: number): string[] {
+  if (p === 0) return [];
+  const base = k - p;
+  const subsets = FRACTIONAL_GENERATORS[`${k}-${p}`].subsets;
+  const multipliers = fractionMultipliers(p, fraction);
+  return subsets.map((subset, index) => {
+    const rhs = subset.map((j) => FACTOR_LETTERS[j]).join('');
+    return `${FACTOR_LETTERS[base + index]}=${multipliers[index] < 0 ? '−' : ''}${rhs}`;
+  });
+}
+
+function fractionSignRows(k: number, p: number, fraction: number): number[][] {
+  validateFraction(k, p, fraction);
+  const base = k - p;
+  const subsets = p === 0 ? [] : FRACTIONAL_GENERATORS[`${k}-${p}`].subsets;
+  const multipliers = fractionMultipliers(p, fraction);
+  return Array.from({ length: 1 << base }, (_, combo) => {
+    const signs = new Array<number>(k);
+    for (let j = 0; j < base; j++) signs[j] = combo & (1 << j) ? 1 : -1;
+    subsets.forEach((subset, index) => {
+      signs[base + index] = multipliers[index] * subset.reduce((product, j) => product * signs[j], 1);
+    });
+    return signs;
+  });
+}
+
+function foldSignRow(signs: number[], fold: FractionalFold): number[] {
+  if (fold === 'none') return [...signs];
+  return fold === 'full'
+    ? signs.map((value) => -value)
+    : signs.map((value, index) => (index === fold ? -value : value));
+}
+
+const signKey = (signs: number[]) => signs.map((value) => (value > 0 ? '+' : '-')).join('');
+
+function exactResolution(signRows: number[][]): number | null {
+  const k = signRows[0]?.length ?? 0;
+  for (let order = 1; order <= k; order++) {
+    for (let mask = 1; mask < (1 << k); mask++) {
+      let bits = 0;
+      for (let work = mask; work > 0; work &= work - 1) bits++;
+      if (bits !== order) continue;
+      const products = signRows.map((row) => row.reduce(
+        (product, value, index) => (mask & (1 << index) ? product * value : product), 1,
+      ));
+      if (products.every((value) => value === products[0])) return order;
+    }
+  }
+  return null;
+}
+
+export interface FractionalFoldPreview {
+  baseRuns: number;
+  addedRuns: number;
+  totalRuns: number;
+  effective: boolean;
+  resolution: number | null;
+  resolutionLabel: string;
+  generators: string[];
+  fraction: number;
+  fractionCount: number;
+}
+
+/** 在写入工作表前预检分部与折叠：无效折叠的镜像会与原分部完全重合，addedRuns=0。 */
+export function fractionalFoldPreview(
+  k: number,
+  p: number,
+  fold: FractionalFold = 'none',
+  fraction = 1,
+): FractionalFoldPreview {
+  if (!Number.isInteger(k) || k < 3 || k > MAX_FRACTIONAL_FACTORS) {
+    throw new Error(`分数因子设计支持 3–${MAX_FRACTIONAL_FACTORS} 个因子`);
+  }
+  validateFraction(k, p, fraction);
+  if (fold !== 'none' && p === 0) throw new Error('全因子设计无别名,无需折叠');
+  if (typeof fold === 'number' && (!Number.isInteger(fold) || fold < 0 || fold >= k)) {
+    throw new Error('折叠因子下标必须在 0..k-1 之间');
+  }
+  const baseRows = fractionSignRows(k, p, fraction);
+  const baseKeys = new Set(baseRows.map(signKey));
+  const foldedRows = fold === 'none' ? [] : baseRows.map((row) => foldSignRow(row, fold));
+  const addedRows = foldedRows.filter((row) => !baseKeys.has(signKey(row)));
+  const combined = [...baseRows, ...addedRows];
+  const resolution = exactResolution(combined);
+  return {
+    baseRuns: baseRows.length,
+    addedRuns: addedRows.length,
+    totalRuns: combined.length,
+    effective: fold === 'none' || addedRows.length === baseRows.length,
+    resolution,
+    resolutionLabel: resolution == null ? '完全' : RESOLUTION_ROMAN[resolution] ?? String(resolution),
+    generators: fractionGenerators(k, p, fraction),
+    fraction,
+    fractionCount: 1 << p,
+  };
+}
+
+/** 生成 2^(k−p) 分数因子设计(p=0 时为 2^k 全因子),支持选择分部与折叠:
  * - 不折叠:2^(k−p)×仿行 次,区组恒为 1;
- * - 全折叠:追加全部因子符号取反的镜像运行(分辨率 III 设计折叠后主效应与二因子交互解除混杂,III→IV);
+ * - 全折叠:仅当全部因子取反确实落入互补分部时才追加；若镜像与原分部重合则拒绝生成；
  * - 指定因子折叠:仅该因子符号取反追加(解除该因子与二因子交互的混杂)。
  * 折叠追加的运行记为区组 2(折叠块可作区组进入分析,吸收两批试验间的批次差),标准序在原设计之后
  * 顺延;随机化按区组内 LCG 洗牌,同种子完全可复现。生成的工作表可直接被两水平分析引擎
@@ -1583,7 +1695,7 @@ export interface GeneratedFractionalDesign extends GeneratedFactorialDesign {
 export function generateFractionalFactorialDesign(
   factors: FactorDef[],
   p: number,
-  opts: { fold?: FractionalFold; replicates?: number; randomize?: boolean; seed?: number } = {},
+  opts: { fold?: FractionalFold; fraction?: number; replicates?: number; randomize?: boolean; seed?: number } = {},
 ): GeneratedFractionalDesign {
   const k = factors.length;
   if (k < 3 || k > MAX_FRACTIONAL_FACTORS) throw new Error(`分数因子设计支持 3–${MAX_FRACTIONAL_FACTORS} 个因子`);
@@ -1595,27 +1707,14 @@ export function generateFractionalFactorialDesign(
   }
   if (factors.some((factor) => !(factor.low < factor.high))) throw new Error('每个因子必须满足低水平 < 高水平');
   if (!Number.isInteger(p) || p < 0) throw new Error('分数 p 必须是非负整数');
-  const spec = fractionalSpec(k, p);
   const fold: FractionalFold = opts.fold ?? 'none';
-  if (fold !== 'none' && p === 0) throw new Error('全因子设计无别名,无需折叠');
-  if (typeof fold === 'number' && (!Number.isInteger(fold) || fold < 0 || fold >= k)) {
-    throw new Error('折叠因子下标必须在 0..k-1 之间');
+  const fraction = opts.fraction ?? 1;
+  const preview = fractionalFoldPreview(k, p, fold, fraction);
+  if (fold !== 'none' && !preview.effective) {
+    throw new Error('所选折叠不会增加新的设计点（镜像与原分部完全重复）；请选择指定因子折叠或其他设计');
   }
   const reps = positiveIntegerOption(opts.replicates, 1, '仿行数', 1);
-  const base = k - p;
-  const subsets = p === 0 ? [] : FRACTIONAL_GENERATORS[`${k}-${p}`].subsets;
-
-  // 基础分数的符号矩阵:基础因子按 Yates 序(A 变化最快),生成因子=基础因子符号之积。
-  const signRows: number[][] = Array.from({ length: 1 << base }, (_, combo) => {
-    const signs = new Array<number>(k);
-    for (let j = 0; j < base; j++) signs[j] = combo & (1 << j) ? 1 : -1;
-    subsets.forEach((subset, index) => {
-      signs[base + index] = subset.reduce((product, j) => product * signs[j], 1);
-    });
-    return signs;
-  });
-  const foldSigns = (signs: number[]): number[] =>
-    fold === 'full' ? signs.map((value) => -value) : signs.map((value, j) => (j === fold ? -value : value));
+  const signRows = fractionSignRows(k, p, fraction);
 
   const generated: GeneratedRun[] = [];
   let standardOrder = 1;
@@ -1633,7 +1732,7 @@ export function generateFractionalFactorialDesign(
     }
   };
   pushRuns(1, (signs) => signs);
-  if (fold !== 'none') pushRuns(2, foldSigns);
+  if (fold !== 'none') pushRuns(2, (signs) => foldSignRow(signs, fold));
 
   const blockCount = fold !== 'none' ? 2 : 1;
   const byBlock = Array.from({ length: blockCount }, (_, i) => generated.filter((run) => run.block === i + 1));
@@ -1647,8 +1746,9 @@ export function generateFractionalFactorialDesign(
     textCols: [{ name: '点类型', values: finalRuns.map((run) => run.pointType) }],
     responseCol: colNames.length - 1,
     blockCount,
-    resolutionLabel: spec.resolutionLabel,
-    generators: spec.generators,
+    resolutionLabel: preview.resolutionLabel,
+    generators: preview.generators,
     folded: fold !== 'none',
+    fraction,
   };
 }

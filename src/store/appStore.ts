@@ -3,9 +3,9 @@
  */
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
-import type { NelsonRules, NelsonRuleK, InspectionLevel, CalcState, AnovaMode, AqlMethod, AqlAcMethod, SwitchStatus, SpcDataLayout } from '../core';
+import type { NelsonRules, NelsonRuleK, InspectionLevel, CalcState, AnovaMode, AqlMethod, AqlAcMethod, AqlRegime, SwitchStatus, SpcDataLayout } from '../core';
 import {
-  AQL_COLS, MAX_LOT_SIZE, calcKey as coreCalcKey, CALC_INIT,
+  AQL_COLS, MAX_LOT_SIZE, aqlRegime, aqlRegimeAllows, calcKey as coreCalcKey, CALC_INIT,
   freshSwitchStatus, normalizeSwitchStatus, DEFAULT_RULE_K, normalizeRuleK,
 } from '../core';
 import { projectStoreValidationError, registerProjectLifecycleHooks } from '../platform/project';
@@ -89,6 +89,8 @@ interface AppState {
   aqlLot: number;
   aqlLevel: InspectionLevel;
   aqlAQL: number;
+  /** 质量表示方式独立于 AQL 档位：per100 可使用 0.010–1000，percent 仅可使用 ≤10。 */
+  aqlRegime: AqlRegime;
   aqlMethod: AqlMethod;     // 兼容旧快照；正式产品路径固定为 'gb'
   aqlAcMethod: AqlAcMethod; // 兼容旧快照；正式产品路径固定为 'gb'
   aqlSwitch: SwitchStatus;  // 当前正常/加严/放宽状态及批次历史
@@ -138,7 +140,7 @@ interface AppState {
   setParetoOptions(patch: Partial<Pick<AppState, 'paretoMergeOther' | 'paretoThreshold'>>): void;
   setParetoShowDemo(v: boolean): void;
   bumpFishboneRevision(): void;
-  setAql(patch: Partial<Pick<AppState, 'aqlLot' | 'aqlLevel' | 'aqlAQL' | 'aqlMethod' | 'aqlAcMethod'>>): void;
+  setAql(patch: Partial<Pick<AppState, 'aqlLot' | 'aqlLevel' | 'aqlAQL' | 'aqlRegime' | 'aqlMethod' | 'aqlAcMethod'>>): void;
   setAqlSwitch(status: SwitchStatus): void;
   setImportTab(t: ImportTab): void;
   setImportKind(k: ImportKind): void;
@@ -273,6 +275,7 @@ interface PersistedAqlState {
   aqlLot: number;
   aqlLevel: InspectionLevel;
   aqlAQL: number;
+  aqlRegime: AqlRegime;
   aqlMethod: 'gb';
   aqlAcMethod: 'gb';
   aqlSwitch: SwitchStatus;
@@ -296,6 +299,8 @@ function loadPersistedAqlState(): PersistedAqlState | null {
     }
     return {
       aqlLot: raw.aqlLot, aqlLevel: raw.aqlLevel, aqlAQL: raw.aqlAQL,
+      // v1.38 及更早的独立账本没有该字段：按当时的固定分流迁移，绝不猜成另一种口径。
+      aqlRegime: raw.aqlRegime ?? aqlRegime(raw.aqlAQL),
       aqlMethod: 'gb', aqlAcMethod: 'gb', aqlSwitch: normalizeSwitchStatus(raw.aqlSwitch),
     };
   } catch {
@@ -360,6 +365,7 @@ export const useApp = create<AppState>()(persist((set, get) => ({
   aqlLot: initialAql?.aqlLot ?? 120,
   aqlLevel: initialAql?.aqlLevel ?? 'II',
   aqlAQL: initialAql?.aqlAQL ?? 1.0,
+  aqlRegime: initialAql?.aqlRegime ?? 'percent',
   aqlMethod: 'gb',
   aqlAcMethod: 'gb',
   aqlSwitch: initialAql?.aqlSwitch ?? freshSwitchStatus(),
@@ -429,8 +435,13 @@ export const useApp = create<AppState>()(persist((set, get) => ({
     // GB/T 2828.1 / ISO 2859-1 的检验状态在连续批间延续；批量本来就可以逐批变化。
     // 只有检验水平/AQL/方法改变才代表换了检验体系、需要重建转移序列；
     // 单独改下一批 N 只重新查本批方案，不得把加严/放宽状态和转移得分清零。
-    const sequenceKeys: Array<keyof Pick<AppState, 'aqlLevel' | 'aqlAQL' | 'aqlMethod' | 'aqlAcMethod'>> = [
-      'aqlLevel', 'aqlAQL', 'aqlMethod', 'aqlAcMethod',
+    const nextAql = patch.aqlAQL ?? s.aqlAQL;
+    const nextRegime = patch.aqlRegime ?? s.aqlRegime;
+    if (!aqlRegimeAllows(nextRegime, nextAql)) {
+      throw new RangeError('百分不合格品体系只允许 AQL≤10；请选择每百单位不合格数或降低 AQL');
+    }
+    const sequenceKeys: Array<keyof Pick<AppState, 'aqlLevel' | 'aqlAQL' | 'aqlRegime' | 'aqlMethod' | 'aqlAcMethod'>> = [
+      'aqlLevel', 'aqlAQL', 'aqlRegime', 'aqlMethod', 'aqlAcMethod',
     ];
     const sequenceChanged = sequenceKeys.some((key) => key in patch && patch[key] !== s[key]);
     const previous = normalizeSwitchStatus(s.aqlSwitch);
@@ -449,7 +460,7 @@ export const useApp = create<AppState>()(persist((set, get) => ({
           ...reset,
           sequenceId: nextAqlSequenceId(),
           records: previous.records.map((record) => ({ ...record })),
-          note: '检验水平/AQL 已变更；已建立新的正常检验序列，转移得分从 0 开始',
+          note: '检验水平/AQL/质量表示方式已变更；已建立新的正常检验序列，转移得分从 0 开始',
         },
       } : {}),
     };
@@ -563,12 +574,18 @@ export const useApp = create<AppState>()(persist((set, get) => ({
     merged.aqlLot = Number.isSafeInteger(aql.aqlLot) && aql.aqlLot! >= 2 && aql.aqlLot! <= MAX_LOT_SIZE
       ? aql.aqlLot!
       : current.aqlLot;
-    merged.aqlLevel = aql.aqlLevel === 'I' || aql.aqlLevel === 'II' || aql.aqlLevel === 'III'
-      ? aql.aqlLevel
+    merged.aqlLevel = ['S-1', 'S-2', 'S-3', 'S-4', 'I', 'II', 'III'].includes(aql.aqlLevel as string)
+      ? aql.aqlLevel as InspectionLevel
       : current.aqlLevel;
     merged.aqlAQL = typeof aql.aqlAQL === 'number' && AQL_COLS.includes(aql.aqlAQL)
       ? aql.aqlAQL
       : current.aqlAQL;
+    const requestedRegime = aql.aqlRegime === 'percent' || aql.aqlRegime === 'per100'
+      ? aql.aqlRegime
+      : aqlRegime(merged.aqlAQL);
+    merged.aqlRegime = aqlRegimeAllows(requestedRegime, merged.aqlAQL)
+      ? requestedRegime
+      : aqlRegime(merged.aqlAQL);
     merged.aqlMethod = 'gb';
     merged.aqlAcMethod = 'gb';
     merged.aqlSwitch = normalizeSwitchStatus(aql.aqlSwitch ?? current.aqlSwitch);
@@ -579,6 +596,7 @@ export const useApp = create<AppState>()(persist((set, get) => ({
 function persistedAqlOf(state: AppState): PersistedAqlState {
   return {
     aqlLot: state.aqlLot, aqlLevel: state.aqlLevel, aqlAQL: state.aqlAQL,
+    aqlRegime: state.aqlRegime,
     aqlMethod: 'gb', aqlAcMethod: 'gb', aqlSwitch: normalizeSwitchStatus(state.aqlSwitch),
   };
 }
@@ -603,7 +621,8 @@ function savePersistedAqlState(state: AppState): boolean {
 
 useApp.subscribe((state, previous) => {
   if (state.aqlLot !== previous.aqlLot || state.aqlLevel !== previous.aqlLevel
-    || state.aqlAQL !== previous.aqlAQL || state.aqlSwitch !== previous.aqlSwitch) {
+    || state.aqlAQL !== previous.aqlAQL || state.aqlRegime !== previous.aqlRegime
+    || state.aqlSwitch !== previous.aqlSwitch) {
     const wasDirty = aqlPersistenceDirty;
     if (!savePersistedAqlState(state) && !wasDirty) {
       state.showToast('AQL 责任账本尚未写入本地存储；请释放空间，项目导出会在安全落盘前阻止');
@@ -671,7 +690,7 @@ export function clearAqlBusinessState(): void {
   aqlStateCorrupt = false;
   aqlPersistenceDirty = false;
   useApp.setState({
-    aqlLot: 120, aqlLevel: 'II', aqlAQL: 1, aqlMethod: 'gb', aqlAcMethod: 'gb',
+    aqlLot: 120, aqlLevel: 'II', aqlAQL: 1, aqlRegime: 'percent', aqlMethod: 'gb', aqlAcMethod: 'gb',
     aqlSwitch: freshSwitchStatus(),
   });
   // setState 的订阅会先写入干净空账本；“清业务数据”契约要求最终连该键一起移除。

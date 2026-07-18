@@ -14,7 +14,7 @@ beforeEach(() => {
   useAnalyses.setState({ saved: [], lastError: null });
   useApp.setState({
     page: 'aql', modal: null, openMenu: null,
-    aqlLot: 2000, aqlLevel: 'II', aqlAQL: 1.0,
+    aqlLot: 2000, aqlLevel: 'II', aqlAQL: 1.0, aqlRegime: 'percent',
     aqlMethod: 'gb', aqlAcMethod: 'gb', aqlSwitch: freshSwitchStatus(),
   });
 });
@@ -61,7 +61,7 @@ describe('AQL 批次工作流', () => {
 
     render(<App />);
     expect(screen.getByRole('button', { name: 'AQL 1.5' }).hasAttribute('disabled')).toBe(true);
-    expect(screen.getByText(/检验水平与 AQL 已锁定/)).toBeTruthy();
+    expect(screen.getByText(/质量表示、检验水平与 AQL 已锁定/)).toBeTruthy();
   });
 
   it('正常检验换参数建立新序列，责任账本保留但转移得分重新起算', () => {

@@ -40,6 +40,15 @@ export function worksheetDisplayOrder(numericCount: number, textCols: TextColumn
   return out;
 }
 
+/** 与工作表顶部一致的数值列 C 编号；文本列占据位置并显示为 C#-T。 */
+export function worksheetNumericColumnCodes(numericCount: number, textCols: TextColumn[]): number[] {
+  const codes = new Array<number>(numericCount);
+  worksheetDisplayOrder(numericCount, textCols).forEach((ref, displayIndex) => {
+    if (ref.kind === 'numeric') codes[ref.index] = displayIndex + 1;
+  });
+  return codes;
+}
+
 export interface ParsedMatrix {
   colNames: string[]; // 数值列名
   rows: number[][];

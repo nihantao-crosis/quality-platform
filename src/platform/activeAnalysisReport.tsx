@@ -65,6 +65,7 @@ import { ScatterPlot } from '../ui/charts/ScatterPlot';
 import { Histogram } from '../ui/charts/Histogram';
 import { EffectsBar, MainEffects } from '../ui/charts/doe';
 import { OcCurveChart } from '../ui/charts/OcCurveChart';
+import { OcCurvePer100 } from '../ui/charts/OcCurvePer100';
 import { FishboneChart } from '../ui/pages/Fishbone';
 import { loadFishboneState } from '../store/fishboneStore';
 import type { AnalysisReportChart, AnalysisReportPayload } from './analysisReportModel';
@@ -158,7 +159,7 @@ function buildSummaryPayload(): AnalysisReportPayload {
 
 function buildAqlPayload(): AnalysisReportPayload {
   const app = useApp.getState();
-  const report = buildAqlReportData(app.aqlLot, app.aqlLevel, app.aqlAQL, app.aqlSwitch);
+  const report = buildAqlReportData(app.aqlLot, app.aqlLevel, app.aqlAQL, app.aqlSwitch, app.aqlRegime);
   const p = report.plan;
   const latest = report.latestRecord;
   const summary = [
@@ -181,21 +182,25 @@ function buildAqlPayload(): AnalysisReportPayload {
       ? '转移得分已达到 30，但生产稳定/负责部门批准条件未同时满足，不能转放宽检验。'
       : '',
   ].filter(Boolean);
-  // per100 体系的 OC 是泊松模型且横轴为 λ(每百单位不合格数),二项 OcCurveChart 画出来是错的:
-  // 页面已有专用 OcCurvePer100(页内组件),导出报告先以数据表述为准、不放错误曲线。
-  const charts = p.fullInspect || report.suspended || report.regime === 'per100' ? [] : [
-    svgChart(
-      'OC 特性曲线',
-      <OcCurveChart T={T} n={p.n} ac={p.ac} pmax={Math.min(1, Math.max(0.1, (report.rqlPct ?? 40) / 80))} aqlP={report.aql / 100} rqlP={report.rqlPct == null ? undefined : report.rqlPct / 100} />,
-      960,
-      330,
-      'AQL 点显示生产方接收概率；RQL 点对应使用方风险 β=10%。',
-    ),
-  ];
+  const charts = p.fullInspect || report.suspended ? [] : report.regime === 'per100'
+    ? [svgChart(
+        'OC 特性曲线（每百单位不合格数）',
+        <OcCurvePer100 T={T} plan={p} aql={report.aql} rqlLambda={report.rqlPer100 ?? undefined} />,
+        960,
+        330,
+        '泊松 OC 曲线；横轴 λ 为每百单位不合格数。AQL 点显示生产方接收概率，RQL 点对应使用方风险 β=10%。',
+      )]
+    : [svgChart(
+        'OC 特性曲线',
+        <OcCurveChart T={T} n={p.n} ac={p.ac} pmax={Math.min(1, Math.max(0.1, (report.rqlPct ?? 40) / 80))} aqlP={report.aql / 100} rqlP={report.rqlPct == null ? undefined : report.rqlPct / 100} />,
+        960,
+        330,
+        'AQL 点显示生产方接收概率；RQL 点对应使用方风险 β=10%。',
+      )];
   return {
     kind: 'aql',
     title: 'AQL 接收抽样专项报告',
-    subtitle: `${report.standard} · ${report.samplingType} · 批量 ${report.lot} · 水平 ${report.level} · AQL ${report.aql}`,
+    subtitle: `${report.standard} · ${report.samplingType} · ${report.regime === 'per100' ? '每百单位不合格数' : '百分不合格品'} · 批量 ${report.lot} · 水平 ${report.level} · AQL ${report.aql}`,
     generatedAt: now(),
     summary,
     warnings,
@@ -207,10 +212,10 @@ function buildAqlPayload(): AnalysisReportPayload {
       },
       {
         title: '实际批次检验与追溯记录',
-        headers: ['时间', '批次号', '检验人', '初检/复验', '批量 N', '水平', 'AQL', '状态', '主表', '初始字码', '执行字码', '检验量', '全检', 'Ac/Re', '不合格数', '不合格品处置', '判定', '转移后', '得分', '备注'],
+        headers: ['时间', '批次号', '检验人', '初检/复验', '批量 N', '水平', 'AQL', '质量表示', '状态', '主表', '初始字码', '执行字码', '检验量', '全检', 'Ac/Re', '不合格数', '不合格品处置', '判定', '转移后', '得分', '备注'],
         rows: report.records.map((record) => [
           record.inspectedAt, record.batchId, record.inspector, record.originalInspection ? '初检' : '复验',
-          record.lot, record.level, record.aql, record.stateBefore, record.sourceTable, record.initialCode, record.finalCode,
+          record.lot, record.level, record.aql, record.regime === 'per100' ? '每百单位不合格数' : '百分不合格品', record.stateBefore, record.sourceTable, record.initialCode, record.finalCode,
           record.sampleSize, record.fullInspection ? '是' : '否', `${record.acceptanceNumber}/${record.rejectionNumber}`,
           record.nonconforming, dispositionLabel(record.nonconformingDisposition),
           record.decision === 'accepted' ? '接收' : '不接收', record.stateAfter, record.switchingScoreAfter, record.note,

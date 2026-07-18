@@ -11,7 +11,7 @@ import {
   oneWayAnova, oneSampleT, twoSampleT, linearRegression, anovaGroups, buildAnovaGroups, wideScaleDisparate, resolveAnovaMode, countAnovaPendingCells, isDoeAnalysisColumn, analyzeDoe, detectFactorial, analyzeFactorial, detectGeneralFactorial, analyzeGeneralFactorial, detectFractionalFactorial, analyzeFractionalFactorial, resolveDoeColumnsWide, MAX_FRACTIONAL_FACTORS, factorialModelTerms, resolveDoeBlockValues, plansByState, computeDescriptive,
   ewmaSeries, cusumSeries, stagedXbar, stagedRange, stageValidationError, normalizeSwitchStatus,
   DEFAULT_RULE_K, normalizeRuleK,
-  type InspectionLevel, type AnovaMode, type AqlMethod, type AqlAcMethod, type NelsonRules, type NelsonRuleK, type SwitchStatus, type SpcDataLayout,
+  type InspectionLevel, type AnovaMode, type AqlMethod, type AqlAcMethod, type AqlRegime, type NelsonRules, type NelsonRuleK, type SwitchStatus, type SpcDataLayout,
 } from '../core';
 import { useApp, DEFAULT_SPC_RULES, type SpcType, type DoeView, type DoeTab, type HypoTab, type ParetoView } from './appStore';
 import { syncSpecForActiveMeasurement, useData, resolveCapabilityMeasurementData, type ParetoModel } from './dataStore';
@@ -60,7 +60,7 @@ export interface AnalysisSnapshot {
   gageOperatorName?: string | null;
   gageRequestedReal?: boolean;
   gageSourceReal?: boolean;
-  aqlLot?: number; aqlLevel?: InspectionLevel; aqlAQL?: number; aqlMethod?: AqlMethod; aqlAcMethod?: AqlAcMethod;
+  aqlLot?: number; aqlLevel?: InspectionLevel; aqlAQL?: number; aqlRegime?: AqlRegime; aqlMethod?: AqlMethod; aqlAcMethod?: AqlAcMethod;
   aqlSwitch?: SwitchStatus;
   doeView?: DoeView; doeTab?: DoeTab; hypoTab?: HypoTab; paretoView?: ParetoView;
   anovaShowDemo?: boolean;
@@ -621,7 +621,7 @@ function buildSummary(kind: AnalysisKind): Omit<SavedAnalysis, 'id' | 'createdAt
       return {
         kind,
         title: sw.suspended ? 'AQL 历史摘要 · 已暂停' : plan.fullInspect ? 'AQL 历史摘要 · 100% 全检' : `AQL 历史摘要 · ${stateLabel}方案`,
-        metric: `保存时 ${plan.fullInspect ? 'N' : 'n'}=${plan.n} Ac=${plan.ac} Re=${plan.re}`,
+        metric: `保存时 ${app.aqlRegime === 'per100' ? '计点' : '百分'} · ${plan.fullInspect ? 'N' : 'n'}=${plan.n} Ac=${plan.ac} Re=${plan.re}`,
         status: sw.suspended ? '保存时：等待纠正' : plan.fullInspect ? '保存时：全检' : `保存时：${stateLabel}`,
         ...pick(sw.suspended ? BAD : plan.fullInspect ? WARN : INFO),
       };
@@ -709,7 +709,7 @@ function snapshotOf(kind: AnalysisKind): AnalysisSnapshot {
     snap.gageSourceReal = current.requestedReal && current.prepared.ok;
   }
   if (kind === 'aql') {
-    snap.aqlLot = a.aqlLot; snap.aqlLevel = a.aqlLevel; snap.aqlAQL = a.aqlAQL;
+    snap.aqlLot = a.aqlLot; snap.aqlLevel = a.aqlLevel; snap.aqlAQL = a.aqlAQL; snap.aqlRegime = a.aqlRegime;
     snap.aqlMethod = 'gb'; snap.aqlAcMethod = 'gb';
     // 标题/指标已经固化保存时的状态摘要；责任账本只保留在活跃 AQL store 中。
     // 历史卡不再复制整本 records，避免 40 个摘要把同一账本重复存储 40 次。
@@ -1036,6 +1036,7 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
       patch.aqlLot = current.aqlLot;
       patch.aqlLevel = current.aqlLevel;
       patch.aqlAQL = current.aqlAQL;
+      patch.aqlRegime = current.aqlRegime;
       patch.aqlMethod = current.aqlMethod;
       patch.aqlAcMethod = current.aqlAcMethod;
       patch.aqlSwitch = current.aqlSwitch;

@@ -202,16 +202,15 @@ export function Worksheet() {
   const winEnd = virtual ? Math.min(M.k, Math.ceil((scrollTop + viewH) / ROW_H) + OVERSCAN) : M.k;
   const visibleSubs = virtual ? M.subs.slice(winStart, winEnd) : M.subs;
 
-  // 公式引擎的 C1/C2…只指真实数值列；隐含子组标签不能占用 C1。
-  // 批次716-R2 P1:列显示顺序按导入原列序交错(TextColumn.sourceIndex),
-  // 「部件、测试人、螺钉高度」不再被强制排成「数值在前、文本在后」;C#/T# 代号仍按各自序号不变。
+  // 列显示顺序按导入原列序交错(TextColumn.sourceIndex)。Minitab 式代号按显示位置统一编号，
+  // 文本列追加 -T：例如「部件/测试人/螺钉高度」显示 C1/C2-T/C3。
   // 批次716-R3 P1-1:删除与左侧 sticky 行号槽重复的「ID/行」数据列(人工审核 PPT 10 页)——
   // Minitab 式工作表只有行号槽 + 业务数据列;行号槽表头在行式子组口径下显示「子组」语义,其余留空。
   const displayOrder = worksheetDisplayOrder(M.colNames.length, textCols);
   const cols: { code: string; name: string; measIdx: number | null }[] = [];
-  displayOrder.forEach((ref) => {
-    if (ref.kind === 'numeric') cols.push({ code: `C${ref.index + 1}`, name: M.colNames[ref.index], measIdx: ref.index });
-    else cols.push({ code: `T${ref.index + 1}`, name: textCols[ref.index].name, measIdx: null });
+  displayOrder.forEach((ref, displayIndex) => {
+    if (ref.kind === 'numeric') cols.push({ code: `C${displayIndex + 1}`, name: M.colNames[ref.index], measIdx: ref.index });
+    else cols.push({ code: `C${displayIndex + 1}-T`, name: textCols[ref.index].name, measIdx: null });
   });
   const extra: Array<[string, string]> = [
     ...(rowSpc ? ([['', '均值'], ['', '极差']] as Array<[string, string]>) : []),

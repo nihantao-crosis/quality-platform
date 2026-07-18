@@ -264,7 +264,8 @@ describe('保存分析', () => {
     });
     const saved = useAnalyses.getState().saveCurrent()!;
     expect(saved.title).toContain('加严');
-    expect(saved.metric).toBe('保存时 n=125 Ac=2 Re=3');
+    expect(saved.metric).toBe('保存时 百分 · n=125 Ac=2 Re=3');
+    expect(saved.snapshot.aqlRegime).toBe('percent');
     expect(saved.snapshot.aqlSwitch).toBeUndefined();
 
     const active = aqlStatus({ note: '当前活跃检验流' });
@@ -391,7 +392,8 @@ describe('保存分析', () => {
 
     const saved = useAnalyses.getState().saveCurrent()!;
     expect(saved.title).toBe('AQL 历史摘要 · 100% 全检');
-    expect(saved.metric).toBe('保存时 N=8 Ac=0 Re=1');
+    expect(saved.metric).toBe('保存时 百分 · N=8 Ac=0 Re=1');
+    expect(saved.snapshot.aqlRegime).toBe('percent');
     expect(saved.status).toBe('保存时：全检');
     expect(saved.snapshot.aqlSwitch).toBeUndefined();
   });

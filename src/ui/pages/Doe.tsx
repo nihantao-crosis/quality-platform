@@ -14,7 +14,7 @@ import {
   uncodedEquation, lenthPseFromEffects, studentizedDeletedResiduals,
   detectFractionalFactorial, analyzeFractionalFactorial, MAX_FRACTIONAL_FACTORS,
   detectGeneralFactorial, analyzeGeneralFactorial, generateGeneralFactorialDesign,
-  fractionalDesignOptions, generateFractionalFactorialDesign,
+  fractionalDesignOptions, fractionalFoldPreview, generateFractionalFactorialDesign,
   type CodedDesign, type FactorialResult, type FactorDef,
   type GeneralFactorialDesign, type GeneralFactorialResult,
 } from '../../core';
@@ -668,6 +668,7 @@ type CreateDesignType = 'two-level' | 'general' | 'fractional';
 
 /** 一般全因子的因子编辑草稿:水平数与各水平值均为「文本态」,生成时统一解析校验(参考 kText 模式)。 */
 interface GeneralFactorDraft { name: string; countText: string; levelTexts: string[] }
+interface CreatedDesignPreview { name: string; colNames: string[]; rows: number[][] }
 
 function CreateDesign() {
   const { importMatrix } = useData();
@@ -690,6 +691,8 @@ function CreateDesign() {
   const [blocks, setBlocks] = useState(1);
   const [randomize, setRandomize] = useState(true);
   const [seedText, setSeedText] = useState(String(DEFAULT_DOE_SEED));
+  const [storeDesign, setStoreDesign] = useState(true);
+  const [createdPreview, setCreatedPreview] = useState<CreatedDesignPreview | null>(null);
 
   // —— 一般全因子(716-R3 ①):每因子 2–5 个自定义水平 ——
   const [gKText, setGKText] = useState('2');
@@ -704,6 +707,7 @@ function CreateDesign() {
   // —— 分数因子(716-R3 ②):2^(k−p) 标准生成元 + 折叠 ——
   const [fKText, setFKText] = useState('4');
   const [fP, setFP] = useState(1);
+  const [fFraction, setFFraction] = useState(1);
   const [fRepsText, setFRepsText] = useState('1');
   const [foldMode, setFoldMode] = useState<'none' | 'full' | 'factor'>('none');
   const [foldFactorIdx, setFoldFactorIdx] = useState(0);
@@ -720,6 +724,23 @@ function CreateDesign() {
   const setF = (i: number, patch: Partial<FactorDef>) =>
     setFactors((prev) => prev.map((f, j) => (j === i ? { ...f, ...patch } : f)));
 
+  const deliverDesign = (
+    name: string,
+    design: { colNames: string[]; rows: number[][]; textCols: { name: string; values: string[] }[]; responseCol: number },
+    description: string,
+  ) => {
+    if (!storeDesign) {
+      setCreatedPreview({ name, colNames: [...design.colNames], rows: design.rows.map((row) => [...row]) });
+      showToast(`${description}；当前仅生成预览，未写入工作表`);
+      return;
+    }
+    const pending = design.rows.map((_, row) => ({ row, col: design.responseCol }));
+    importMatrix(name, design.colNames, design.rows, design.textCols, pending);
+    setCreatedPreview(null);
+    goTo('worksheet');
+    showToast(`${description}；已写入工作表，请录入响应后回 DOE→分析`);
+  };
+
   const create = () => {
     const facs = factors.slice(0, k);
     if (facs.some((f) => !f.name.trim())) { showToast('请填写所有因子名'); return; }
@@ -728,10 +749,7 @@ function CreateDesign() {
     const d = generateFactorialDesign(facs.map((f) => ({ name: f.name.trim(), low: f.low, high: f.high })),
       { centerPoints: center, replicates: reps, blocks: blocksEff, randomize, seed });
     const stamp = new Date().toLocaleTimeString('zh-CN', { hour12: false }).replace(/:/g, '');
-    const pending = d.rows.map((_, row) => ({ row, col: d.responseCol }));
-    importMatrix(`DOE设计_${stamp}`, d.colNames, d.rows, d.textCols, pending);
-    goTo('worksheet');
-    showToast(`已生成 ${d.rows.length} 运行 / ${d.blockCount} 区组的因子设计（含标准序、运行序、区组、点类型），请录入响应后回 DOE→分析`);
+    deliverDesign(`DOE设计_${stamp}`, d, `已生成 ${d.rows.length} 运行 / ${d.blockCount} 区组的因子设计（含标准序、运行序、区组、点类型）`);
   };
 
   // —— 一般全因子:派生值与生成 ——
@@ -771,10 +789,7 @@ function CreateDesign() {
     try {
       const d = generateGeneralFactorialDesign(parsed, { replicates: gReps, randomize, seed });
       const stamp = new Date().toLocaleTimeString('zh-CN', { hour12: false }).replace(/:/g, '');
-      const pending = d.rows.map((_, row) => ({ row, col: d.responseCol }));
-      importMatrix(`DOE一般全因子_${stamp}`, d.colNames, d.rows, d.textCols, pending);
-      goTo('worksheet');
-      showToast(`已生成 ${d.rows.length} 运行的一般全因子设计（标准序、运行序、点类型;区组恒为 1），请录入响应后回 DOE→分析,多水平数据自动走一般全因子 ANOVA`);
+      deliverDesign(`DOE一般全因子_${stamp}`, d, `已生成 ${d.rows.length} 运行的一般全因子设计（标准序、运行序、点类型；区组恒为 1），多水平数据将走一般全因子 ANOVA`);
     } catch (error) { showToast((error as Error).message); }
   };
 
@@ -786,11 +801,16 @@ function CreateDesign() {
   // 因子数变化后原 p 可能不存在(如 3 因子无 p=2):回落到全因子行,避免静默生成另一种设计
   const fPEff = fOptions.some((option) => option.p === fP) ? fP : 0;
   const fSpec = fOptions.find((option) => option.p === fPEff)!;
+  const fFractionCount = 1 << fSpec.p;
+  const fFractionEff = Math.max(1, Math.min(fFraction, fFractionCount));
   const fParsedReps = Number.parseInt(fRepsText, 10);
   const fReps = Number.isInteger(fParsedReps) ? Math.max(1, Math.min(10, fParsedReps)) : 1;
   const foldEff: 'none' | 'full' | 'factor' = fSpec.p === 0 ? 'none' : foldMode;
   const foldFactorEff = Math.min(foldFactorIdx, fK - 1);
-  const fRuns = fSpec.runs * fReps * (foldEff !== 'none' ? 2 : 1);
+  const foldArg = foldEff === 'none' ? 'none' as const : foldEff === 'full' ? 'full' as const : foldFactorEff;
+  const fFoldPreview = fractionalFoldPreview(fK, fSpec.p, foldArg, fFractionEff);
+  const fRuns = fFoldPreview.totalRuns * fReps;
+  const ineffectiveFold = foldEff !== 'none' && !fFoldPreview.effective;
 
   const createFractional = () => {
     const facs = factors.slice(0, fK);
@@ -802,15 +822,17 @@ function CreateDesign() {
         facs.map((f) => ({ name: f.name.trim(), low: f.low, high: f.high })),
         fSpec.p,
         {
-          fold: foldEff === 'none' ? 'none' : foldEff === 'full' ? 'full' : foldFactorEff,
+          fold: foldArg,
+          fraction: fFractionEff,
           replicates: fReps, randomize, seed,
         },
       );
       const stamp = new Date().toLocaleTimeString('zh-CN', { hour12: false }).replace(/:/g, '');
-      const pending = d.rows.map((_, row) => ({ row, col: d.responseCol }));
-      importMatrix(`DOE分数因子_${stamp}`, d.colNames, d.rows, d.textCols, pending);
-      goTo('worksheet');
-      showToast(`已生成 ${fSpec.p === 0 ? `2^${fK} 全因子` : `${fSpec.label} ${d.resolutionLabel} 分数因子`}设计,共 ${d.rows.length} 运行${d.folded ? '（折叠追加运行记为区组 2）' : ''};${d.generators.length ? `生成元 ${d.generators.join('、')},别名项在分析时按低阶优先自动剔除` : '无别名'}。请录入响应后回 DOE→分析`);
+      deliverDesign(
+        `DOE分数因子_${stamp}`,
+        d,
+        `已生成 ${fSpec.p === 0 ? `2^${fK} 全因子` : `${fSpec.label} 分数因子（第 ${d.fraction}/${1 << fSpec.p} 分部）`}，实际分辨率 ${d.resolutionLabel}，共 ${d.rows.length} 运行${d.folded ? '（折叠追加运行记为区组 2）' : ''}；${d.generators.length ? `生成元 ${d.generators.join('、')}，别名项按低阶优先剔除` : '无别名'}`,
+      );
     } catch (error) { showToast((error as Error).message); }
   };
 
@@ -827,6 +849,37 @@ function CreateDesign() {
       </label>
     </>
   );
+  const storageControl = (
+    <label title="关闭后只在当前页面预览设计矩阵，不覆盖现有工作表" style={{ display: 'inline-flex', alignItems: 'center', gap: 5, cursor: 'pointer' }}>
+      <input
+        type="checkbox"
+        aria-label="将设计存储在工作表中"
+        checked={storeDesign}
+        onChange={(event) => setStoreDesign(event.target.checked)}
+      />
+      将设计存储在工作表中
+    </label>
+  );
+  const createdPreviewPanel = createdPreview && !storeDesign ? (
+    <div style={{ marginTop: 16, paddingTop: 14, borderTop: '1px solid #edf0f3' }}>
+      <div style={{ fontWeight: 600, color: '#33404f', marginBottom: 8 }}>
+        设计预览 · {createdPreview.name}（{createdPreview.rows.length} 行，未写入工作表）
+      </div>
+      <div style={{ overflowX: 'auto', maxHeight: 300, border: '1px solid #e2e7ed', borderRadius: 5 }}>
+        <table style={{ borderCollapse: 'collapse', minWidth: '100%', fontSize: 11.5 }}>
+          <thead><tr>{createdPreview.colNames.map((name) => (
+            <th key={name} style={{ padding: '6px 9px', textAlign: 'right', color: '#6b7480', background: '#f7f9fb', whiteSpace: 'nowrap' }}>{name}</th>
+          ))}</tr></thead>
+          <tbody>{createdPreview.rows.slice(0, 12).map((row, rowIndex) => (
+            <tr key={rowIndex} style={{ borderTop: '1px solid #eef1f4' }}>{row.map((value, colIndex) => (
+              <td key={colIndex} className="mono" style={{ padding: '5px 9px', textAlign: 'right', color: '#33404f' }}>{nf(value, 6)}</td>
+            ))}</tr>
+          ))}</tbody>
+        </table>
+      </div>
+      {createdPreview.rows.length > 12 && <div style={{ marginTop: 5, fontSize: 11, color: '#8a929d' }}>仅显示前 12 行；勾选“将设计存储在工作表中”并重新生成即可录入全部运行。</div>}
+    </div>
+  ) : null;
 
   // —— 一般全因子创建卡内容 ——
   const generalSection = (
@@ -869,6 +922,7 @@ function CreateDesign() {
             <input type="number" min={1} max={10} value={gRepsText} onChange={(e) => setGRepsText(e.target.value)} style={{ ...inp, width: 64 }} />
           </label>
           {randomizeControls}
+          {storageControl}
           <span style={{ color: '#1c4e7a' }}>共 <b className="mono">{gRuns}</b> 次试验</span>
         </div>
         <div style={{ fontSize: 11.5, color: '#9aa2ad', lineHeight: 1.6 }}>
@@ -881,9 +935,10 @@ function CreateDesign() {
         <div>
           <button type="button" className="hov-act-primary" onClick={createGeneral}
             style={{ display: 'inline-block', padding: '9px 20px', border: 0, background: '#1f6fb2', color: '#fff', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit', fontSize: 13, fontWeight: 600 }}>
-            生成设计表 → 工作表
+            {storeDesign ? '生成设计表 → 工作表' : '生成设计预览'}
           </button>
         </div>
+        {createdPreviewPanel}
       </div>
     </>
   );
@@ -927,10 +982,10 @@ function CreateDesign() {
             </thead>
             <tbody>
               {fOptions.map((option) => (
-                <tr key={option.p} onClick={() => setFP(option.p)}
+                <tr key={option.p} onClick={() => { setFP(option.p); setFFraction(1); }}
                   style={{ borderTop: '1px solid #f0f2f5', cursor: 'pointer', background: option.p === fPEff ? '#f2f7fc' : undefined }}>
                   <td style={{ padding: '6px 10px' }}>
-                    <input type="radio" name="frac-design" checked={option.p === fPEff} onChange={() => setFP(option.p)} />
+                    <input type="radio" name="frac-design" checked={option.p === fPEff} onChange={() => { setFP(option.p); setFFraction(1); }} />
                   </td>
                   <td style={{ padding: '6px 10px', color: '#33404f', fontWeight: 600 }} className="mono">
                     {option.p === 0 ? `${option.label} 全因子` : `${option.label} 分数因子`}
@@ -945,8 +1000,21 @@ function CreateDesign() {
             </tbody>
           </table>
         </div>
+        {fSpec.p > 0 && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              分部
+              <select aria-label="分数因子分部" style={selStyle} value={fFractionEff} onChange={(event) => setFFraction(+event.target.value)}>
+                {Array.from({ length: fFractionCount }, (_, index) => index + 1).map((fraction) => (
+                  <option key={fraction} value={fraction}>{fraction === 1 ? `主分部 1/${fFractionCount}` : `分部 ${fraction}/${fFractionCount}`}</option>
+                ))}
+              </select>
+            </label>
+            <span className="mono" style={{ color: '#6b7480' }}>生成元 {fFoldPreview.generators.join('、')}</span>
+          </div>
+        )}
         <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
-          <label title="折叠通过追加符号取反的镜像运行解除混杂:全折叠使分辨率 III→IV(主效应与二因子交互解除混杂);指定因子折叠解除该因子与二因子交互的混杂" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <label title="折叠前会检查镜像是否产生新设计点；无效折叠不会写入重复运行" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             折叠
             <select style={selStyle} value={foldEff === 'none' && fSpec.p === 0 ? 'none' : foldMode} disabled={fSpec.p === 0}
               onChange={(e) => setFoldMode(e.target.value as 'none' | 'full' | 'factor')}>
@@ -965,20 +1033,29 @@ function CreateDesign() {
             <input type="number" min={1} max={10} value={fRepsText} onChange={(e) => setFRepsText(e.target.value)} style={{ ...inp, width: 64 }} />
           </label>
           {randomizeControls}
+          {storageControl}
           <span style={{ color: '#1c4e7a' }}>共 <b className="mono">{fRuns}</b> 次试验</span>
+          <span style={{ color: '#1c4e7a' }}>实际分辨率 <b className="mono">{fFoldPreview.resolutionLabel}</b></span>
         </div>
+        {ineffectiveFold && (
+          <div role="alert" style={{ padding: '8px 10px', border: '1px solid #efcf91', borderRadius: 5, background: '#fff7e8', color: '#8a6414', lineHeight: 1.5 }}>
+            该全折叠把设计映射回原分部，新增设计点为 0，不能解除任何混杂。请选择“指定因子折叠”或其他设计。
+          </div>
+        )}
         <div style={{ fontSize: 11.5, color: '#9aa2ad', lineHeight: 1.6 }}>
           生成元与分辨率取自公认的教科书标准最小失真设计表(Box–Hunter–Hunter / Montgomery,与 Minitab 默认一致),
           例如 2^(5-2) III 8 次:D=AB、E=AC。分辨率 III 表示主效应与二因子交互混杂,IV 表示二因子交互相互混杂,V 及以上主效应与二因子交互均清晰。
-          折叠追加的镜像运行记为区组 2(折叠块可作区组吸收两批试验的批次差);标准序在原设计后顺延,随机化按区组内 LCG 洗牌,同种子可复现。
+          可选择 2^p 个互补分部；负生成元会明确显示。折叠前先检查镜像是否真的增加新设计点；有效镜像运行记为区组 2，实际分辨率按合并后的设计矩阵重新计算。
+          标准序在原设计后顺延,随机化按区组内 LCG 洗牌,同种子可复现。
           分析时别名项(如 C=AB 时的 A×B)由分析引擎按低阶优先自动剔除并报告混杂关系。
         </div>
         <div>
-          <button type="button" className="hov-act-primary" onClick={createFractional}
-            style={{ display: 'inline-block', padding: '9px 20px', border: 0, background: '#1f6fb2', color: '#fff', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit', fontSize: 13, fontWeight: 600 }}>
-            生成设计表 → 工作表
+          <button type="button" className="hov-act-primary" onClick={createFractional} disabled={ineffectiveFold}
+            style={{ display: 'inline-block', padding: '9px 20px', border: 0, background: '#1f6fb2', color: '#fff', borderRadius: 6, cursor: ineffectiveFold ? 'not-allowed' : 'pointer', opacity: ineffectiveFold ? 0.55 : 1, fontFamily: 'inherit', fontSize: 13, fontWeight: 600 }}>
+            {storeDesign ? '生成设计表 → 工作表' : '生成设计预览'}
           </button>
         </div>
+        {createdPreviewPanel}
       </div>
     </>
   );
@@ -1051,6 +1128,7 @@ function CreateDesign() {
             <input type="number" value={seedText} onChange={(e) => setSeedText(e.target.value)} disabled={!randomize}
               style={{ ...inp, width: 100, ...(randomize ? {} : { opacity: 0.5 }) }} />
           </label>
+          {storageControl}
           <span style={{ color: '#1c4e7a' }}>共 <b className="mono">{runs}</b> 次试验</span>
         </div>
         <div style={{ fontSize: 11.5, color: '#9aa2ad', lineHeight: 1.6 }}>
@@ -1061,9 +1139,10 @@ function CreateDesign() {
         <div>
           <button type="button" className="hov-act-primary" onClick={create}
             style={{ display: 'inline-block', padding: '9px 20px', border: 0, background: '#1f6fb2', color: '#fff', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit', fontSize: 13, fontWeight: 600 }}>
-            生成设计表 → 工作表
+            {storeDesign ? '生成设计表 → 工作表' : '生成设计预览'}
           </button>
         </div>
+        {createdPreviewPanel}
       </div>
     </Card>
   );

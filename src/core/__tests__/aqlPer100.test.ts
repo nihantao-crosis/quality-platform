@@ -8,7 +8,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
-  AQL_COLS, PER100_MAX_D_PER_UNIT, PER100_RQL_SEARCH_MAX, aqlPlanByState, aqlRegime,
+  AQL_COLS, AQL_PERCENT_COLS, AQL_PER100_COLS, PER100_MAX_D_PER_UNIT, PER100_RQL_SEARCH_MAX, aqlPlanByState, aqlRegime,
   masterPlanByState, normalPlanOneStepTighter, ocPa, oneStepTighterAql, producerRiskPct,
   rqlFor, rqlForResult, type InspectionState, type SamplingPlan,
 } from '../aql';
@@ -170,8 +170,8 @@ describe('K2 黄金夹具来源与逐格核对(490 格)', () => {
   });
 });
 
-describe('体系区分 aqlRegime 与 26 档列表', () => {
-  it('≤10 为 percent(二项);≥15 为 per100(泊松);AQL_COLS 恰好 26 档', () => {
+describe('显式质量表示与 26 档列表', () => {
+  it('旧载荷维持固定分流；新 per100 允许完整 26 档', () => {
     expect(AQL_COLS).toHaveLength(26);
     expect(aqlRegime(0.01)).toBe('percent');
     expect(aqlRegime(10)).toBe('percent');
@@ -179,6 +179,8 @@ describe('体系区分 aqlRegime 与 26 档列表', () => {
     expect(aqlRegime(1000)).toBe('per100');
     expect(AQL_COLS.filter((a) => aqlRegime(a) === 'percent')).toHaveLength(16);
     expect(AQL_COLS.filter((a) => aqlRegime(a) === 'per100')).toEqual([15, 25, 40, 65, 100, 150, 250, 400, 650, 1000]);
+    expect(AQL_PERCENT_COLS).toEqual(AQL_COLS.slice(0, 16));
+    expect(AQL_PER100_COLS).toEqual(AQL_COLS);
   });
 });
 
@@ -305,6 +307,47 @@ describe('per100 批判定与责任账本(d 允许大于 n)', () => {
     expect(normalizeSwitchStatus({ ...valid, records: [forged] }).records).toEqual([]);
   });
 
+  it('低 AQL 也可显式选择 per100，且账本/报告不会与同 AQL 的 percent 混淆', () => {
+    const per100 = recordInspection(freshSwitchStatus(), {
+      lot: 2000, level: 'II', aql: 1.0, regime: 'per100', nonconforming: 126,
+      batchId: 'POINTS-LOW-AQL', inspector: '张检', inspectedAt: '2026-07-17T08:20:00.000Z',
+    });
+    expect(per100.records[0]).toMatchObject({ regime: 'per100', sampleSize: 125, nonconforming: 126 });
+    expect(normalizeSwitchStatus(per100).records).toHaveLength(1);
+    const pointsReport = buildAqlReportData(2000, 'II', 1.0, per100, 'per100');
+    expect(pointsReport.regime).toBe('per100');
+    expect(pointsReport.latestRecord?.batchId).toBe('POINTS-LOW-AQL');
+    expect(pointsReport.rqlPer100).toBeGreaterThan(0);
+    expect(pointsReport.rqlPct).toBeNull();
+    const percentReport = buildAqlReportData(2000, 'II', 1.0, per100, 'percent');
+    expect(percentReport.latestRecord).toBeNull();
+    expect(percentReport.rqlPct).toBeGreaterThan(0);
+  });
+
+  it('S-1～S-4 责任记录在规范化与项目校验中均完整保留', () => {
+    for (const level of ['S-1', 'S-2', 'S-3', 'S-4'] as const) {
+      const status = recordInspection(freshSwitchStatus(), {
+        lot: 2000, level, aql: 1.0, regime: 'percent', nonconforming: 0,
+        batchId: `SPECIAL-${level}`, inspector: '张检', inspectedAt: `2026-07-17T09:0${level.slice(-1)}:00.000Z`,
+      });
+      expect(normalizeSwitchStatus(status).records).toHaveLength(1);
+      expect(projectStoreValidationError('qp-aql-state-v1', {
+        aqlLot: 2000, aqlLevel: level, aqlAQL: 1.0, aqlRegime: 'percent',
+        aqlMethod: 'gb', aqlAcMethod: 'gb', aqlSwitch: status,
+      })).toBeNull();
+    }
+  });
+
+  it('旧责任记录缺失 regime 时按 v1.38 默认安全迁移', () => {
+    const status = recordInspection(freshSwitchStatus(), {
+      lot: 1000, level: 'II', aql: 15, regime: 'per100', nonconforming: 85,
+      batchId: 'LEGACY-REGIME', inspector: '张检', inspectedAt: '2026-07-17T09:10:00.000Z',
+    });
+    const legacy = { ...status.records[0] } as Partial<(typeof status.records)[number]>;
+    delete legacy.regime;
+    expect(normalizeSwitchStatus({ ...status, records: [legacy as (typeof status.records)[number]] }).records[0].regime).toBe('per100');
+  });
+
   it('转移得分跨体系口径:AQL15 的严一档是 10,J 字码两档同 n=80 可比', () => {
     expect(oneStepTighterAql(15)).toBe(10);
     expect(oneStepTighterAql(25)).toBe(15);
@@ -346,14 +389,20 @@ describe('per100 批判定与责任账本(d 允许大于 n)', () => {
 });
 
 describe('快照/qproj 的 aqlAQL 校验随 AQL_COLS 放宽到 26 档', () => {
-  const aqlStatePayload = (aql: number) => ({
-    aqlLot: 2000, aqlLevel: 'II', aqlAQL: aql, aqlMethod: 'gb', aqlAcMethod: 'gb',
+  const aqlStatePayload = (aql: number, regime?: 'percent' | 'per100') => ({
+    aqlLot: 2000, aqlLevel: 'II', aqlAQL: aql, ...(regime ? { aqlRegime: regime } : {}), aqlMethod: 'gb', aqlAcMethod: 'gb',
     aqlSwitch: freshSwitchStatus(),
   });
 
   it('qp-aql-state-v1:aqlAQL=650 通过;17(非档位)拒绝', () => {
     expect(projectStoreValidationError('qp-aql-state-v1', aqlStatePayload(650))).toBeNull();
     expect(projectStoreValidationError('qp-aql-state-v1', aqlStatePayload(17))).toMatch(/AQL 值不在正式主表范围/);
+  });
+
+  it('显式质量表示校验：per100/AQL1 合法，percent/AQL15 拒绝；缺失字段兼容旧项目', () => {
+    expect(projectStoreValidationError('qp-aql-state-v1', aqlStatePayload(1, 'per100'))).toBeNull();
+    expect(projectStoreValidationError('qp-aql-state-v1', aqlStatePayload(15, 'percent'))).toMatch(/不能超过 10/);
+    expect(projectStoreValidationError('qp-aql-state-v1', aqlStatePayload(15))).toBeNull();
   });
 
   it('qp-prefs-v1:state.aqlAQL=650 通过;17 拒绝', () => {
@@ -367,7 +416,7 @@ describe('快照/qproj 的 aqlAQL 校验随 AQL_COLS 放宽到 26 档', () => {
       batchId: 'QPROJ-1', inspector: '张检', inspectedAt: '2026-07-17T11:00:00.000Z',
     });
     expect(projectStoreValidationError('qp-aql-state-v1', {
-      aqlLot: 1000, aqlLevel: 'II', aqlAQL: 15, aqlMethod: 'gb', aqlAcMethod: 'gb',
+      aqlLot: 1000, aqlLevel: 'II', aqlAQL: 15, aqlRegime: 'per100', aqlMethod: 'gb', aqlAcMethod: 'gb',
       aqlSwitch: status,
     })).toBeNull();
   });

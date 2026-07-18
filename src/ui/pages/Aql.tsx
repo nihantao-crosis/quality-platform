@@ -1,18 +1,18 @@
 /** 抽样检验 AQL—正式主表、实际批判定、责任追溯与第 9.3/9.4 条转移规则。 */
-import { Fragment, useState } from 'react';
+import { useState } from 'react';
 import { useApp } from '../../store/appStore';
 import {
-  rqlForResult, producerRiskPct, masterPlanByState, CODE_LETTER_TABLE, MAX_LOT_SIZE, TABLE_BY_STATE, AQL_COLS,
-  aqlRegime, ocPa, maxNonconforming,
+  rqlForResult, producerRiskPct, masterPlanByState, CODE_LETTER_TABLE, MAX_LOT_SIZE, TABLE_BY_STATE,
+  AQL_PERCENT_COLS, AQL_PER100_COLS, maxNonconforming,
   decideLot, recordInspection, plansByState, normalizeSwitchStatus,
   AQL_TRACE_LIMITS,
   restoreNormalInspection, resumeTightenedInspection, setSwitchConditions,
-  type InspectionLevel, type InspState, type NonconformingDisposition, type SamplingPlan,
+  type InspectionLevel, type InspState, type NonconformingDisposition,
 } from '../../core';
 import type { ChartTokens } from '../tokens';
 import { Card, CardHeader, KvRows, tabStyle } from '../common';
 import { OcCurveChart } from '../charts/OcCurveChart';
-import { Svg, Ln, Txt } from '../charts/primitives';
+import { OcCurvePer100 } from '../charts/OcCurvePer100';
 
 const STATE_META: Record<InspState, { label: string; bg: string; color: string }> = {
   normal: { label: '正常检验', bg: '#e7f0f9', color: '#1f6fb2' },
@@ -20,68 +20,8 @@ const STATE_META: Record<InspState, { label: string; bg: string; color: string }
   reduced: { label: '放宽检验', bg: '#e8f4ea', color: '#2c8a45' },
 };
 
-// K2:下拉覆盖全部 26 档(0.010–10 百分不合格品 + 15–1000 每百单位不合格数);常用 6 档保留为快捷芯片不变。
+// 百分不合格品允许 AQL≤10；每百单位不合格数允许完整 26 档（含 AQL≤10）。
 const AQL_QUICK = [0.65, 1.0, 1.5, 2.5, 4.0, 6.5];
-
-/**
- * per100 体系专用 OC 曲线:Pa(λ) = poissonCdf(Ac, n·λ/100),横轴为「每百单位不合格数 λ」。
- * 既有 OcCurveChart 内部固定二项 CDF 与「批不良率」横轴(K2 不在其文件属权内),
- * 故 per100 在本页用同一套 SVG 基元内联绘制,视觉风格与其保持一致。
- */
-function OcCurvePer100({ T, plan, aql, rqlLambda }: { T: ChartTokens; plan: SamplingPlan; aql: number; rqlLambda?: number }) {
-  const W = 960;
-  const H = 330;
-  const m = { t: 24, r: 34, b: 50, l: 56 };
-  const pw = W - m.l - m.r;
-  const ph = H - m.t - m.b;
-  // 横轴上限:覆盖 AQL 点与 RQL 点并留边;RQL 未达到时以 3×AQL 展示曲线形状
-  const lmax = Math.max(aql * 1.6, (rqlLambda ?? aql * 3) * 1.25);
-  const X = (l: number) => m.l + (l / lmax) * pw;
-  const Y = (pa: number) => m.t + (1 - pa) * ph;
-  const fmtL = (l: number) => (lmax >= 100 ? l.toFixed(0) : l.toFixed(1));
-  const pts: string[] = [];
-  for (let i = 0; i <= 140; i++) {
-    const l = (lmax * i) / 140;
-    pts.push(X(l) + ',' + Y(ocPa(plan, l, 'per100')));
-  }
-  const mark = (l: number, col: string, lab: string) => {
-    const pa = ocPa(plan, l, 'per100');
-    return (
-      <Fragment key={lab}>
-        <Ln x1={X(l)} y1={m.t} x2={X(l)} y2={m.t + ph} stroke={col} sw={1.3} dash="4 3" />
-        <Ln x1={m.l} y1={Y(pa)} x2={X(l)} y2={Y(pa)} stroke={col} sw={1.3} dash="4 3" />
-        <circle cx={X(l)} cy={Y(pa)} r={T.r + 1.5} fill={col} />
-        <Txt x={X(l) + 6} y={Y(pa) - 9} s={lab + ' ' + (pa * 100).toFixed(0) + '%'} fill={col} size={10.5} weight={700} />
-      </Fragment>
-    );
-  };
-  return (
-    <Svg w={W} h={H}>
-      <rect x={0} y={0} width={W} height={H} fill={T.bg} />
-      {Array.from({ length: 6 }, (_, g) => {
-        const yy = m.t + (g / 5) * ph;
-        return (
-          <Fragment key={'g' + g}>
-            <Ln x1={m.l} y1={yy} x2={m.l + pw} y2={yy} stroke={T.grid} sw={1} />
-            <Txt x={m.l - 8} y={yy} s={100 - g * 20 + '%'} fill={T.axis} size={10} anchor="end" />
-          </Fragment>
-        );
-      })}
-      {Array.from({ length: 7 }, (_, g) => {
-        const l = (lmax * g) / 6;
-        return <Txt key={'x' + g} x={X(l)} y={H - 18} s={fmtL(l)} fill={T.axis} size={10} anchor="middle" />;
-      })}
-      <polyline points={pts.join(' ')} fill="none" stroke={T.point} strokeWidth={T.sw + 1} />
-      {/* AQL 点语义是「绿线」(与二项版一致),不跟随主题中心线色 */}
-      {mark(aql, '#1a8a3a', 'AQL')}
-      {rqlLambda != null && mark(rqlLambda, T.limit, 'RQL')}
-      <Txt x={m.l} y={m.t - 9} s="接收概率 Pa(泊松)" fill={T.text} size={11} weight={600} />
-      <Txt x={m.l + pw} y={H - 2} s="每百单位不合格数 λ →" fill={T.axis} size={10} anchor="end" />
-      <Ln x1={m.l} y1={m.t + ph} x2={m.l + pw} y2={m.t + ph} stroke={T.axis} sw={1} />
-      <Ln x1={m.l} y1={m.t} x2={m.l} y2={m.t + ph} stroke={T.axis} sw={1} />
-    </Svg>
-  );
-}
 const DISPOSITION_LABEL: Record<NonconformingDisposition, string> = {
   none: '无不合格品', unrecorded: '未记录处置状态', pending: '已隔离，待负责部门处置', reworked: '已返工并按要求复验',
   replaced: '已替换不合格品', scrapped: '已报废不合格品', concession: '已取得让步接收批准',
@@ -101,7 +41,7 @@ function planTableRows(level: InspectionLevel, aqlPct: number, lot: number, stat
 }
 
 export function Aql({ T }: { T: ChartTokens }) {
-  const { aqlLot, aqlLevel, aqlAQL, aqlSwitch: storedSwitch, setAql, setAqlSwitch: setSw } = useApp();
+  const { aqlLot, aqlLevel, aqlAQL, aqlRegime: regime, aqlSwitch: storedSwitch, setAql, setAqlSwitch: setSw } = useApp();
   const sw = normalizeSwitchStatus(storedSwitch);
   const [lotDraft, setLotDraft] = useState<string | null>(null);
   const [lotError, setLotError] = useState<string | null>(null);
@@ -114,13 +54,11 @@ export function Aql({ T }: { T: ChartTokens }) {
   const [referenceState, setReferenceState] = useState<InspState>('normal');
   const statePlans = plansByState(aqlLot, aqlLevel, aqlAQL);
   const plan = statePlans[sw.state];
-  // K2 体系分流:≤10 百分不合格品(二项,d≤n);≥15 每百单位不合格数(泊松,d 可大于 n)
-  const regime = aqlRegime(aqlAQL);
   const per100 = regime === 'per100';
   const aqlP = aqlAQL / 100;
   const rql = rqlForResult(plan, 0.1, undefined, regime);
   const rqlP = rql.status === 'found' ? rql.p : undefined;
-  const prodRisk = producerRiskPct(plan, aqlAQL);
+  const prodRisk = producerRiskPct(plan, aqlAQL, regime);
   const meta = STATE_META[sw.state];
   const nonconforming = Number(nonconformingDraft);
   const hasNonconforming = nonconformingDraft.trim() !== '';
@@ -158,6 +96,7 @@ export function Aql({ T }: { T: ChartTokens }) {
         lot: aqlLot,
         level: aqlLevel,
         aql: aqlAQL,
+        regime,
         nonconforming,
         batchId,
         inspector,
@@ -173,7 +112,7 @@ export function Aql({ T }: { T: ChartTokens }) {
     }
   };
 
-  // per100 十档均为整数(15–1000),直接原样显示;percent 档维持既有格式不变
+  const aqlOptions = per100 ? AQL_PER100_COLS : AQL_PERCENT_COLS;
   const fmtAql = (a: number) => 'AQL ' + (a >= 15 ? String(a) : a < 0.1 ? String(a) : a.toFixed(2).replace(/0$/, '').replace(/\.$/, '.0'));
 
   return (
@@ -209,6 +148,25 @@ export function Aql({ T }: { T: ChartTokens }) {
           {lotError && <div role="alert" style={{ maxWidth: 360, marginTop: 4, fontSize: 11, color: '#c22f2f' }}>{lotError}</div>}
         </div>
         <span style={{ width: 1, height: 22, background: '#e5e9ee' }} />
+        <span style={{ fontSize: 12, color: '#8a929d', fontWeight: 600 }}>质量表示</span>
+        <div role="group" aria-label="AQL 质量表示" style={{ display: 'flex', gap: 6 }}>
+          {([
+            ['percent', '百分不合格品'],
+            ['per100', '每百单位不合格数'],
+          ] as const).map(([value, label]) => (
+            <button
+              type="button"
+              key={value}
+              disabled={schemeLocked}
+              title={schemeLocked ? '须恢复正常检验后才能更改质量表示' : undefined}
+              style={{ ...tabStyle(regime === value), border: 0, opacity: schemeLocked ? 0.55 : 1, cursor: schemeLocked ? 'not-allowed' : 'pointer' }}
+              onClick={() => setAql(value === 'percent'
+                ? { aqlRegime: value, aqlAQL: Math.min(aqlAQL, 10) }
+                : { aqlRegime: value })}
+            >{label}</button>
+          ))}
+        </div>
+        <span style={{ width: 1, height: 22, background: '#e5e9ee' }} />
         <span style={{ fontSize: 12, color: '#8a929d', fontWeight: 600 }}>检验水平</span>
         <div style={{ display: 'flex', gap: 6 }}>
           {(['S-1', 'S-2', 'S-3', 'S-4', 'I', 'II', 'III'] as InspectionLevel[]).map((l, idx) => (
@@ -240,16 +198,13 @@ export function Aql({ T }: { T: ChartTokens }) {
           <select
             aria-label="全部 AQL 档位"
             disabled={schemeLocked}
-            title={schemeLocked ? '须按正式转移规则恢复正常检验后才能更改检验体系' : '全部 26 档 AQL(0.010–10 百分不合格品;15–1000 每百单位不合格数)'}
+            title={schemeLocked ? '须按正式转移规则恢复正常检验后才能更改检验体系' : (per100 ? '计点制全部 26 档 AQL（0.010–1000）' : '百分不合格品 AQL（0.010–10）')}
             value={aqlAQL}
             onChange={(e) => setAql({ aqlAQL: Number(e.target.value) })}
             style={{ padding: '5px 8px', border: `1px solid ${AQL_QUICK.includes(aqlAQL) ? '#cfd5dd' : '#1f6fb2'}`, borderRadius: 4, fontSize: 12, color: AQL_QUICK.includes(aqlAQL) ? '#5b6472' : '#1f6fb2', background: '#fff', cursor: schemeLocked ? 'not-allowed' : 'pointer' }}
           >
-            <optgroup label="百分不合格品(AQL ≤ 10,二项)">
-              {AQL_COLS.filter((a) => aqlRegime(a) === 'percent').map((a) => <option key={a} value={a}>{fmtAql(a)}</option>)}
-            </optgroup>
-            <optgroup label="每百单位不合格数(AQL 15–1000,泊松)">
-              {AQL_COLS.filter((a) => aqlRegime(a) === 'per100').map((a) => <option key={a} value={a}>{fmtAql(a)}</option>)}
+            <optgroup label={per100 ? '每百单位不合格数（泊松）' : '百分不合格品（二项）'}>
+              {aqlOptions.map((a) => <option key={a} value={a}>{fmtAql(a)}</option>)}
             </optgroup>
           </select>
         </div>
@@ -259,11 +214,11 @@ export function Aql({ T }: { T: ChartTokens }) {
         </span>
         {/* K2 体系徽标:per100 时明确提示计数口径变化(d 可大于 n) */}
         <span style={{ padding: '5px 9px', borderRadius: 4, background: per100 ? '#f3eefb' : '#f2f4f7', color: per100 ? '#7a4fb5' : '#5b6472', fontSize: 11.5, fontWeight: 600 }}>
-          {per100 ? '每百单位不合格数体系 · 泊松(d 可大于 n)' : '百分不合格品体系 · 二项'}
+          {per100 ? '每百单位不合格数 · 泊松（d 可大于 n）' : '百分不合格品 · 二项'}
         </span>
         {schemeLocked && (
           <span role="status" style={{ fontSize: 11.5, color: sw.suspended ? '#8a6414' : '#6b7480' }}>
-            当前{sw.suspended ? '暂停' : meta.label}期间，检验水平与 AQL 已锁定
+            当前{sw.suspended ? '暂停' : meta.label}期间，质量表示、检验水平与 AQL 已锁定
           </span>
         )}
       </Card>
@@ -430,12 +385,12 @@ export function Aql({ T }: { T: ChartTokens }) {
                 <div style={{ marginBottom: 6, fontSize: 12, fontWeight: 600, color: '#33404f' }}>最近批次追溯记录</div>
                 <table style={{ width: '100%', minWidth: 900, borderCollapse: 'collapse', fontSize: 11 }}>
                   <thead><tr style={{ color: '#8a929d', textAlign: 'left' }}>
-                    <th style={{ padding: '5px 4px' }}>批次</th><th style={{ padding: '5px 4px' }}>N/水平/AQL</th><th style={{ padding: '5px 4px' }}>类型</th><th style={{ padding: '5px 4px' }}>方案</th><th style={{ padding: '5px 4px' }}>d</th><th style={{ padding: '5px 4px' }}>判定</th><th style={{ padding: '5px 4px' }}>不合格品处置</th><th style={{ padding: '5px 4px' }}>检验人</th>
+                    <th style={{ padding: '5px 4px' }}>批次</th><th style={{ padding: '5px 4px' }}>N/水平/AQL/表示</th><th style={{ padding: '5px 4px' }}>类型</th><th style={{ padding: '5px 4px' }}>方案</th><th style={{ padding: '5px 4px' }}>d</th><th style={{ padding: '5px 4px' }}>判定</th><th style={{ padding: '5px 4px' }}>不合格品处置</th><th style={{ padding: '5px 4px' }}>检验人</th>
                   </tr></thead>
                   <tbody>{sw.records.slice(-8).reverse().map((record) => (
                     <tr key={record.id} style={{ borderTop: '1px solid #f0f2f5' }}>
                       <td style={{ padding: '5px 4px', color: '#33404f' }}>{record.batchId}</td>
-                      <td className="mono" style={{ padding: '5px 4px', color: '#6b7480' }}>{record.lot}/{record.level}/{record.aql}</td>
+                      <td className="mono" style={{ padding: '5px 4px', color: '#6b7480' }}>{record.lot}/{record.level}/{record.aql}/{record.regime === 'per100' ? '计点' : '百分'}</td>
                       <td style={{ padding: '5px 4px', color: '#6b7480' }}>{record.originalInspection ? '初次' : '复验'}</td>
                       <td className="mono" style={{ padding: '5px 4px', color: '#6b7480' }}>{record.sourceTable} {record.initialCode}→{record.finalCode}/{record.fullInspection ? '全检' : `n${record.sampleSize}`}/Ac{record.acceptanceNumber}/Re{record.rejectionNumber}</td>
                       <td className="mono" style={{ padding: '5px 4px' }}>{record.nonconforming}</td>

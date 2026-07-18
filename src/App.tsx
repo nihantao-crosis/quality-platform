@@ -31,7 +31,7 @@ import { Aql } from './ui/pages/Aql';
 export default function App() {
   const {
     page, openMenu, varOpen, setOpenMenu, setVarOpen, openModal, showToast, chartStyle, showGrid, lsl, usl, tgt, lslOn, busyOverlay, uslOn,
-    spcType, spcDataLayout, spcValueCol, spcSubgroupCol, hypoTab, aqlLevel, aqlAQL,
+    spcType, spcDataLayout, spcValueCol, spcSubgroupCol, hypoTab, aqlLevel, aqlAQL, aqlRegime,
     gageUseReal, gageValueName, gagePartName, gageOperatorName, activeVar,
     capSubgroupMode, capSubgroupSize, capValueCol, capSubgroupIdCol,
   } = useApp();
@@ -153,7 +153,7 @@ export default function App() {
         ? `导入数据 · ${preparedGage.study.operatorLabels.length} 操作员 × ${preparedGage.study.partLabels.length} 部件 × ${preparedGage.study.repeats} 次`
         : `尚未运行 · ${preparedGage.reason}`
       : '演示研究 · 交叉设计 · ANOVA 法',
-    aql: `GB/T 2828.1 · ${aqlLevel.startsWith('S-') ? '特殊' : '一般'}检验水平 ${aqlLevel} · AQL ${aqlAQL} · ${aqlAQL >= 15 ? '每百单位不合格数' : '百分不合格品'}`,
+    aql: `GB/T 2828.1 · ${aqlLevel.startsWith('S-') ? '特殊' : '一般'}检验水平 ${aqlLevel} · AQL ${aqlAQL} · ${aqlRegime === 'per100' ? '每百单位不合格数' : '百分不合格品'}`,
   };
   const subtitle = dynSub[page] ?? cur.sub;
 

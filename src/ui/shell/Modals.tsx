@@ -2,7 +2,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useApp, type ImportTab, type ExportFmt } from '../../store/appStore';
 import { markActiveDataReplaced, prepareVaultDatasetRemoval, useData } from '../../store/dataStore';
-import { parseMatrix, parseCategoryCounts, extractPChartColumns, evalFormula, truthy, arrMin, arrMax, FormulaError, type ParsedMatrix } from '../../core';
+import { parseMatrix, parseCategoryCounts, extractPChartColumns, evalFormula, truthy, arrMin, arrMax, FormulaError, worksheetNumericColumnCodes, type ParsedMatrix } from '../../core';
 import { platform } from '../../platform/adapter';
 import { buildExportJob } from '../../platform/report';
 import { mesStart, mesStop } from '../../platform/mes';
@@ -496,17 +496,20 @@ function CalcModal() {
 // ---------- 公式计算列 ----------
 function FormulaModal() {
   const { closeModal, goTo, showToast } = useApp();
-  const { model, addFormulaColumn } = useData();
+  const { model, textCols, addFormulaColumn } = useData();
   const [name, setName] = useState('公式列');
   const [expr, setExpr] = useState('');
 
   const columns = model.colNames.map((_, j) => model.subs.map((s) => s.vals[j]));
+  const columnNumbers = worksheetNumericColumnCodes(model.n, textCols);
+  const firstCode = `C${columnNumbers[0] ?? 1}`;
+  const secondCode = `C${columnNumbers[1] ?? columnNumbers[0] ?? 1}`;
   // 实时预览:算前几行 + 捕获错误
   let previewVals: number[] | null = null;
   let error: string | null = null;
   if (expr.trim() !== '') {
     try {
-      previewVals = evalFormula(expr, { columns, colNames: model.colNames, rowCount: model.k }).values;
+      previewVals = evalFormula(expr, { columns, colNames: model.colNames, rowCount: model.k, columnNumbers }).values;
       const invalidRow = previewVals.findIndex((value) => !Number.isFinite(value));
       if (invalidRow >= 0) error = `第 ${invalidRow + 1} 行未得到有限数值（可能除以 0、对负数开方或数值溢出）`;
     } catch (e) {
@@ -543,7 +546,7 @@ function FormulaModal() {
         <label style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
           <span style={{ width: 56, color: '#8a929d', paddingTop: 7 }}>公式</span>
           <textarea value={expr} onChange={(e) => setExpr(e.target.value)} autoFocus
-            placeholder={"例:(C1 + C2) / 2    或    (C1 - mean(C1)) / std(C1)    或    sqrt(C1)"}
+            placeholder={`例:(${firstCode} + ${secondCode}) / 2    或    (${firstCode} - mean(${firstCode})) / std(${firstCode})    或    sqrt(${firstCode})`}
             style={{ flex: 1, height: 60, border: `1px solid ${error ? '#d98324' : '#cfd5dd'}`, borderRadius: 6, padding: '8px 10px', fontFamily: 'IBM Plex Mono,monospace', fontSize: 13, resize: 'none', boxSizing: 'border-box' }} />
         </label>
 
@@ -551,7 +554,7 @@ function FormulaModal() {
           <div style={{ fontSize: 11, color: '#98a1ac', marginBottom: 5 }}>点击插入列引用</div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
             {model.colNames.map((n, i) => (
-              <button type="button" key={i} style={chip} title={n} onClick={() => insert(`C${i + 1}`)}>C{i + 1} · {n}</button>
+              <button type="button" key={i} style={chip} title={n} onClick={() => insert(`C${columnNumbers[i]}`)}>C{columnNumbers[i]} · {n}</button>
             ))}
           </div>
         </div>
@@ -574,7 +577,7 @@ function FormulaModal() {
               {model.k > 6 ? '   …' : ''}
             </div>
           ) : (
-            <div style={{ color: '#9aa2ad', fontSize: 12.5 }}>输入公式后在此实时预览计算结果。支持 + − × ÷ ^、括号、C1…C{model.n} 列引用与列名。</div>
+            <div style={{ color: '#9aa2ad', fontSize: 12.5 }}>输入公式后在此实时预览计算结果。支持 + − × ÷ ^、括号、工作表顶部 C# 数值列引用与列名。</div>
           )}
         </div>
       </div>
@@ -747,15 +750,18 @@ function FindReplaceModal() {
 // ---------- 数据子集 / 条件筛选 ----------
 function SubsetModal() {
   const { closeModal, goTo, showToast } = useApp();
-  const { model, subsetByCondition } = useData();
+  const { model, textCols, subsetByCondition } = useData();
   const [cond, setCond] = useState('');
 
   const columns = model.colNames.map((_, j) => model.subs.map((s) => s.vals[j]));
+  const columnNumbers = worksheetNumericColumnCodes(model.n, textCols);
+  const firstCode = `C${columnNumbers[0] ?? 1}`;
+  const secondCode = `C${columnNumbers[1] ?? columnNumbers[0] ?? 1}`;
   let kept: number | null = null;
   let error: string | null = null;
   if (cond.trim() !== '') {
     try {
-      const flags = evalFormula(cond, { columns, colNames: model.colNames, rowCount: model.k }).values;
+      const flags = evalFormula(cond, { columns, colNames: model.colNames, rowCount: model.k, columnNumbers }).values;
       kept = flags.filter(truthy).length;
     } catch (e) {
       error = e instanceof FormulaError ? e.message : (e as Error).message;
@@ -787,7 +793,7 @@ function SubsetModal() {
         <label style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
           <span style={{ width: 40, color: '#8a929d', paddingTop: 7 }}>条件</span>
           <textarea value={cond} onChange={(e) => setCond(e.target.value)} autoFocus
-            placeholder={"例:C1 > 25    或    C1 >= 24.9 and C1 <= 25.1    或    not (C2 = 0)"}
+            placeholder={`例:${firstCode} > 25    或    ${firstCode} >= 24.9 and ${firstCode} <= 25.1    或    not (${secondCode} = 0)`}
             style={{ flex: 1, height: 56, border: `1px solid ${error ? '#d98324' : '#cfd5dd'}`, borderRadius: 6, padding: '8px 10px', fontFamily: 'IBM Plex Mono,monospace', fontSize: 13, resize: 'none', boxSizing: 'border-box' }} />
         </label>
 
@@ -795,7 +801,7 @@ function SubsetModal() {
           <div style={{ fontSize: 11, color: '#98a1ac', marginBottom: 5 }}>点击插入列引用</div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
             {model.colNames.map((n, i) => (
-              <button type="button" key={i} style={chip} title={n} onClick={() => insert(`C${i + 1}`)}>C{i + 1} · {n}</button>
+              <button type="button" key={i} style={chip} title={n} onClick={() => insert(`C${columnNumbers[i]}`)}>C{columnNumbers[i]} · {n}</button>
             ))}
           </div>
         </div>

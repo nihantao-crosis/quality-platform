@@ -24,6 +24,7 @@ beforeEach(() => {
     aqlLot: 2000,
     aqlLevel: 'II',
     aqlAQL: 1,
+    aqlRegime: 'percent',
     aqlSwitch: freshSwitchStatus(),
     anovaMode: 'stacked',
     anovaRespName: null,
@@ -80,7 +81,17 @@ describe('buildActiveAnalysisReport', () => {
     expect(report?.subtitle).toContain('GB/T 2828.1-2012');
     expect(report?.summary.join(' ')).toContain('n=125');
     const trace = report?.tables.find((table) => table.title === '实际批次检验与追溯记录');
-    expect(trace?.headers).toEqual(expect.arrayContaining(['批量 N', '水平', 'AQL', '主表', '初始字码', '执行字码', '全检', '得分']));
+    expect(trace?.headers).toEqual(expect.arrayContaining(['批量 N', '水平', 'AQL', '质量表示', '主表', '初始字码', '执行字码', '全检', '得分']));
+  });
+
+  it('低 AQL 的 per100 专项报告导出泊松 OC 图，不回落二项或省略图表', () => {
+    useApp.setState({ page: 'aql', aqlAQL: 1, aqlRegime: 'per100' });
+    const report = buildActiveAnalysisReport();
+    expect(report?.subtitle).toContain('每百单位不合格数');
+    expect(report?.charts).toHaveLength(1);
+    expect(report?.charts[0].title).toContain('每百单位不合格数');
+    expect(report?.charts[0].svg).toContain('泊松');
+    expect(report?.charts[0].svg).toContain('每百单位不合格数');
   });
 
   it('ANOVA 从原始因子表自动推断真实因子/响应，不导出演示或异量纲宽表', () => {

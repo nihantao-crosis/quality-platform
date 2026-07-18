@@ -87,7 +87,7 @@ const TOPICS: Topic[] = [
     key: 'formula', title: '公式计算列',
     lines: [
       '计算 → 公式计算列…:用表达式从已有列算出新列,如 (C1+C2)/2、sqrt(C1)。',
-      '列引用:C1 C2…对应工作表顶部同名数值列（ID 子组标签不占 C 编号）;也可用引号列名 \'直径 (mm)\'。',
+      '列引用:C1 C2…对应工作表顶部同名数值列；文本列显示为 C#-T 并占据原导入位置（例如 C1/C2-T/C3），也可用引号列名 \'直径 (mm)\'。',
       '运算:+ − × ÷ ^ 与括号;逐元素函数 abs/sqrt/ln/log10/exp/round/sq。',
       '聚合函数整列折算成常量再广播:mean/std/var/min/max/sum/median/range/n。',
       '典型用法:z 分数 (C1−mean(C1))/std(C1);两列均值 (C1+C2)/2。',

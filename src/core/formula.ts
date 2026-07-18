@@ -2,7 +2,7 @@
  * 公式引擎（对标 Minitab 计算器 Calc → Calculator）——从已有列算出一列新值。
  *
  * 纯函数、零依赖、安全(自建递归下降解析器,不用 eval)。支持:
- *  - 列引用:C1 C2 …(1 基,对应第 j 列)或用单引号引用列名 '直径 (mm)'
+ *  - 列引用:C1 C2 …（对应工作表顶部的数值列代号；文本列显示 C#-T）或用单引号引用列名 '直径 (mm)'
  *  - 运算:+ − × ÷ ^ 与一元负号、括号;^ 右结合,* / 高于 + −
  *  - 逐元素函数:abs sqrt exp ln log(=ln) log10 sin cos tan round sq
  *  - 聚合函数(整列折算成常量再广播):mean/avg std/sd var min max sum median range n/count
@@ -19,6 +19,8 @@ export interface FormulaCtx {
   colNames: string[];
   /** 行数 */
   rowCount: number;
+  /** 与 columns 对齐的工作表 C 编号；有文本列交错时可为 [1,3] 而不是 [1,2]。 */
+  columnNumbers?: number[];
 }
 
 export interface FormulaResult {
@@ -37,7 +39,7 @@ type Tok =
 
 const OPS = new Set(['+', '-', '*', '/', '^']);
 
-function tokenize(src: string, colNames: string[]): Tok[] {
+function tokenize(src: string, colNames: string[], columnNumbers?: number[]): Tok[] {
   const toks: Tok[] = [];
   let i = 0;
   const norm = src
@@ -99,7 +101,9 @@ function tokenize(src: string, colNames: string[]): Tok[] {
       if (m) {
         const n = parseInt(m[1], 10);
         if (n < 1) throw new FormulaError(`列引用 ${word} 无效(应为 C1 及以上)`);
-        toks.push({ t: 'col', i: n - 1 });
+        const index = columnNumbers ? columnNumbers.indexOf(n) : n - 1;
+        if (index < 0) throw new FormulaError(`列引用 C${n} 不是当前工作表的数值列（文本列请用分组功能，数值列也可用引号列名引用）`);
+        toks.push({ t: 'col', i: index });
       } else {
         toks.push({ t: 'name', s: lower(word) });
       }
@@ -257,7 +261,12 @@ function aggregate(fn: string, xs: number[]): number {
 /** 编译一次公式,返回按行求值器与引用列。 */
 export function compileFormula(expr: string, ctx: FormulaCtx): { evalRow: (row: number) => number; refs: number[] } {
   if (expr.trim() === '') throw new FormulaError('公式为空');
-  const ast = new Parser(tokenize(expr, ctx.colNames)).parse();
+  if (ctx.columnNumbers && (ctx.columnNumbers.length !== ctx.columns.length
+    || ctx.columnNumbers.some((value) => !Number.isInteger(value) || value < 1)
+    || new Set(ctx.columnNumbers).size !== ctx.columnNumbers.length)) {
+    throw new FormulaError('工作表数值列编号映射无效');
+  }
+  const ast = new Parser(tokenize(expr, ctx.colNames, ctx.columnNumbers)).parse();
   const refs = new Set<number>();
   const aggCache = new Map<Node, number>();
 

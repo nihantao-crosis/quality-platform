@@ -4,7 +4,7 @@
  */
 import { create } from 'zustand';
 import {
-  buildData, computeVarModel, computePChart, computeCChart, evalFormula, truthy, FormulaError, prepareSpcData, isDoeAnalysisColumn, worksheetDisplayOrder,
+  buildData, computeVarModel, computePChart, computeCChart, evalFormula, truthy, FormulaError, prepareSpcData, isDoeAnalysisColumn, worksheetDisplayOrder, worksheetNumericColumnCodes,
   type VarModel, type PChartModel, type CChartModel, type TextColumn, type SpcPreparedData,
 } from '../core';
 import { useApp } from './appStore';
@@ -331,9 +331,9 @@ interface DataState {
   deleteColumn(col: number): void;
   /** 在末尾插入数值列（值默认取各行首列的副本,便于随后编辑） */
   insertColumn(): void;
-  /** 用公式(引用 C1../列名)算出一列并追加;成功返回 null,失败返回错误信息 */
+  /** 用公式（引用工作表顶部 C# 数值列/列名）算出一列并追加;成功返回 null,失败返回错误信息 */
   addFormulaColumn(name: string, expr: string): string | null;
-  /** 按条件表达式(如 C1>25 and C2<=25.1)筛出子集为新数据集 */
+  /** 按条件表达式（C# 与工作表顶部编号同源）筛出子集为新数据集 */
   subsetByCondition(cond: string): { ok: true; name: string; kept: number; total: number } | { ok: false; error: string };
   /** 统计与替换测量值(3dp 显示容差);col=-1 全部列。replace 为 null 只计数。可撤销。 */
   findReplace(find: number, replace: number | null, col: number): number;
@@ -1323,7 +1323,7 @@ export const useData = create<DataState>((set, get) => ({
     const columns = m.colNames.map((_, j) => m.subs.map((s) => s.vals[j]));
     let values: number[];
     try {
-      values = evalFormula(expr, { columns, colNames: m.colNames, rowCount: m.k }).values;
+      values = evalFormula(expr, { columns, colNames: m.colNames, rowCount: m.k, columnNumbers: worksheetNumericColumnCodes(m.n, get().textCols) }).values;
     } catch (e) {
       return e instanceof FormulaError ? e.message : '公式计算失败：' + (e as Error).message;
     }
@@ -1372,7 +1372,7 @@ export const useData = create<DataState>((set, get) => ({
     const columns = m.colNames.map((_, j) => m.subs.map((s) => s.vals[j]));
     let flags: number[];
     try {
-      flags = evalFormula(cond, { columns, colNames: m.colNames, rowCount: m.k }).values;
+      flags = evalFormula(cond, { columns, colNames: m.colNames, rowCount: m.k, columnNumbers: worksheetNumericColumnCodes(m.n, get().textCols) }).values;
     } catch (e) {
       return { ok: false, error: e instanceof FormulaError ? e.message : '条件计算失败：' + (e as Error).message };
     }

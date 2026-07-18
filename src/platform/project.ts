@@ -4,7 +4,7 @@
  * 导入:白名单校验后写回并重载,另一台机器打开即完整恢复。
  */
 import { platform } from './adapter';
-import { AQL_COLS, MAX_AQL_RECORDS, MAX_LOT_SIZE, normalizeSwitchStatus, ruleKValueError, type NelsonRuleK, type SwitchStatus } from '../core';
+import { AQL_COLS, MAX_AQL_RECORDS, MAX_LOT_SIZE, aqlRegimeAllows, normalizeSwitchStatus, ruleKValueError, type AqlRegime, type NelsonRuleK, type SwitchStatus } from '../core';
 
 /** 允许进出项目文件的存储键；各 store 仍须自行做字段级校验。 */
 export const PROJECT_KEYS = [
@@ -317,7 +317,7 @@ function aqlSwitchValidationError(rawSwitch: unknown): string | null {
 
 function aqlStateValidationError(raw: unknown): string | null {
   if (!isObject(raw)) return 'AQL 业务状态不是有效对象';
-  const allowed = new Set(['aqlLot', 'aqlLevel', 'aqlAQL', 'aqlMethod', 'aqlAcMethod', 'aqlSwitch']);
+  const allowed = new Set(['aqlLot', 'aqlLevel', 'aqlAQL', 'aqlRegime', 'aqlMethod', 'aqlAcMethod', 'aqlSwitch']);
   const extra = Object.keys(raw).find((key) => !allowed.has(key));
   if (extra) return `AQL 业务状态含有非白名单字段 ${extra}`;
   if (!Number.isSafeInteger(raw.aqlLot) || (raw.aqlLot as number) < 2
@@ -327,6 +327,12 @@ function aqlStateValidationError(raw: unknown): string | null {
   }
   if (typeof raw.aqlAQL !== 'number' || !AQL_COLS.includes(raw.aqlAQL)) {
     return 'AQL 值不在正式主表范围';
+  }
+  if (raw.aqlRegime !== undefined && raw.aqlRegime !== 'percent' && raw.aqlRegime !== 'per100') {
+    return 'AQL 质量表示方式无效';
+  }
+  if (raw.aqlRegime !== undefined && !aqlRegimeAllows(raw.aqlRegime as AqlRegime, raw.aqlAQL)) {
+    return '百分不合格品体系的 AQL 不能超过 10';
   }
   if (raw.aqlMethod !== 'gb' || raw.aqlAcMethod !== 'gb') return 'AQL 正式产品路径必须使用国标方案';
   if (!('aqlSwitch' in raw)) return 'AQL 业务状态缺少责任账本';
@@ -343,7 +349,7 @@ function prefsValidationError(raw: unknown): string | null {
   const allowedStateKeys = new Set([
     'chartStyle', 'showGrid', 'projectName', 'lsl', 'usl', 'tgt', 'lslOn', 'uslOn', 'capabilityBins',
     'gageUseReal', 'gageValueName', 'gagePartName', 'gageOperatorName',
-    'aqlLot', 'aqlLevel', 'aqlAQL', 'aqlMethod', 'aqlAcMethod', 'aqlSwitch',
+    'aqlLot', 'aqlLevel', 'aqlAQL', 'aqlRegime', 'aqlMethod', 'aqlAcMethod', 'aqlSwitch',
     'spcRules', 'spcRuleK', 'spcDataLayout', 'spcValueCol', 'spcSubgroupCol', 'spcStageCol',
     'doeView', 'doeTab', 'doeFactorCols', 'doeRespCol', 'doeModelTerms', 'doeIncludeCurvature',
     't1ColName', 't1Mu0', 't2ColAName', 't2ColBName', 'regXName', 'regYName',
@@ -365,6 +371,7 @@ function prefsValidationError(raw: unknown): string | null {
     ['paretoView', new Set(['pareto', 'fishbone'])],
     ['aqlMethod', new Set(['shift', 'gb'])],
     ['aqlAcMethod', new Set(['binom', 'gb'])],
+    ['aqlRegime', new Set(['percent', 'per100'])],
   ];
   for (const [key, allowed] of enums) {
     if (state[key] !== undefined && (typeof state[key] !== 'string' || !allowed.has(state[key]))) {
@@ -419,6 +426,10 @@ function prefsValidationError(raw: unknown): string | null {
   if ('aqlAQL' in state && (typeof state.aqlAQL !== 'number' || !AQL_COLS.includes(state.aqlAQL))) {
     return 'AQL 值不在正式主表范围';
   }
+  if (state.aqlRegime !== undefined && typeof state.aqlAQL === 'number'
+    && !aqlRegimeAllows(state.aqlRegime as AqlRegime, state.aqlAQL)) {
+    return '百分不合格品体系的 AQL 不能超过 10';
+  }
   if (!('aqlSwitch' in state)) return null;
   return aqlSwitchValidationError(state.aqlSwitch);
 }
@@ -451,6 +462,7 @@ function snapshotValidationError(raw: unknown): string | null {
     ['aqlLevel', new Set(['S-1', 'S-2', 'S-3', 'S-4', 'I', 'II', 'III'])],
     ['aqlMethod', new Set(['shift', 'gb'])],
     ['aqlAcMethod', new Set(['binom', 'gb'])],
+    ['aqlRegime', new Set(['percent', 'per100'])],
     ['doeView', new Set(['main', 'interact', 'pareto', 'cube'])],
     ['doeTab', new Set(['analyze', 'create'])],
     ['hypoTab', new Set(['anova', 't1', 't2', 'reg'])],
@@ -480,6 +492,10 @@ function snapshotValidationError(raw: unknown): string | null {
     || (raw.aqlLot as number) < 2 || (raw.aqlLot as number) > MAX_LOT_SIZE)) return '分析 AQL 批量无效';
   if (raw.aqlAQL !== undefined && (typeof raw.aqlAQL !== 'number' || !AQL_COLS.includes(raw.aqlAQL))) {
     return '分析 AQL 值不在正式主表范围';
+  }
+  if (raw.aqlRegime !== undefined && typeof raw.aqlAQL === 'number'
+    && !aqlRegimeAllows(raw.aqlRegime as AqlRegime, raw.aqlAQL)) {
+    return '分析百分不合格品体系的 AQL 不能超过 10';
   }
   if (raw.paretoThreshold !== undefined && ((raw.paretoThreshold as number) < 0.5
     || (raw.paretoThreshold as number) > 1)) return '分析帕累托阈值无效';

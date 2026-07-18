@@ -43,9 +43,9 @@ describe('Minitab 式行号槽:无重复的 ID/行 数据列', () => {
     const { container } = render(createElement(Worksheet));
 
     const headerRows = container.querySelectorAll('thead tr');
-    // 代号行:行号槽无代号,数据列为 C1/T1/C2(不再有 ID)
+    // 代号行:按显示位置统一编号，文本列带 -T（与人工审核 PPT 的 Minitab 格式一致）
     const codes = [...headerRows[0].querySelectorAll('th')].map((th) => th.textContent);
-    expect(codes).toEqual(['', 'C1', 'T1', 'C2']);
+    expect(codes).toEqual(['', 'C1', 'C2-T', 'C3']);
     // 列名行:行号槽无标题(Minitab 式),数据列按导入原序恰为 3 个(测量列名后缀的 × 是删列按钮)
     const names = [...headerRows[1].querySelectorAll('th')].map((th) => th.textContent?.replace(/×$/, ''));
     expect(names).toEqual(['', '部件', '测试人', '螺钉高度']);
@@ -59,6 +59,15 @@ describe('Minitab 式行号槽:无重复的 ID/行 数据列', () => {
     expect(cells.slice(1).map((td) => td.textContent)).toEqual(['1', '邹德玉', '10.100']);
     // 删行按钮仍在行号槽内
     expect(firstRow.querySelector('.ws-rownum .ws-del')).not.toBeNull();
+  });
+
+  it('公式/子集的 C# 与交错工作表表头同源，C3 指向第二个数值列而 C2-T 不可作数值列', () => {
+    useData.getState().importMatrix('工厂GRR', ['部件', '螺钉高度'],
+      [[1, 10.1], [2, 10.2], [3, 10.0]],
+      [{ name: '测试人', values: ['甲', '乙', '甲'], sourceIndex: 1 }]);
+    expect(useData.getState().addFormulaColumn('高度差', 'C3 - C1')).toBeNull();
+    expect(useData.getState().model.subs.map((row) => row.vals[2])).toEqual([9.1, 8.2, 7]);
+    expect(useData.getState().addFormulaColumn('错误引用', 'C2 + 1')).toContain('不是当前工作表的数值列');
   });
 
   it('行式子组数据集(演示集)行号槽保留「子组」语义,均值/极差列仍在', () => {
