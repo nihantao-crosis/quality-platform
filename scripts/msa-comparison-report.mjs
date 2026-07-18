@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+/* global process, console */
 /**
  * MSA 工厂案例对比报告生成器（v1.40，Codex 终审 P2 整改：右侧必须是应用实抓）。
  *
@@ -105,7 +106,7 @@ for (const spec of CASES) {
     <div class="appside">
       <div class="cap">本应用 v1.40.0 实算输出（同产品导入/引擎链路）</div>
       <table><thead><tr><th>来源</th><th>标准差(SD)</th><th>研究变异(6×SD)</th><th>%研究变异</th><th>%公差</th></tr></thead><tbody>${rows}</tbody></table>
-      <div class="mono">可区分的类别数 = ${result.ndc === Infinity ? '∞' : result.ndc}　｜　工厂标准判定：<b>${esc(assessment.label)}</b></div>
+      <div class="mono">可区分的类别数 = ${result.ndc === Infinity ? '∞' : result.ndc} ｜ 工厂标准判定：<b>${esc(assessment.label)}</b></div>
     </div>
   </div>
   <div class="cap" style="margin-top:10px">应用图形报告实抓（${single ? '4 联' : '6 联'}，react-dom/server 渲染，与应用「导出报表」同一代码路径）</div>
