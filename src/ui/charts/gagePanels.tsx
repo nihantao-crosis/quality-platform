@@ -341,7 +341,7 @@ function byOperatorBody(T: ChartTokens, panel: GagePanelData, operatorLabels: st
             {/* Minitab:浅蓝填充箱体(自工厂 EMF 色) */}
             <rect x={x - boxWidth / 2} y={Y(stats.q3)} width={boxWidth} height={Math.max(1, Y(stats.q1) - Y(stats.q3))} fill={MTB.box} stroke={T.text} strokeWidth={1.1} />
             <Ln x1={x - boxWidth / 2} y1={Y(stats.median)} x2={x + boxWidth / 2} y2={Y(stats.median)} stroke={T.text} sw={1.3} />
-            <MeanMarker x={x} y={Y(byPart.flat().reduce((a, b) => a + b, 0) / byPart.flat().length)} color={MTB.data} />
+            <MeanMarker x={x} y={Y(panel.operatorMeans[operator])} color={MTB.data} />
             {stats.outliers.map((value, index) => (
               <Txt key={index} x={x} y={Y(value)} s="*" fill={T.text} size={14} anchor="middle" weight={700} />
             ))}

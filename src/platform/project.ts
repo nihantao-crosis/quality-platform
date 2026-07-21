@@ -4,6 +4,7 @@
  * 导入:白名单校验后写回并重载,另一台机器打开即完整恢复。
  */
 import { platform } from './adapter';
+import { isIsoCalendarDate } from './calendarDate';
 import { AQL_COLS, MAX_AQL_RECORDS, MAX_LOT_SIZE, aqlRegimeAllows, normalizeSwitchStatus, ruleKValueError, type AqlRegime, type NelsonRuleK, type SwitchStatus } from '../core';
 
 /** 允许进出项目文件的存储键；各 store 仍须自行做字段级校验。 */
@@ -462,8 +463,8 @@ function prefsValidationError(raw: unknown): string | null {
     }
   }
   if (state.gageStudyDate !== undefined && (typeof state.gageStudyDate !== 'string'
-    || (state.gageStudyDate !== '' && !/^\d{4}-\d{2}-\d{2}$/.test(state.gageStudyDate)))) {
-    return '偏好设置 gageStudyDate 日期格式无效';
+    || (state.gageStudyDate !== '' && !isIsoCalendarDate(state.gageStudyDate)))) {
+    return '偏好设置 gageStudyDate 日期无效（须为真实存在的 YYYY-MM-DD）';
   }
   if ('aqlLot' in state && (!Number.isSafeInteger(state.aqlLot)
     || (state.aqlLot as number) < 2 || (state.aqlLot as number) > MAX_LOT_SIZE)) {
@@ -601,8 +602,8 @@ function snapshotValidationError(raw: unknown): string | null {
     }
   }
   if (raw.gageStudyDate !== undefined && (typeof raw.gageStudyDate !== 'string'
-    || (raw.gageStudyDate !== '' && !/^\d{4}-\d{2}-\d{2}$/.test(raw.gageStudyDate)))) {
-    return '分析 snapshot.gageStudyDate 日期格式无效';
+    || (raw.gageStudyDate !== '' && !isIsoCalendarDate(raw.gageStudyDate)))) {
+    return '分析 snapshot.gageStudyDate 日期无效（须为真实存在的 YYYY-MM-DD）';
   }
   for (const key of ['spcResolvedLayout', 'spcResolvedVariableName', 'spcResolvedRoleNote', 'activeVar'] as const) {
     if (raw[key] !== undefined && typeof raw[key] !== 'string') return `分析 snapshot.${key} 不是字符串`;

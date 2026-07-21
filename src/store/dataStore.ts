@@ -4,7 +4,7 @@
  */
 import { create } from 'zustand';
 import {
-  buildData, computeVarModel, computePChart, computeCChart, evalFormula, truthy, FormulaError, prepareSpcData, isDoeAnalysisColumn, worksheetDisplayOrder, worksheetNumericColumnCodes,
+  buildData, computeVarModel, computePChart, computeCChart, evalFormula, truthy, FormulaError, prepareSpcData, isDoeAnalysisColumn, worksheetDisplayOrder, worksheetNumericColumnCodes, mean, stdev,
   type VarModel, type PChartModel, type CChartModel, type TextColumn, type SpcPreparedData,
 } from '../core';
 import { useApp } from './appStore';
@@ -1223,13 +1223,15 @@ export const useData = create<DataState>((set, get) => ({
     const m = get().model;
     // 各列 z = (x − x̄ⱼ)/sⱼ;列内无变异则拒绝
     const cols = m.colNames.map((_, j) => m.subs.map((s) => s.vals[j]));
-    const stats = cols.map((v) => {
-      const mu = v.reduce((a, b) => a + b, 0) / v.length;
-      const sd = Math.sqrt(v.reduce((a, b) => a + (b - mu) ** 2, 0) / (v.length - 1));
-      return { mu, sd };
+    const stats = cols.map((values) => {
+      // z 分数只依赖差值；保留偏移坐标，避免稳定均值加回大基准后再次舍入低位。
+      const origin = values[0];
+      return { origin, meanOffset: mean(values.map((value) => value - origin)), sd: stdev(values) };
     });
     if (stats.some((x) => x.sd === 0)) return null;
-    const rows = m.subs.map((s) => s.vals.map((v, j) => Number(((v - stats[j].mu) / stats[j].sd).toFixed(4))));
+    const rows = m.subs.map((s) => s.vals.map((v, j) => Number((
+      ((v - stats[j].origin) - stats[j].meanOffset) / stats[j].sd
+    ).toFixed(4))));
     const name = m.name.replace(/\.[^.]+$/, '') + ' (标准化)';
     get().importMatrix(name, m.colNames.map((c) => c + '_z'), rows, get().textCols);
     return name;

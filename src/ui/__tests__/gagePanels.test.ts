@@ -1,6 +1,11 @@
 /** MSA 图形面板纯计算:Minitab 默认箱线规则(1.5×IQR 箱须 + 星号离群点)。 */
 import { describe, expect, it } from 'vitest';
-import { boxplotStats } from '../charts/gagePanels';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import type { GagePanelData } from '../../core';
+import { mean } from '../../core';
+import { boxplotStats, GageByOperatorPanel } from '../charts/gagePanels';
+import { chartTokens } from '../tokens';
 
 describe('boxplotStats — Minitab 1.5×IQR 箱线规则(Codex 复审 P1)', () => {
   it('Minitab 官方十值示例使用 (n+1)p：Q1=14.25、Q3=46.50', () => {
@@ -47,5 +52,33 @@ describe('boxplotStats — Minitab 1.5×IQR 箱线规则(Codex 复审 P1)', () =
     expect(stats.outliers).toEqual([]);
     expect(stats.whiskerLo).toBe(1);
     expect(stats.whiskerHi).toBe(8);
+  });
+});
+
+describe('Gage 操作员均值标记', () => {
+  it('1e9±微扰观测重排后复用面板稳定均值，SVG标记不漂移', () => {
+    const base = 1e9;
+    const low = base - 5e-6;
+    const high = base + 5e-6;
+    const blocked = [...Array(50).fill(low), ...Array(450).fill(high)] as number[];
+    const operatorMean = mean(blocked);
+    const panel = (values: number[]): GagePanelData => ({
+      partCount: 1,
+      operatorCount: 1,
+      trialCount: values.length,
+      cellMeans: [[operatorMean]],
+      cellRanges: [[high - low]],
+      partMeans: [operatorMean],
+      operatorMeans: [operatorMean],
+      values: [[values]],
+      grandMean: operatorMean,
+      rBar: high - low,
+      rLimits: null,
+      xbarLimits: null,
+    });
+    const render = (values: number[]) => renderToStaticMarkup(createElement(GageByOperatorPanel, {
+      T: chartTokens('经典', false), panel: panel(values), partLabels: ['1'], operatorLabels: ['甲'],
+    }));
+    expect(render(blocked)).toBe(render([...blocked].reverse()));
   });
 });

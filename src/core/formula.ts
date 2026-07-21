@@ -10,7 +10,7 @@
  * 每行独立求值;聚合函数对「其参数在所有行上的取值」做一次归约并缓存。
  */
 
-import { arrMin, arrMax } from './basicMath';
+import { arrMin, arrMax, mean, stdev } from './basicMath';
 
 export interface FormulaCtx {
   /** 各列的数值数组，columns[j] 为第 j 列(0 基) */
@@ -239,16 +239,17 @@ function aggregate(fn: string, xs: number[]): number {
   const n = finite.length;
   if (n === 0) return NaN;
   const sum = finite.reduce((a, b) => a + b, 0);
-  const mean = sum / n;
+  const average = mean(finite);
   switch (fn) {
     case 'sum': return sum;
-    case 'mean': case 'avg': return mean;
+    case 'mean': case 'avg': return average;
     case 'min': return arrMin(finite);
     case 'max': return arrMax(finite);
     case 'range': return arrMax(finite) - arrMin(finite);
     case 'n': case 'count': return n;
-    case 'var': return n > 1 ? finite.reduce((a, b) => a + (b - mean) ** 2, 0) / (n - 1) : 0;
-    case 'std': case 'sd': return n > 1 ? Math.sqrt(finite.reduce((a, b) => a + (b - mean) ** 2, 0) / (n - 1)) : 0;
+    // 既有公式口径为样本方差/样本标准差(n−1)，仅替换数值算法，不改变定义。
+    case 'var': return n > 1 ? stdev(finite) ** 2 : 0;
+    case 'std': case 'sd': return n > 1 ? stdev(finite) : 0;
     case 'median': {
       const s = [...finite].sort((a, b) => a - b);
       const mid = Math.floor(s.length / 2);

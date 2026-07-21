@@ -11,8 +11,10 @@
  * 用法：node scripts/msa-comparison-report.mjs \
  *   [--workbook src/core/__tests__/fixtures/gage-factory-workbook-2026-07.xlsx] \
  *   [--left-images <目录>]   # 工厂 PPT 会话窗口截图 s3_2/s4_4/s5_6/s6_8/s7_10.png,可缺省
+ *   [--gauge-name <量具名称>] [--report-by <报表人>] [--study-date YYYY-MM-DD] [--notes <备注>] \
  *   [--out 对比报告_MSA工厂案例.html]
  * 工厂截图属外部材料,不入公开仓库;缺省时报告只输出应用实抓侧。
+ * 量具元数据不从操作员或运行日期推断；未显式传入时统一显示“未填写”。
  */
 import { readFileSync, writeFileSync, existsSync, mkdtempSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -32,6 +34,13 @@ const opt = (name, fallback) => {
 const workbookPath = opt('workbook', join(root, 'src/core/__tests__/fixtures/gage-factory-workbook-2026-07.xlsx'));
 const leftDir = opt('left-images', '');
 const outPath = opt('out', join(root, '..', '对比报告_MSA工厂案例_v1.40.0.html'));
+const metadataValue = (name) => String(opt(name, '') ?? '').trim() || '未填写';
+const reportMetadata = {
+  gaugeName: metadataValue('gauge-name'),
+  reportBy: metadataValue('report-by'),
+  studyDate: metadataValue('study-date'),
+  otherText: metadataValue('notes'),
+};
 
 // 打包真实产品模块(TS/TSX)为可 require 的 CJS——保证与应用同一份代码
 const entry = `
@@ -44,12 +53,16 @@ export { CONTROL_CONSTANTS } from '${join(root, 'src/core/spc.ts')}';
 export { chartTokens } from '${join(root, 'src/ui/tokens.ts')}';
 export { GroupedBars } from '${join(root, 'src/ui/charts/misc.tsx')}';
 export { GageReportFigure, gageBarCategories } from '${join(root, 'src/ui/charts/gagePanels.tsx')}';
+export { isIsoCalendarDate } from '${join(root, 'src/platform/calendarDate.ts')}';
 export { renderToStaticMarkup } from 'react-dom/server';
 export { createElement } from 'react';
 `;
 const bundle = join(mkdtempSync(join(tmpdir(), 'msa-report-')), 'bundle.cjs');
 buildSync({ stdin: { contents: entry, resolveDir: root, loader: 'ts' }, bundle: true, format: 'cjs', platform: 'node', outfile: bundle, logLevel: 'silent', jsx: 'automatic' });
 const app = require(bundle);
+if (reportMetadata.studyDate !== '未填写' && !app.isIsoCalendarDate(reportMetadata.studyDate)) {
+  throw new Error('--study-date 必须是真实存在的 YYYY-MM-DD 日期');
+}
 
 const CASES = [
   { block: 0, value: '螺钉高度', tol: { mode: 'width', value: 1 }, tolText: '过程公差 = 1（双侧宽度）', png: 's3_2.png', graph: 's3_1.png' },
@@ -89,8 +102,7 @@ for (const spec of CASES) {
     valueName: spec.value,
     partName: study.study.partName,
     operatorName: study.study.operatorName ?? '测试人',
-    reportBy: study.study.operatorLabels.join(''),
-    studyDate: '20260718',
+    ...reportMetadata,
     toleranceText: spec.tol.mode === 'width' ? String(spec.tol.value) : `上限 ${spec.tol.value}`,
   });
   const factoryGraph = leftDir && existsSync(join(leftDir, spec.graph))

@@ -73,7 +73,8 @@ describe('偏好持久化安全', () => {
       state: {
         gageTolMode: '任意', gageTolValue: 'NaN', gageStandard: 7,
         gageGaugeName: 'x'.repeat(81), gageReportBy: 7,
-        gageStudyDate: '2026-99-99-额外', gageNotes: 'x'.repeat(201),
+        // 格式正确但日历上不存在，也必须逐字段回落。
+        gageStudyDate: '2026-02-29', gageNotes: 'x'.repeat(201),
       },
     }));
     await useApp.persist.rehydrate();

@@ -169,7 +169,12 @@ describe('项目文件', () => {
       ['qp-prefs-v1', { version: 3, state: { doeFactorCols: [1] } }],
       ['qp-prefs-v1', { version: 4, state: {} }],
       ['qp-prefs-v1', { version: 3, state: { chartStyle: '注入值' } }],
+      ['qp-prefs-v1', { version: 3, state: { gageStudyDate: '2026-02-29' } }],
       ['qp-prefs-v1', { version: 3, state: { page: 'poison', modal: {}, calc: null } }],
+      ['qp-analyses-v1', [{
+        ...baseAnalysis, kind: 'gagerr',
+        snapshot: { snapshotVersion: 7, gageStudyDate: '2026-04-31' },
+      }]],
       ['qp-aql-state-v1', aqlState({ injected: 'poison' })],
       ['qp-aql-state-v1', aqlState({ aqlSwitch: { ...freshSwitchStatus(), records: [{}] } })],
       ['qp-specs-v1', { 批次: { lsl: 1, tgt: 2, usl: 3, lslOn: false, uslOn: false } }],

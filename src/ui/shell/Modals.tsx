@@ -2,8 +2,9 @@
 import { useState, useEffect, useRef } from 'react';
 import { useApp, type ImportTab, type ExportFmt } from '../../store/appStore';
 import { markActiveDataReplaced, prepareVaultDatasetRemoval, useData } from '../../store/dataStore';
-import { parseMatrix, parseCategoryCounts, extractPChartColumns, evalFormula, truthy, arrMin, arrMax, FormulaError, worksheetNumericColumnCodes, detectCsvBlocks, type CsvBlock, type ParsedMatrix } from '../../core';
+import { parseMatrix, parseCategoryCounts, extractPChartColumns, evalFormula, truthy, arrMin, arrMax, mean, stdev, FormulaError, worksheetNumericColumnCodes, detectCsvBlocks, type CsvBlock, type ParsedMatrix } from '../../core';
 import { assertXlsxImportSize, platform } from '../../platform/adapter';
+import { assertTextImportSize } from '../../platform/importLimits';
 import { buildExportJob } from '../../platform/report';
 import { mesStart, mesStop } from '../../platform/mes';
 import { sessionLog } from '../../store/sessionLog';
@@ -192,9 +193,11 @@ function ImportModal() {
     if (isProjectFile(file.name)) {
       let text: string;
       try {
+        assertTextImportSize(file.name, file.size);
         text = await file.text(); // 拖放源文件可能已被移动/删除;必须在上锁之前读取
-      } catch {
-        showToast('打开项目失败：无法读取拖入的文件（源文件可能已被移动或删除）');
+      } catch (error) {
+        showToast('打开项目失败：' + ((error as Error).message
+          || '无法读取拖入的文件（源文件可能已被移动或删除）'));
         return;
       }
       useApp.getState().setBusyOverlay('正在导入项目，请勿操作…（完成后将自动重载）');
@@ -220,7 +223,12 @@ function ImportModal() {
         showToast('导入失败：' + (error as Error).message);
       }
     } else {
-      handlePicked(file.name, await file.text());
+      try {
+        assertTextImportSize(file.name, file.size);
+        handlePicked(file.name, await file.text());
+      } catch (error) {
+        showToast('导入失败：' + (error as Error).message);
+      }
     }
   };
 
@@ -1000,8 +1008,8 @@ function ColStatsModal() {
   const { model } = useData();
   const rows = model.colNames.map((name, j) => {
     const v = model.subs.map((s) => s.vals[j]);
-    const mu = v.reduce((a, b) => a + b, 0) / v.length;
-    const sd = Math.sqrt(v.reduce((a, b) => a + (b - mu) ** 2, 0) / Math.max(1, v.length - 1));
+    const mu = mean(v);
+    const sd = stdev(v);
     const mn = arrMin(v);
     const mx = arrMax(v);
     return { name, n: v.length, mu, sd, mn, mx, range: mx - mn };

@@ -8,6 +8,7 @@ import {
   AQL_COLS, MAX_LOT_SIZE, aqlRegime, aqlRegimeAllows, calcKey as coreCalcKey, CALC_INIT,
   freshSwitchStatus, normalizeSwitchStatus, DEFAULT_RULE_K, normalizeRuleK,
 } from '../core';
+import { isIsoCalendarDate } from '../platform/calendarDate';
 import { projectStoreValidationError, registerProjectLifecycleHooks } from '../platform/project';
 import { preserveCorruptStore } from './quarantine';
 
@@ -659,7 +660,7 @@ export const useApp = create<AppState>()(persist((set, get) => ({
     merged.gageGaugeName = limitedString(p.gageGaugeName, current.gageGaugeName, 80);
     merged.gageReportBy = limitedString(p.gageReportBy, current.gageReportBy, 80);
     merged.gageStudyDate = typeof p.gageStudyDate === 'string'
-      && (p.gageStudyDate === '' || /^\d{4}-\d{2}-\d{2}$/.test(p.gageStudyDate))
+      && (p.gageStudyDate === '' || isIsoCalendarDate(p.gageStudyDate))
       ? p.gageStudyDate
       : current.gageStudyDate;
     merged.gageNotes = limitedString(p.gageNotes, current.gageNotes, 200);

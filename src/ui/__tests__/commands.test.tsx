@@ -97,6 +97,22 @@ describe('数据集命令', () => {
       expect(sd).toBeCloseTo(1, 2);
     }
   });
+  it('标准化在 1e9±微扰数据上不受行序影响', () => {
+    const base = 1e9;
+    const low = base - 5e-6;
+    const high = base + 5e-6;
+    const blocked = [...Array(50).fill(low), ...Array(450).fill(high)] as number[];
+    const standardized = (values: number[]) => {
+      useData.getState().importMatrix('微扰.csv', ['测量值'], values.map((value) => [value]));
+      expect(useData.getState().standardize()).toContain('(标准化)');
+      return useData.getState().model.all;
+    };
+    const ordered = standardized(blocked);
+    const reversed = standardized([...blocked].reverse());
+    expect([...ordered].sort((a, b) => a - b)).toEqual([...reversed].sort((a, b) => a - b));
+    expect(ordered[0]).toBeCloseTo(-2.997, 4);
+    expect(ordered[ordered.length - 1]).toBeCloseTo(0.333, 4);
+  });
   it('生成随机数据:形状与名称正确,均值接近 μ', () => {
     useData.getState().generateRandom(50, 2, 30, 4);
     const m = useData.getState().model;

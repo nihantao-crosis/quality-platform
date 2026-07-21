@@ -2,6 +2,7 @@
  * PlatformAdapter — 平台能力抽象（交接文档 §4.2）。
  * Web 与桌面（Tauri）各自实现导入/导出，UI 与 core 不感知运行端。
  */
+import { assertTextImportSize } from './importLimits';
 
 export interface ExportJob {
   defaultName: string; // 不含扩展名
@@ -107,7 +108,10 @@ const webAdapter: PlatformAdapter = {
             const bytes = new Uint8Array(await f.arrayBuffer());
             assertXlsxImportSize(bytes.byteLength); // 读取后再校验实际载荷
             resolve({ name: f.name, bytes });
-          } else resolve({ name: f.name, contents: await f.text() });
+          } else {
+            assertTextImportSize(f.name, f.size); // 文本读取前按 CSV/TXT 与 QPROJ 分别限流
+            resolve({ name: f.name, contents: await f.text() });
+          }
         } catch (error) {
           reject(error);
         }

@@ -52,8 +52,9 @@ jobs:
           tauri = json.loads((root / 'src-tauri/tauri.conf.json').read_text(encoding='utf-8'))
 
           tag = os.environ['TAG']
-          if not re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?', tag):
-              raise SystemExit(f'invalid release tag: {tag!r}')
+          # latest.json 只能指向正式版；beta/rc 或带前导零的非标准 tag 必须在构建前失败。
+          if not re.fullmatch(r'v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)', tag):
+              raise SystemExit(f'invalid stable release tag: {tag!r}; expected vX.Y.Z')
           expected = tag[1:]
           versions = {
               'tag': expected,

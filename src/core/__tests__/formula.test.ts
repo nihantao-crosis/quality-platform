@@ -83,6 +83,24 @@ describe('聚合函数(广播为常量)', () => {
   it('聚合可作用于表达式 mean(C1+C2)', () => {
     expect(ev('mean(C1 + C2)')[0]).toBe((11 + 22 + 33 + 44) / 4);
   });
+  it('大基准微扰下 MEAN/STD/VAR 使用稳定样本口径且不随行序改变', () => {
+    const base = 1e9;
+    const low = base - 5e-6;
+    const high = base + 5e-6;
+    const blocked = [...Array(50).fill(low), ...Array(450).fill(high)] as number[];
+    const reversed = [...blocked].reverse();
+    const formulaCtx = (values: number[]): FormulaCtx => ({
+      columns: [values], colNames: ['微扰'], rowCount: values.length,
+    });
+    const read = (name: 'mean' | 'std' | 'var', values: number[]) =>
+      evalFormula(`${name}(C1)`, formulaCtx(values)).values[0];
+    const expectedSd = 3.007082684410897e-6;
+    expect(read('mean', blocked)).toBe(read('mean', reversed));
+    expect(read('std', blocked)).toBeCloseTo(expectedSd, 15);
+    expect(Math.abs(read('std', blocked) - read('std', reversed)) / expectedSd).toBeLessThan(1e-12);
+    expect(read('var', blocked)).toBeCloseTo(expectedSd ** 2, 24);
+    expect(Math.abs(read('var', blocked) - read('var', reversed)) / (expectedSd ** 2)).toBeLessThan(1e-12);
+  });
 });
 
 describe('比较与逻辑', () => {
