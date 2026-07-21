@@ -106,7 +106,7 @@ describe('countCapabilityViolations 接 K 值(审查缺陷 S5)', () => {
     const base = [10, 10.1, 9.9, 10.05, 9.95, 10, 10.1, 9.9, 10, 10.05, 9.95, 10, 10.4, 10, 9.95];
     const M = computeVarModel('k值能力', ['x'], base.map((v) => [v]));
     const rules = { r1: true, r2: false, r3: false, r4: false, r5: false, r6: false, r7: false, r8: false };
-    const std = countCapabilityViolations(M, rules);
+    const std = countCapabilityViolations(M, rules, DEFAULT_RULE_K);
     const tight = countCapabilityViolations(M, rules, { ...DEFAULT_RULE_K, k1: 1 });
     expect(tight).toBeGreaterThan(std);
   });

@@ -8,7 +8,7 @@ import {
 } from 'docx';
 import PptxGenJS from 'pptxgenjs';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { nf, fmtCap, computeCapability, capabilityInputError, andersonDarling, type VarModel, type SpcAssessment, assessCapability } from '../core';
+import { nf, fmtCap, computeCapability, capabilityInputError, evaluateAndersonDarling, type VarModel, type SpcAssessment, assessCapability } from '../core';
 import { chartTokens } from '../ui/tokens';
 import { ControlChart } from '../ui/charts/ControlChart';
 import { Histogram } from '../ui/charts/Histogram';
@@ -16,9 +16,12 @@ import { NormalProbPlot } from '../ui/charts/NormalProbPlot';
 import type { ReportSpec } from './report';
 import { svgMarkupToPng } from './svgToPng';
 import { analysisUsesWorksheet, type AnalysisReportPayload, type AnalysisReportTable } from './analysisReportModel';
+import { reportContextText, reportSpecText, withinSigmaLabel } from './reportLabels';
 
 export interface ReportImages {
   xbar?: Uint8Array;
+  /** R / MR 离散图，与 xbar 位置图成对出现。 */
+  dispersion?: Uint8Array;
   hist?: Uint8Array;
   prob?: Uint8Array;
   /** 与 AnalysisReportPayload.charts 保持相同顺序。 */
@@ -31,8 +34,7 @@ interface ReportStats {
   capError: string | null;
   viol: { i: number; rule: number; desc: string; chart: string }[];
   verdictLine: string;
-  uniquePointCount: number;
-  /** 失控结论 + 三个计数各自标注口径(各图点数/去重观测数),与其余格式同一表述 */
+  /** 失控结论 + 三个计数各自标注口径(各图点数/去重分析单元数),与其余格式同一表述 */
   violSummary: string;
   adText: string;
 }
@@ -42,45 +44,100 @@ function collectStats(M: VarModel, spec: ReportSpec, assessment: SpcAssessment):
   const cap = capError ? null : computeCapability(M.all, M.sigmaWithin, spec);
   // v1.42.3:位置+离散图统一判异明细,与判定行同源
   const viol = assessment.events;
-  let adText = '样本量不足,未执行正态性检验';
-  if (M.all.length >= 8) {
-    const ad = andersonDarling(M.all);
+  const adEvaluation = evaluateAndersonDarling(M.all);
+  let adText = adEvaluation.unavailableReason ?? '正态性不可判定';
+  if (adEvaluation.result) {
+    const ad = adEvaluation.result;
     adText = `Anderson-Darling A²* = ${nf(ad.a2star, 3)}, P ${ad.p < 0.005 ? '< 0.005' : '= ' + nf(ad.p, 3)} → ${ad.normal ? '未拒绝正态假设' : '显著偏离正态,建议 Box-Cox'}`;
   }
-  const violSummary = `${assessment.verdictLine}（${assessment.locationLabel} 图 ${assessment.locationPoints} 点 + ${assessment.dispersionLabel} 图 ${assessment.dispersionPoints} 点，去重后 ${assessment.uniquePointCount} 个失控观测）`;
-  return { cap, capError, viol, verdictLine: assessment.verdictLine, uniquePointCount: assessment.uniquePointCount, violSummary, adText };
+  const violSummary = `${assessment.verdictLine}（各图累计 ${assessment.chartPointCount} 个失控点：${assessment.locationLabel} 图 ${assessment.locationPoints} 个 + ${assessment.dispersionLabel} 图 ${assessment.dispersionPoints} 个；去重${assessment.analysisUnitLabel} ${assessment.uniqueAnalysisUnitCount} 个）`;
+  return { cap, capError, viol, verdictLine: assessment.verdictLine, violSummary, adText };
 }
 
-/** 浏览器路径：渲染三张图为 PNG（经典主题,与界面一致） */
+/** Word/PPT 是阅读摘要；逐行完整明细保留在 HTML/文本/Excel，避免演示文档因长游程无限膨胀。 */
+function officeViolationText(
+  viol: ReportStats['viol'],
+  verdictLine: string,
+  violSummary: string,
+  limit: number,
+): string {
+  if (viol.length === 0) return verdictLine;
+  const shown = viol.slice(0, limit)
+    .map((item) => `${item.chart}图点${item.i + 1}(准则${item.rule}：${item.desc})`)
+    .join('、');
+  return viol.length > limit
+    ? `${violSummary}：${shown}（摘要仅列前 ${limit} 项；共 ${viol.length} 项，完整明细请导出 Excel）`
+    : `${violSummary}：${shown}`;
+}
+
+/** PPT 每张控制图只列自己的点×准则明细，避免把 R/MR 异常挂在 X̄/I 图下。 */
+function officeChartViolationText(
+  viol: ReportStats['viol'],
+  violSummary: string,
+  chartLabel: string,
+  limit: number,
+): string {
+  const chartViol = viol.filter((item) => item.chart === chartLabel);
+  if (chartViol.length === 0) return `${violSummary}；${chartLabel} 图无逐点判异明细`;
+  const shown = chartViol.slice(0, limit)
+    .map((item) => `${item.chart}图点${item.i + 1}(准则${item.rule}：${item.desc})`)
+    .join('、');
+  return chartViol.length > limit
+    ? `${violSummary}；${chartLabel} 图明细：${shown}（摘要仅列前 ${limit} 项；该图共 ${chartViol.length} 项，完整明细请导出 Excel）`
+    : `${violSummary}；${chartLabel} 图明细：${shown}`;
+}
+
+/** 浏览器路径：渲染位置图、离散图、直方图和概率图为 PNG。 */
 export async function renderReportImages(
   M: VarModel,
   spec: ReportSpec,
-  assessment: SpcAssessment,
+  assessment: SpcAssessment | null,
   analysis?: AnalysisReportPayload,
+  capabilityModel: VarModel = M,
 ): Promise<ReportImages> {
+  // 专项分析按自身 charts 原样输出，不混入通用报告的 SPC/能力图。
   if (analysis) {
     return {
       analysis: await Promise.all(analysis.charts.map((chart) =>
         svgMarkupToPng(chart.svg, chart.width, chart.height, 2))),
     };
   }
+  if (!assessment) throw new Error('通用报告图片缺少 SPC 判异结果');
+  const C = capabilityModel;
   const T = chartTokens('经典', true);
   const spc = M.hasSubgroups
     ? { data: M.subs.map((s) => s.mean), cl: M.xbarbar, ucl: M.uclX, lcl: M.lclX, label: 'X̄' }
     : { data: M.indiv, cl: M.indMean, ucl: M.iUcl, lcl: M.iLcl, label: 'I' };
-  const viol = assessment.locationViolIndexes;
+  const dispersion = M.hasSubgroups
+    ? { data: M.subs.map((s) => s.range), cl: M.rCl, ucl: M.uclR, lcl: M.lclR, label: 'R̄', xIndexOffset: 0 }
+    : { data: M.mr.slice(1) as number[], cl: M.mrbar, ucl: M.mrUcl, lcl: 0, label: 'MR̄', xIndexOffset: 1 };
   const mk = (el: React.ReactElement, w: number, h: number) =>
     svgMarkupToPng(renderToStaticMarkup(el), w, h, 2);
   return {
     xbar: await mk(
-      <ControlChart T={T} data={spc.data} cl={spc.cl} ucl={spc.ucl} lcl={spc.lcl} clLabel={spc.label} h={250} zones violations={viol} />,
+      <ControlChart T={T} data={spc.data} cl={spc.cl} ucl={spc.ucl} lcl={spc.lcl} clLabel={spc.label} h={250} zones violations={assessment.locationViolIndexes} />,
+      960, 250,
+    ),
+    dispersion: await mk(
+      <ControlChart
+        T={T}
+        data={dispersion.data}
+        cl={dispersion.cl}
+        ucl={dispersion.ucl}
+        lcl={dispersion.lcl}
+        clLabel={dispersion.label}
+        h={250}
+        zones
+        violations={assessment.dispersionViolIndexes}
+        xIndexOffset={dispersion.xIndexOffset}
+      />,
       960, 250,
     ),
     hist: await mk(
-      <Histogram T={T} data={M.all} mu={M.oMean} sigmaWithin={M.sigmaWithin} sigmaOverall={M.oSd} lsl={spec.lsl} usl={spec.usl} tgt={spec.tgt} h={300} />,
+      <Histogram T={T} data={C.all} mu={C.oMean} sigmaWithin={C.sigmaWithin} sigmaOverall={C.oSd} lsl={spec.lsl} usl={spec.usl} tgt={spec.tgt} h={300} />,
       960, 300,
     ),
-    prob: await mk(<NormalProbPlot T={T} data={M.all} h={280} />, 960, 280),
+    prob: await mk(<NormalProbPlot T={T} data={C.all} h={280} />, 960, 280),
   };
 }
 
@@ -92,11 +149,11 @@ const capPairs = (cap: NonNullable<ReportStats['cap']>): Array<[string, string]>
 ];
 
 // P0-4:判定消费唯一判定器,失控时不得写无警示的「能力充足」。
-const capabilityVerdictText = (M: VarModel, cap: NonNullable<ReportStats['cap']>, assessment: SpcAssessment) => {
-  const ad = M.all.length >= 8 ? andersonDarling(M.all) : null;
+const capabilityVerdictText = (M: VarModel, cap: NonNullable<ReportStats['cap']>, spcViolations: number) => {
+  const ad = evaluateAndersonDarling(M.all).result;
   const a = assessCapability({
     cpk: cap.cpk, verdict: cap.verdict, adP: ad ? ad.p : null, n: M.all.length,
-    spcViolations: assessment.locationPoints + assessment.dispersionPoints,
+    spcViolations,
   });
   return a.spcViolations > 0 ? `${a.status}（${a.headline}）` : a.status;
 };
@@ -107,8 +164,10 @@ export async function buildDocx(
   M: VarModel,
   spec: ReportSpec,
   images: ReportImages,
-  assessment: SpcAssessment,
+  assessment: SpcAssessment | null,
   analysis?: AnalysisReportPayload,
+  capabilityModel: VarModel = M,
+  capabilitySpcViolations?: number | null,
 ): Promise<Uint8Array> {
   const border = { style: BorderStyle.SINGLE, size: 4, color: 'E2E5EA' };
   const borders = { top: border, bottom: border, left: border, right: border };
@@ -164,20 +223,26 @@ export async function buildDocx(
     const blob = await Packer.toBlob(doc);
     return new Uint8Array(await blob.arrayBuffer());
   }
+  if (!assessment) throw new Error('通用 Word 报告缺少 SPC 判异结果');
 
-  const { cap, capError, viol, verdictLine, violSummary, adText } = collectStats(M, spec, assessment);
+  const C = capabilityModel;
+  const capSpcCount = capabilitySpcViolations ?? assessment.chartPointCount;
+  const { cap, capError, viol, verdictLine, violSummary, adText } = collectStats(C, spec, assessment);
 
   const children: (Paragraph | Table)[] = [
     new Paragraph({ heading: HeadingLevel.HEADING_1, children: [new TextRun({ text: '质量分析报告', size: 40, bold: true })] }),
-    p(`工作表 ${M.name} · ${M.k} 子组 × ${M.n} 测量 = ${M.all.length} 观测 · 生成于 ${new Date().toLocaleString('zh-CN')}`),
+    p(`工作表 ${M.name} · ${reportContextText(M, C)} · 生成于 ${new Date().toLocaleString('zh-CN')}`),
     h('1. 过程概览'),
     kvTable([
-      ['均值', nf(M.oMean, 4)], ['σ 组内', nf(M.sigmaWithin, 4)], ['σ 整体', nf(M.oSd, 4)],
-      ['规格', `${nf(spec.lsl, 2)} / ${nf(spec.tgt, 2)} / ${nf(spec.usl, 2)}`], ['判定', cap ? `${capabilityVerdictText(M, cap, assessment)} (Cpk ${nf(cap.cpk, 2)})` : '能力分析未运行'],
+      ['能力口径均值', nf(C.oMean, 4)], [withinSigmaLabel(C), nf(C.sigmaWithin, 4)], ['σ 整体', nf(C.oSd, 4)],
+      ['规格', reportSpecText(spec, 2)], ['判定', cap ? `${capabilityVerdictText(C, cap, capSpcCount)} (Cpk ${nf(cap.cpk, 2)})` : '能力分析未运行'],
     ]),
-    h('2. SPC 控制图与判异'),
+    h(`2. SPC 控制图（${assessment.locationLabel}-${assessment.dispersionLabel}）与判异`),
+    p(`${assessment.locationLabel} 控制图（位置）`),
     ...img(images.xbar),
-    p(viol.length === 0 ? verdictLine : `${violSummary}：` + viol.slice(0, 12).map((v) => `${v.chart}图点${v.i + 1}(准则${v.rule})`).join('、') + (viol.length > 12 ? ` 等 ${viol.length} 项` : '')),
+    p(`${assessment.dispersionLabel} 控制图（离散）`),
+    ...img(images.dispersion),
+    p(officeViolationText(viol, verdictLine, violSummary, 12)),
     h('3. 过程能力'),
     ...img(images.hist, 620, 194),
     cap ? kvTable(capPairs(cap)) : p(`能力分析未运行: ${capError}`),
@@ -198,8 +263,10 @@ export async function buildPptx(
   M: VarModel,
   spec: ReportSpec,
   images: ReportImages,
-  assessment: SpcAssessment,
+  assessment: SpcAssessment | null,
   analysis?: AnalysisReportPayload,
+  capabilityModel: VarModel = M,
+  capabilitySpcViolations?: number | null,
 ): Promise<Uint8Array> {
   const pptx = new PptxGenJS();
   pptx.defineLayout({ name: 'WIDE', width: 13.33, height: 7.5 });
@@ -215,15 +282,23 @@ export async function buildPptx(
   const chartSlide = (title: string, data: Uint8Array | undefined, ratio: number, note?: string) => {
     const s = pptx.addSlide();
     titleBar(s, title);
+    let imageBottom = 4.1;
     if (data) {
       const b64 = 'data:image/png;base64,' + btoaBytes(data);
       const w = 11.5;
       const h = Math.min(5.4, w * ratio);
       s.addImage({ data: b64, x: (13.33 - w) / 2, y: 1.1, w, h });
+      imageBottom = 1.1 + h;
     } else {
       s.addText('（图表在浏览器/桌面导出时嵌入）', { x: 0.9, y: 3, w: 11.5, h: 1, color: GRAY, fontSize: 16, align: 'center' });
     }
-    if (note) s.addText(note, { x: 0.9, y: 6.7, w: 11.5, h: 0.5, color: GRAY, fontSize: 12 });
+    if (note) {
+      const noteY = Math.min(6.55, imageBottom + 0.15);
+      s.addText(note, {
+        x: 0.9, y: noteY, w: 11.5, h: Math.max(0.55, 7.25 - noteY),
+        color: GRAY, fontSize: 11, fit: 'shrink', valign: 'top', margin: 0.03,
+      });
+    }
     return s;
   };
 
@@ -276,15 +351,18 @@ export async function buildPptx(
     const buf = (await pptx.write({ outputType: 'arraybuffer' })) as ArrayBuffer;
     return new Uint8Array(buf);
   }
+  if (!assessment) throw new Error('通用 PowerPoint 报告缺少 SPC 判异结果');
 
-  const { cap, capError, viol, verdictLine, violSummary, adText } = collectStats(M, spec, assessment);
+  const C = capabilityModel;
+  const capSpcCount = capabilitySpcViolations ?? assessment.chartPointCount;
+  const { cap, capError, viol, verdictLine, violSummary, adText } = collectStats(C, spec, assessment);
 
   // 封面
   const cover = pptx.addSlide();
   cover.addShape('rect', { x: 0, y: 0, w: 13.33, h: 7.5, fill: { color: 'F4F6F8' } });
   cover.addShape('rect', { x: 0, y: 3.0, w: 13.33, h: 0.06, fill: { color: BLUE } });
   cover.addText('质量分析报告', { x: 1, y: 1.7, w: 11.3, h: 1.1, fontSize: 44, bold: true, color: DARK });
-  cover.addText(`${M.name} · ${M.k} 子组 × ${M.n} 测量 = ${M.all.length} 观测`, { x: 1, y: 3.3, w: 11.3, h: 0.6, fontSize: 18, color: GRAY });
+  cover.addText(`${M.name} · ${reportContextText(M, C)}`, { x: 1, y: 3.3, w: 11.3, h: 0.6, fontSize: 18, color: GRAY, fit: 'shrink' });
   cover.addText(`${new Date().toLocaleDateString('zh-CN')} · 质量分析平台`, { x: 1, y: 3.9, w: 11.3, h: 0.5, fontSize: 14, color: GRAY });
 
   // 概览 + 能力表
@@ -292,10 +370,10 @@ export async function buildPptx(
   titleBar(s2, '过程概览与能力指标');
   const rows: PptxGenJS.TableRow[] = [
     [
-      { text: '均值', options: { bold: true } }, { text: 'σ 组内', options: { bold: true } },
+      { text: '能力口径均值', options: { bold: true } }, { text: withinSigmaLabel(C), options: { bold: true } },
       { text: 'σ 整体', options: { bold: true } }, { text: '规格 L/T/U', options: { bold: true } }, { text: '判定', options: { bold: true } },
     ],
-    [nf(M.oMean, 4), nf(M.sigmaWithin, 4), nf(M.oSd, 4), `${nf(spec.lsl, 2)} / ${nf(spec.tgt, 2)} / ${nf(spec.usl, 2)}`, cap ? `${capabilityVerdictText(M, cap, assessment)} (Cpk ${nf(cap.cpk, 2)})` : '能力分析未运行'].map((t) => ({ text: t })),
+    [nf(C.oMean, 4), nf(C.sigmaWithin, 4), nf(C.oSd, 4), reportSpecText(spec, 2), cap ? `${capabilityVerdictText(C, cap, capSpcCount)} (Cpk ${nf(cap.cpk, 2)})` : '能力分析未运行'].map((t) => ({ text: t })),
   ];
   s2.addTable(rows, { x: 0.6, y: 1.1, w: 12.1, fontSize: 14, border: { type: 'solid', color: 'E2E5EA', pt: 1 }, fill: { color: 'FFFFFF' } });
   if (cap) {
@@ -309,8 +387,10 @@ export async function buildPptx(
   }
   s2.addText(adText, { x: 0.6, y: 4.3, w: 12.1, h: 0.5, fontSize: 13, color: GRAY });
 
-  chartSlide(`SPC 控制图（${M.hasSubgroups ? 'X̄' : 'I'}）`, images.xbar, 250 / 960,
-    viol.length === 0 ? verdictLine : `${violSummary}：` + viol.slice(0, 8).map((v) => `${v.chart}图点${v.i + 1}(准则${v.rule})`).join('、') + (viol.length > 8 ? ` 等 ${viol.length} 项` : ''));
+  chartSlide(`SPC 位置图（${assessment.locationLabel}）`, images.xbar, 250 / 960,
+    viol.length === 0 ? verdictLine : officeChartViolationText(viol, violSummary, assessment.locationLabel, 8));
+  chartSlide(`SPC 离散图（${assessment.dispersionLabel}）`, images.dispersion, 250 / 960,
+    viol.length === 0 ? verdictLine : officeChartViolationText(viol, violSummary, assessment.dispersionLabel, 8));
   chartSlide('过程能力直方图', images.hist, 300 / 960);
   chartSlide('正态概率图', images.prob, 280 / 960, adText);
 

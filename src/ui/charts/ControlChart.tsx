@@ -73,7 +73,8 @@ function ControlChartImpl(cfg: ControlChartProps) {
   const viol =
     cfg.violations ??
     new Set(data.map((v, i) => (v > cfg.ucl || v < cfg.lcl ? i : -1)).filter((i) => i >= 0));
-  const label = (i: number) => (cfg.ptLabel ? cfg.ptLabel(i) : `点 ${i + 1}`);
+  // xIndexOffset 不只属于轴刻度：MR[0] 对应原始观测 2，默认 tooltip/辅助标签也必须映射到同一点号空间。
+  const label = (i: number) => (cfg.ptLabel ? cfg.ptLabel(i) : `点 ${i + 1 + xIndexOffset}`);
   const tickLabel = (i: number) => {
     const raw = cfg.xLabels?.length === data.length ? cfg.xLabels[i] : String(i + 1 + xIndexOffset);
     return raw.length > 12 ? raw.slice(0, 11) + '…' : raw;

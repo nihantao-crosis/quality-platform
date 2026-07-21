@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mean, rootMeanSquare, stdev } from '../basicMath';
+import { mean, rootMeanSquare, stableSum, stdev } from '../basicMath';
 import { computeCapability } from '../capability';
 import { computeGagePanelData, computeGageRR, type GageObservation } from '../gage';
 import { computeVarModel } from '../model';
@@ -28,6 +28,74 @@ const NO_RULES: NelsonRules = {
 };
 
 describe('审计级数值稳定性回归', () => {
+  it('均值保留大数相消后的低位，且不随排列改变', () => {
+    const permutations = (magnitude: number): number[][] => [
+      [magnitude, -magnitude, 1],
+      [magnitude, 1, -magnitude],
+      [-magnitude, magnitude, 1],
+      [-magnitude, 1, magnitude],
+      [1, magnitude, -magnitude],
+      [1, -magnitude, magnitude],
+    ];
+
+    for (const magnitude of [1e16, 1e308]) {
+      const results = permutations(magnitude).map((values) => mean(values));
+      expect(new Set(results).size).toBe(1);
+      results.forEach((result) => expect(result).toBeCloseTo(1 / 3, 15));
+    }
+
+    // 补偿相消不能以牺牲既有的大基准微扰精度为代价。
+    const local = [1e15 - 1, 1e15, 1e15 + 1];
+    expect(mean(local)).toBe(1e15);
+    expect(stdev(local)).toBe(1);
+  });
+
+  it('多层量级相消也保留最后残量，均值与求和不随排列改变', () => {
+    const high = 2 ** 108;
+    const middle = 2 ** 54;
+    const values = [high, -high, middle, -middle, -1];
+    const permutations = (items: number[]): number[][] => items.length <= 1
+      ? [items]
+      : items.flatMap((value, index) =>
+        permutations([...items.slice(0, index), ...items.slice(index + 1)])
+          .map((tail) => [value, ...tail]));
+
+    for (const arranged of permutations(values)) {
+      expect(stableSum(arranged)).toBe(-1);
+      expect(mean(arranged)).toBe(-0.2);
+    }
+  });
+
+  it('真实总和溢出但均值/标准差可表示时仍返回有限正确值', () => {
+    const values = [-4e307, ...Array(10).fill(4e307)] as number[];
+    const expectedMean = (36 / 11) * 1e307;
+    const expectedStdev = (8 / Math.sqrt(11)) * 1e307;
+    for (const arranged of [values, [...values].reverse()]) {
+      const actualMean = mean(arranged);
+      const actualStdev = stdev(arranged);
+      expect(Number.isFinite(actualMean)).toBe(true);
+      expect(Number.isFinite(actualStdev)).toBe(true);
+      expect(relativeDifference(actualMean, expectedMean)).toBeLessThan(2e-15);
+      expect(relativeDifference(actualStdev, expectedStdev)).toBeLessThan(2e-15);
+    }
+  });
+
+  it('空样本与非有限观测明确传播 NaN，不误报零方差', () => {
+    expect(mean([])).toBeNaN();
+    expect(stdev([])).toBeNaN();
+    expect(stdev([], false)).toBeNaN();
+    expect(stdev([1])).toBeNaN();
+    expect(stdev([1], false)).toBe(0);
+    for (const invalid of [
+      [Number.NaN, 1],
+      [Number.POSITIVE_INFINITY, 1],
+      [Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY],
+    ]) {
+      expect(stdev(invalid)).toBeNaN();
+      expect(stdev(invalid, false)).toBeNaN();
+    }
+  });
+
   it('固定 500 点反例：旧朴素二遍法高估约 73.08%，模型结果与排列无关', () => {
     // 期望值按 JavaScript 实际可表示的 LOW/HIGH 两点及 50/450 频数计算。
     const expected = 3.007082684410897e-6;

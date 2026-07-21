@@ -107,30 +107,47 @@ function offsetMean(xs: number[]): { origin: number; offset: number } {
 }
 
 /**
- * 缩放后的 Neumaier 补偿求和。先除以最大绝对值可避免合法有限输入因中间加法
- * 提前溢出；补偿项保留大数相消后的低位。最终真实结果超出 Number 范围时仍返回 ±∞。
+ * 浮点展开求和（Shewchuk/Python fsum 的 partials 思路）。
+ * 单个 Neumaier 补偿项在多层量级相消时仍会丢失次级残量；partials 把每层
+ * 舍入残量分开保存，使 [2^108,-2^108,2^54,-2^54,-1] 不再依赖排列。
+ */
+function expansionSumAtScale(xs: number[], scale = 1): number {
+  const partials: number[] = [];
+  for (const raw of xs) {
+    let x = raw / scale;
+    let write = 0;
+    for (let read = 0; read < partials.length; read++) {
+      let y = partials[read];
+      if (Math.abs(x) < Math.abs(y)) [x, y] = [y, x];
+      const high = x + y;
+      const low = y - (high - x);
+      if (low !== 0) partials[write++] = low;
+      x = high;
+    }
+    partials.length = write;
+    partials.push(x);
+  }
+  let total = 0;
+  for (const partial of partials) total += partial;
+  return total;
+}
+
+/**
+ * 展开求和。原量级可表示时直接返回；中间加法溢出时才按最大绝对值归一化重算。
+ * 最终真实总和超出 Number 范围时仍返回 ±∞。
  */
 export function stableSum(xs: number[]): number {
   if (xs.some((value) => !Number.isFinite(value))) return xs.reduce((sum, value) => sum + value, 0);
-  let scale = 0;
-  for (const value of xs) scale = Math.max(scale, Math.abs(value));
+  const unscaled = expansionSumAtScale(xs);
+  if (Number.isFinite(unscaled)) return unscaled;
+  const scale = maxAbs(xs);
   if (scale === 0) return 0;
-  let sum = 0;
-  let correction = 0;
-  for (const raw of xs) {
-    const value = raw / scale;
-    const next = sum + value;
-    correction += Math.abs(sum) >= Math.abs(value)
-      ? (sum - next) + value
-      : (value - next) + sum;
-    sum = next;
-  }
-  return (sum + correction) * scale;
+  return expansionSumAtScale(xs, scale) * scale;
 }
 
-/** 值域守卫(v1.42.3,审计 P2):offsetMean 里 (x − origin) 单项差最大 2·maxAbs,且 n 项
- * 累加的部分和最坏可达 2·maxAbs·(n−1)——单项差不溢出但部分和溢出同样会输出 NaN(mean)
- * 或静默 0(stdev,对抗审查反例 [-4e307, 4e307, 4e307, 4e307])。因此阈值必须随样本量收紧:
+/** stdev 值域守卫(v1.42.3,审计 P2):offsetMean 里 (x − origin) 单项差最大 2·maxAbs,且 n 项
+ * 累加的部分和最坏可达 2·maxAbs·(n−1)——单项差不溢出但部分和溢出，
+ * 仍会让 stdev 的中心偏移成为 NaN 并静默误报 0。因此阈值必须随样本量收紧:
  * maxAbs > MAX_VALUE/(4n) 即整体按最大绝对值缩放后计算再乘回(缩放后 maxAbs=1,不会复触发)。
  * 输入含非有限值时守卫不触发,保持既有 NaN 传播行为。 */
 const OFFSET_OVERFLOW_GUARD = Number.MAX_VALUE / 4;
@@ -149,21 +166,35 @@ function maxAbs(xs: number[]): number {
 }
 
 export function mean(xs: number[]): number {
+  if (xs.length === 0) return Number.NaN;
+  // 非有限值沿用 JavaScript 算术传播语义；有限值先用原量级补偿和，
+  // 只在中间总和溢出时改用归一化补偿和。
+  // 不再选首元素作原点，避免 [1e16,-1e16,1] 的低位残差随排列丢失。
+  if (xs.some((value) => !Number.isFinite(value))) return stableSum(xs) / xs.length;
+  const unscaledTotal = expansionSumAtScale(xs);
+  if (Number.isFinite(unscaledTotal)) return unscaledTotal / xs.length;
+
+  // 同号大数的中间总和可能溢出，即使最终均值仍在有限值域内。
   const scale = maxAbs(xs);
-  if (Number.isFinite(scale) && scale > offsetGuardThreshold(xs.length)) {
-    return scale * mean(xs.map((v) => v / scale));
-  }
-  const centered = offsetMean(xs);
-  return xs.length === 0 ? Number.NaN : centered.origin + centered.offset;
+  if (scale === 0) return 0;
+  const normalizedTotal = expansionSumAtScale(xs, scale);
+  const total = normalizedTotal * scale;
+  // 总和本身可能溢出，但均值仍在 Number 范围内；此时必须先除以 n 再乘回量级。
+  return Number.isFinite(total)
+    ? total / xs.length
+    : (normalizedTotal / xs.length) * scale;
 }
 
 /** sample=true → n-1 分母（默认样本标准差） */
 export function stdev(xs: number[], sample = true): number {
+  const denom = sample ? xs.length - 1 : xs.length;
+  // 空数组/单观测样本没有可定义的标准差；非有限观测必须传播 NaN，
+  // 不能落入 scale===0 分支被误报为 0。
+  if (denom <= 0 || xs.some((value) => !Number.isFinite(value))) return Number.NaN;
   const guardScale = maxAbs(xs);
   if (Number.isFinite(guardScale) && guardScale > offsetGuardThreshold(xs.length)) {
     return guardScale * stdev(xs.map((v) => v / guardScale), sample);
   }
-  const denom = sample ? xs.length - 1 : xs.length;
   const centered = offsetMean(xs);
   // 在偏移坐标内计算离差，避免先把均值舍入回大基准后再相减。
   // 缩放平方和算法同时避免合法有限输入在平方时不必要地上溢/下溢。

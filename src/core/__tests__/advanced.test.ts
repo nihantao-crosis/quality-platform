@@ -3,7 +3,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { computePChart, computeCChart } from '../attr';
-import { andersonDarling, probPlotPoints } from '../normality';
+import { andersonDarling, evaluateAndersonDarling, probPlotPoints } from '../normality';
 import { bestLambda, boxCoxTransform, transformWithSpec } from '../boxcox';
 import { ewmaSeries, cusumSeries } from '../advancedSpc';
 import {
@@ -100,6 +100,14 @@ describe('正态性检验 (Anderson-Darling)', () => {
       expect(pts[i].x).toBeGreaterThanOrEqual(pts[i - 1].x);
       expect(pts[i].z).toBeGreaterThan(pts[i - 1].z);
     }
+  });
+  it('报告安全入口对常量数据返回不可判定，严格入口仍抛错', () => {
+    const constant = Array(20).fill(1) as number[];
+    expect(() => andersonDarling(constant)).toThrow(/正的有限标准差/);
+    expect(evaluateAndersonDarling(constant)).toEqual({
+      result: null,
+      unavailableReason: '数据无可估计变异，正态性不可判定',
+    });
   });
 });
 

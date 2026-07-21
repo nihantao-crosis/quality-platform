@@ -5,12 +5,20 @@
 import * as XLSX from 'xlsx';
 import {
   nf, computeCapability, capabilityInputError, type VarModel, type SpcAssessment,
-  assessCapability, andersonDarling,
+  assessCapability, evaluateAndersonDarling,
 } from '../core';
 import type { ReportSpec } from './report';
 import { safeSheetName, type AnalysisReportPayload } from './analysisReportModel';
+import { reportSpecText, withinSigmaLabel, MAX_XLSX_VIOLATION_ROWS, violationTruncationNote } from './reportLabels';
 
-export function buildXlsx(M: VarModel, spec: ReportSpec, assessment: SpcAssessment, analysis?: AnalysisReportPayload): Uint8Array {
+export function buildXlsx(
+  M: VarModel,
+  spec: ReportSpec,
+  assessment: SpcAssessment | null,
+  analysis?: AnalysisReportPayload,
+  capabilityModel: VarModel = M,
+  capabilitySpcViolations?: number | null,
+): Uint8Array {
   const wb = XLSX.utils.book_new();
 
   const appendDataSheet = () => {
@@ -52,16 +60,20 @@ export function buildXlsx(M: VarModel, spec: ReportSpec, assessment: SpcAssessme
     );
     return new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer);
   }
+  if (!assessment) throw new Error('通用 Excel 报告缺少 SPC 判异结果');
+
+  const C = capabilityModel;
+  const capSpcCount = capabilitySpcViolations ?? assessment.chartPointCount;
 
   appendDataSheet();
 
   // Sheet 2: 统计摘要(能力输入闸门:规格不匹配等情况写「未运行」,数据 sheet 与其余章节照常导出)
-  const capError = capabilityInputError(M.all, M.sigmaWithin, spec);
-  const cap = capError ? null : computeCapability(M.all, M.sigmaWithin, spec);
-  const xlsxAd = M.all.length >= 8 ? andersonDarling(M.all) : null;
+  const capError = capabilityInputError(C.all, C.sigmaWithin, spec);
+  const cap = capError ? null : computeCapability(C.all, C.sigmaWithin, spec);
+  const xlsxAd = evaluateAndersonDarling(C.all).result;
   const capAssessment = cap ? assessCapability({
-    cpk: cap.cpk, verdict: cap.verdict, adP: xlsxAd ? xlsxAd.p : null, n: M.all.length,
-    spcViolations: assessment.locationPoints + assessment.dispersionPoints,
+    cpk: cap.cpk, verdict: cap.verdict, adP: xlsxAd ? xlsxAd.p : null, n: C.all.length,
+    spcViolations: capSpcCount,
   }) : null;
   const capRows: (string | number)[][] = cap && capAssessment ? [
     ['Cp', cap.cp == null ? '—' : Number(nf(cap.cp, 3))],
@@ -73,28 +85,47 @@ export function buildXlsx(M: VarModel, spec: ReportSpec, assessment: SpcAssessme
     ['西格玛水平', Number(nf(cap.sigmaLevel, 3))],
     ['PPM 合计（整体）', Math.round(cap.ppm.overall.total)],
     ['判定', capAssessment.status],
-    ['过程稳定性', capAssessment.spcViolations > 0 ? `控制图 ${capAssessment.spcViolations} 个失控点（各图累计，去重后 ${assessment.uniquePointCount} 个观测）——能力值仅描述当前样本` : '控制图无失控信号'],
   ] : [
     ['过程能力', `未运行: ${capError}`],
+  ];
+  // 稳定性是独立于能力计算的 SPC 结果；即使 σ=0/规格闸门使能力未运行，也必须保留这一行。
+  const stabilityRow: (string | number)[] = [
+    '过程稳定性',
+    assessment.chartPointCount > 0
+      ? `各图累计 ${assessment.chartPointCount} 个失控点（${assessment.locationLabel} 图 ${assessment.locationPoints} 个 + ${assessment.dispersionLabel} 图 ${assessment.dispersionPoints} 个）；去重${assessment.analysisUnitLabel} ${assessment.uniqueAnalysisUnitCount} 个${cap ? '——能力值仅描述当前样本' : '——过程不稳定'}`
+      : '控制图无失控信号',
   ];
   const summary: (string | number)[][] = [
     ['质量分析平台 · 统计摘要', ''],
     ['工作表', M.name],
-    ['子组数 k', M.k],
-    ['子组大小 n', M.n],
-    ['观测数 N', M.all.length],
-    ['均值', Number(nf(M.oMean, 5))],
-    ['σ 组内', Number(nf(M.sigmaWithin, 5))],
-    ['σ 整体', Number(nf(M.oSd, 5))],
+    ['数据结构', M.hasSubgroups ? '子组数据' : '单值观测（I-MR）'],
+    ...(M.hasSubgroups ? [['子组数 k', M.k], ['子组大小 n', M.n]] : []),
+    ...(C !== M ? [
+      ['能力数据结构', C.hasSubgroups ? '子组数据' : '单值观测（I-MR）'],
+      ...(C.hasSubgroups ? [['能力子组数 k', C.k], ['能力子组大小 n', C.n]] : []),
+      ['SPC 观测数 N', M.all.length],
+    ] : []),
+    [C !== M ? '能力观测数 N' : '观测数 N', C.all.length],
+    ['能力口径均值', Number(nf(C.oMean, 5))],
+    [withinSigmaLabel(C), Number(nf(C.sigmaWithin, 5))],
+    ['σ 整体', Number(nf(C.oSd, 5))],
     ['', ''],
-    ['规格 LSL / 目标 / USL', `${spec.lsl} / ${spec.tgt} / ${spec.usl}`],
+    ['规格 LSL / 目标 / USL', reportSpecText(spec)],
     ...capRows,
+    stabilityRow,
   ];
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(summary), '统计摘要');
 
   // Sheet 3: 失控点(v1.42.3:位置+离散图统一判异,与统计摘要「过程稳定性」同源,不再自相矛盾)
   const violRows: (string | number)[][] = [['点号', '图', 'Nelson 准则', '描述']];
-  assessment.events.forEach((v) => violRows.push([v.i + 1, v.chart, v.rule, v.desc]));
+  // 行数硬上限(v1.42.4):对抗性数据可产出 50 万+事件,完整写入会冻结/OOM;截断行写明总数
+  const shownEvents = assessment.events.length > MAX_XLSX_VIOLATION_ROWS
+    ? assessment.events.slice(0, MAX_XLSX_VIOLATION_ROWS)
+    : assessment.events;
+  shownEvents.forEach((v) => violRows.push([v.i + 1, v.chart, v.rule, v.desc]));
+  if (assessment.events.length > shownEvents.length) {
+    violRows.push(['…', '', '', violationTruncationNote(assessment.events.length, shownEvents.length)]);
+  }
   if (assessment.events.length === 0) violRows.push(['—', '—', '—', assessment.verdictLine]);
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(violRows), '失控点');
 

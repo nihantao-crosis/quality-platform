@@ -11,6 +11,12 @@ export interface AdResult {
   n: number;
 }
 
+export interface AdEvaluation {
+  result: AdResult | null;
+  /** result 为 null 时给用户的可操作说明。 */
+  unavailableReason: string | null;
+}
+
 export function andersonDarling(xs: number[]): AdResult {
   const n = xs.length;
   if (n < 8) throw new Error('Anderson-Darling 检验至少需要 8 个观测');
@@ -42,6 +48,25 @@ export function andersonDarling(xs: number[]): AdResult {
   else p = 1 - Math.exp(-13.436 + 101.14 * a2star - 223.73 * a2star * a2star);
   p = Math.min(1, Math.max(0, p));
   return { a2, a2star, p, normal: p >= 0.05, n };
+}
+
+/**
+ * 报告/UI 安全入口：AD 是可选诊断，不应因样本太少、常量数据或非有限值
+ * 让整份报告导出失败。严格引擎入口 andersonDarling 仍保持抛错契约。
+ */
+export function evaluateAndersonDarling(xs: number[]): AdEvaluation {
+  const n = xs.length;
+  if (n < 8) {
+    return { result: null, unavailableReason: `样本量不足 8 个（当前 ${n} 个），未执行 Anderson-Darling 正态性检验` };
+  }
+  if (xs.some((value) => !Number.isFinite(value))) {
+    return { result: null, unavailableReason: '数据包含非有限值，正态性不可判定' };
+  }
+  const sd = stdev(xs, true);
+  if (!(sd > 0) || !Number.isFinite(sd)) {
+    return { result: null, unavailableReason: '数据无可估计变异，正态性不可判定' };
+  }
+  return { result: andersonDarling(xs), unavailableReason: null };
 }
 
 /** 正态概率图坐标：返回按值排序的 (x=观测值, z=期望正态分位数) */

@@ -1,7 +1,7 @@
 /** AQL 页真实批判定、追溯与转移交互。
  * @vitest-environment jsdom
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import App from '../../App';
 import { freshSwitchStatus } from '../../core/aqlSwitch';
@@ -18,6 +18,9 @@ beforeEach(() => {
     aqlMethod: 'gb', aqlAcMethod: 'gb', aqlSwitch: freshSwitchStatus(),
   });
 });
+
+// 全量并行测试结束时显式卸载 React 根，避免 Zustand 的末次同步通知越过 jsdom 生命周期。
+afterEach(() => cleanup());
 
 function recordBatch(batchId: string, nonconforming: number, fillInspector = false) {
   fireEvent.change(screen.getByLabelText('批次号'), { target: { value: batchId } });

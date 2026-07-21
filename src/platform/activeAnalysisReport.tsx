@@ -1338,28 +1338,57 @@ export function buildActiveAnalysisReport(): AnalysisReportPayload | undefined {
  * 例如“子组 + 5 个测量列”在原始工作表中是 6 个数值列，但 SPC 专项分析必须排除子组 ID；
  * Excel 的通用数据/摘要 sheet 若继续使用 raw model，会与专项 sheet 自相矛盾。
  */
-export function buildActiveAnalysisExport(): { report?: AnalysisReportPayload; model: VarModel } {
+export function buildActiveAnalysisExport(): { report?: AnalysisReportPayload; model: VarModel; capabilityModel: VarModel } {
   const app = useApp.getState();
   const data = useData.getState();
   let model = data.model;
+  let capabilityModel = data.model;
   if ((app.page === 'spc' && app.spcType !== 'p' && app.spcType !== 'c') || app.page === 'capability') {
-    const prepared = prepareSpcData(data.model, data.textCols, {
-      layout: app.spcDataLayout,
-      valueColumn: app.spcValueCol,
-      subgroupColumn: app.spcSubgroupCol,
-      pendingCells: data.pendingCells,
-    });
-    // SPC 页的通用导出与页面同口径（σ 估计方法随页面设置；能力路径 sigmaWithin 语义不受影响）
-    if (prepared.model && !prepared.error) model = withSigmaMethod(prepared.model, app.spcSigmaMethod);
+    const prepared = app.page === 'capability'
+      ? resolveCapabilityMeasurementData(data.model, data.textCols)
+      : prepareSpcData(data.model, data.textCols, {
+          layout: app.spcDataLayout,
+          valueColumn: app.spcValueCol,
+          subgroupColumn: app.spcSubgroupCol,
+          pendingCells: data.pendingCells,
+        });
+    if (!prepared.model || prepared.error) {
+      // 专项页保持优雅降级(与 v1.42.3 基线一致):buildSpcPayload/buildCapabilityPayload 自会生成
+      // 「未运行 + 原因」专项报告,四个构建器在 analysis 分支提前返回,raw model 仅提供工作表名,
+      // 不会产出自相矛盾的通用 sheet。整体阻断仅适用于无专项载荷兜底的通用报告页(下方分支)。
+      return { report: buildActiveAnalysisReport(), model: data.model, capabilityModel: data.model };
+    }
+    // SPC 页的图表限值跟随当前 σ 估计方法；能力模型保持自身解析口径。
+    model = app.page === 'spc' ? withSigmaMethod(prepared.model, app.spcSigmaMethod) : prepared.model;
+    capabilityModel = prepared.model;
   } else if (app.page === 'spc' && app.spcType === 'p') {
     model = computeVarModel(
       data.pModel.name,
       ['不良数', '样本量'],
       data.pModel.pdef.map((count, index) => [count, data.pModel.pNs[index]]),
     );
+    capabilityModel = model;
   } else if (app.page === 'summary') {
     const selected = resolveNumericColumn(data.model, app.activeVar);
     model = computeVarModel(data.model.name, [selected.name], selected.values.map((value) => [value]));
+    capabilityModel = model;
+  } else if (app.page === 'dashboard' || app.page === 'worksheet' || app.page === 'assistant') {
+    const prepared = prepareSpcData(data.model, data.textCols, {
+      layout: app.spcDataLayout,
+      valueColumn: app.spcValueCol,
+      subgroupColumn: app.spcSubgroupCol,
+      pendingCells: data.pendingCells,
+    });
+    if (!prepared.model || prepared.error) throw new Error(prepared.error ?? '当前 SPC 数据角色无效，无法导出');
+    model = withSigmaMethod(prepared.model, app.spcSigmaMethod);
+    if (app.capSubgroupMode === 'spc') {
+      // 能力沿用 SPC 角色时，二者观测完全相同；withSigmaMethod 只改控制图限值，不改能力 sigmaWithin。
+      capabilityModel = model;
+    } else {
+      const capability = resolveCapabilityMeasurementData(data.model, data.textCols);
+      if (!capability.model || capability.error) throw new Error(capability.error ?? '当前能力数据角色无效，无法导出');
+      capabilityModel = capability.model;
+    }
   }
-  return { report: buildActiveAnalysisReport(), model };
+  return { report: buildActiveAnalysisReport(), model, capabilityModel };
 }

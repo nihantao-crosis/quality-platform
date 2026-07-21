@@ -4,7 +4,7 @@
  */
 import { DEFAULT_SPC_RULES } from '../../store/appStore';
 import { describe, it, expect, beforeEach } from 'vitest';
-import { assessSpcCharts } from '../../core';
+import { assessSpcCharts, DEFAULT_RULE_K } from '../../core';
 import { useData } from '../../store/dataStore';
 import { buildHtmlReport } from '../../platform/htmlReport';
 
@@ -57,10 +57,11 @@ describe('工作表手工录入', () => {
 });
 
 describe('图文报告 (HTML)', () => {
-  it('内嵌三张 SVG 图表与关键统计', () => {
+  it('内嵌四张 SVG 图表与关键统计', () => {
     const M = useData.getState().model;
-    const html = buildHtmlReport(M, { lsl: 24.9, tgt: 25.0, usl: 25.1 }, assessSpcCharts(M, DEFAULT_SPC_RULES));
-    expect((html.match(/<svg/g) ?? []).length).toBe(3);
+    const html = buildHtmlReport(M, { lsl: 24.9, tgt: 25.0, usl: 25.1 }, assessSpcCharts(M, DEFAULT_SPC_RULES, DEFAULT_RULE_K));
+    // 通用报告必须同时给出位置图、离散图、直方图和正态概率图。
+    expect((html.match(/<svg/g) ?? []).length).toBe(4);
     expect(html).toContain('质量分析报告');
     expect(html).toContain(M.name);
     expect(html).toContain('Cpk');

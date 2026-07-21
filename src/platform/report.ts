@@ -6,18 +6,15 @@ import type { ExportFmt } from '../store/appStore';
 import {
   nf, fmtCap, computeCapability, capabilityInputError, oneWayAnova, computeGageRR,
   anovaGroups, gageStudyData, GAGE_TOLERANCE, type VarModel,
-  assessCapability, andersonDarling,
-  type SpcAssessment,
+  assessCapability, evaluateAndersonDarling,
+  type SpcAssessment, type SpecLimits,
 } from '../core';
+import { reportContextText, reportSpecText, withinSigmaLabel } from './reportLabels';
 
 const OPS = ['张伟', '李娜', '王强'];
 const SHIFTS = ['早班', '中班', '夜班'];
 
-export interface ReportSpec {
-  lsl: number;
-  tgt: number;
-  usl: number;
-}
+export type ReportSpec = SpecLimits;
 
 export function worksheetCsv(M: VarModel): string {
   const head = [M.hasSubgroups ? '子组' : '观测', ...M.colNames];
@@ -32,13 +29,19 @@ export function worksheetCsv(M: VarModel): string {
   return [head, ...rows].map((r) => r.join(',')).join('\n');
 }
 
-// v1.42.3(审计 P1):判异评估由调用方经 assessSpcCharts 用「用户当前规则/K」计算一次,
-// 四种导出格式只消费同一 SpcAssessment;本函数不再自带 DEFAULT_RULES 评估。
-export function textReport(M: VarModel, spec: ReportSpec, assessment: SpcAssessment): string {
+// 通用报告判异由调用方按「用户当前规则/K」计算后传入；
+// 本函数不再内置 DEFAULT_RULES。页面专项报告仍使用自身 AnalysisReportPayload，不经这条通用文本路径。
+export function textReport(
+  M: VarModel,
+  spec: ReportSpec,
+  assessment: SpcAssessment,
+  capabilityModel: VarModel = M,
+  capabilitySpcViolations: number = assessment.chartPointCount,
+): string {
+  const C = capabilityModel;
   // 能力输入闸门:规格与数据量纲不匹配(1000σ 哨兵)等情况下,能力章节写「未运行」而非让整份导出失败
-  const capError = capabilityInputError(M.all, M.sigmaWithin, spec);
-  const cap = capError ? null : computeCapability(M.all, M.sigmaWithin, spec);
-  const capabilityViolationCount = assessment.locationPoints + assessment.dispersionPoints;
+  const capError = capabilityInputError(C.all, C.sigmaWithin, spec);
+  const cap = capError ? null : computeCapability(C.all, C.sigmaWithin, spec);
   const violationEvents = assessment.events;
   const anova = M.isDemo ? oneWayAnova(anovaGroups().map((g) => g.vals)) : null;
   const gage = M.isDemo ? computeGageRR(gageStudyData(), { mode: 'width', value: GAGE_TOLERANCE }) : null;
@@ -50,10 +53,9 @@ export function textReport(M: VarModel, spec: ReportSpec, assessment: SpcAssessm
   L.push('════════════════════════════════════════');
   L.push('');
   L.push('【数据集】');
-  L.push(M.hasSubgroups
-    ? `  ${M.k} 子组 × ${M.n} 测量值 = ${M.all.length} 观测 · 列: ${M.colNames.join(' / ')}`
-    : `  ${M.indiv.length} 个单值观测 · 列: ${M.colNames.join(' / ')}`);
-  L.push(`  均值 ${nf(M.oMean, 4)} · σ整体 ${nf(M.oSd, 4)} · σ组内 ${nf(M.sigmaWithin, 4)}`);
+  L.push(`  ${reportContextText(M, C)} · SPC 列: ${M.colNames.join(' / ')}`);
+  if (C !== M) L.push(`  能力列: ${C.colNames.join(' / ')}`);
+  L.push(`  能力口径均值 ${nf(C.oMean, 4)} · σ整体 ${nf(C.oSd, 4)} · ${withinSigmaLabel(C)} ${nf(C.sigmaWithin, 4)}`);
   L.push('');
   if (M.hasSubgroups) {
     L.push('【SPC · X̄-R 控制图】');
@@ -65,11 +67,11 @@ export function textReport(M: VarModel, spec: ReportSpec, assessment: SpcAssessm
   L.push('  ' + assessment.verdictLine);
   if (violationEvents.length > 0) {
     // 三个计数各自标注口径,避免「结论 N 点、明细 M 行」观感矛盾(明细行按 点×准则 展开,可多于点数)
-    L.push(`  判异明细（${assessment.locationLabel} 图 ${assessment.locationPoints} 点 + ${assessment.dispersionLabel} 图 ${assessment.dispersionPoints} 点，去重后 ${assessment.uniquePointCount} 个失控观测）:`);
+    L.push(`  判异明细（各图累计 ${assessment.chartPointCount} 个失控点：${assessment.locationLabel} 图 ${assessment.locationPoints} 个 + ${assessment.dispersionLabel} 图 ${assessment.dispersionPoints} 个；去重${assessment.analysisUnitLabel} ${assessment.uniqueAnalysisUnitCount} 个）:`);
     violationEvents.forEach((v) => L.push(`    · ${v.chart} 图 · 点 ${v.i + 1} · 准则 ${v.rule} · ${v.desc}`));
   }
   L.push('');
-  L.push('【过程能力】规格 ' + nf(spec.lsl, 2) + ' / ' + nf(spec.tgt, 2) + ' / ' + nf(spec.usl, 2));
+  L.push('【过程能力】规格 ' + reportSpecText(spec, 2));
   if (!cap) {
     L.push(`  能力分析未运行: ${capError}`);
   } else {
@@ -77,11 +79,11 @@ export function textReport(M: VarModel, spec: ReportSpec, assessment: SpcAssessm
     L.push(`  CPU ${fmtCap(cap.cpu)} · CPL ${fmtCap(cap.cpl)} · Z.bench ${nf(cap.zBench, 2)} · 西格玛水平 ${nf(cap.sigmaLevel, 2)}σ`);
     L.push(`  PPM 合计（整体）${Math.round(cap.ppm.overall.total).toLocaleString()}`);
     // P0-4:判定必须消费唯一判定器——失控时不得写无警示的「能力充足」。
-    const capAd = M.all.length >= 8 ? andersonDarling(M.all) : null;
+    const capAd = evaluateAndersonDarling(C.all).result;
     const capAssessment = assessCapability({
-      cpk: cap.cpk, verdict: cap.verdict, adP: capAd ? capAd.p : null, n: M.all.length,
+      cpk: cap.cpk, verdict: cap.verdict, adP: capAd ? capAd.p : null, n: C.all.length,
       // 保持能力判定既有的「位置图点数 + 离散图点数」口径，但复用上方结果，不再二次重算。
-      spcViolations: capabilityViolationCount,
+      spcViolations: capabilitySpcViolations,
     });
     L.push(`  判定: ${capAssessment.status}`);
     if (capAssessment.spcViolations > 0) L.push(`  ⚠ ${capAssessment.headline}`);
@@ -111,9 +113,12 @@ export async function buildExportJob(
   spec: ReportSpec,
   // 必填:通用报告的 SPC 判异结果,由调用方按用户当前规则/K 计算(assessSpcCharts)。
   // 设为必填而非可选回落——v1.42.2 的教训正是"漏掉的调用点静默退回 DEFAULT_RULES"。
-  assessment: SpcAssessment,
+  assessment: SpcAssessment | null,
   analysis?: AnalysisReportPayload,
+  capabilityModel: VarModel = M,
+  capabilitySpcViolations: number | null = assessment?.chartPointCount ?? null,
 ): Promise<ExportJob> {
+  if (!analysis && !assessment) throw new Error('通用报告必须提供当前 SPC 判异结果');
   const stamp = new Date().toISOString().slice(0, 10);
   const base = analysis?.title.replace(/[\\/:*?"<>|]/g, '_') || M.name.replace(/\.[^.]+$/, '');
   if (fmt === 'excel') {
@@ -122,7 +127,7 @@ export async function buildExportJob(
       defaultName: `${base}_${stamp}`,
       ext: 'xlsx',
       filterLabel: 'Excel 工作簿',
-      bytes: buildXlsx(M, spec, assessment, analysis),
+      bytes: buildXlsx(M, spec, assessment, analysis, capabilityModel, capabilitySpcViolations),
     };
   }
   if (fmt === 'pdf') {
@@ -132,27 +137,27 @@ export async function buildExportJob(
       defaultName: `${base}_${stamp}`,
       ext: 'html',
       filterLabel: '图文报告 (打开后打印为 PDF)',
-      text: buildHtmlReport(M, spec, assessment, analysis),
+      text: buildHtmlReport(M, spec, assessment, analysis, capabilityModel, capabilitySpcViolations),
     };
   }
   // Office 真渲染：图表位图化失败(无 canvas 环境)时降级为纯表格文档
   const office = await import('./officeExport');
   let images: Awaited<ReturnType<typeof office.renderReportImages>> = {};
   try {
-    images = await office.renderReportImages(M, spec, assessment, analysis);
+    images = await office.renderReportImages(M, spec, assessment, analysis, capabilityModel);
   } catch { /* 降级 */ }
   if (fmt === 'ppt') {
     return {
       defaultName: `${base}_${stamp}`,
       ext: 'pptx',
       filterLabel: 'PowerPoint 演示文稿',
-      bytes: await office.buildPptx(M, spec, images, assessment, analysis),
+      bytes: await office.buildPptx(M, spec, images, assessment, analysis, capabilityModel, capabilitySpcViolations),
     };
   }
   return {
     defaultName: `${base}_${stamp}`,
     ext: 'docx',
     filterLabel: 'Word 文档',
-    bytes: await office.buildDocx(M, spec, images, assessment, analysis),
+    bytes: await office.buildDocx(M, spec, images, assessment, analysis, capabilityModel, capabilitySpcViolations),
   };
 }

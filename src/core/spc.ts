@@ -92,6 +92,11 @@ export interface RuleViolation {
   desc: string;
 }
 
+export interface RuleEvalOptions {
+  /** false 时只维护违例点 Set，不构建/去重/排序文字明细；供看板与能力卡同步计数。 */
+  collectDetails?: boolean;
+}
+
 /** 判异描述:K 为标准值时逐字沿用 RULE_DEFS(向后兼容),自定义时如实写出实际参数。
  * 导出供 SPC 页说明区使用:说明文案必须随当前 K 变化,不能标准描述与自定义 K 并存两个数字。 */
 export function ruleKDesc(rule: RuleNo, K: NelsonRuleK): string {
@@ -115,6 +120,7 @@ export function evalLimitedRules(
   /** 逐点真实 σ(未截断)。P 图上下限都可能被 [0,1] 钳位,从展示用限值反推 σ 在
    * 双侧同时截断时仍会低估(Codex v1.37 P2-1);P/C 图调用方应直接传入真 σ。 */
   sigmas?: number | number[],
+  options: RuleEvalOptions = {},
 ): { viol: Set<number>; list: RuleViolation[] } {
   const ucls = Array.isArray(ucl) ? ucl : Array.from({ length: data.length }, () => ucl);
   const lcls = Array.isArray(lcl) ? lcl : Array.from({ length: data.length }, () => lcl);
@@ -125,6 +131,7 @@ export function evalLimitedRules(
     throw new Error('控制限必须为有限数且 LCL ≤ UCL');
   }
   const K = normalizeRuleK({ ...DEFAULT_RULE_K, ...k });
+  const collectDetails = options.collectDetails !== false;
   const viol = new Set<number>();
   const list: RuleViolation[] = [];
   if (rules.r1) {
@@ -147,7 +154,7 @@ export function evalLimitedRules(
         : v - cl > kSigma || cl - v > kSigma;
       if (out) {
         viol.add(i);
-        list.push({ i, rule: 1, desc: `1 点超出该图的 ${K.k1}σ 控制限` });
+        if (collectDetails) list.push({ i, rule: 1, desc: `1 点超出该图的 ${K.k1}σ 控制限` });
       }
     });
   }
@@ -159,10 +166,12 @@ export function evalLimitedRules(
   // 趋势/游程规则只依赖点序与中心线；可变控制限不改变这些规则。
   const maxDistance = ucls.reduce((value, upper, index) =>
     Math.max(value, Math.abs(upper - cl), Math.abs(cl - lcls[index])), 0);
-  const pattern = evalRules(data, cl, maxDistance / 3 || 1e-12, patternRules, K);
+  const pattern = evalRules(data, cl, maxDistance / 3 || 1e-12, patternRules, K, options);
   pattern.viol.forEach((i) => viol.add(i));
-  list.push(...pattern.list);
-  return { viol, list: list.sort((a, b) => a.i - b.i || a.rule - b.rule) };
+  // 不能用 list.push(...pattern.list)：高命中长序列（正式支持到 20 万行）会因
+  // 展开十几万个函数实参触发 Maximum call stack size exceeded。
+  if (collectDetails) for (const item of pattern.list) list.push(item);
+  return { viol, list: collectDetails ? list.sort((a, b) => a.i - b.i || a.rule - b.rule) : [] };
 }
 
 export interface ControlConstants {
@@ -239,9 +248,11 @@ export function evalRules(
   sigma: number,
   rules: NelsonRules,
   k: Partial<NelsonRuleK> = DEFAULT_RULE_K,
+  options: RuleEvalOptions = {},
 ): { viol: Set<number>; list: RuleViolation[] } {
   // 可选 K 值:省略即 Nelson/Minitab 标准参数,行为与旧签名逐位一致。
   const K = normalizeRuleK({ ...DEFAULT_RULE_K, ...k });
+  const collectDetails = options.collectDetails !== false;
   const viol = new Set<number>();
   const list: RuleViolation[] = [];
   if (rules.r1)
@@ -249,7 +260,7 @@ export function evalRules(
       // k1 只改判异检测阈(K1σ),不改动控制限 UCL/LCL 本身
       if (Math.abs(v - cl) > K.k1 * sigma) {
         viol.add(i);
-        list.push({ i, rule: 1, desc: ruleKDesc(1, K) });
+        if (collectDetails) list.push({ i, rule: 1, desc: ruleKDesc(1, K) });
       }
     });
   if (rules.r2) {
@@ -264,7 +275,7 @@ export function evalRules(
       }
       if (run >= K.k2) {
         for (let q = i - (K.k2 - 1); q <= i; q++) viol.add(q);
-        list.push({ i, rule: 2, desc: ruleKDesc(2, K) });
+        if (collectDetails) list.push({ i, rule: 2, desc: ruleKDesc(2, K) });
       }
     });
   }
@@ -284,7 +295,7 @@ export function evalRules(
       }
       if (inc >= K.k3 || dec >= K.k3) {
         for (let q = i - (K.k3 - 1); q <= i; q++) viol.add(q);
-        list.push({ i, rule: 3, desc: ruleKDesc(3, K) });
+        if (collectDetails) list.push({ i, rule: 3, desc: ruleKDesc(3, K) });
       }
     }
   }
@@ -299,7 +310,7 @@ export function evalRules(
       prevDir = d;
       if (run >= K.k4) {
         for (let q = i - (K.k4 - 1); q <= i; q++) viol.add(q);
-        list.push({ i, rule: 4, desc: ruleKDesc(4, K) });
+        if (collectDetails) list.push({ i, rule: 4, desc: ruleKDesc(4, K) });
       }
     }
   }
@@ -312,7 +323,11 @@ export function evalRules(
         const dn = w.filter((q) => cl - data[q] > z * sigma).length;
         if (up >= need || dn >= need) {
           const side = up >= need ? (q: number) => data[q] - cl > z * sigma : (q: number) => cl - data[q] > z * sigma;
-          w.forEach((q) => { if (side(q)) { viol.add(q); list.push({ i: q, rule, desc: ruleKDesc(rule, K) }); } });
+          w.forEach((q) => {
+            if (!side(q)) return;
+            viol.add(q);
+            if (collectDetails) list.push({ i: q, rule, desc: ruleKDesc(rule, K) });
+          });
         }
       }
     };
@@ -325,7 +340,10 @@ export function evalRules(
     let run = 0;
     for (let i = 0; i < data.length; i++) {
       run = Math.abs(data[i] - cl) < sigma ? run + 1 : 0;
-      if (run >= K.k7) { for (let q = i - (K.k7 - 1); q <= i; q++) viol.add(q); list.push({ i, rule: 7, desc: ruleKDesc(7, K) }); }
+      if (run >= K.k7) {
+        for (let q = i - (K.k7 - 1); q <= i; q++) viol.add(q);
+        if (collectDetails) list.push({ i, rule: 7, desc: ruleKDesc(7, K) });
+      }
     }
   }
   if (rules.r8) {
@@ -333,9 +351,13 @@ export function evalRules(
     let run = 0;
     for (let i = 0; i < data.length; i++) {
       run = Math.abs(data[i] - cl) > sigma ? run + 1 : 0;
-      if (run >= K.k8) { for (let q = i - (K.k8 - 1); q <= i; q++) viol.add(q); list.push({ i, rule: 8, desc: ruleKDesc(8, K) }); }
+      if (run >= K.k8) {
+        for (let q = i - (K.k8 - 1); q <= i; q++) viol.add(q);
+        if (collectDetails) list.push({ i, rule: 8, desc: ruleKDesc(8, K) });
+      }
     }
   }
+  if (!collectDetails) return { viol, list: [] };
   const seen = new Set<string>();
   const out = list
     .filter((x) => {
@@ -365,7 +387,7 @@ export function expandSpcRuleItems(
   viol: ReadonlySet<number>,
   list: ReadonlyArray<{ i: number; rule: number; desc: string }>,
   chartLabel: string,
-  ruleK: NelsonRuleK = DEFAULT_RULE_K,
+  ruleK: NelsonRuleK,
 ): SpcViolationItem[] {
   // 游程型准则窗口长度随 K 值变化;准则 1/5/6 的 list 已按实际点逐条记录,窗口恒为 1。
   const windowLength: Partial<Record<number, number>> = {

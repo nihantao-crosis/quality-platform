@@ -392,7 +392,7 @@ describe('保存分析', () => {
 
   it('窗口型准则列表展开为图上实际标红点', () => {
     const viol = new Set(Array.from({ length: 9 }, (_, i) => i));
-    const items = expandSpcRuleItems(viol, [{ i: 8, rule: 2, desc: '连续 9 点同侧' }], 'X̄');
+    const items = expandSpcRuleItems(viol, [{ i: 8, rule: 2, desc: '连续 9 点同侧' }], 'X̄', DEFAULT_RULE_K);
     expect(items.map((item) => item.i)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8]);
     expect(uniqueSpcPointCount(items)).toBe(9);
   });
