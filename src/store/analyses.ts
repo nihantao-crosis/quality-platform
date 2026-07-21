@@ -34,7 +34,7 @@ export interface AnalysisSourceData {
 }
 
 export interface AnalysisSnapshot {
-  snapshotVersion?: 2 | 3 | 4 | 5 | 6;
+  snapshotVersion?: 2 | 3 | 4 | 5 | 6 | 7;
   spcType?: SpcType;
   spcRules?: NelsonRules;
   /** 判异准则可编辑 K 值;缺失即当时的 Nelson/Minitab 标准值(旧记录兼容)。 */
@@ -65,6 +65,11 @@ export interface AnalysisSnapshot {
   gageValueName?: string | null;
   gagePartName?: string | null;
   gageOperatorName?: string | null;
+  /** v7：量具报告真实追溯字段，缺失时报告显示“未填写”。 */
+  gageGaugeName?: string;
+  gageReportBy?: string;
+  gageStudyDate?: string;
+  gageNotes?: string;
   gageRequestedReal?: boolean;
   gageSourceReal?: boolean;
   /** v1.40:MSA 过程公差口径与判定标准随快照固化;旧快照缺字段按保存时行为回放(双侧宽度/不设 + AIAG)。 */
@@ -660,7 +665,7 @@ function pick(c: { color: string; bg: string }) {
 
 function snapshotOf(kind: AnalysisKind): AnalysisSnapshot {
   const a = useApp.getState();
-  const snap: AnalysisSnapshot = { snapshotVersion: 6 };
+  const snap: AnalysisSnapshot = { snapshotVersion: 7 };
   if (kind === 'spc') {
     snap.spcType = a.spcType;
     snap.spcRules = { ...a.spcRules };
@@ -720,6 +725,10 @@ function snapshotOf(kind: AnalysisKind): AnalysisSnapshot {
     snap.gageValueName = a.gageValueName ?? current.effective.valueColumn;
     snap.gagePartName = a.gagePartName ?? current.effective.partColumn;
     snap.gageOperatorName = a.gageOperatorName ?? current.effective.operatorColumn;
+    snap.gageGaugeName = a.gageGaugeName;
+    snap.gageReportBy = a.gageReportBy;
+    snap.gageStudyDate = a.gageStudyDate;
+    snap.gageNotes = a.gageNotes;
     snap.gageRequestedReal = current.requestedReal;
     snap.gageSourceReal = current.requestedReal && current.prepared.ok;
     snap.gageTolMode = a.gageTolMode;
@@ -1041,7 +1050,9 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
     const appKeys: Array<keyof AnalysisSnapshot> = [
       'spcType', 'spcRules', 'spcStageCol', 'spcSigmaMethod', 'spcShowZones', 'spcDataLayout', 'spcValueCol', 'spcSubgroupCol',
       'lsl', 'usl', 'tgt', 'lslOn', 'uslOn', 'capabilityBins',
-      'gageUseReal', 'gageValueName', 'gagePartName', 'gageOperatorName', 'gageTolMode', 'gageTolValue', 'gageStandard', 'gageBatchCols', 'gageTolByCol',
+      'gageUseReal', 'gageValueName', 'gagePartName', 'gageOperatorName',
+      'gageGaugeName', 'gageReportBy', 'gageStudyDate', 'gageNotes',
+      'gageTolMode', 'gageTolValue', 'gageStandard', 'gageBatchCols', 'gageTolByCol',
       'doeView', 'doeTab', 'doeFactorCols', 'doeRespCol', 'doeModelTerms', 'doeIncludeCurvature',
       'hypoTab', 'anovaMode', 'anovaRespName', 'anovaFactorName', 'anovaShowDemo',
       't1ColName', 't1Mu0', 't2ColAName', 't2ColBName', 'regXName', 'regYName',
@@ -1063,6 +1074,15 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
       patch.gageTolValue = width != null && width > 0 ? width : null;
     }
     if (a.kind === 'gagerr' && s.gageStandard === undefined) patch.gageStandard = 'aiag';
+    // 追溯字段属于单次研究。即便一个 v7 快照因损坏/手工编辑缺少个别字段，
+    // 也必须逐字段回落为空，不能借用当前页面中另一份研究的信息。
+    if (a.kind === 'gagerr') {
+      const hasTraceFields = s.snapshotVersion === 7;
+      patch.gageGaugeName = hasTraceFields && typeof s.gageGaugeName === 'string' ? s.gageGaugeName : '';
+      patch.gageReportBy = hasTraceFields && typeof s.gageReportBy === 'string' ? s.gageReportBy : '';
+      patch.gageStudyDate = hasTraceFields && typeof s.gageStudyDate === 'string' ? s.gageStudyDate : '';
+      patch.gageNotes = hasTraceFields && typeof s.gageNotes === 'string' ? s.gageNotes : '';
+    }
     // 批次720 以前的 gage 记录没有批量态:回放清空批量选择与逐列记忆,不继承当前页面
     if (a.kind === 'gagerr' && s.gageBatchCols === undefined) patch.gageBatchCols = null;
     if (a.kind === 'gagerr' && s.gageBatchCols !== undefined) patch.gageBatchCols = normalizeGageBatchCols(s.gageBatchCols);

@@ -51,6 +51,18 @@ export interface PlatformAdapter {
 
 const BINARY_EXT = /\.(xlsx|xls)$/i;
 
+/** Excel 导入文件上限（Web 和桌面端共用）。 */
+export const MAX_XLSX_IMPORT_BYTES = 20 * 1024 * 1024;
+
+export function assertXlsxImportSize(byteLength: number): void {
+  if (!Number.isSafeInteger(byteLength) || byteLength < 0) {
+    throw new Error('Excel 文件大小无效');
+  }
+  if (byteLength > MAX_XLSX_IMPORT_BYTES) {
+    throw new Error('Excel 文件超过 20 MB 导入上限');
+  }
+}
+
 function isTauri(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 }
@@ -82,15 +94,23 @@ const webAdapter: PlatformAdapter = {
     return name;
   },
   async pickImportFile() {
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       const inp = document.createElement('input');
       inp.type = 'file';
       inp.accept = '.csv,.txt,.xlsx,.xls,.qproj';
       inp.onchange = async () => {
-        const f = inp.files?.[0];
-        if (!f) return resolve(null);
-        if (BINARY_EXT.test(f.name)) resolve({ name: f.name, bytes: new Uint8Array(await f.arrayBuffer()) });
-        else resolve({ name: f.name, contents: await f.text() });
+        try {
+          const f = inp.files?.[0];
+          if (!f) return resolve(null);
+          if (BINARY_EXT.test(f.name)) {
+            assertXlsxImportSize(f.size); // 读取前拒绝过大文件
+            const bytes = new Uint8Array(await f.arrayBuffer());
+            assertXlsxImportSize(bytes.byteLength); // 读取后再校验实际载荷
+            resolve({ name: f.name, bytes });
+          } else resolve({ name: f.name, contents: await f.text() });
+        } catch (error) {
+          reject(error);
+        }
       };
       inp.oncancel = () => resolve(null);
       inp.click();
@@ -157,7 +177,9 @@ const desktopAdapter: PlatformAdapter = {
     const name = path.split(/[\\/]/).pop() ?? path;
     if (BINARY_EXT.test(name)) {
       const b64 = await invoke<string>('read_binary_file', { path });
-      return { name, bytes: fromBase64(b64) };
+      const bytes = fromBase64(b64);
+      assertXlsxImportSize(bytes.byteLength); // Rust 已限制，JS 边界再防御一次
+      return { name, bytes };
     }
     const contents = await invoke<string>('read_text_file', { path });
     return { name, contents };

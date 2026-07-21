@@ -4,6 +4,8 @@ use std::path::Path;
 
 mod db;
 
+const MAX_XLSX_IMPORT_BYTES: u64 = 20 * 1024 * 1024;
+
 /// Write a complete replacement beside the destination, make its bytes durable,
 /// and only then atomically swap it into place. `NamedTempFile::persist` uses the
 /// platform replacement primitive, including overwrite-safe behavior on Windows.
@@ -65,7 +67,15 @@ fn read_text_file(path: String) -> Result<String, String> {
 #[tauri::command]
 fn read_binary_file(path: String) -> Result<String, String> {
     use base64::Engine;
+    let metadata = fs::metadata(&path).map_err(|e| e.to_string())?;
+    if metadata.len() > MAX_XLSX_IMPORT_BYTES {
+        return Err("Excel 文件超过 20 MB 导入上限".into());
+    }
     let bytes = fs::read(&path).map_err(|e| e.to_string())?;
+    // 防止 metadata 检查后文件被替换或继续写入。
+    if bytes.len() as u64 > MAX_XLSX_IMPORT_BYTES {
+        return Err("Excel 文件超过 20 MB 导入上限".into());
+    }
     Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
 }
 
@@ -128,6 +138,17 @@ mod tests {
                 .decode(read_back)
                 .unwrap(),
             bytes
+        );
+    }
+
+    #[test]
+    fn binary_import_rejects_files_over_twenty_megabytes() {
+        let (_dir, path) = temp_path("too-large.xlsx");
+        fs::write(&path, vec![0_u8; MAX_XLSX_IMPORT_BYTES as usize + 1]).unwrap();
+
+        assert_eq!(
+            read_binary_file(path.to_string_lossy().to_string()).unwrap_err(),
+            "Excel 文件超过 20 MB 导入上限"
         );
     }
 

@@ -4,6 +4,7 @@
  */
 import { CONTROL_CONSTANTS, DEFAULT_RULE_K, c4Of, evalLimitedRules, evalRules, type NelsonRuleK, type NelsonRules, type RuleViolation } from './spc';
 import type { SpcSigmaMethod } from './model';
+import { mean, rootMeanSquare, stdev } from './basicMath';
 
 export interface StageSegment {
   label: string;
@@ -74,10 +75,10 @@ export function stagedXbar(
   if (validationError) throw new RangeError(validationError);
   const n = rows[0].length;
   const C = CONTROL_CONSTANTS[Math.max(2, Math.min(10, n))];
-  return buildStaged(labels, rows.map((r) => r.reduce((a, b) => a + b, 0) / r.length), (seg) => {
+  return buildStaged(labels, rows.map((row) => mean(row)), (seg) => {
     const segRows = rows.slice(seg.start, seg.end + 1);
-    const means = segRows.map((r) => r.reduce((a, b) => a + b, 0) / r.length);
-    const xbarbar = means.reduce((a, b) => a + b, 0) / means.length;
+    const means = segRows.map((row) => mean(row));
+    const xbarbar = mean(means);
     const sigmaHat = segmentSigma(segRows, n, C, sigmaMethod);
     const half = (3 * sigmaHat) / Math.sqrt(n);
     return { cl: xbarbar, ucl: xbarbar + half, lcl: xbarbar - half, sigma: half / 3 };
@@ -100,7 +101,7 @@ export function stagedRange(
   return buildStaged(labels, rows.map((r) => Math.max(...r) - Math.min(...r)), (seg) => {
     const segRows = rows.slice(seg.start, seg.end + 1);
     const segRanges = segRows.map((r) => Math.max(...r) - Math.min(...r));
-    const rbar = segRanges.reduce((a, b) => a + b, 0) / segRanges.length;
+    const rbar = mean(segRanges);
     const sigmaHat = segmentSigma(segRows, n, C, sigmaMethod);
     const cl = sigmaMethod === 'pooled' ? C.d2 * sigmaHat : rbar;
     const ucl = cl + 3 * C.d3 * sigmaHat;
@@ -112,15 +113,13 @@ export function stagedRange(
 /** 段内 σ̂：classic=R̄/d2（Minitab 标准 X̄-R 默认）；pooled=Sp/c4(d+1)（显式可选）。 */
 function segmentSigma(segRows: number[][], n: number, C: (typeof CONTROL_CONSTANTS)[number], sigmaMethod: SpcSigmaMethod): number {
   if (sigmaMethod === 'classic') {
-    const rbar = segRows.map((r) => Math.max(...r) - Math.min(...r)).reduce((a, b) => a + b, 0) / segRows.length;
+    const rbar = mean(segRows.map((row) => Math.max(...row) - Math.min(...row)));
     return rbar / C.d2;
   }
   const df = segRows.length * (n - 1);
-  const ssq = segRows.reduce((a, r) => {
-    const m = r.reduce((x, y) => x + y, 0) / r.length;
-    return a + r.reduce((x, y) => x + (y - m) * (y - m), 0);
-  }, 0);
-  return Math.sqrt(ssq / df) / c4Of(df + 1);
+  // 子组大小相同，因此 sqrt(mean(s_i²)) 与合并标准差完全等价；缩放 RMS
+  // 避免先平方大/小量纲标准差导致不必要的溢出或下溢。
+  return rootMeanSquare(segRows.map((row) => stdev(row))) / c4Of(df + 1);
 }
 
 function buildStaged(

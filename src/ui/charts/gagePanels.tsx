@@ -419,6 +419,7 @@ export interface GageReportFigureProps {
   reportBy?: string;
   studyDate?: string;
   toleranceText?: string;
+  otherText?: string;
 }
 
 const TITLE_H = 20;
@@ -426,11 +427,19 @@ const HEADER_H = 92;
 const CELL_GAP = 8;
 const FIG_M = 14;
 
+/** SVG 表头空间固定；完整追溯值保留在报告信息表，图内只做可读缩略。 */
+function compactHeaderText(value: string, maxCharacters = 36): string {
+  const characters = Array.from(value.trim());
+  return characters.length <= maxCharacters
+    ? characters.join('')
+    : `${characters.slice(0, maxCharacters - 1).join('')}…`;
+}
+
 /** 与工厂 Minitab 17「量具 R&R(方差分析)报告」同形制的单张整图。 */
 export function GageReportFigure({
   T, panel, partLabels, operatorLabels, cats, valueName,
   partName = '部件', operatorName = '测试人',
-  gaugeName = '', reportBy = '', studyDate = '', toleranceText = '',
+  gaugeName = '', reportBy = '', studyDate = '', toleranceText = '', otherText = '',
 }: GageReportFigureProps) {
   const single = panel.operatorCount === 1;
   const cells: Array<{ title: string; body: ReactNode }> = single
@@ -457,11 +466,11 @@ export function GageReportFigure({
       <rect x={0} y={0} width={width} height={height} fill="#ffffff" stroke={T.axis} strokeWidth={1} />
       <Txt x={FIG_M + 4} y={22} s={`${valueName} 的量具 R&R (方差分析) 报告`} fill="#111820" size={15} weight={700} />
       {/* 表头信息块(量具名称/研究日期 | 报表人/公差/其他) */}
-      <Txt x={FIG_M + 4} y={50} s={`量具名称：${gaugeName}`} fill="#333c46" size={10.5} />
-      <Txt x={FIG_M + 4} y={68} s={`研究日期：${studyDate}`} fill="#333c46" size={10.5} />
-      <Txt x={width / 2 + 10} y={50} s={`报表人：${reportBy}`} fill="#333c46" size={10.5} />
-      <Txt x={width / 2 + 10} y={68} s={`公差：${toleranceText}`} fill="#333c46" size={10.5} />
-      <Txt x={width / 2 + 10} y={84} s="其他：" fill="#333c46" size={10.5} />
+      <Txt x={FIG_M + 4} y={50} s={`量具名称：${compactHeaderText(gaugeName)}`} fill="#333c46" size={10.5} />
+      <Txt x={FIG_M + 4} y={68} s={`研究日期：${compactHeaderText(studyDate, 20)}`} fill="#333c46" size={10.5} />
+      <Txt x={width / 2 + 10} y={50} s={`报表人：${compactHeaderText(reportBy)}`} fill="#333c46" size={10.5} />
+      <Txt x={width / 2 + 10} y={68} s={`公差：${compactHeaderText(toleranceText, 30)}`} fill="#333c46" size={10.5} />
+      <Txt x={width / 2 + 10} y={84} s={`其他：${compactHeaderText(otherText)}`} fill="#333c46" size={10.5} />
       <Ln x1={FIG_M} y1={HEADER_H - 4} x2={width - FIG_M} y2={HEADER_H - 4} stroke="#c8cdd4" sw={1} />
       {cells.map((cell, index) => {
         const col = index % 2;

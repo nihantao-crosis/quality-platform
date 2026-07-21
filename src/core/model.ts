@@ -3,6 +3,7 @@
  * X̄-R / X̄-S；其他形态仍可用于 I-MR，随后由 SPC 数据角色层转换。
  */
 import { CONTROL_CONSTANTS, c4Of } from './spc';
+import { mean, rootMeanSquare, stdev } from './basicMath';
 
 /** SPC 图 σ 估计方法（批次720-A1）：
  * 'classic' = R̄/d2（X̄-R）/ S̄/c4（X̄-S），是 Minitab 标准控制图的默认口径；
@@ -105,29 +106,27 @@ export function computeVarModel(
   const subs: SubgroupRow[] = rows.map((vals, i) => ({
     i: i + 1,
     vals,
-    mean: vals.reduce((a, b) => a + b, 0) / vals.length,
+    mean: mean(vals),
     range: Math.max(...vals) - Math.min(...vals),
   }));
   const all = rows.flat();
-  const oMean = all.reduce((a, b) => a + b, 0) / all.length;
-  const oSd = Math.sqrt(all.reduce((a, b) => a + (b - oMean) ** 2, 0) / (all.length - 1));
+  const oMean = mean(all);
+  const oSd = stdev(all);
 
-  const xbarbar = subs.reduce((a, s) => a + s.mean, 0) / k;
-  const rbar = subs.reduce((a, s) => a + s.range, 0) / k;
+  const xbarbar = mean(subs.map((subgroup) => subgroup.mean));
+  const rbar = mean(subs.map((subgroup) => subgroup.range));
 
   // 不支持的原始形态绝不借用 n=2 常数伪造子组限值。消费者必须先检查
   // hasSubgroups，或经 SPC 角色层转成真实 n=2..10 矩阵；NaN 使漏用能在测试/调试中立即暴露。
   const C = hasSubgroups ? CONTROL_CONSTANTS[n] : null;
 
-  const svals = subs.map((s) =>
-    hasMultipleValues ? Math.sqrt(s.vals.reduce((a, b) => a + (b - s.mean) ** 2, 0) / (n - 1)) : 0,
-  );
-  const sbar = svals.reduce((a, b) => a + b, 0) / svals.length;
+  const svals = subs.map((s) => hasMultipleValues ? stdev(s.vals) : 0);
+  const sbar = mean(svals);
 
   // 合并标准差 σ̂ = Sp/c4(d+1)，Sp²=Σ(nᵢ−1)sᵢ²/d，d=k(n−1)（显式可选口径，含 c4 无偏化）
   const dfPooled = hasSubgroups ? k * (n - 1) : 0;
   const sigmaPooled = C
-    ? Math.sqrt(svals.reduce((a, s) => a + (n - 1) * s * s, 0) / dfPooled) / c4Of(dfPooled + 1)
+    ? rootMeanSquare(svals) / c4Of(dfPooled + 1)
     : Number.NaN;
 
   // 图表口径 σ̂：pooled 统一用合并标准差；classic 分别为 R̄/d2（X̄-R 对）与 S̄/c4（X̄-S 对）。
@@ -154,8 +153,8 @@ export function computeVarModel(
   const C2 = CONTROL_CONSTANTS[2];
   const indiv = opts?.indivSeries ?? all;
   const mr = indiv.map((v, i) => (i === 0 ? null : Math.abs(v - indiv[i - 1])));
-  const mrbar = (mr.slice(1) as number[]).reduce((a, b) => a + b, 0) / Math.max(1, indiv.length - 1);
-  const indMean = indiv.reduce((a, b) => a + b, 0) / indiv.length;
+  const mrbar = mean(mr.slice(1) as number[]);
+  const indMean = mean(indiv);
   const iSig = mrbar / C2.d2;
   const iUcl = indMean + 3 * iSig;
   const iLcl = indMean - 3 * iSig;

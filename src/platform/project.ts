@@ -25,9 +25,9 @@ export const PROJECT_KEYS = [
 
 const FORMAT = 'quality-platform-project';
 // v2 把 SQLite vault/active-ref 与独立 AQL 责任账本定义为不可忽略的项目语义。
-// v3 引入分析 snapshotVersion=6（MSA 显式未选语义与 SPC 常数迁移提示）；旧 v1.40 读取器
-// 必须在项目格式层明确提示升级，不能先接受 format2 再把新快照误报成“损坏”。当前读取器兼容 v1/v2。
-const FORMAT_VERSION = 3;
+// v3 引入 snapshotVersion=6；v4 引入 snapshotVersion=7（MSA 真实追溯字段）。
+// 旧读取器必须在项目格式层明确提示升级，不能接受后再把新快照误报成“损坏”。
+const FORMAT_VERSION = 4;
 
 interface ProjectFile {
   format: typeof FORMAT;
@@ -370,6 +370,7 @@ function prefsValidationError(raw: unknown): string | null {
   const allowedStateKeys = new Set([
     'chartStyle', 'showGrid', 'projectName', 'lsl', 'usl', 'tgt', 'lslOn', 'uslOn', 'capabilityBins',
     'gageUseReal', 'gageValueName', 'gagePartName', 'gageOperatorName',
+    'gageGaugeName', 'gageReportBy', 'gageStudyDate', 'gageNotes',
     'gageTolMode', 'gageTolValue', 'gageStandard', 'gageBatchCols', 'gageTolByCol',
     'aqlLot', 'aqlLevel', 'aqlAQL', 'aqlRegime', 'aqlMethod', 'aqlAcMethod', 'aqlSwitch',
     'spcRules', 'spcRuleK', 'spcDataLayout', 'spcValueCol', 'spcSubgroupCol', 'spcStageCol',
@@ -453,6 +454,17 @@ function prefsValidationError(raw: unknown): string | null {
       return `偏好设置 ${key} 类型无效`;
     }
   }
+  for (const [key, maxLength] of [
+    ['gageGaugeName', 80], ['gageReportBy', 80], ['gageNotes', 200],
+  ] as const) {
+    if (state[key] !== undefined && (typeof state[key] !== 'string' || state[key].length > maxLength)) {
+      return `偏好设置 ${key} 类型无效或过长`;
+    }
+  }
+  if (state.gageStudyDate !== undefined && (typeof state.gageStudyDate !== 'string'
+    || (state.gageStudyDate !== '' && !/^\d{4}-\d{2}-\d{2}$/.test(state.gageStudyDate)))) {
+    return '偏好设置 gageStudyDate 日期格式无效';
+  }
   if ('aqlLot' in state && (!Number.isSafeInteger(state.aqlLot)
     || (state.aqlLot as number) < 2 || (state.aqlLot as number) > MAX_LOT_SIZE)) {
     return 'AQL 批量超出允许范围';
@@ -494,7 +506,7 @@ function recentsValidationError(raw: unknown): string | null {
 function snapshotValidationError(raw: unknown): string | null {
   if (!isObject(raw)) return '分析 snapshot 不是对象';
   if (raw.snapshotVersion !== undefined
-    && (!Number.isSafeInteger(raw.snapshotVersion) || ![2, 3, 4, 5, 6].includes(raw.snapshotVersion as number))) {
+    && (!Number.isSafeInteger(raw.snapshotVersion) || ![2, 3, 4, 5, 6, 7].includes(raw.snapshotVersion as number))) {
     return '分析 snapshotVersion 无效';
   }
   const enums: Array<[string, ReadonlySet<string>]> = [
@@ -580,6 +592,17 @@ function snapshotValidationError(raw: unknown): string | null {
     if (raw[key] !== undefined && raw[key] !== null && typeof raw[key] !== 'string') {
       return `分析 snapshot.${key} 类型无效`;
     }
+  }
+  for (const [key, maxLength] of [
+    ['gageGaugeName', 80], ['gageReportBy', 80], ['gageNotes', 200],
+  ] as const) {
+    if (raw[key] !== undefined && (typeof raw[key] !== 'string' || (raw[key] as string).length > maxLength)) {
+      return `分析 snapshot.${key} 类型无效或过长`;
+    }
+  }
+  if (raw.gageStudyDate !== undefined && (typeof raw.gageStudyDate !== 'string'
+    || (raw.gageStudyDate !== '' && !/^\d{4}-\d{2}-\d{2}$/.test(raw.gageStudyDate)))) {
+    return '分析 snapshot.gageStudyDate 日期格式无效';
   }
   for (const key of ['spcResolvedLayout', 'spcResolvedVariableName', 'spcResolvedRoleNote', 'activeVar'] as const) {
     if (raw[key] !== undefined && typeof raw[key] !== 'string') return `分析 snapshot.${key} 不是字符串`;

@@ -1,7 +1,7 @@
 {
   "name": "quality-platform",
   "private": true,
-  "version": "1.41.0",
+  "version": "1.42.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -23,7 +23,7 @@
     "pptxgenjs": "^4.0.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "xlsx": "^0.18.5",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
     "zustand": "^5.0.5"
   },
   "devDependencies": {

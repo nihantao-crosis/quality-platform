@@ -3,7 +3,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useApp, type ImportTab, type ExportFmt } from '../../store/appStore';
 import { markActiveDataReplaced, prepareVaultDatasetRemoval, useData } from '../../store/dataStore';
 import { parseMatrix, parseCategoryCounts, extractPChartColumns, evalFormula, truthy, arrMin, arrMax, FormulaError, worksheetNumericColumnCodes, detectCsvBlocks, type CsvBlock, type ParsedMatrix } from '../../core';
-import { platform } from '../../platform/adapter';
+import { assertXlsxImportSize, platform } from '../../platform/adapter';
 import { buildExportJob } from '../../platform/report';
 import { mesStart, mesStop } from '../../platform/mes';
 import { sessionLog } from '../../store/sessionLog';
@@ -157,7 +157,13 @@ function ImportModal() {
   };
 
   const pickFile = async () => {
-    const f = await platform.pickImportFile();
+    let f;
+    try {
+      f = await platform.pickImportFile();
+    } catch (error) {
+      showToast('导入失败：' + (error as Error).message);
+      return;
+    }
     if (!f) return;
     if (isProjectFile(f.name)) {
       // P0-3:导入期间锁死整个界面(遮罩层 zIndex 高于弹窗),失败才解锁;成功保持锁定直至 reload。
@@ -205,7 +211,14 @@ function ImportModal() {
       return;
     }
     if (/\.(xlsx|xls)$/i.test(file.name)) {
-      handlePicked(file.name, undefined, new Uint8Array(await file.arrayBuffer()));
+      try {
+        assertXlsxImportSize(file.size); // 拖放流程在读取前拒绝过大文件
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        assertXlsxImportSize(bytes.byteLength);
+        handlePicked(file.name, undefined, bytes);
+      } catch (error) {
+        showToast('导入失败：' + (error as Error).message);
+      }
     } else {
       handlePicked(file.name, await file.text());
     }
@@ -441,7 +454,7 @@ function ImportModal() {
               <>
                 <div style={{ fontSize: 13.5, color: '#5b6472', fontWeight: 500 }}>拖拽文件到此处，或点击选择文件</div>
                 <div style={{ fontSize: 12, color: '#9aa2ad', marginTop: 6 }}>
-                  {importTab === 'excel' ? '支持 .xlsx / .xls 工作簿（读取首个工作表，首行作为列名）' : '支持 .csv / .txt，自动识别分隔符与列名'}
+                  {importTab === 'excel' ? '支持 .xlsx / .xls 工作簿（最大 20 MB，读取首个工作表，首行作为列名）' : '支持 .csv / .txt，自动识别分隔符与列名'}
                 </div>
                 <button type="button" onClick={pickFile} style={{ display: 'inline-block', marginTop: 14, padding: '8px 18px', border: '1px solid #1f6fb2', background: '#1f6fb2', color: '#fff', borderRadius: 5, fontFamily: 'inherit', fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}>选择文件</button>
               </>

@@ -26,6 +26,7 @@ beforeEach(() => {
     spcSigmaMethod: 'classic', spcShowZones: true,
     lsl: 24.9, usl: 25.1, tgt: 25.0, lslOn: true, uslOn: true,
     capabilityBins: 13, gageUseReal: true, gageValueName: null, gagePartName: null, gageOperatorName: null,
+    gageGaugeName: '', gageReportBy: '', gageStudyDate: '', gageNotes: '',
     aqlLot: 120, aqlLevel: 'II', aqlAQL: 1.0, aqlMethod: 'gb', aqlAcMethod: 'gb',
     aqlSwitch: aqlStatus({ note: '初始为正常检验' }),
     doeTab: 'analyze', doeFactorCols: null, doeRespCol: null, doeModelTerms: null, doeIncludeCurvature: true,
@@ -133,7 +134,7 @@ describe('保存分析', () => {
     expect(useApp.getState().toast ?? '').not.toContain('d₂/d₃');
   });
 
-  it('v6 MSA 快照明确未选测量列时，回放不得迁移成第一数值列', () => {
+  it('当前 MSA 快照明确未选测量列时，回放不得迁移成第一数值列', () => {
     const rows: number[][] = [];
     for (const op of [1, 2]) for (const part of [1, 2, 3]) for (let rep = 0; rep < 2; rep++) rows.push([part, op, 10 + part]);
     useData.getState().importMatrix('全ID列.csv', ['部件ID', '操作员ID', '批次ID'], rows);
@@ -142,10 +143,67 @@ describe('保存分析', () => {
       gageValueName: null, gagePartName: null, gageOperatorName: null,
     });
     const saved = useAnalyses.getState().saveCurrent()!;
-    expect(saved.snapshot).toMatchObject({ snapshotVersion: 6, gageValueName: null });
+    expect(saved.snapshot).toMatchObject({ snapshotVersion: 7, gageValueName: null });
     useApp.setState({ gageValueName: '部件ID' });
     useAnalyses.getState().restore(saved.id);
     expect(useApp.getState().gageValueName).toBeNull();
+  });
+
+  it('MSA 量具信息随 v7 快照回放，旧 v6 记录不会借用当前填写内容', () => {
+    useApp.setState({
+      page: 'gagerr',
+      gageGaugeName: '数显千分尺-01',
+      gageReportBy: '张工',
+      gageStudyDate: '2026-07-21',
+      gageNotes: '产线 A 首件研究',
+    });
+    const saved = useAnalyses.getState().saveCurrent()!;
+    expect(saved.snapshot).toMatchObject({
+      snapshotVersion: 7,
+      gageGaugeName: '数显千分尺-01',
+      gageReportBy: '张工',
+      gageStudyDate: '2026-07-21',
+      gageNotes: '产线 A 首件研究',
+    });
+
+    useApp.setState({ gageGaugeName: '后来量具', gageReportBy: '李工', gageStudyDate: '', gageNotes: '后来备注' });
+    useAnalyses.getState().restore(saved.id);
+    expect(useApp.getState()).toMatchObject({
+      gageGaugeName: '数显千分尺-01',
+      gageReportBy: '张工',
+      gageStudyDate: '2026-07-21',
+      gageNotes: '产线 A 首件研究',
+    });
+
+    const incompleteV7 = {
+      ...saved,
+      id: 'v7-gage-missing-metadata',
+      snapshot: {
+        ...saved.snapshot,
+        gageGaugeName: undefined,
+        gageReportBy: undefined,
+        gageStudyDate: undefined,
+        gageNotes: undefined,
+      },
+    };
+    useAnalyses.setState({ saved: [incompleteV7], lastError: null });
+    useApp.setState({ gageGaugeName: '不得继承', gageReportBy: '不得继承', gageStudyDate: '2026-07-22', gageNotes: '不得继承' });
+    useAnalyses.getState().restore(incompleteV7.id);
+    expect(useApp.getState()).toMatchObject({
+      gageGaugeName: '', gageReportBy: '', gageStudyDate: '', gageNotes: '',
+    });
+
+    const legacy = {
+      ...saved,
+      id: 'v6-gage-no-metadata',
+      snapshot: { ...saved.snapshot, snapshotVersion: 6 as const },
+    };
+    useAnalyses.setState({ saved: [legacy], lastError: null });
+    useApp.setState({ gageGaugeName: '不得继承', gageReportBy: '不得继承', gageStudyDate: '2026-07-22', gageNotes: '不得继承' });
+    useAnalyses.getState().restore(legacy.id);
+    expect(useApp.getState()).toMatchObject({
+      gageGaugeName: '', gageReportBy: '', gageStudyDate: '', gageNotes: '',
+    });
   });
 
   it('v5 MSA 空角色按旧版位置默认迁移，v6 才把 null 解释为明确未选', () => {
@@ -204,6 +262,8 @@ describe('保存分析', () => {
       gageBatchCols: ['测量值'],
       gageTolByCol: { 测量值: { mode: 'upper', value: 10 } },
       gageTolMode: 'upper', gageTolValue: 10,
+      gageGaugeName: '上一量具', gageReportBy: '上一报表人',
+      gageStudyDate: '2026-07-20', gageNotes: '上一研究备注',
     });
     useData.getState().importMatrix('数据集B.csv', ['测量值', '部件'], [[100, 1], [200, 2]]);
     expect(useApp.getState()).toMatchObject({
@@ -214,6 +274,10 @@ describe('保存分析', () => {
       gageTolByCol: {},
       gageTolMode: 'auto',
       gageTolValue: null,
+      gageGaugeName: '',
+      gageReportBy: '',
+      gageStudyDate: '',
+      gageNotes: '',
     });
   });
 
@@ -773,7 +837,7 @@ describe('回看分析', () => {
       anovaRespName: '响应', anovaFactorName: '因子',
     });
     const saved = useAnalyses.getState().saveCurrent()!;
-    expect(saved.snapshot.snapshotVersion).toBe(6);
+    expect(saved.snapshot.snapshotVersion).toBe(7);
     expect(saved.snapshot.sourceDataKey).toBeTruthy();
 
     for (let i = 0; i < 7; i++) {

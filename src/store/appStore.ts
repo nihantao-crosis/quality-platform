@@ -100,6 +100,11 @@ interface AppState {
   gageValueName: string | null;
   gagePartName: string | null;
   gageOperatorName: string | null;
+  /** 量具报告追溯信息：全部由用户填写，不再从操作员或当前日期推断。 */
+  gageGaugeName: string;
+  gageReportBy: string;
+  gageStudyDate: string;
+  gageNotes: string;
   /** MSA 过程公差口径：auto=联动全局规格限（双开=宽度，单开=对应单侧），width/upper/lower=手动值，none=不设。 */
   gageTolMode: GageTolMode;
   /** 批次720-B:多测量列批量 GRR 的选中列(null=仅当前测量列;列名引用,换表由页面过滤失效项) */
@@ -175,7 +180,10 @@ interface AppState {
   toggleSide(side: 'lslOn' | 'uslOn'): void;
   setCapabilityBins(v: number): void;
   setCapabilitySubgroup(patch: Partial<Pick<AppState, 'capSubgroupMode' | 'capSubgroupSize' | 'capValueCol' | 'capSubgroupIdCol'>>): void;
-  setGageOptions(patch: Partial<Pick<AppState, 'gageUseReal' | 'gageValueName' | 'gagePartName' | 'gageOperatorName' | 'gageTolMode' | 'gageTolValue' | 'gageStandard'>>): void;
+  setGageOptions(patch: Partial<Pick<AppState,
+    'gageUseReal' | 'gageValueName' | 'gagePartName' | 'gageOperatorName'
+    | 'gageGaugeName' | 'gageReportBy' | 'gageStudyDate' | 'gageNotes'
+    | 'gageTolMode' | 'gageTolValue' | 'gageStandard'>>): void;
   /** 切换测量列:旧列公差入记忆,新列公差从记忆恢复(无记忆=none,绝不带旧列的值) */
   switchGageMeasurement(prev: string | null, next: string | null): void;
   setGageBatchCols(cols: string[] | null): void;
@@ -298,6 +306,10 @@ function persistedPrefsOf(s: AppState) {
     gageValueName: s.gageValueName,
     gagePartName: s.gagePartName,
     gageOperatorName: s.gageOperatorName,
+    gageGaugeName: s.gageGaugeName,
+    gageReportBy: s.gageReportBy,
+    gageStudyDate: s.gageStudyDate,
+    gageNotes: s.gageNotes,
     gageTolMode: s.gageTolMode,
     gageTolValue: s.gageTolValue,
     gageStandard: s.gageStandard,
@@ -404,6 +416,10 @@ export const useApp = create<AppState>()(persist((set, get) => ({
   gageValueName: null,
   gagePartName: null,
   gageOperatorName: null,
+  gageGaugeName: '',
+  gageReportBy: '',
+  gageStudyDate: '',
+  gageNotes: '',
   gageTolMode: 'auto',
   gageTolValue: null,
   gageStandard: 'factory',
@@ -638,6 +654,15 @@ export const useApp = create<AppState>()(persist((set, get) => ({
     merged.gageValueName = stringOrNull(p.gageValueName, current.gageValueName);
     merged.gagePartName = stringOrNull(p.gagePartName, current.gagePartName);
     merged.gageOperatorName = stringOrNull(p.gageOperatorName, current.gageOperatorName);
+    const limitedString = (value: unknown, fallback: string, maxLength: number) =>
+      typeof value === 'string' && value.length <= maxLength ? value : fallback;
+    merged.gageGaugeName = limitedString(p.gageGaugeName, current.gageGaugeName, 80);
+    merged.gageReportBy = limitedString(p.gageReportBy, current.gageReportBy, 80);
+    merged.gageStudyDate = typeof p.gageStudyDate === 'string'
+      && (p.gageStudyDate === '' || /^\d{4}-\d{2}-\d{2}$/.test(p.gageStudyDate))
+      ? p.gageStudyDate
+      : current.gageStudyDate;
+    merged.gageNotes = limitedString(p.gageNotes, current.gageNotes, 200);
     // v1.40:MSA 公差口径/数值/判定标准——写入侧(partialize/.qproj)与读取侧必须对称,漏一侧就是「保存端带、回放端丢」
     merged.gageTolMode = p.gageTolMode === 'auto' || p.gageTolMode === 'width' || p.gageTolMode === 'upper'
       || p.gageTolMode === 'lower' || p.gageTolMode === 'none' ? p.gageTolMode : current.gageTolMode;
@@ -815,6 +840,7 @@ export function resetUiPreferences(): void {
     chartStyle: '经典', showGrid: true, projectName: '质检项目 2026-Q2',
     lsl: 24.9, usl: 25.1, tgt: 25, lslOn: true, uslOn: true, capabilityBins: 13,
     gageUseReal: true, gageValueName: null, gagePartName: null, gageOperatorName: null,
+    gageGaugeName: '', gageReportBy: '', gageStudyDate: '', gageNotes: '',
     gageTolMode: 'auto', gageTolValue: null, gageStandard: 'factory',
     gageBatchCols: null, gageTolByCol: {},
     spcRules: { ...DEFAULT_SPC_RULES }, spcRuleK: { ...DEFAULT_RULE_K },

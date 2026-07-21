@@ -10,7 +10,7 @@
  *   （与 Minitab 单边规格公式一致），总均值已达/越过限值时拒绝计算并给出说明。
  */
 
-import { fCdf } from './basicMath';
+import { fCdf, mean } from './basicMath';
 
 export interface GageObservation {
   part: number; // 0-based
@@ -188,8 +188,9 @@ export function computeGageRR(data: GageObservation[], tolerance: GageToleranceS
   const scale = centered.reduce((maximum, value) => Math.max(maximum, Math.abs(value)), 0);
   if (!Number.isFinite(scale)) throw new Error('量具 R&R 测量值范围过大，无法得到有限的方差');
   const normalized = scale === 0 ? centered : centered.map((value) => value / scale);
+  // 主 ANOVA 的归一化方差路径保持原口径；仅对外展示/单侧公差共用稳定总均值。
   const grand = normalized.reduce((sum, value) => sum + value, 0) / N;
-  const grandMean = origin + grand * (scale === 0 ? 1 : scale);
+  const grandMean = mean(observations.map((observation) => observation.value));
 
   const partMean = new Array(p).fill(0);
   const operMean = new Array(o).fill(0);
@@ -459,7 +460,7 @@ export function computeGagePanelData(
   for (const observation of validated.data) {
     values[observation.operator][observation.part][observation.trial] = observation.value;
   }
-  const cellMeans = values.map((byPart) => byPart.map((trials) => trials.reduce((a, b) => a + b, 0) / r));
+  const cellMeans = values.map((byPart) => byPart.map((trials) => mean(trials)));
   // 不用 Math.max(...展开):重复次数极大时展开会栈溢出(本库既有教训),循环求极差
   const cellRanges = values.map((byPart) => byPart.map((trials) => {
     let lo = Infinity;
@@ -470,11 +471,10 @@ export function computeGagePanelData(
     }
     return hi - lo;
   }));
-  const partMeans = Array.from({ length: p }, (_, part) =>
-    cellMeans.reduce((sum, byPart) => sum + byPart[part], 0) / o);
-  const operatorMeans = cellMeans.map((byPart) => byPart.reduce((a, b) => a + b, 0) / p);
-  const grandMean = operatorMeans.reduce((a, b) => a + b, 0) / o;
-  const rBar = cellRanges.reduce((sum, byPart) => sum + byPart.reduce((a, b) => a + b, 0), 0) / (p * o);
+  const partMeans = Array.from({ length: p }, (_, part) => mean(cellMeans.map((byPart) => byPart[part])));
+  const operatorMeans = cellMeans.map((byPart) => mean(byPart));
+  const grandMean = mean(validated.data.map((observation) => observation.value));
+  const rBar = mean(cellRanges.flat());
   const rLimits = constants ? { cl: rBar, ucl: constants.D4 * rBar, lcl: constants.D3 * rBar } : null;
   const xbarLimits = constants
     ? { cl: grandMean, ucl: grandMean + constants.A2 * rBar, lcl: grandMean - constants.A2 * rBar }

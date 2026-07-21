@@ -554,6 +554,8 @@ function resetDatasetNonSpcRoles(): void {
   useApp.setState({
     // Gage 下拉框不能视觉回退到新列、计算却继续提交旧列名。
     gageValueName: null, gagePartName: null, gageOperatorName: null,
+    // 量具信息属于具体研究；导入/切换工作表时不得把上一研究的追溯字段带到新研究。
+    gageGaugeName: '', gageReportBy: '', gageStudyDate: '', gageNotes: '',
     // 批量响应选择与逐列公差属于当前工作表；即使新表恰有同名列，也不能沿用上一数据集的物理规格。
     gageBatchCols: null, gageTolByCol: {}, gageTolMode: 'auto', gageTolValue: null,
     // 能力子组配置同属列角色:跨数据集沿用会把上一张表的口径静默套在新表同名列上。

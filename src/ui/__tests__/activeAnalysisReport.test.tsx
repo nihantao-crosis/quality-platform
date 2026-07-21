@@ -53,6 +53,10 @@ beforeEach(() => {
     gageValueName: null,
     gagePartName: null,
     gageOperatorName: null,
+    gageGaugeName: '',
+    gageReportBy: '',
+    gageStudyDate: '',
+    gageNotes: '',
     hypoTab: 'anova',
     paretoView: 'pareto',
     paretoMergeOther: true,
@@ -62,6 +66,46 @@ beforeEach(() => {
 });
 
 describe('buildActiveAnalysisReport', () => {
+  it('MSA 报告只使用用户填写的量具信息，缺失值不再伪造成操作员或当天日期', () => {
+    useApp.setState({ page: 'gagerr' });
+    const empty = buildActiveAnalysisReport();
+    const emptyInfo = empty?.tables.find((table) => table.title === '量具研究信息');
+    expect(emptyInfo?.rows[0]?.slice(0, 3)).toEqual(['未填写', '未填写', '未填写']);
+    expect(emptyInfo?.rows[0]?.[4]).toBe('未填写');
+    expect(emptyInfo?.note).toContain('系统不从操作员标签或导出时间推断');
+
+    useApp.setState({
+      gageGaugeName: '数显千分尺-01',
+      gageReportBy: '张工',
+      gageStudyDate: '2026-07-21',
+      gageNotes: '产线 A 首件研究',
+    });
+    const filled = buildActiveAnalysisReport();
+    const filledInfo = filled?.tables.find((table) => table.title === '量具研究信息');
+    expect(filledInfo?.rows[0]).toEqual([
+      '数显千分尺-01', '张工', '2026-07-21', expect.any(String), '产线 A 首件研究',
+    ]);
+    const figure = filled?.charts.find((chart) => chart.title.includes('量具 R&R'))?.svg ?? '';
+    expect(figure).toContain('数显千分尺-01');
+    expect(figure).toContain('张工');
+    expect(figure).toContain('2026-07-21');
+    expect(figure).toContain('产线 A 首件研究');
+
+    const longGaugeName = '长'.repeat(80);
+    const longNotes = '注'.repeat(200);
+    useApp.setState({ gageGaugeName: longGaugeName, gageNotes: longNotes });
+    const longReport = buildActiveAnalysisReport();
+    const longInfo = longReport?.tables.find((table) => table.title === '量具研究信息');
+    expect(longInfo?.rows[0]?.[0]).toBe(longGaugeName);
+    expect(longInfo?.rows[0]?.[4]).toBe(longNotes);
+    expect(longInfo?.note).toContain('图形表头过长时仅缩略显示');
+    const longFigure = longReport?.charts.find((chart) => chart.title.includes('量具 R&R'))?.svg ?? '';
+    expect(longFigure).not.toContain(longGaugeName);
+    expect(longFigure).not.toContain(longNotes);
+    expect(longFigure).toContain(`${'长'.repeat(35)}…`);
+    expect(longFigure).toContain(`${'注'.repeat(35)}…`);
+  });
+
   it('出厂 ANOVA / DOE 演示导出与页面一致且显式标记非用户数据', () => {
     useApp.setState({ page: 'anova', hypoTab: 'anova' });
     const anova = buildActiveAnalysisReport();

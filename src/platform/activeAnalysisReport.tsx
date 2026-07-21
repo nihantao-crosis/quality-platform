@@ -941,14 +941,18 @@ function buildGagePayload(): AnalysisReportPayload {
   const partLabels = realStudy?.partLabels ?? Array.from({ length: panelData.partCount }, (_, index) => String(index + 1));
   const operatorLabels = realStudy?.operatorLabels ?? ['A', 'B', 'C'];
   const cats = gageBarCategories(result);
+  const generatedAt = now();
+  const infoOrMissing = (value: string) => value.trim() || '未填写';
   const figureProps = {
     T, panel: panelData, partLabels, operatorLabels, cats,
     valueName: realStudy?.valueName ?? '演示测量',
     partName: realStudy?.partName ?? '部件',
     operatorName: realStudy ? (realStudy.operatorName ?? '测试人') : '测试人',
-    reportBy: operatorLabels.join(''),
-    studyDate: new Date().toLocaleDateString('zh-CN'),
-    toleranceText: tolerance == null ? '' : tolerance.mode === 'width' ? String(tolerance.value) : `${tolerance.mode === 'upper' ? '上限' : '下限'} ${tolerance.value}`,
+    gaugeName: infoOrMissing(app.gageGaugeName),
+    reportBy: infoOrMissing(app.gageReportBy),
+    studyDate: app.gageStudyDate || '未填写',
+    otherText: infoOrMissing(app.gageNotes),
+    toleranceText: tolerance == null ? '未设置' : tolerance.mode === 'width' ? String(tolerance.value) : `${tolerance.mode === 'upper' ? '上限' : '下限'} ${tolerance.value}`,
   } as const;
   return {
     kind: 'gagerr',
@@ -957,7 +961,7 @@ function buildGagePayload(): AnalysisReportPayload {
     subtitle: requestedReal && realStudy
       ? `${realStudy.valueName} · 部件 ${realStudy.partName} · 操作员 ${realStudy.operatorName ?? '单操作员'} · ${realStudy.partLabels.length}×${realStudy.operatorLabels.length}×${realStudy.repeats}`
       : '内置 10 部件 × 3 操作员 × 2 重复演示研究 · 非用户数据',
-    generatedAt: now(),
+    generatedAt,
     summary: [
       `合计 Gage R&R=${fmt(result.totalGageRR, 3)}%（研究变异），${primary.standard === 'factory' ? '工厂标准' : 'AIAG'}判定：${primary.label}。${primary.detail}`,
       `对照口径（${reference.standard === 'factory' ? '工厂标准' : 'AIAG'}）：${reference.label}。`,
@@ -973,6 +977,18 @@ function buildGagePayload(): AnalysisReportPayload {
     ],
     tables: [
       ...(gageBatchTable ? [gageBatchTable] : []),
+      {
+        title: '量具研究信息',
+        headers: ['量具名称', '报表人', '研究日期', '报告生成时间', '其他备注'],
+        rows: [[
+          infoOrMissing(app.gageGaugeName),
+          infoOrMissing(app.gageReportBy),
+          app.gageStudyDate || '未填写',
+          generatedAt,
+          infoOrMissing(app.gageNotes),
+        ]],
+        note: '量具名称、报表人、研究日期与备注均为用户手工填写；系统不从操作员标签或导出时间推断。图形表头过长时仅缩略显示，完整值以本表为准。',
+      },
       {
         title: requestedReal
           ? single ? '导入的单操作员研究原始观测' : '导入的交叉研究原始观测'

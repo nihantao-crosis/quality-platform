@@ -40,7 +40,7 @@ describe('项目文件', () => {
     const json = buildProjectJson('9.9.9');
     const file = JSON.parse(json);
     expect(file.format).toBe('quality-platform-project');
-    expect(file.formatVersion).toBe(3);
+    expect(file.formatVersion).toBe(4);
     expect(file.appVersion).toBe('9.9.9');
     expect(Object.keys(file.stores)).toContain('qp-dataset-v1');
 
@@ -52,7 +52,7 @@ describe('项目文件', () => {
     expect(JSON.parse(localStorage.getItem('qp-aql-state-v1')!).aqlLot).toBe(2000);
   });
 
-  it('v3 qproj 对批次720新增 SPC/MSA 字段与 v6 分析快照完整往返', () => {
+  it('v4 qproj 对批次720字段、MSA量具信息与 v7 分析快照完整往返', () => {
     const prefs = {
       version: 3,
       state: {
@@ -61,6 +61,8 @@ describe('项目文件', () => {
         spcSigmaMethod: 'classic', spcShowZones: true,
         gageUseReal: true, gageValueName: '响应A', gagePartName: '部件', gageOperatorName: '测试人',
         gageTolMode: 'width', gageTolValue: 10, gageStandard: 'factory',
+        gageGaugeName: '数显千分尺-01', gageReportBy: '张工',
+        gageStudyDate: '2026-07-21', gageNotes: '产线 A 首件研究',
         gageBatchCols: ['响应A', '响应B'],
         gageTolByCol: {
           响应A: { mode: 'width', value: 10 },
@@ -74,10 +76,14 @@ describe('项目文件', () => {
       id: 'msa-720', kind: 'gagerr', title: 'MSA批量', datasetName: '工厂表', metric: '2个响应', status: '已分析',
       statusColor: '#2c8a45', statusBg: '#e8f4ea', createdAt: 1,
       snapshot: {
-        snapshotVersion: 6,
+        snapshotVersion: 7,
         gageValueName: null,
         gagePartName: '部件',
         gageOperatorName: '测试人',
+        gageGaugeName: '数显千分尺-01',
+        gageReportBy: '张工',
+        gageStudyDate: '2026-07-21',
+        gageNotes: '产线 A 首件研究',
         gageBatchCols: ['响应A', '响应B'],
         gageTolByCol: {
           响应A: { mode: 'width', value: 10 },
@@ -90,7 +96,7 @@ describe('项目文件', () => {
     localStorage.setItem('qp-prefs-v1', JSON.stringify(prefs));
     localStorage.setItem('qp-analyses-v1', JSON.stringify([analysis]));
     const project = buildProjectJson('1.41.0');
-    expect(JSON.parse(project).formatVersion).toBe(3);
+    expect(JSON.parse(project).formatVersion).toBe(4);
 
     localStorage.clear();
     expect(applyProjectJson(project)).toBeNull();

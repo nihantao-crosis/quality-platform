@@ -84,6 +84,7 @@ function GageRRInner({ T }: { T: ChartTokens }) {
   const { model, textCols, pendingCells } = useData();
   const {
     lsl, usl, lslOn, uslOn, gageUseReal, gageValueName, gagePartName, gageOperatorName,
+    gageGaugeName, gageReportBy, gageStudyDate, gageNotes,
     gageTolMode, gageTolValue, gageStandard, setGageOptions,
     gageBatchCols, gageTolByCol, switchGageMeasurement, setGageBatchCols, applyGageTolToCols, showToast,
   } = useApp();
@@ -467,6 +468,37 @@ function GageRRInner({ T }: { T: ChartTokens }) {
             「联动规格限」：双侧都启用取 USL−LSL；仅启用一侧按 Minitab 单边规格口径（3×SD/|限值−均值|）。
           </div>
         </Card>
+        <Card style={{ padding: 16 }}>
+          <div style={{ fontWeight: 600, color: '#33404f', marginBottom: 10 }}>量具信息</div>
+          <div style={{ display: 'grid', gap: 8 }}>
+            <input
+              aria-label="量具名称" placeholder="量具名称（未填写）" maxLength={80}
+              value={gageGaugeName} onChange={(e) => setGageOptions({ gageGaugeName: e.target.value })}
+              style={{ padding: '6px 8px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12 }}
+            />
+            <input
+              aria-label="报表人" placeholder="报表人（未填写）" maxLength={80}
+              value={gageReportBy} onChange={(e) => setGageOptions({ gageReportBy: e.target.value })}
+              style={{ padding: '6px 8px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12 }}
+            />
+            <label style={{ display: 'grid', gap: 4, fontSize: 11.5, color: '#697382' }}>
+              研究日期
+              <input
+                type="date" aria-label="研究日期" value={gageStudyDate}
+                onChange={(e) => setGageOptions({ gageStudyDate: e.target.value })}
+                style={{ padding: '6px 8px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12 }}
+              />
+            </label>
+            <textarea
+              aria-label="量具备注" placeholder="其他备注（可选）" maxLength={200} rows={2}
+              value={gageNotes} onChange={(e) => setGageOptions({ gageNotes: e.target.value })}
+              style={{ padding: '6px 8px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12, resize: 'vertical' }}
+            />
+          </div>
+          <div style={{ fontSize: 11, color: '#9aa2ad', marginTop: 8, lineHeight: 1.5 }}>
+            这些字段仅来自手工填写并随分析保存；未填时报告明确显示“未填写”。
+          </div>
+        </Card>
       </div>
       </div>
       <Card>
@@ -479,8 +511,10 @@ function GageRRInner({ T }: { T: ChartTokens }) {
             valueName={valueLabel}
             partName={realStudy?.partName ?? '部件'}
             operatorName={realStudy ? (realStudy.operatorName ?? '测试人') : '测试人'}
-            reportBy={operatorLabels.join('')}
-            studyDate={new Date().toLocaleDateString('zh-CN')}
+            gaugeName={gageGaugeName.trim() || '未填写'}
+            reportBy={gageReportBy.trim() || '未填写'}
+            studyDate={gageStudyDate || '未填写'}
+            otherText={gageNotes.trim() || '未填写'}
             toleranceText={g.tolerance == null ? '' : g.tolerance.mode === 'width' ? String(g.tolerance.value) : `${g.tolerance.mode === 'upper' ? '上限' : '下限'} ${g.tolerance.value}`}
           />
         </div>

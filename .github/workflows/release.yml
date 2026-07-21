@@ -6,9 +6,6 @@ on:
   push:
     tags: ['v*']
 
-permissions:
-  contents: write
-
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
@@ -16,8 +13,26 @@ concurrency:
 jobs:
   validate-release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Verify tagged commit belongs to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          TAG_COMMIT=$(git rev-parse "${GITHUB_REF}^{commit}")
+          test "$TAG_COMMIT" = "$(git rev-parse HEAD)" || {
+            echo "checked-out commit does not match $GITHUB_REF" >&2
+            exit 1
+          }
+          git merge-base --is-ancestor "$TAG_COMMIT" refs/remotes/origin/main || {
+            echo "refusing release: $GITHUB_REF_NAME is not reachable from origin/main" >&2
+            exit 1
+          }
       - name: Verify tag, application versions, and updater configuration
         env:
           TAG: ${{ github.ref_name }}
@@ -74,6 +89,8 @@ jobs:
 
   build:
     needs: validate-release
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -88,13 +105,15 @@ jobs:
             updater_platform: darwin-aarch64
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable action; Rust 1.88.0 below
+        with:
+          toolchain: 1.88.0
+      - uses: swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
         with:
           workspaces: src-tauri
       - name: Verify build architecture and signing material
@@ -118,7 +137,7 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: cargo test --manifest-path src-tauri/Cargo.toml --locked
-      - uses: tauri-apps/tauri-action@v0
+      - uses: tauri-apps/tauri-action@42e9df6c59070d114bf90dcd3943a1b8f138b113 # v0.5.20
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -137,6 +156,8 @@ jobs:
   updater-json:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Build and upload latest.json
         env:
@@ -219,9 +240,11 @@ jobs:
   portable:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
@@ -237,6 +260,8 @@ jobs:
   publish-release:
     needs: [updater-json, portable]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Publish only after every artifact and updater check passes
         env:

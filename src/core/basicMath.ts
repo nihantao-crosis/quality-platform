@@ -133,6 +133,28 @@ export function stdev(xs: number[], sample = true): number {
   return scale * Math.sqrt(sumSquares / denom);
 }
 
+/**
+ * 均方根 sqrt(Σx²/n)。缩放后再累计平方，避免直接 x² 在极端量纲下溢出/上溢。
+ * 主要供 Cpm 的目标偏差与等自由度合并标准差使用。
+ */
+export function rootMeanSquare(xs: number[]): number {
+  if (xs.length === 0) return Number.NaN;
+  let scale = 0;
+  let sumSquares = 1;
+  for (const value of xs) {
+    const magnitude = Math.abs(value);
+    if (!Number.isFinite(magnitude)) return magnitude;
+    if (magnitude === 0) continue;
+    if (scale < magnitude) {
+      sumSquares = 1 + sumSquares * (scale / magnitude) ** 2;
+      scale = magnitude;
+    } else {
+      sumSquares += (magnitude / scale) ** 2;
+    }
+  }
+  return scale === 0 ? 0 : scale * Math.sqrt(sumSquares / xs.length);
+}
+
 export function median(xs: number[]): number {
   const s = [...xs].sort((a, b) => a - b);
   const n = s.length;

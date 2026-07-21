@@ -1,6 +1,6 @@
 /** Gage R&R 页面、保存恢复与专项导出的同源闭环。 @vitest-environment jsdom */
 import { beforeEach, describe, expect, it } from 'vitest';
-import { cleanup, render } from '@testing-library/react';
+import { cleanup, fireEvent, render } from '@testing-library/react';
 import { createElement } from 'react';
 import { buildActiveAnalysisReport } from '../../platform/activeAnalysisReport';
 import { useAnalyses } from '../../store/analyses';
@@ -33,11 +33,29 @@ beforeEach(() => {
   useApp.setState({
     page: 'dashboard', lsl: 0, usl: 30, lslOn: true, uslOn: true,
     gageUseReal: true, gageValueName: null, gagePartName: null, gageOperatorName: null,
+    gageGaugeName: '', gageReportBy: '', gageStudyDate: '', gageNotes: '',
     gageTolMode: 'auto', gageTolValue: null, gageStandard: 'factory',
   });
 });
 
 describe('Gage R&R 当前研究闭环', () => {
+  it('量具追溯字段可直接填写，并由状态与报告使用同一份值', () => {
+    importStudy();
+    const view = render(createElement(GageRR, { T: chartTokens('经典', true) }));
+    fireEvent.change(view.getByLabelText('量具名称'), { target: { value: '数显千分尺-01' } });
+    fireEvent.change(view.getByLabelText('报表人'), { target: { value: '张工' } });
+    fireEvent.change(view.getByLabelText('研究日期'), { target: { value: '2026-07-21' } });
+    fireEvent.change(view.getByLabelText('量具备注'), { target: { value: '产线 A 首件研究' } });
+    expect(useApp.getState()).toMatchObject({
+      gageGaugeName: '数显千分尺-01', gageReportBy: '张工',
+      gageStudyDate: '2026-07-21', gageNotes: '产线 A 首件研究',
+    });
+    const info = buildActiveAnalysisReport()?.tables.find((table) => table.title === '量具研究信息');
+    expect(info?.rows[0]).toEqual([
+      '数显千分尺-01', '张工', '2026-07-21', expect.any(String), '产线 A 首件研究',
+    ]);
+  });
+
   it('有效 2×2×2 导入研究在页面与专项报告均使用真实数据', () => {
     importStudy();
     const text = render(createElement(GageRR, { T: chartTokens('经典', true) })).container.textContent ?? '';
@@ -125,7 +143,8 @@ describe('Gage R&R 当前研究闭环', () => {
     const report = buildActiveAnalysisReport();
     expect(report).toMatchObject({ usesWorksheet: true });
     expect(report?.subtitle).toContain('测量值 · 部件 部件ID · 操作员 操作员ID');
-    expect(report?.tables[0].rows[0]).toEqual(['101', '1', 1, '10.00000000']);
+    expect(report?.tables.find((table) => table.title.includes('原始观测'))?.rows[0])
+      .toEqual(['101', '1', 1, '10.00000000']);
   });
 
   it('单侧规格按 Minitab 单边口径计算 %公差(v1.40);公差模式 none 时明确不计算', () => {

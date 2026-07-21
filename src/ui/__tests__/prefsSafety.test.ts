@@ -11,6 +11,7 @@ beforeEach(() => {
     chartStyle: '经典', showGrid: true, projectName: '安全项目',
     lsl: 1, tgt: 2, usl: 3, lslOn: true, uslOn: true, capabilityBins: 13,
     gageUseReal: true, gageValueName: null, gagePartName: null, gageOperatorName: null,
+    gageGaugeName: '', gageReportBy: '', gageStudyDate: '', gageNotes: '',
     spcRules: { ...DEFAULT_SPC_RULES }, spcDataLayout: 'auto', spcValueCol: null, spcSubgroupCol: null, spcStageCol: null,
     doeView: 'main', doeTab: 'analyze', doeFactorCols: null, doeRespCol: null, doeModelTerms: null, doeIncludeCurvature: true,
     t1ColName: null, t1Mu0: null, t2ColAName: null, t2ColBName: null, regXName: null, regYName: null,
@@ -47,21 +48,39 @@ describe('偏好持久化安全', () => {
     expect(useApp.getState().spcRules).toMatchObject({ ...DEFAULT_SPC_RULES, r2: false });
   });
 
-  it('v1.40 MSA 公差口径/数值/判定标准持久化往返;非法值回落(防「保存端带、回放端丢」回归)', async () => {
+  it('MSA 公差、判定与量具信息持久化往返；非法值逐字段回落', async () => {
     localStorage.setItem('qp-prefs-v1', JSON.stringify({
       version: 3,
-      state: { gageTolMode: 'upper', gageTolValue: 100, gageStandard: 'aiag' },
+      state: {
+        gageTolMode: 'upper', gageTolValue: 100, gageStandard: 'aiag',
+        gageGaugeName: '数显千分尺-01', gageReportBy: '张工',
+        gageStudyDate: '2026-07-21', gageNotes: '产线 A 首件研究',
+      },
     }));
     await useApp.persist.rehydrate();
-    expect(useApp.getState()).toMatchObject({ gageTolMode: 'upper', gageTolValue: 100, gageStandard: 'aiag' });
+    expect(useApp.getState()).toMatchObject({
+      gageTolMode: 'upper', gageTolValue: 100, gageStandard: 'aiag',
+      gageGaugeName: '数显千分尺-01', gageReportBy: '张工',
+      gageStudyDate: '2026-07-21', gageNotes: '产线 A 首件研究',
+    });
 
-    useApp.setState({ gageTolMode: 'auto', gageTolValue: null, gageStandard: 'factory' });
+    useApp.setState({
+      gageTolMode: 'auto', gageTolValue: null, gageStandard: 'factory',
+      gageGaugeName: '', gageReportBy: '', gageStudyDate: '', gageNotes: '',
+    });
     localStorage.setItem('qp-prefs-v1', JSON.stringify({
       version: 3,
-      state: { gageTolMode: '任意', gageTolValue: 'NaN', gageStandard: 7 },
+      state: {
+        gageTolMode: '任意', gageTolValue: 'NaN', gageStandard: 7,
+        gageGaugeName: 'x'.repeat(81), gageReportBy: 7,
+        gageStudyDate: '2026-99-99-额外', gageNotes: 'x'.repeat(201),
+      },
     }));
     await useApp.persist.rehydrate();
-    expect(useApp.getState()).toMatchObject({ gageTolMode: 'auto', gageTolValue: null, gageStandard: 'factory' });
+    expect(useApp.getState()).toMatchObject({
+      gageTolMode: 'auto', gageTolValue: null, gageStandard: 'factory',
+      gageGaugeName: '', gageReportBy: '', gageStudyDate: '', gageNotes: '',
+    });
   });
 
   it('批次720 MSA 公差随列记忆:切列换口径不串用、记忆可恢复、应用到全部显式生效', () => {

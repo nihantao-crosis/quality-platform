@@ -3,7 +3,7 @@
  * 支持单侧规格：lsl / usl 允许为 null（如平面度只有上限）,
  * 双侧指标（Cp/Pp/Cpm）在单侧时为 null,Cpk/Ppk 取可用侧。
  */
-import { phi, invNorm } from './basicMath';
+import { phi, invNorm, mean, rootMeanSquare, stdev } from './basicMath';
 
 export interface SpecLimits {
   lsl: number | null;
@@ -51,8 +51,8 @@ export function capabilityInputError(
   if (spec.lsl != null && spec.usl != null && spec.lsl >= spec.usl) {
     return '双侧规格必须满足 LSL < USL';
   }
-  const mu = allValues.reduce((sum, value) => sum + value, 0) / allValues.length;
-  const sigmaOverall = Math.sqrt(allValues.reduce((sum, value) => sum + (value - mu) ** 2, 0) / (allValues.length - 1));
+  const mu = mean(allValues);
+  const sigmaOverall = stdev(allValues);
   if (!Number.isFinite(sigmaOverall) || sigmaOverall <= 0) {
     return '过程整体标准差为 0 或不可估计，无法计算能力指数';
   }
@@ -77,8 +77,8 @@ export function computeCapability(
   const inputError = capabilityInputError(allValues, sigmaWithin, spec);
   if (inputError) throw new Error(inputError);
   const { lsl, usl } = spec;
-  const mu = allValues.reduce((a, b) => a + b, 0) / allValues.length;
-  const so = Math.sqrt(allValues.reduce((a, b) => a + (b - mu) ** 2, 0) / (allValues.length - 1));
+  const mu = mean(allValues);
+  const so = stdev(allValues);
   const sw = sigmaWithin;
   const both = lsl != null && usl != null;
 
@@ -91,7 +91,7 @@ export function computeCapability(
     usl != null ? (usl - mu) / (3 * so) : Infinity,
     lsl != null ? (mu - lsl) / (3 * so) : Infinity,
   );
-  const tau = Math.sqrt(allValues.reduce((a, b) => a + (b - spec.tgt) ** 2, 0) / allValues.length);
+  const tau = rootMeanSquare(allValues.map((value) => value - spec.tgt));
   const cpm = both ? (usl - lsl) / (6 * tau) : null;
 
   const ppmUw = usl != null ? (1 - phi((usl - mu) / sw)) * 1e6 : null;
