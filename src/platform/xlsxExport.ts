@@ -4,13 +4,13 @@
  */
 import * as XLSX from 'xlsx';
 import {
-  nf, computeCapability, capabilityInputError, evalRules, DEFAULT_RULES, type VarModel,
-  assessCapability, countCapabilityViolations, andersonDarling,
+  nf, computeCapability, capabilityInputError, type VarModel, type SpcAssessment,
+  assessCapability, andersonDarling,
 } from '../core';
 import type { ReportSpec } from './report';
 import { safeSheetName, type AnalysisReportPayload } from './analysisReportModel';
 
-export function buildXlsx(M: VarModel, spec: ReportSpec, analysis?: AnalysisReportPayload): Uint8Array {
+export function buildXlsx(M: VarModel, spec: ReportSpec, assessment: SpcAssessment, analysis?: AnalysisReportPayload): Uint8Array {
   const wb = XLSX.utils.book_new();
 
   const appendDataSheet = () => {
@@ -61,7 +61,7 @@ export function buildXlsx(M: VarModel, spec: ReportSpec, analysis?: AnalysisRepo
   const xlsxAd = M.all.length >= 8 ? andersonDarling(M.all) : null;
   const capAssessment = cap ? assessCapability({
     cpk: cap.cpk, verdict: cap.verdict, adP: xlsxAd ? xlsxAd.p : null, n: M.all.length,
-    spcViolations: countCapabilityViolations(M, DEFAULT_RULES),
+    spcViolations: assessment.locationPoints + assessment.dispersionPoints,
   }) : null;
   const capRows: (string | number)[][] = cap && capAssessment ? [
     ['Cp', cap.cp == null ? '—' : Number(nf(cap.cp, 3))],
@@ -73,7 +73,7 @@ export function buildXlsx(M: VarModel, spec: ReportSpec, analysis?: AnalysisRepo
     ['西格玛水平', Number(nf(cap.sigmaLevel, 3))],
     ['PPM 合计（整体）', Math.round(cap.ppm.overall.total)],
     ['判定', capAssessment.status],
-    ['过程稳定性', capAssessment.spcViolations > 0 ? `控制图 ${capAssessment.spcViolations} 个失控点——能力值仅描述当前样本` : '控制图无失控信号'],
+    ['过程稳定性', capAssessment.spcViolations > 0 ? `控制图 ${capAssessment.spcViolations} 个失控点（各图累计，去重后 ${assessment.uniquePointCount} 个观测）——能力值仅描述当前样本` : '控制图无失控信号'],
   ] : [
     ['过程能力', `未运行: ${capError}`],
   ];
@@ -92,14 +92,10 @@ export function buildXlsx(M: VarModel, spec: ReportSpec, analysis?: AnalysisRepo
   ];
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(summary), '统计摘要');
 
-  // Sheet 3: 失控点（子组数据用 X̄，单值/未转换形态用 I，绝不借用伪造的子组常数）
-  const data = M.hasSubgroups ? M.subs.map((s) => s.mean) : M.indiv;
-  const cl = M.hasSubgroups ? M.xbarbar : M.indMean;
-  const sigma = M.hasSubgroups ? (M.uclX - M.xbarbar) / 3 : M.iSig;
-  const { list } = evalRules(data, cl, sigma, DEFAULT_RULES);
-  const violRows: (string | number)[][] = [['点号', 'Nelson 准则', '描述']];
-  list.forEach((v) => violRows.push([v.i + 1, v.rule, v.desc]));
-  if (list.length === 0) violRows.push(['—', '—', '未检出失控点，过程受控']);
+  // Sheet 3: 失控点(v1.42.3:位置+离散图统一判异,与统计摘要「过程稳定性」同源,不再自相矛盾)
+  const violRows: (string | number)[][] = [['点号', '图', 'Nelson 准则', '描述']];
+  assessment.events.forEach((v) => violRows.push([v.i + 1, v.chart, v.rule, v.desc]));
+  if (assessment.events.length === 0) violRows.push(['—', '—', '—', assessment.verdictLine]);
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(violRows), '失控点');
 
   return new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer);

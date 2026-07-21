@@ -12,7 +12,7 @@ export class QprojExportSizeError extends Error {
     const limitMb = MAX_QPROJ_IMPORT_BYTES / 1024 / 1024;
     super(`项目文件${estimated ? '预计至少' : '生成后'}为 ${sizeMb} MB，超过 ${limitMb} MB 导入上限；`
       + '为避免生成软件无法重新打开的备份，已取消导出。'
-      + '请在「项目管理器」删除不再需要的本机归档数据集，或缩小当前数据后重试');
+      + '请在「数据 → 数据集库（本机）」删除不再需要的归档数据集，或缩小当前数据后重试');
     this.name = 'QprojExportSizeError';
   }
 }

@@ -72,7 +72,7 @@ describe('.qproj × 数据集库', () => {
 
     const attempt = exportProject('9.9.9', '超大项目');
     await expect(attempt).rejects.toThrow('预计至少');
-    await expect(attempt).rejects.toThrow('删除不再需要的本机归档数据集');
+    await expect(attempt).rejects.toThrow('「数据 → 数据集库（本机）」删除不再需要的归档数据集');
     expect(get).not.toHaveBeenCalled();
     expect(exportFile).not.toHaveBeenCalled();
   });

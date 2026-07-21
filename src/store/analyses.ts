@@ -10,7 +10,7 @@ import {
   prepareGageStudy, effectiveGageSelection, listGageCategoryColumns, resolveNumericColumn,
   oneWayAnova, oneSampleT, twoSampleT, linearRegression, anovaGroups, buildAnovaGroups, wideScaleDisparate, resolveAnovaMode, countAnovaPendingCells, isDoeAnalysisColumn, analyzeDoe, detectFactorial, analyzeFactorial, detectGeneralFactorial, analyzeGeneralFactorial, detectFractionalFactorial, analyzeFractionalFactorial, resolveDoeColumnsWide, MAX_FRACTIONAL_FACTORS, factorialModelTerms, resolveDoeBlockValues, plansByState, computeDescriptive,
   ewmaSeries, cusumSeries, stagedXbar, stagedRange, stageValidationError, normalizeSwitchStatus,
-  DEFAULT_RULE_K, normalizeRuleK, assessGage, withSigmaMethod,
+  normalizeRuleK, assessGage, withSigmaMethod,
   type InspectionLevel, type AnovaMode, type AqlMethod, type AqlAcMethod, type AqlRegime, type GageStandard, type NelsonRules, type NelsonRuleK, type SwitchStatus, type SpcDataLayout, type SpcSigmaMethod,
 } from '../core';
 import { useApp, resolveGageTolerance, DEFAULT_SPC_RULES, GAGE_TOL_MEMORY_CAP, normalizeGageBatchCols, type SpcType, type DoeView, type DoeTab, type HypoTab, type ParetoView } from './appStore';
@@ -254,47 +254,11 @@ const SPC_TITLE: Record<SpcType, string> = {
   ewma: 'EWMA 控制图', cusum: 'CUSUM 控制图', p: 'P 控制图', c: 'C 控制图',
 };
 
-/**
- * 统一 SPC 页面红点、列表、结论卡与保存摘要的最小判异单元。
- * 窗口型准则的 core list 记录「窗口触发点」，而 viol 记录图上实际标红的所有点；
- * 这里把触发窗口展开成实际点，使列表与图一一对应。
- */
-export interface SpcViolationItem {
-  i: number;
-  rule: number;
-  desc: string;
-  chartLabel: string;
-}
-
-export function expandSpcRuleItems(
-  viol: ReadonlySet<number>,
-  list: ReadonlyArray<{ i: number; rule: number; desc: string }>,
-  chartLabel: string,
-  ruleK: NelsonRuleK = DEFAULT_RULE_K,
-): SpcViolationItem[] {
-  // 游程型准则窗口长度随 K 值变化;准则 1/5/6 的 list 已按实际点逐条记录,窗口恒为 1。
-  const windowLength: Partial<Record<number, number>> = {
-    2: ruleK.k2, 3: ruleK.k3, 4: ruleK.k4, 7: ruleK.k7, 8: ruleK.k8,
-  };
-  const out: SpcViolationItem[] = [];
-  const seen = new Set<string>();
-  for (const item of list) {
-    const len = windowLength[item.rule] ?? 1;
-    const start = Math.max(0, item.i - len + 1);
-    for (let i = start; i <= item.i; i++) {
-      if (!viol.has(i)) continue;
-      const key = `${chartLabel}:${item.rule}:${i}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push({ i, rule: item.rule, desc: item.desc, chartLabel });
-    }
-  }
-  return out.sort((a, b) => a.i - b.i || a.rule - b.rule);
-}
-
-export function uniqueSpcPointCount(items: ReadonlyArray<Pick<SpcViolationItem, 'i'>>): number {
-  return new Set(items.map((item) => item.i)).size;
-}
+// v1.42.3:判异展开器下沉至 core/spc(通用导出报告与页面共用),此处保持再导出以兼容既有调用方
+import { expandSpcRuleItems, uniqueSpcPointCount } from '../core';
+export { expandSpcRuleItems, uniqueSpcPointCount };
+import type { SpcViolationItem } from '../core';
+export type { SpcViolationItem };
 
 const HYPO_TITLE: Record<HypoTab, string> = {
   anova: '单因子 ANOVA', t1: '单样本 t 检验', t2: '双样本 t 检验', reg: '相关与回归',

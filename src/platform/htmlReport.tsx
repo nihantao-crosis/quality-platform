@@ -4,9 +4,8 @@
  */
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
-  nf, fmtCap, computeCapability, capabilityInputError, evalRules, DEFAULT_RULES, andersonDarling, type VarModel,
-  assessCapability, countCapabilityViolations,
-} from '../core';
+  nf, fmtCap, computeCapability, capabilityInputError, andersonDarling, type VarModel, type SpcAssessment,
+  assessCapability, } from '../core';
 import { chartTokens } from '../ui/tokens';
 import { ControlChart } from '../ui/charts/ControlChart';
 import { Histogram } from '../ui/charts/Histogram';
@@ -71,20 +70,19 @@ ${charts}
 </body></html>`;
 }
 
-export function buildHtmlReport(M: VarModel, spec: ReportSpec, analysis?: AnalysisReportPayload): string {
+export function buildHtmlReport(M: VarModel, spec: ReportSpec, assessment: SpcAssessment, analysis?: AnalysisReportPayload): string {
   if (analysis) return buildAnalysisHtml(M, analysis);
   const T = chartTokens('经典', true);
   // 能力输入闸门:规格与数据量纲不匹配(1000σ 哨兵)等情况写「未运行」,其余章节照常导出
   const capError = capabilityInputError(M.all, M.sigmaWithin, spec);
   const cap = capError ? null : computeCapability(M.all, M.sigmaWithin, spec);
   const spc = M.hasSubgroups
-    ? { data: M.subs.map((s) => s.mean), cl: M.xbarbar, ucl: M.uclX, lcl: M.lclX, sigma: (M.uclX - M.xbarbar) / 3, label: 'X̄' }
-    : { data: M.indiv, cl: M.indMean, ucl: M.iUcl, lcl: M.iLcl, sigma: M.iSig, label: 'I' };
-  const { list: viol } = evalRules(spc.data, spc.cl, spc.sigma, DEFAULT_RULES);
+    ? { data: M.subs.map((s) => s.mean), cl: M.xbarbar, ucl: M.uclX, lcl: M.lclX, label: 'X̄' }
+    : { data: M.indiv, cl: M.indMean, ucl: M.iUcl, lcl: M.iLcl, label: 'I' };
   const ad = M.all.length >= 8 ? andersonDarling(M.all) : null;
 
   const xbarSvg = renderToStaticMarkup(
-    <ControlChart T={T} data={spc.data} cl={spc.cl} ucl={spc.ucl} lcl={spc.lcl} clLabel={spc.label} h={250} zones violations={new Set(viol.map((v) => v.i))} />,
+    <ControlChart T={T} data={spc.data} cl={spc.cl} ucl={spc.ucl} lcl={spc.lcl} clLabel={spc.label} h={250} zones violations={assessment.locationViolIndexes} />,
   );
   const histSvg = renderToStaticMarkup(
     <Histogram T={T} data={M.all} mu={M.oMean} sigmaWithin={M.sigmaWithin} sigmaOverall={M.oSd} lsl={spec.lsl} usl={spec.usl} tgt={spec.tgt} h={300} />,
@@ -94,7 +92,7 @@ export function buildHtmlReport(M: VarModel, spec: ReportSpec, analysis?: Analys
   // P0-4:判定消费唯一判定器(含位置+离散图稳定性与正态性),失控时不得绿色「能力充足」。
   const capAssessment = cap ? assessCapability({
     cpk: cap.cpk, verdict: cap.verdict, adP: ad ? ad.p : null, n: M.all.length,
-    spcViolations: countCapabilityViolations(M, DEFAULT_RULES),
+    spcViolations: assessment.locationPoints + assessment.dispersionPoints,
   }) : null;
   const verdictCls = !capAssessment ? 'verdict-warn' : capAssessment.level === 'ok' ? 'verdict-ok' : capAssessment.level === 'warn' ? 'verdict-warn' : 'verdict-bad';
   const verdictTxt = capAssessment ? capAssessment.status : '能力分析未运行';
@@ -108,10 +106,12 @@ export function buildHtmlReport(M: VarModel, spec: ReportSpec, analysis?: Analys
     ['能力分析未运行', capError ?? ''],
   ];
 
-  const violHtml = viol.length === 0
-    ? '<p class="verdict-ok">✓ 未检出失控点，过程受控（当前启用的 Nelson 准则）</p>'
-    : `<table><tr><th>点号</th><th>准则</th><th>描述</th></tr>${viol
-        .map((v) => `<tr><td class="num">${v.i + 1}</td><td class="num">${v.rule}</td><td>${esc(v.desc)}</td></tr>`)
+  // 位置图+离散图统一判异明细(v1.42.3):结论行与明细同源,离散图失控不再与「受控」并存
+  const violHtml = assessment.events.length === 0
+    ? `<p class="verdict-ok">${esc(assessment.verdictLine)}</p>`
+    : `<p class="verdict-bad">${esc(assessment.verdictLine)}（${esc(assessment.locationLabel)} 图 ${assessment.locationPoints} 点 + ${esc(assessment.dispersionLabel)} 图 ${assessment.dispersionPoints} 点，去重后 ${assessment.uniquePointCount} 个失控观测）</p>`
+      + `<table><tr><th>点号</th><th>图</th><th>准则</th><th>描述</th></tr>${assessment.events
+        .map((v) => `<tr><td class="num">${v.i + 1}</td><td>${esc(v.chart)}</td><td class="num">${v.rule}</td><td>${esc(v.desc)}</td></tr>`)
         .join('')}</table>`;
 
   return `<!doctype html>

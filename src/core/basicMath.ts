@@ -128,13 +128,41 @@ export function stableSum(xs: number[]): number {
   return (sum + correction) * scale;
 }
 
+/** 值域守卫(v1.42.3,审计 P2):offsetMean 里 (x − origin) 单项差最大 2·maxAbs,且 n 项
+ * 累加的部分和最坏可达 2·maxAbs·(n−1)——单项差不溢出但部分和溢出同样会输出 NaN(mean)
+ * 或静默 0(stdev,对抗审查反例 [-4e307, 4e307, 4e307, 4e307])。因此阈值必须随样本量收紧:
+ * maxAbs > MAX_VALUE/(4n) 即整体按最大绝对值缩放后计算再乘回(缩放后 maxAbs=1,不会复触发)。
+ * 输入含非有限值时守卫不触发,保持既有 NaN 传播行为。 */
+const OFFSET_OVERFLOW_GUARD = Number.MAX_VALUE / 4;
+
+function offsetGuardThreshold(n: number): number {
+  return OFFSET_OVERFLOW_GUARD / Math.max(1, n);
+}
+
+function maxAbs(xs: number[]): number {
+  let m = 0;
+  for (const v of xs) {
+    const a = Math.abs(v);
+    if (a > m) m = a;
+  }
+  return m;
+}
+
 export function mean(xs: number[]): number {
+  const scale = maxAbs(xs);
+  if (Number.isFinite(scale) && scale > offsetGuardThreshold(xs.length)) {
+    return scale * mean(xs.map((v) => v / scale));
+  }
   const centered = offsetMean(xs);
   return xs.length === 0 ? Number.NaN : centered.origin + centered.offset;
 }
 
 /** sample=true → n-1 分母（默认样本标准差） */
 export function stdev(xs: number[], sample = true): number {
+  const guardScale = maxAbs(xs);
+  if (Number.isFinite(guardScale) && guardScale > offsetGuardThreshold(xs.length)) {
+    return guardScale * stdev(xs.map((v) => v / guardScale), sample);
+  }
   const denom = sample ? xs.length - 1 : xs.length;
   const centered = offsetMean(xs);
   // 在偏移坐标内计算离差，避免先把均值舍入回大基准后再相减。

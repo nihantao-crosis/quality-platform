@@ -8,7 +8,7 @@ import {
 } from 'docx';
 import PptxGenJS from 'pptxgenjs';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { nf, fmtCap, computeCapability, capabilityInputError, evalRules, DEFAULT_RULES, andersonDarling, type VarModel, assessCapability, countCapabilityViolations } from '../core';
+import { nf, fmtCap, computeCapability, capabilityInputError, andersonDarling, type VarModel, type SpcAssessment, assessCapability } from '../core';
 import { chartTokens } from '../ui/tokens';
 import { ControlChart } from '../ui/charts/ControlChart';
 import { Histogram } from '../ui/charts/Histogram';
@@ -29,29 +29,33 @@ interface ReportStats {
   /** 能力输入闸门未通过(如 1000σ 量纲哨兵)时为 null,capError 给出原因;其余章节照常导出。 */
   cap: ReturnType<typeof computeCapability> | null;
   capError: string | null;
-  viol: { i: number; rule: number; desc: string }[];
+  viol: { i: number; rule: number; desc: string; chart: string }[];
+  verdictLine: string;
+  uniquePointCount: number;
+  /** 失控结论 + 三个计数各自标注口径(各图点数/去重观测数),与其余格式同一表述 */
+  violSummary: string;
   adText: string;
 }
 
-function collectStats(M: VarModel, spec: ReportSpec): ReportStats {
+function collectStats(M: VarModel, spec: ReportSpec, assessment: SpcAssessment): ReportStats {
   const capError = capabilityInputError(M.all, M.sigmaWithin, spec);
   const cap = capError ? null : computeCapability(M.all, M.sigmaWithin, spec);
-  const data = M.hasSubgroups ? M.subs.map((s) => s.mean) : M.indiv;
-  const cl = M.hasSubgroups ? M.xbarbar : M.indMean;
-  const sigma = M.hasSubgroups ? (M.uclX - M.xbarbar) / 3 : M.iSig;
-  const { list: viol } = evalRules(data, cl, sigma, DEFAULT_RULES);
+  // v1.42.3:位置+离散图统一判异明细,与判定行同源
+  const viol = assessment.events;
   let adText = '样本量不足,未执行正态性检验';
   if (M.all.length >= 8) {
     const ad = andersonDarling(M.all);
     adText = `Anderson-Darling A²* = ${nf(ad.a2star, 3)}, P ${ad.p < 0.005 ? '< 0.005' : '= ' + nf(ad.p, 3)} → ${ad.normal ? '未拒绝正态假设' : '显著偏离正态,建议 Box-Cox'}`;
   }
-  return { cap, capError, viol, adText };
+  const violSummary = `${assessment.verdictLine}（${assessment.locationLabel} 图 ${assessment.locationPoints} 点 + ${assessment.dispersionLabel} 图 ${assessment.dispersionPoints} 点，去重后 ${assessment.uniquePointCount} 个失控观测）`;
+  return { cap, capError, viol, verdictLine: assessment.verdictLine, uniquePointCount: assessment.uniquePointCount, violSummary, adText };
 }
 
 /** 浏览器路径：渲染三张图为 PNG（经典主题,与界面一致） */
 export async function renderReportImages(
   M: VarModel,
   spec: ReportSpec,
+  assessment: SpcAssessment,
   analysis?: AnalysisReportPayload,
 ): Promise<ReportImages> {
   if (analysis) {
@@ -62,9 +66,9 @@ export async function renderReportImages(
   }
   const T = chartTokens('经典', true);
   const spc = M.hasSubgroups
-    ? { data: M.subs.map((s) => s.mean), cl: M.xbarbar, ucl: M.uclX, lcl: M.lclX, sigma: (M.uclX - M.xbarbar) / 3, label: 'X̄' }
-    : { data: M.indiv, cl: M.indMean, ucl: M.iUcl, lcl: M.iLcl, sigma: M.iSig, label: 'I' };
-  const { viol } = evalRules(spc.data, spc.cl, spc.sigma, DEFAULT_RULES);
+    ? { data: M.subs.map((s) => s.mean), cl: M.xbarbar, ucl: M.uclX, lcl: M.lclX, label: 'X̄' }
+    : { data: M.indiv, cl: M.indMean, ucl: M.iUcl, lcl: M.iLcl, label: 'I' };
+  const viol = assessment.locationViolIndexes;
   const mk = (el: React.ReactElement, w: number, h: number) =>
     svgMarkupToPng(renderToStaticMarkup(el), w, h, 2);
   return {
@@ -88,11 +92,11 @@ const capPairs = (cap: NonNullable<ReportStats['cap']>): Array<[string, string]>
 ];
 
 // P0-4:判定消费唯一判定器,失控时不得写无警示的「能力充足」。
-const capabilityVerdictText = (M: VarModel, cap: NonNullable<ReportStats['cap']>) => {
+const capabilityVerdictText = (M: VarModel, cap: NonNullable<ReportStats['cap']>, assessment: SpcAssessment) => {
   const ad = M.all.length >= 8 ? andersonDarling(M.all) : null;
   const a = assessCapability({
     cpk: cap.cpk, verdict: cap.verdict, adP: ad ? ad.p : null, n: M.all.length,
-    spcViolations: countCapabilityViolations(M, DEFAULT_RULES),
+    spcViolations: assessment.locationPoints + assessment.dispersionPoints,
   });
   return a.spcViolations > 0 ? `${a.status}（${a.headline}）` : a.status;
 };
@@ -102,7 +106,8 @@ const capabilityVerdictText = (M: VarModel, cap: NonNullable<ReportStats['cap']>
 export async function buildDocx(
   M: VarModel,
   spec: ReportSpec,
-  images: ReportImages = {},
+  images: ReportImages,
+  assessment: SpcAssessment,
   analysis?: AnalysisReportPayload,
 ): Promise<Uint8Array> {
   const border = { style: BorderStyle.SINGLE, size: 4, color: 'E2E5EA' };
@@ -160,7 +165,7 @@ export async function buildDocx(
     return new Uint8Array(await blob.arrayBuffer());
   }
 
-  const { cap, capError, viol, adText } = collectStats(M, spec);
+  const { cap, capError, viol, verdictLine, violSummary, adText } = collectStats(M, spec, assessment);
 
   const children: (Paragraph | Table)[] = [
     new Paragraph({ heading: HeadingLevel.HEADING_1, children: [new TextRun({ text: '质量分析报告', size: 40, bold: true })] }),
@@ -168,11 +173,11 @@ export async function buildDocx(
     h('1. 过程概览'),
     kvTable([
       ['均值', nf(M.oMean, 4)], ['σ 组内', nf(M.sigmaWithin, 4)], ['σ 整体', nf(M.oSd, 4)],
-      ['规格', `${nf(spec.lsl, 2)} / ${nf(spec.tgt, 2)} / ${nf(spec.usl, 2)}`], ['判定', cap ? `${capabilityVerdictText(M, cap)} (Cpk ${nf(cap.cpk, 2)})` : '能力分析未运行'],
+      ['规格', `${nf(spec.lsl, 2)} / ${nf(spec.tgt, 2)} / ${nf(spec.usl, 2)}`], ['判定', cap ? `${capabilityVerdictText(M, cap, assessment)} (Cpk ${nf(cap.cpk, 2)})` : '能力分析未运行'],
     ]),
     h('2. SPC 控制图与判异'),
     ...img(images.xbar),
-    p(viol.length === 0 ? '未检出失控点，过程受控（当前启用的 Nelson 准则）。' : `检出 ${viol.length} 项失控：` + viol.map((v) => `点${v.i + 1}(准则${v.rule})`).join('、')),
+    p(viol.length === 0 ? verdictLine : `${violSummary}：` + viol.slice(0, 12).map((v) => `${v.chart}图点${v.i + 1}(准则${v.rule})`).join('、') + (viol.length > 12 ? ` 等 ${viol.length} 项` : '')),
     h('3. 过程能力'),
     ...img(images.hist, 620, 194),
     cap ? kvTable(capPairs(cap)) : p(`能力分析未运行: ${capError}`),
@@ -192,7 +197,8 @@ export async function buildDocx(
 export async function buildPptx(
   M: VarModel,
   spec: ReportSpec,
-  images: ReportImages = {},
+  images: ReportImages,
+  assessment: SpcAssessment,
   analysis?: AnalysisReportPayload,
 ): Promise<Uint8Array> {
   const pptx = new PptxGenJS();
@@ -271,7 +277,7 @@ export async function buildPptx(
     return new Uint8Array(buf);
   }
 
-  const { cap, capError, viol, adText } = collectStats(M, spec);
+  const { cap, capError, viol, verdictLine, violSummary, adText } = collectStats(M, spec, assessment);
 
   // 封面
   const cover = pptx.addSlide();
@@ -289,7 +295,7 @@ export async function buildPptx(
       { text: '均值', options: { bold: true } }, { text: 'σ 组内', options: { bold: true } },
       { text: 'σ 整体', options: { bold: true } }, { text: '规格 L/T/U', options: { bold: true } }, { text: '判定', options: { bold: true } },
     ],
-    [nf(M.oMean, 4), nf(M.sigmaWithin, 4), nf(M.oSd, 4), `${nf(spec.lsl, 2)} / ${nf(spec.tgt, 2)} / ${nf(spec.usl, 2)}`, cap ? `${capabilityVerdictText(M, cap)} (Cpk ${nf(cap.cpk, 2)})` : '能力分析未运行'].map((t) => ({ text: t })),
+    [nf(M.oMean, 4), nf(M.sigmaWithin, 4), nf(M.oSd, 4), `${nf(spec.lsl, 2)} / ${nf(spec.tgt, 2)} / ${nf(spec.usl, 2)}`, cap ? `${capabilityVerdictText(M, cap, assessment)} (Cpk ${nf(cap.cpk, 2)})` : '能力分析未运行'].map((t) => ({ text: t })),
   ];
   s2.addTable(rows, { x: 0.6, y: 1.1, w: 12.1, fontSize: 14, border: { type: 'solid', color: 'E2E5EA', pt: 1 }, fill: { color: 'FFFFFF' } });
   if (cap) {
@@ -304,7 +310,7 @@ export async function buildPptx(
   s2.addText(adText, { x: 0.6, y: 4.3, w: 12.1, h: 0.5, fontSize: 13, color: GRAY });
 
   chartSlide(`SPC 控制图（${M.hasSubgroups ? 'X̄' : 'I'}）`, images.xbar, 250 / 960,
-    viol.length === 0 ? '未检出失控点，过程受控' : `检出 ${viol.length} 项失控：` + viol.slice(0, 8).map((v) => `点${v.i + 1}(准则${v.rule})`).join('、'));
+    viol.length === 0 ? verdictLine : `${violSummary}：` + viol.slice(0, 8).map((v) => `${v.chart}图点${v.i + 1}(准则${v.rule})`).join('、') + (viol.length > 8 ? ` 等 ${viol.length} 项` : ''));
   chartSlide('过程能力直方图', images.hist, 300 / 960);
   chartSlide('正态概率图', images.prob, 280 / 960, adText);
 

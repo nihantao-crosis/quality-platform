@@ -2,7 +2,9 @@
  * 手工录入与图文报告测试。
  * @vitest-environment jsdom
  */
+import { DEFAULT_SPC_RULES } from '../../store/appStore';
 import { describe, it, expect, beforeEach } from 'vitest';
+import { assessSpcCharts } from '../../core';
 import { useData } from '../../store/dataStore';
 import { buildHtmlReport } from '../../platform/htmlReport';
 
@@ -57,7 +59,7 @@ describe('工作表手工录入', () => {
 describe('图文报告 (HTML)', () => {
   it('内嵌三张 SVG 图表与关键统计', () => {
     const M = useData.getState().model;
-    const html = buildHtmlReport(M, { lsl: 24.9, tgt: 25.0, usl: 25.1 });
+    const html = buildHtmlReport(M, { lsl: 24.9, tgt: 25.0, usl: 25.1 }, assessSpcCharts(M, DEFAULT_SPC_RULES));
     expect((html.match(/<svg/g) ?? []).length).toBe(3);
     expect(html).toContain('质量分析报告');
     expect(html).toContain(M.name);

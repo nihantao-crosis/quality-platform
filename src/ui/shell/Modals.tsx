@@ -2,7 +2,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useApp, type ImportTab, type ExportFmt } from '../../store/appStore';
 import { markActiveDataReplaced, prepareVaultDatasetRemoval, useData } from '../../store/dataStore';
-import { parseMatrix, parseCategoryCounts, extractPChartColumns, evalFormula, truthy, arrMin, arrMax, mean, stdev, FormulaError, worksheetNumericColumnCodes, detectCsvBlocks, type CsvBlock, type ParsedMatrix } from '../../core';
+import { parseMatrix, parseCategoryCounts, extractPChartColumns, evalFormula, truthy, arrMin, arrMax, mean, stdev, FormulaError, worksheetNumericColumnCodes, detectCsvBlocks, assessSpcCharts, type CsvBlock, type ParsedMatrix } from '../../core';
 import { assertXlsxImportSize, platform } from '../../platform/adapter';
 import { assertTextImportSize } from '../../platform/importLimits';
 import { buildExportJob } from '../../platform/report';
@@ -533,10 +533,13 @@ function ExportModal() {
   ];
   const doExport = async () => {
     try {
-      const { lsl, tgt, usl } = useApp.getState();
+      const { lsl, tgt, usl, spcRules, spcRuleK } = useApp.getState();
       const { buildActiveAnalysisExport } = await import('../../platform/activeAnalysisReport');
       const { report: analysis, model } = buildActiveAnalysisExport();
-      const job = await buildExportJob(exportFmt, model, { lsl, tgt, usl }, analysis);
+      // v1.42.3(审计 P1):通用报告判异用「用户当前规则/K」评估一次,四种格式共用——
+      // 不再让各导出器各自按 DEFAULT_RULES 只评位置图。
+      const spcAssessment = assessSpcCharts(model, spcRules, spcRuleK);
+      const job = await buildExportJob(exportFmt, model, { lsl, tgt, usl }, spcAssessment, analysis);
       const dest = await platform.exportFile(job);
       if (dest == null) return; // 用户取消
       sessionLog(`导出报表 ${dest}`);

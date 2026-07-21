@@ -4,9 +4,10 @@
  */
 import type { ExportFmt } from '../store/appStore';
 import {
-  nf, fmtCap, computeCapability, capabilityInputError, evalRules, evalLimitedRules, DEFAULT_RULES, oneWayAnova, computeGageRR,
+  nf, fmtCap, computeCapability, capabilityInputError, oneWayAnova, computeGageRR,
   anovaGroups, gageStudyData, GAGE_TOLERANCE, type VarModel,
   assessCapability, andersonDarling,
+  type SpcAssessment,
 } from '../core';
 
 const OPS = ['张伟', '李娜', '王强'];
@@ -31,29 +32,14 @@ export function worksheetCsv(M: VarModel): string {
   return [head, ...rows].map((r) => r.join(',')).join('\n');
 }
 
-export function textReport(M: VarModel, spec: ReportSpec): string {
+// v1.42.3(审计 P1):判异评估由调用方经 assessSpcCharts 用「用户当前规则/K」计算一次,
+// 四种导出格式只消费同一 SpcAssessment;本函数不再自带 DEFAULT_RULES 评估。
+export function textReport(M: VarModel, spec: ReportSpec, assessment: SpcAssessment): string {
   // 能力输入闸门:规格与数据量纲不匹配(1000σ 哨兵)等情况下,能力章节写「未运行」而非让整份导出失败
   const capError = capabilityInputError(M.all, M.sigmaWithin, spec);
   const cap = capError ? null : computeCapability(M.all, M.sigmaWithin, spec);
-  const spc = M.hasSubgroups
-    ? { values: M.subs.map((s) => s.mean), cl: M.xbarbar, sigma: (M.uclX - M.xbarbar) / 3 }
-    : { values: M.indiv, cl: M.indMean, sigma: M.iSig };
-  // 通用报告也必须先判 R/MR：只重算 X̄/I 会在离散图失控时同屏写出
-  // 「过程受控」与「过程不稳定」。下方结论和能力判定共用这一次结构化判异结果。
-  const location = evalRules(spc.values, spc.cl, spc.sigma, DEFAULT_RULES);
-  const dispersion = M.hasSubgroups
-    ? evalLimitedRules(M.subs.map((s) => s.range), M.rCl, M.uclR, M.lclR, DEFAULT_RULES)
-    : evalLimitedRules(M.mr.slice(1) as number[], M.mrbar, M.mrUcl, 0, DEFAULT_RULES);
-  const locationLabel = M.hasSubgroups ? 'X̄' : 'I';
-  const dispersionLabel = M.hasSubgroups ? 'R' : 'MR';
-  const dispersionOffset = M.hasSubgroups ? 0 : 1;
-  const dispersionPoints = new Set([...dispersion.viol].map((i) => i + dispersionOffset));
-  const allViolationPoints = new Set([...location.viol, ...dispersionPoints]);
-  const capabilityViolationCount = location.viol.size + dispersion.viol.size;
-  const violationEvents = [
-    ...location.list.map((item) => ({ ...item, chart: locationLabel })),
-    ...dispersion.list.map((item) => ({ ...item, i: item.i + dispersionOffset, chart: dispersionLabel })),
-  ].sort((a, b) => a.i - b.i || a.chart.localeCompare(b.chart) || a.rule - b.rule);
+  const capabilityViolationCount = assessment.locationPoints + assessment.dispersionPoints;
+  const violationEvents = assessment.events;
   const anova = M.isDemo ? oneWayAnova(anovaGroups().map((g) => g.vals)) : null;
   const gage = M.isDemo ? computeGageRR(gageStudyData(), { mode: 'width', value: GAGE_TOLERANCE }) : null;
   const L: string[] = [];
@@ -76,15 +62,10 @@ export function textReport(M: VarModel, spec: ReportSpec): string {
     L.push('【SPC · I-MR 控制图】');
     L.push(`  中心线 X̄ ${nf(M.indMean, 3)} · UCL ${nf(M.iUcl, 3)} · LCL ${nf(M.iLcl, 3)} · MR̄ ${nf(M.mrbar, 3)}`);
   }
-  if (dispersionPoints.size > 0) {
-    L.push(`  ✗ ${dispersionLabel} 图检出 ${dispersionPoints.size} 个异常点，过程变异尚未受控；暂不解释 ${locationLabel} 图，先调查离散异常`);
-  } else if (allViolationPoints.size === 0) {
-    L.push('  ✓ 未检出失控点，过程受控');
-  } else {
-    L.push(`  ✗ ${locationLabel} 图检出 ${location.viol.size} 个失控点，存在特殊原因变异`);
-  }
+  L.push('  ' + assessment.verdictLine);
   if (violationEvents.length > 0) {
-    L.push(`  判异明细（${allViolationPoints.size} 个实际点）:`);
+    // 三个计数各自标注口径,避免「结论 N 点、明细 M 行」观感矛盾(明细行按 点×准则 展开,可多于点数)
+    L.push(`  判异明细（${assessment.locationLabel} 图 ${assessment.locationPoints} 点 + ${assessment.dispersionLabel} 图 ${assessment.dispersionPoints} 点，去重后 ${assessment.uniquePointCount} 个失控观测）:`);
     violationEvents.forEach((v) => L.push(`    · ${v.chart} 图 · 点 ${v.i + 1} · 准则 ${v.rule} · ${v.desc}`));
   }
   L.push('');
@@ -128,6 +109,9 @@ export async function buildExportJob(
   fmt: ExportFmt,
   M: VarModel,
   spec: ReportSpec,
+  // 必填:通用报告的 SPC 判异结果,由调用方按用户当前规则/K 计算(assessSpcCharts)。
+  // 设为必填而非可选回落——v1.42.2 的教训正是"漏掉的调用点静默退回 DEFAULT_RULES"。
+  assessment: SpcAssessment,
   analysis?: AnalysisReportPayload,
 ): Promise<ExportJob> {
   const stamp = new Date().toISOString().slice(0, 10);
@@ -138,7 +122,7 @@ export async function buildExportJob(
       defaultName: `${base}_${stamp}`,
       ext: 'xlsx',
       filterLabel: 'Excel 工作簿',
-      bytes: buildXlsx(M, spec, analysis),
+      bytes: buildXlsx(M, spec, assessment, analysis),
     };
   }
   if (fmt === 'pdf') {
@@ -148,27 +132,27 @@ export async function buildExportJob(
       defaultName: `${base}_${stamp}`,
       ext: 'html',
       filterLabel: '图文报告 (打开后打印为 PDF)',
-      text: buildHtmlReport(M, spec, analysis),
+      text: buildHtmlReport(M, spec, assessment, analysis),
     };
   }
   // Office 真渲染：图表位图化失败(无 canvas 环境)时降级为纯表格文档
   const office = await import('./officeExport');
   let images: Awaited<ReturnType<typeof office.renderReportImages>> = {};
   try {
-    images = await office.renderReportImages(M, spec, analysis);
+    images = await office.renderReportImages(M, spec, assessment, analysis);
   } catch { /* 降级 */ }
   if (fmt === 'ppt') {
     return {
       defaultName: `${base}_${stamp}`,
       ext: 'pptx',
       filterLabel: 'PowerPoint 演示文稿',
-      bytes: await office.buildPptx(M, spec, images, analysis),
+      bytes: await office.buildPptx(M, spec, images, assessment, analysis),
     };
   }
   return {
     defaultName: `${base}_${stamp}`,
     ext: 'docx',
     filterLabel: 'Word 文档',
-    bytes: await office.buildDocx(M, spec, images, analysis),
+    bytes: await office.buildDocx(M, spec, images, assessment, analysis),
   };
 }

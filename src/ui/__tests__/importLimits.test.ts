@@ -55,7 +55,7 @@ describe('文本与项目文件导入上限', () => {
     expect(qprojExportByteLength('{}')).toBe(5); // 3 字节 BOM + 2 字节 JSON
     expect(() => assertQprojExportByteLength(MAX_QPROJ_IMPORT_BYTES)).not.toThrow();
     expect(() => assertQprojExportByteLength(MAX_QPROJ_IMPORT_BYTES + 1)).toThrow('软件无法重新打开');
-    expect(() => assertQprojExportByteLength(MAX_QPROJ_IMPORT_BYTES + 1)).toThrow('项目管理器');
+    expect(() => assertQprojExportByteLength(MAX_QPROJ_IMPORT_BYTES + 1)).toThrow('数据集库（本机）');
   });
 
   it('Web/桌面共用的导出任务闸门在任何落盘副作用前拒绝超限 QPROJ', () => {

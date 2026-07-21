@@ -1,5 +1,7 @@
 /** 当前分析专项导出：四种格式必须消费同一份载荷。 */
+import { DEFAULT_SPC_RULES } from '../../store/appStore';
 import { describe, expect, it } from 'vitest';
+import { assessSpcCharts } from '../../core';
 import * as XLSX from 'xlsx';
 import { buildData, computeVarModel } from '../../core';
 import { buildHtmlReport } from '../../platform/htmlReport';
@@ -34,7 +36,7 @@ const isZip = (bytes: Uint8Array) => bytes[0] === 0x50 && bytes[1] === 0x4b;
 
 describe('当前分析专项导出', () => {
   it('HTML 使用专项标题、结论、警告和表格，不再回落通用能力报告', () => {
-    const html = buildHtmlReport(M, SPEC, REPORT);
+    const html = buildHtmlReport(M, SPEC, assessSpcCharts(M, DEFAULT_SPC_RULES), REPORT);
     expect(html).toContain('AQL 接收抽样专项报告');
     expect(html).toContain('本批不合格数 2');
     expect(html).toContain('生产放行应同时保留批号');
@@ -44,7 +46,7 @@ describe('当前分析专项导出', () => {
   });
 
   it('Excel 增加当前分析 sheet，并写入相同结论', () => {
-    const bytes = buildXlsx(M, SPEC, REPORT);
+    const bytes = buildXlsx(M, SPEC, assessSpcCharts(M, DEFAULT_SPC_RULES), REPORT);
     const wb = XLSX.read(bytes, { type: 'array' });
     const sheetName = wb.SheetNames.find((name) => name.includes('aql-当前分析'));
     expect(sheetName).toBeTruthy();
@@ -62,7 +64,7 @@ describe('当前分析专项导出', () => {
       title: 'P 控制图专项报告',
       subtitle: '属性数据',
     };
-    const wb = XLSX.read(buildXlsx(M, SPEC, report), { type: 'array' });
+    const wb = XLSX.read(buildXlsx(M, SPEC, assessSpcCharts(M, DEFAULT_SPC_RULES), report), { type: 'array' });
     expect(wb.SheetNames).toEqual(['spc-当前分析']);
     expect(wb.SheetNames).not.toContain('数据');
     expect(wb.SheetNames).not.toContain('统计摘要');
@@ -80,7 +82,7 @@ describe('当前分析专项导出', () => {
         rows: [[1, 'A', 10], [2, 'A', 11], [3, 'B', 20], [4, 'B', 21]],
       }],
     };
-    const wb = XLSX.read(buildXlsx(M, SPEC, report), { type: 'array' });
+    const wb = XLSX.read(buildXlsx(M, SPEC, assessSpcCharts(M, DEFAULT_SPC_RULES), report), { type: 'array' });
     expect(wb.SheetNames).toEqual(['anova-当前分析']);
     const rows = XLSX.utils.sheet_to_json<string[]>(wb.Sheets['anova-当前分析'], { header: 1 });
     expect(rows.flat().join('|')).toContain('工作表行|设备|压入力');
@@ -92,8 +94,8 @@ describe('当前分析专项导出', () => {
 
   it('Word 与 PowerPoint 专项路径均生成合法 OOXML', async () => {
     const [docx, pptx] = await Promise.all([
-      buildDocx(M, SPEC, {}, REPORT),
-      buildPptx(M, SPEC, {}, REPORT),
+      buildDocx(M, SPEC, {}, assessSpcCharts(M, DEFAULT_SPC_RULES), REPORT),
+      buildPptx(M, SPEC, {}, assessSpcCharts(M, DEFAULT_SPC_RULES), REPORT),
     ]);
     expect(isZip(docx)).toBe(true);
     expect(isZip(pptx)).toBe(true);

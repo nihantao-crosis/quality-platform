@@ -1,6 +1,8 @@
 /** @vitest-environment jsdom */
 /** 批次716-R2:Codex v1.36 验收确认缺陷的防回归(P0 规格绑定/P2 P图截断/P2 动态文案/P1 列序)。 */
+import { DEFAULT_SPC_RULES } from '../../store/appStore';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { assessSpcCharts } from '../../core';
 import { createElement } from 'react';
 import { cleanup, render } from '@testing-library/react';
 import { useApp } from '../../store/appStore';
@@ -167,7 +169,7 @@ describe('自查F2:legacy 导出在哨兵状态下能力章节写「未运行」
   it('textReport 规格量纲误配 → 不抛异常,含未运行说明,其余章节仍在', () => {
     useData.getState().importMatrix('螺钉', ['高度'], [[10.1], [10.2], [10.0], [10.15], [10.05], [10.12]], []);
     const M = useData.getState().model;
-    const text = textReport(M, { lsl: 500, tgt: 900, usl: 1400 });
+    const text = textReport(M, { lsl: 500, tgt: 900, usl: 1400 }, assessSpcCharts(M, DEFAULT_SPC_RULES));
     expect(text).toContain('能力分析未运行');
     expect(text).toContain('1000 倍标准差');
     expect(text).toContain('SPC');
@@ -177,7 +179,7 @@ describe('自查F2:legacy 导出在哨兵状态下能力章节写「未运行」
     const rows = Array.from({ length: 24 }, () => [9, 11]);
     rows.push([0, 20]);
     useData.getState().importMatrix('R-only.csv', ['x1', 'x2'], rows, []);
-    const text = textReport(useData.getState().model, { lsl: 0, tgt: 10, usl: 20 });
+    const text = textReport(useData.getState().model, { lsl: 0, tgt: 10, usl: 20 }, assessSpcCharts(useData.getState().model, DEFAULT_SPC_RULES));
     expect(text).toMatch(/R 图检出 \d+ 个异常点，过程变异尚未受控/);
     expect(text).not.toContain('未检出失控点，过程受控');
   });
@@ -187,7 +189,7 @@ describe('自查F2:legacy 导出在哨兵状态下能力章节写「未运行」
     values[10] = -3.5;
     values[11] = 3.5;
     useData.getState().importMatrix('MR-only.csv', ['位移'], values.map((value) => [value]), []);
-    const text = textReport(useData.getState().model, { lsl: -10, tgt: 0, usl: 10 });
+    const text = textReport(useData.getState().model, { lsl: -10, tgt: 0, usl: 10 }, assessSpcCharts(useData.getState().model, DEFAULT_SPC_RULES));
     expect(text).toMatch(/MR 图检出 \d+ 个异常点，过程变异尚未受控/);
     expect(text).toContain('暂不解释 I 图');
     expect(text).not.toContain('未检出失控点，过程受控');

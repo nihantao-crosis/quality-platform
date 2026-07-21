@@ -347,3 +347,46 @@ export function evalRules(
     .sort((a, b) => a.i - b.i);
   return { viol, list: out };
 }
+
+/**
+ * 统一 SPC 页面红点、列表、结论卡、保存摘要与通用导出报告的最小判异单元。
+ * 窗口型准则的 core list 记录「窗口触发点」,而 viol 记录图上实际标红的所有点;
+ * 这里把触发窗口展开成实际点,使明细列表与图一一对应。
+ * (v1.42.3 从 store/analyses 下沉至 core:通用报告 assessSpcCharts 必须与页面共用同一展开器)
+ */
+export interface SpcViolationItem {
+  i: number;
+  rule: number;
+  desc: string;
+  chartLabel: string;
+}
+
+export function expandSpcRuleItems(
+  viol: ReadonlySet<number>,
+  list: ReadonlyArray<{ i: number; rule: number; desc: string }>,
+  chartLabel: string,
+  ruleK: NelsonRuleK = DEFAULT_RULE_K,
+): SpcViolationItem[] {
+  // 游程型准则窗口长度随 K 值变化;准则 1/5/6 的 list 已按实际点逐条记录,窗口恒为 1。
+  const windowLength: Partial<Record<number, number>> = {
+    2: ruleK.k2, 3: ruleK.k3, 4: ruleK.k4, 7: ruleK.k7, 8: ruleK.k8,
+  };
+  const out: SpcViolationItem[] = [];
+  const seen = new Set<string>();
+  for (const item of list) {
+    const len = windowLength[item.rule] ?? 1;
+    const start = Math.max(0, item.i - len + 1);
+    for (let i = start; i <= item.i; i++) {
+      if (!viol.has(i)) continue;
+      const key = `${chartLabel}:${item.rule}:${i}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ i, rule: item.rule, desc: item.desc, chartLabel });
+    }
+  }
+  return out.sort((a, b) => a.i - b.i || a.rule - b.rule);
+}
+
+export function uniqueSpcPointCount(items: ReadonlyArray<Pick<SpcViolationItem, 'i'>>): number {
+  return new Set(items.map((item) => item.i)).size;
+}
