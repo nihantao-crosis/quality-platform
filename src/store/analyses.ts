@@ -10,10 +10,10 @@ import {
   prepareGageStudy, effectiveGageSelection, listGageCategoryColumns, resolveNumericColumn,
   oneWayAnova, oneSampleT, twoSampleT, linearRegression, anovaGroups, buildAnovaGroups, wideScaleDisparate, resolveAnovaMode, countAnovaPendingCells, isDoeAnalysisColumn, analyzeDoe, detectFactorial, analyzeFactorial, detectGeneralFactorial, analyzeGeneralFactorial, detectFractionalFactorial, analyzeFractionalFactorial, resolveDoeColumnsWide, MAX_FRACTIONAL_FACTORS, factorialModelTerms, resolveDoeBlockValues, plansByState, computeDescriptive,
   ewmaSeries, cusumSeries, stagedXbar, stagedRange, stageValidationError, normalizeSwitchStatus,
-  DEFAULT_RULE_K, normalizeRuleK, assessGage,
-  type InspectionLevel, type AnovaMode, type AqlMethod, type AqlAcMethod, type AqlRegime, type GageStandard, type NelsonRules, type NelsonRuleK, type SwitchStatus, type SpcDataLayout,
+  DEFAULT_RULE_K, normalizeRuleK, assessGage, withSigmaMethod,
+  type InspectionLevel, type AnovaMode, type AqlMethod, type AqlAcMethod, type AqlRegime, type GageStandard, type NelsonRules, type NelsonRuleK, type SwitchStatus, type SpcDataLayout, type SpcSigmaMethod,
 } from '../core';
-import { useApp, resolveGageTolerance, DEFAULT_SPC_RULES, type SpcType, type DoeView, type DoeTab, type HypoTab, type ParetoView } from './appStore';
+import { useApp, resolveGageTolerance, DEFAULT_SPC_RULES, GAGE_TOL_MEMORY_CAP, normalizeGageBatchCols, type SpcType, type DoeView, type DoeTab, type HypoTab, type ParetoView } from './appStore';
 import { syncSpecForActiveMeasurement, useData, resolveCapabilityMeasurementData, type ParetoModel } from './dataStore';
 import { loadFishboneState, saveFishboneState, type FishboneData } from './fishboneStore';
 import { sessionLog } from './sessionLog';
@@ -34,12 +34,16 @@ export interface AnalysisSourceData {
 }
 
 export interface AnalysisSnapshot {
-  snapshotVersion?: 2 | 3 | 4 | 5;
+  snapshotVersion?: 2 | 3 | 4 | 5 | 6;
   spcType?: SpcType;
   spcRules?: NelsonRules;
   /** 判异准则可编辑 K 值;缺失即当时的 Nelson/Minitab 标准值(旧记录兼容)。 */
   spcRuleK?: NelsonRuleK;
   spcStageCol?: string | null;
+  /** SPC σ 估计方法(批次720);缺失即旧记录=保存时的 R̄/d2 经典口径,回放固化 'classic'。 */
+  spcSigmaMethod?: SpcSigmaMethod;
+  /** ±1SL/±2SL 区带是否显示；旧记录缺失时按旧版是否分阶段迁移。 */
+  spcShowZones?: boolean;
   spcDataLayout?: SpcDataLayout;
   spcValueCol?: string | null;
   spcSubgroupCol?: string | null;
@@ -55,6 +59,9 @@ export interface AnalysisSnapshot {
   capValueCol?: string | null;
   capSubgroupIdCol?: string | null;
   gageUseReal?: boolean;
+  /** 批次720-B:批量选中列与逐列公差记忆;缺失即旧记录(单列),回放清空批量态。 */
+  gageBatchCols?: string[] | null;
+  gageTolByCol?: Record<string, { mode: 'auto' | 'width' | 'upper' | 'lower' | 'none'; value: number | null }>;
   gageValueName?: string | null;
   gagePartName?: string | null;
   gageOperatorName?: string | null;
@@ -305,7 +312,7 @@ function buildSummary(kind: AnalysisKind): Omit<SavedAnalysis, 'id' | 'createdAt
           status: '未分析', ...pick(WARN),
         };
       }
-      const SM = prepared.model ?? M;
+      const SM = withSigmaMethod(prepared.model ?? M, app.spcSigmaMethod);
       const effType: SpcType = !SM.hasSubgroups && (app.spcType === 'xbar-r' || app.spcType === 'xbar-s')
         ? 'i-mr'
         : app.spcType;
@@ -340,8 +347,8 @@ function buildSummary(kind: AnalysisKind): Omit<SavedAnalysis, 'id' | 'createdAt
         }
         const canUseStages = Boolean(stageLabels);
         if (canUseStages && stageLabels) {
-          const x = stagedXbar(rows, stageLabels, app.spcRules);
-          const r = stagedRange(rows, stageLabels, app.spcRules);
+          const x = stagedXbar(rows, stageLabels, app.spcRules, app.spcSigmaMethod, app.spcRuleK);
+          const r = stagedRange(rows, stageLabels, app.spcRules, app.spcSigmaMethod, app.spcRuleK);
           items = [
             ...expandSpcRuleItems(x.viol, x.list, 'X̄'),
             ...expandSpcRuleItems(r.viol, r.list, 'R'),
@@ -350,13 +357,14 @@ function buildSummary(kind: AnalysisKind): Omit<SavedAnalysis, 'id' | 'createdAt
         } else {
           items = [
             ...ruleItems(means, SM.xbarbar, (SM.uclX - SM.xbarbar) / 3, 'X̄'),
-            ...limitedItems(SM.subs.map((s) => s.range), SM.rbar, SM.uclR, SM.lclR, 'R'),
+            // 判异中心线与图表同口径(pooled 时 R 图 CL=d2σ̂ 而非 R̄,批次720)
+            ...limitedItems(SM.subs.map((s) => s.range), SM.rCl, SM.uclR, SM.lclR, 'R'),
           ];
         }
       } else if (effType === 'xbar-s') {
         items = [
           ...ruleItems(means, SM.xbarbar, (SM.uclXs - SM.xbarbar) / 3, 'X̄'),
-          ...limitedItems(SM.svals, SM.sbar, SM.uclS, SM.lclS, 'S'),
+          ...limitedItems(SM.svals, SM.sCl, SM.uclS, SM.lclS, 'S'),
         ];
       } else if (effType === 'i-mr') {
         items = [
@@ -367,13 +375,13 @@ function buildSummary(kind: AnalysisKind): Omit<SavedAnalysis, 'id' | 'createdAt
       } else if (effType === 'ewma') {
         const data = SM.hasSubgroups ? means : SM.indiv;
         const mu = SM.hasSubgroups ? SM.xbarbar : SM.indMean;
-        const sigma = SM.hasSubgroups ? SM.sigmaWithin / Math.sqrt(SM.n) : SM.iSig;
+        const sigma = SM.hasSubgroups ? SM.sigmaChart / Math.sqrt(SM.n) : SM.iSig;
         const r = ewmaSeries(data, mu, sigma);
         items = [...r.viol].map((i) => ({ i, rule: 1, desc: 'EWMA 超出时变控制限', chartLabel: 'EWMA' }));
       } else if (effType === 'cusum') {
         const data = SM.hasSubgroups ? means : SM.indiv;
         const mu = SM.hasSubgroups ? SM.xbarbar : SM.indMean;
-        const sigma = SM.hasSubgroups ? SM.sigmaWithin / Math.sqrt(SM.n) : SM.iSig;
+        const sigma = SM.hasSubgroups ? SM.sigmaChart / Math.sqrt(SM.n) : SM.iSig;
         const r = cusumSeries(data, mu, sigma, 0.5, SM.hasSubgroups ? 4 : 5);
         items = [...r.viol].map((i) => ({ i, rule: 1, desc: '累积和超出判定限 H', chartLabel: 'CUSUM' }));
       } else if (effType === 'p') {
@@ -652,12 +660,14 @@ function pick(c: { color: string; bg: string }) {
 
 function snapshotOf(kind: AnalysisKind): AnalysisSnapshot {
   const a = useApp.getState();
-  const snap: AnalysisSnapshot = { snapshotVersion: 5 };
+  const snap: AnalysisSnapshot = { snapshotVersion: 6 };
   if (kind === 'spc') {
     snap.spcType = a.spcType;
     snap.spcRules = { ...a.spcRules };
     snap.spcRuleK = { ...a.spcRuleK };
     snap.spcStageCol = a.spcStageCol;
+    snap.spcSigmaMethod = a.spcSigmaMethod;
+    snap.spcShowZones = a.spcShowZones;
   }
   // 能力指标依赖与 SPC 相同的测量列/子组角色，因此历史回看也必须保存这组参数。
   if (kind === 'spc' || kind === 'capability') {
@@ -715,6 +725,24 @@ function snapshotOf(kind: AnalysisKind): AnalysisSnapshot {
     snap.gageTolMode = a.gageTolMode;
     snap.gageTolValue = a.gageTolValue;
     snap.gageStandard = a.gageStandard;
+    snap.gageBatchCols = normalizeGageBatchCols(a.gageBatchCols);
+    // 逐列公差记忆连同当前列的在用值一起固化,批量摘要回放不依赖此后的页面操作
+    const toleranceMemory = { ...a.gageTolByCol };
+    // 当前列必须作为最新条目保留；若先前已有同名键，先删再追加，避免 64 列截断时误删正在使用的公差。
+    if (snap.gageValueName) {
+      delete toleranceMemory[snap.gageValueName];
+      toleranceMemory[snap.gageValueName] = { mode: a.gageTolMode, value: a.gageTolValue };
+    }
+    const protectedCols = new Set([...(snap.gageBatchCols ?? []), snap.gageValueName].filter((name): name is string => Boolean(name)));
+    const entries = Object.entries(toleranceMemory);
+    const selected = entries.filter(([name]) => protectedCols.has(name));
+    const selectedNames = new Set(selected.map(([name]) => name));
+    const remaining = Math.max(0, GAGE_TOL_MEMORY_CAP - selected.length);
+    // slice(-0) 等价于 slice(0)，会在保护项恰好占满容量时反而把全部旧项带入快照。
+    const recentOther = remaining > 0
+      ? entries.filter(([name]) => !selectedNames.has(name)).slice(-remaining)
+      : [];
+    snap.gageTolByCol = Object.fromEntries([...recentOther, ...selected]);
   }
   if (kind === 'aql') {
     snap.aqlLot = a.aqlLot; snap.aqlLevel = a.aqlLevel; snap.aqlAQL = a.aqlAQL; snap.aqlRegime = a.aqlRegime;
@@ -965,8 +993,9 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
     if (usesWorksheet && !restoredEmbeddedData && a.datasetName !== useData.getState().model.name) {
       const rec = useData.getState().recents.find((r) => r.name === a.datasetName);
       if (rec) {
-        // 旧版快照回落最近列表时，随后会回放该记录自己的 SPC 角色；异步库读取也不能在完成时清掉它。
-        const loaded = await useData.getState().loadRecent(a.datasetName, true);
+        // 先完整清除上一工作表的所有列绑定态，再回放目标快照；即使目标不是 SPC，
+        // 也不能让上一表的 SPC/MSA/能力角色潜伏到新数据集。
+        const loaded = await useData.getState().loadRecent(a.datasetName);
         if (!loaded) {
           useApp.getState().showToast('旧版分析对应的数据集读取失败，无法准确重建；当前数据与分析参数未作更改');
           sessionLog(`无法回看旧版分析 ${a.title} · 数据集 ${a.datasetName} 读取失败`);
@@ -1010,9 +1039,9 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
     const patch: Record<string, unknown> = {};
     // 仅允许 AppState 中真实存在的快照字段，避免 paretoData 等大载荷污染 UI store。
     const appKeys: Array<keyof AnalysisSnapshot> = [
-      'spcType', 'spcRules', 'spcStageCol', 'spcDataLayout', 'spcValueCol', 'spcSubgroupCol',
+      'spcType', 'spcRules', 'spcStageCol', 'spcSigmaMethod', 'spcShowZones', 'spcDataLayout', 'spcValueCol', 'spcSubgroupCol',
       'lsl', 'usl', 'tgt', 'lslOn', 'uslOn', 'capabilityBins',
-      'gageUseReal', 'gageValueName', 'gagePartName', 'gageOperatorName', 'gageTolMode', 'gageTolValue', 'gageStandard',
+      'gageUseReal', 'gageValueName', 'gagePartName', 'gageOperatorName', 'gageTolMode', 'gageTolValue', 'gageStandard', 'gageBatchCols', 'gageTolByCol',
       'doeView', 'doeTab', 'doeFactorCols', 'doeRespCol', 'doeModelTerms', 'doeIncludeCurvature',
       'hypoTab', 'anovaMode', 'anovaRespName', 'anovaFactorName', 'anovaShowDemo',
       't1ColName', 't1Mu0', 't2ColAName', 't2ColBName', 'regXName', 'regYName',
@@ -1034,16 +1063,29 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
       patch.gageTolValue = width != null && width > 0 ? width : null;
     }
     if (a.kind === 'gagerr' && s.gageStandard === undefined) patch.gageStandard = 'aiag';
+    // 批次720 以前的 gage 记录没有批量态:回放清空批量选择与逐列记忆,不继承当前页面
+    if (a.kind === 'gagerr' && s.gageBatchCols === undefined) patch.gageBatchCols = null;
+    if (a.kind === 'gagerr' && s.gageBatchCols !== undefined) patch.gageBatchCols = normalizeGageBatchCols(s.gageBatchCols);
+    if (a.kind === 'gagerr' && s.gageTolByCol === undefined) patch.gageTolByCol = {};
     // v1.30 以前的 SPC 记录没有规则/阶段快照：采用当时的产品默认，而非继承当前页面条件。
     if (a.kind === 'spc' && !s.spcRules) patch.spcRules = { ...DEFAULT_SPC_RULES };
     // K 值随记录还原;旧记录无该字段时回到 Nelson/Minitab 标准值,不继承当前页面设置。
     if (a.kind === 'spc') patch.spcRuleK = normalizeRuleK(s.spcRuleK);
     if (a.kind === 'spc' && s.spcStageCol === undefined) patch.spcStageCol = null;
+    // 批次720 以前的 SPC 记录没有 σ 估计方法:保存时限值即 A2R̄/D3D4R̄(classic),回放固化该口径,不继承当前设置。
+    if (a.kind === 'spc' && s.spcSigmaMethod === undefined) patch.spcSigmaMethod = 'classic';
+    // 旧版非分阶段控制图原本就显示区带；分阶段图当时没有区带。单一布尔字段无法表达旧版
+    // 每面板差异，按是否存在阶段列迁移是最接近保存时画面的确定性规则。
+    if (a.kind === 'spc' && s.spcShowZones === undefined) {
+      patch.spcShowZones = !((s.spcType ?? 'xbar-r') === 'xbar-r' && s.spcStageCol);
+    }
     if (a.kind === 'spc' && s.spcDataLayout === undefined) {
       patch.spcDataLayout = 'auto';
       patch.spcValueCol = null;
       patch.spcSubgroupCol = null;
     }
+    // 人工审核720已移除帕累托图面“合并其他”行为；历史快照也统一展开全部类别。
+    if (a.kind === 'pareto') patch.paretoMergeOther = false;
     // AQL 参数、状态机与责任账本共同构成一条持续演进的活跃检验流。历史记录只用于
     // 导航和查看保存摘要，任何字段都不能写回，否则会把历史方案与当前转移序列串线。
     if (a.kind === 'aql') {
@@ -1065,7 +1107,8 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
     if (a.kind === 'pareto' && !s.paretoData) patch.paretoShowDemo = s.paretoShowDemo ?? false;
     // R3 前的旧 gage 快照未固化生效角色(null=保存当时的列序位置默认);回放时按基线口径
     // 显式解析成列名,不能让 null 落到新的推荐路径——推荐与位置默认不同会静默改口径。
-    if (a.kind === 'gagerr' && (s.gageValueName == null || s.gagePartName == null || s.gageOperatorName == null)) {
+    if (a.kind === 'gagerr' && (s.snapshotVersion == null || s.snapshotVersion < 6)
+      && (s.gageValueName == null || s.gagePartName == null || s.gageOperatorName == null)) {
       const restored = useData.getState();
       const value = s.gageValueName ?? restored.model.colNames[0] ?? null;
       const cats = listGageCategoryColumns(restored.model, restored.textCols, value);
@@ -1079,6 +1122,18 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
     if (s.paretoView) useApp.getState().setParetoView(s.paretoView);
     if (s.doeView) useApp.getState().setDoeView(s.doeView);
     useApp.getState().goTo(a.kind);
+    const legacySpcType = s.spcType ?? 'xbar-r';
+    if (a.kind === 'spc' && (s.snapshotVersion == null || s.snapshotVersion < 6)
+      && (legacySpcType === 'xbar-r' || legacySpcType === 'xbar-s' || legacySpcType === 'i-mr')) {
+      const message = '该旧版 SPC 记录已按修正后的 Minitab 控制图常数（d₂/d₃/c₄）重新计算；控制限可能与旧版有轻微差异';
+      useApp.getState().showToast(message);
+      sessionLog(`${message} · ${a.title}`);
+    }
+    if (a.kind === 'pareto' && s.paretoMergeOther === true) {
+      const message = '旧版帕累托“合并其他”设置已停用；现按 Minitab 经典图展开全部类别';
+      useApp.getState().showToast(message);
+      sessionLog(`${message} · ${a.title}`);
+    }
     if (a.kind === 'aql') {
       useApp.getState().showToast('已打开 AQL；为保护连续判定，历史记录未覆盖当前抽样参数与批次状态');
     }

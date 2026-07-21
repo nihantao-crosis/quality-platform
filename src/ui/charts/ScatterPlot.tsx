@@ -4,6 +4,7 @@
 import { memo, Fragment } from 'react';
 import { nf, arrMin, arrMax, decimateUniform } from '../../core';
 import type { ChartTokens } from '../tokens';
+import { niceTicks, tickDecimals } from '../tokens';
 import { Svg, Ln, Txt } from './primitives';
 
 const MAX_RENDER_PTS = 1000;
@@ -33,19 +34,24 @@ function ScatterPlotImpl({ T, xs, ys, slope, intercept, xLabel, yLabel, h }: {
   return (
     <Svg w={W} h={H}>
       <rect x={0} y={0} width={W} height={H} fill={T.bg} />
-      {Array.from({ length: 5 }, (_, g) => {
-        const yy = m.t + (g / 4) * ph;
-        return (
-          <Fragment key={'g' + g}>
-            <Ln x1={m.l} y1={yy} x2={m.l + pw} y2={yy} stroke={T.grid} sw={1} />
-            <Txt x={m.l - 8} y={yy} s={nf(yhi - ((yhi - ylo) * g) / 4, 3)} fill={T.axis} size={10} anchor="end" />
+      {(() => {
+        // 批次720-C3:整洁刻度(1-2-5 阶梯)取代等分刻度——残差 vs 拟合值/顺序图不再出现 462.000/659.200 式标签
+        const yTicks = niceTicks(ylo, yhi, 5);
+        const yDp = tickDecimals(yTicks);
+        return yTicks.map((v) => (
+          <Fragment key={'g' + v}>
+            <Ln x1={m.l} y1={Y(v)} x2={m.l + pw} y2={Y(v)} stroke={T.grid} sw={1} />
+            <Txt x={m.l - 8} y={Y(v)} s={nf(v, yDp)} fill={T.axis} size={10} anchor="end" />
           </Fragment>
-        );
-      })}
-      {Array.from({ length: 6 }, (_, i) => {
-        const v = xlo + ((xhi - xlo) * i) / 5;
-        return <Txt key={'x' + i} x={X(v)} y={H - 22} s={nf(v, 3)} fill={T.axis} size={10} anchor="middle" />;
-      })}
+        ));
+      })()}
+      {(() => {
+        const xTicks = niceTicks(xlo, xhi, 6);
+        const xDp = tickDecimals(xTicks);
+        return xTicks.map((v) => (
+          <Txt key={'x' + v} x={X(v)} y={H - 22} s={nf(v, xDp)} fill={T.axis} size={10} anchor="middle" />
+        ));
+      })()}
       <Ln x1={X(xlo)} y1={Y(yAt(xlo))} x2={X(xhi)} y2={Y(yAt(xhi))} stroke={T.center} sw={T.sw + 0.6} />
       {idx.map((i) => (
         <circle key={i} cx={X(xs[i])} cy={Y(ys[i])} r={T.r} fill={T.point} stroke={T.bg} strokeWidth={1} opacity={0.85} />

@@ -23,6 +23,7 @@ beforeEach(() => {
   useApp.setState({
     page: 'dashboard', spcType: 'xbar-r', spcRules: { ...R1_ONLY },
     spcDataLayout: 'auto', spcValueCol: null, spcSubgroupCol: null, spcStageCol: null,
+    spcSigmaMethod: 'classic', spcShowZones: true,
     lsl: 24.9, usl: 25.1, tgt: 25.0, lslOn: true, uslOn: true,
     capabilityBins: 13, gageUseReal: true, gageValueName: null, gagePartName: null, gageOperatorName: null,
     aqlLot: 120, aqlLevel: 'II', aqlAQL: 1.0, aqlMethod: 'gb', aqlAcMethod: 'gb',
@@ -75,9 +76,145 @@ describe('保存分析', () => {
     expect(a!.kind).toBe('spc');
     expect(a!.title).toBe('X̄-R 控制图');
     expect(a!.datasetName).toBe('质检数据.mtw');
+    expect(a!.snapshot).toMatchObject({ spcSigmaMethod: 'classic', spcShowZones: true });
     // 演示数据 X̄ 图有失控点 → 需关注
     expect(a!.metric).toMatch(/失控点|受控/);
     expect(useAnalyses.getState().saved.length).toBe(1);
+  });
+
+  it('SPC 区带开关随分析快照保存和回放', () => {
+    useApp.setState({ page: 'spc', spcType: 'xbar-r', spcShowZones: false });
+    const saved = useAnalyses.getState().saveCurrent()!;
+    expect(saved.snapshot.spcShowZones).toBe(false);
+    useApp.setState({ spcShowZones: true });
+    useAnalyses.getState().restore(saved.id);
+    expect(useApp.getState().spcShowZones).toBe(false);
+  });
+
+  it('v5 及更早 SPC 记录按修正后的 Minitab 常数重算时给出显式迁移提示', () => {
+    useData.getState().importMatrix('旧SPC.csv', ['测量1', '测量2'], [[10, 11], [12, 13], [9, 10]]);
+    useApp.setState({ page: 'spc', spcType: 'xbar-r', toast: null });
+    const current = useAnalyses.getState().saveCurrent()!;
+    const legacy = {
+      ...current,
+      id: 'v5-spc-constants',
+      snapshot: { ...current.snapshot, snapshotVersion: 5 as const },
+    };
+    useAnalyses.setState({ saved: [legacy], lastError: null });
+    useAnalyses.getState().restore(legacy.id);
+    expect(useApp.getState().toast).toContain('按修正后的 Minitab 控制图常数（d₂/d₃/c₄）重新计算');
+  });
+
+  it('旧 Xbar-S 快照因 c₄ 全精度升级也给出迁移提示', () => {
+    useData.getState().importMatrix('旧XS.csv', ['测量1', '测量2'], [[10, 11], [12, 13], [9, 10]]);
+    useApp.setState({ page: 'spc', spcType: 'xbar-s', toast: null });
+    const current = useAnalyses.getState().saveCurrent()!;
+    const legacy = { ...current, id: 'v5-xs-constants', snapshot: { ...current.snapshot, snapshotVersion: 5 as const } };
+    useAnalyses.setState({ saved: [legacy], lastError: null });
+    useAnalyses.getState().restore(legacy.id);
+    expect(useApp.getState().toast).toContain('d₂/d₃/c₄');
+  });
+
+  it('旧 P/C 快照回放不误报与属性图无关的 d₂/d₃ 迁移提示', () => {
+    useAnalyses.setState({
+      saved: [{
+        id: 'legacy-p', kind: 'spc', title: '旧 P 图', datasetName: '旧属性图',
+        metric: '过程受控', status: '受控', statusColor: '#000', statusBg: '#fff', createdAt: 1,
+        snapshot: {
+          snapshotVersion: 5,
+          spcType: 'p',
+          pChartData: { name: '旧属性图', counts: [1, 2, 1], sampleSize: 50 },
+        },
+      }],
+      lastError: null,
+    });
+    useApp.setState({ toast: null });
+    useAnalyses.getState().restore('legacy-p');
+    expect(useApp.getState().toast ?? '').not.toContain('d₂/d₃');
+  });
+
+  it('v6 MSA 快照明确未选测量列时，回放不得迁移成第一数值列', () => {
+    const rows: number[][] = [];
+    for (const op of [1, 2]) for (const part of [1, 2, 3]) for (let rep = 0; rep < 2; rep++) rows.push([part, op, 10 + part]);
+    useData.getState().importMatrix('全ID列.csv', ['部件ID', '操作员ID', '批次ID'], rows);
+    useApp.setState({
+      page: 'gagerr', gageUseReal: true,
+      gageValueName: null, gagePartName: null, gageOperatorName: null,
+    });
+    const saved = useAnalyses.getState().saveCurrent()!;
+    expect(saved.snapshot).toMatchObject({ snapshotVersion: 6, gageValueName: null });
+    useApp.setState({ gageValueName: '部件ID' });
+    useAnalyses.getState().restore(saved.id);
+    expect(useApp.getState().gageValueName).toBeNull();
+  });
+
+  it('v5 MSA 空角色按旧版位置默认迁移，v6 才把 null 解释为明确未选', () => {
+    const rows: number[][] = [];
+    for (const op of [1, 2]) for (const part of [1, 2, 3]) for (let rep = 0; rep < 2; rep++) rows.push([10 + part, part, op]);
+    useData.getState().importMatrix('旧Gage.csv', ['测量值', '部件ID', '操作员ID'], rows);
+    useApp.setState({ page: 'gagerr', gageUseReal: true, gageValueName: '测量值', gagePartName: '部件ID', gageOperatorName: '操作员ID' });
+    const current = useAnalyses.getState().saveCurrent()!;
+    const legacy = {
+      ...current,
+      id: 'v5-gage-null',
+      snapshot: {
+        ...current.snapshot,
+        snapshotVersion: 5 as const,
+        gageValueName: null,
+        gagePartName: null,
+        gageOperatorName: null,
+      },
+    };
+    useAnalyses.setState({ saved: [legacy], lastError: null });
+    useApp.setState({ gageValueName: null, gagePartName: null, gageOperatorName: null });
+    useAnalyses.getState().restore(legacy.id);
+    expect(useApp.getState()).toMatchObject({
+      gageValueName: '测量值',
+      gagePartName: '部件ID',
+      gageOperatorName: '操作员ID',
+    });
+  });
+
+  it('MSA 快照保全 64 个批量列和批量外当前明细列', () => {
+    useData.getState().importMatrix('MSA-memory.csv', ['当前响应', '部件'], [[10, 1], [11, 2], [10.1, 1], [11.1, 2]]);
+    const selected = Array.from({ length: 64 }, (_, index) => `批量响应${index + 1}`);
+    const memory = Object.fromEntries([
+      ['旧明细响应', { mode: 'lower' as const, value: -1 }] as const,
+      ...selected.map((name, index) => [name, { mode: 'width' as const, value: index + 1 }] as const),
+    ]);
+    useApp.setState({
+      page: 'gagerr', gageUseReal: true,
+      gageValueName: '当前响应', gagePartName: '部件', gageOperatorName: null,
+      gageTolMode: 'upper', gageTolValue: 100,
+      gageTolByCol: memory,
+      gageBatchCols: [...selected, '第65个批量响应'],
+    });
+    const saved = useAnalyses.getState().saveCurrent()!;
+    expect(Object.keys(saved.snapshot.gageTolByCol ?? {})).toHaveLength(65);
+    expect(saved.snapshot.gageTolByCol?.['当前响应']).toEqual({ mode: 'upper', value: 100 });
+    for (const name of selected) expect(saved.snapshot.gageTolByCol?.[name]).toEqual(memory[name]);
+    expect(saved.snapshot.gageTolByCol?.['旧明细响应']).toBeUndefined();
+    expect(saved.snapshot.gageBatchCols).toHaveLength(64);
+  });
+
+  it('导入新工作表清除 MSA 批量选择与逐列公差，禁止同名列跨数据集串用', () => {
+    useData.getState().importMatrix('数据集A.csv', ['测量值', '部件'], [[1, 1], [2, 2]]);
+    useApp.setState({
+      gageValueName: '测量值', gagePartName: '部件', gageOperatorName: null,
+      gageBatchCols: ['测量值'],
+      gageTolByCol: { 测量值: { mode: 'upper', value: 10 } },
+      gageTolMode: 'upper', gageTolValue: 10,
+    });
+    useData.getState().importMatrix('数据集B.csv', ['测量值', '部件'], [[100, 1], [200, 2]]);
+    expect(useApp.getState()).toMatchObject({
+      gageValueName: null,
+      gagePartName: null,
+      gageOperatorName: null,
+      gageBatchCols: null,
+      gageTolByCol: {},
+      gageTolMode: 'auto',
+      gageTolValue: null,
+    });
   });
 
   it('普通 X̄-R 仅 R 图失控时，摘要仍报 1 个失控点', () => {
@@ -190,7 +327,12 @@ describe('保存分析', () => {
       spcDataLayout: 'stacked', spcValueCol: '当前值', spcSubgroupCol: 'text:当前组',
       spcRules: { r1: false, r2: false, r3: false, r4: true, r5: false, r6: true, r7: true, r8: true },
     });
+    useApp.setState({ spcSigmaMethod: 'pooled', spcShowZones: true });
     useAnalyses.getState().restore('legacy-spc');
+    // 批次720 以前的记录没有 σ 估计方法字段:保存时限值即 A2R̄ 经典口径,回放固化 classic,不继承当前 pooled
+    expect(useApp.getState().spcSigmaMethod).toBe('classic');
+    // 旧版非分阶段 Xbar-R 本来就有区带，迁移后不能把既有信息关掉。
+    expect(useApp.getState().spcShowZones).toBe(true);
     expect(useApp.getState().spcStageCol).toBeNull();
     expect(useApp.getState().spcDataLayout).toBe('auto');
     expect(useApp.getState().spcValueCol).toBeNull();
@@ -198,6 +340,67 @@ describe('保存分析', () => {
     expect(useApp.getState().spcRules).toEqual({
       r1: true, r2: true, r3: true, r4: false, r5: true, r6: false, r7: false, r8: false,
     });
+  });
+
+  it('跨数据集回看旧 SPC 只保留待回放的 SPC 角色，清除上一表 MSA/能力绑定态', async () => {
+    useData.getState().importMatrix('数据表B.csv', ['B值', 'B组'], [[10, 1], [11, 1], [12, 2], [13, 2]]);
+    useData.getState().importMatrix('数据表A.csv', ['A值', 'A组'], [[20, 1], [21, 1], [22, 2], [23, 2]]);
+    useApp.setState({
+      gageValueName: 'A值', gagePartName: 'A组', gageOperatorName: null,
+      gageBatchCols: ['A值'], gageTolByCol: { A值: { mode: 'upper', value: 99 } },
+      gageTolMode: 'upper', gageTolValue: 99,
+      capSubgroupMode: 'const', capSubgroupSize: 2, capValueCol: 'A值', capSubgroupIdCol: null,
+    });
+    useAnalyses.setState({
+      saved: [{
+        id: 'legacy-spc-b', kind: 'spc', title: '旧 SPC B', datasetName: '数据表B.csv',
+        metric: '过程受控', status: '受控', statusColor: '#000', statusBg: '#fff', createdAt: 1,
+        snapshot: { spcType: 'xbar-r', spcDataLayout: 'rows' },
+      }],
+      lastError: null,
+    });
+    expect(await useAnalyses.getState().restore('legacy-spc-b')).toBe(true);
+    expect(useData.getState().model.name).toBe('数据表B.csv');
+    expect(useApp.getState()).toMatchObject({
+      gageValueName: null, gagePartName: null, gageOperatorName: null,
+      gageBatchCols: null, gageTolByCol: {}, gageTolMode: 'auto', gageTolValue: null,
+      capSubgroupMode: 'spc', capSubgroupSize: 5, capValueCol: null, capSubgroupIdCol: null,
+    });
+  });
+
+  it('跨数据集回看旧非 SPC 分析也清除上一表 SPC 角色', async () => {
+    useData.getState().importMatrix('能力表B.csv', ['B值', 'B组'], [[10, 1], [11, 1], [12, 2], [13, 2]]);
+    useData.getState().importMatrix('能力表A.csv', ['A值', 'A组'], [[20, 1], [21, 1], [22, 2], [23, 2]]);
+    useApp.setState({
+      spcDataLayout: 'stacked', spcValueCol: 'A值', spcSubgroupCol: 'numeric:A组', spcStageCol: '旧阶段',
+    });
+    useAnalyses.setState({
+      saved: [{
+        id: 'legacy-cap-b', kind: 'capability', title: '旧能力 B', datasetName: '能力表B.csv',
+        metric: 'Cpk 1.00', status: '已分析', statusColor: '#000', statusBg: '#fff', createdAt: 1,
+        snapshot: { lsl: 0, usl: 20, tgt: 10, lslOn: true, uslOn: true },
+      }],
+      lastError: null,
+    });
+    expect(await useAnalyses.getState().restore('legacy-cap-b')).toBe(true);
+    expect(useData.getState().model.name).toBe('能力表B.csv');
+    expect(useApp.getState()).toMatchObject({
+      spcDataLayout: 'auto', spcValueCol: null, spcSubgroupCol: null, spcStageCol: null,
+    });
+  });
+
+  it('旧非 Xbar-R 快照即使残留阶段列，也不误关其原有区带', () => {
+    useAnalyses.setState({
+      saved: [{
+        id: 'legacy-xs-stale-stage', kind: 'spc', title: '旧 Xbar-S', datasetName: '质检数据.mtw',
+        metric: '过程受控', status: '受控', statusColor: '#000', statusBg: '#fff', createdAt: 1,
+        snapshot: { spcType: 'xbar-s', spcStageCol: '残留阶段列' },
+      }],
+      lastError: null,
+    });
+    useApp.setState({ spcShowZones: false });
+    useAnalyses.getState().restore('legacy-xs-stale-stage');
+    expect(useApp.getState().spcShowZones).toBe(true);
   });
 
   it('过程能力页保存:Cpk 指标与能力判定(P0-4:演示集有失控点,不得给绿色「能力充足」)', () => {
@@ -445,7 +648,7 @@ describe('回看分析', () => {
       saved: [{
         id: 'legacy-fishbone', kind: 'pareto', title: '旧鱼骨', datasetName: '旧问题',
         metric: '6M 分析', status: '已分析', statusColor: '#000', statusBg: '#fff', createdAt: 1,
-        snapshot: { snapshotVersion: 5, paretoView: 'fishbone' },
+        snapshot: { snapshotVersion: 6, paretoView: 'fishbone' },
       }],
       lastError: null,
     });
@@ -570,7 +773,7 @@ describe('回看分析', () => {
       anovaRespName: '响应', anovaFactorName: '因子',
     });
     const saved = useAnalyses.getState().saveCurrent()!;
-    expect(saved.snapshot.snapshotVersion).toBe(5);
+    expect(saved.snapshot.snapshotVersion).toBe(6);
     expect(saved.snapshot.sourceDataKey).toBeTruthy();
 
     for (let i = 0; i < 7; i++) {

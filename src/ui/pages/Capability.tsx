@@ -52,14 +52,21 @@ export function Capability({ T }: { T: ChartTokens }) {
     padding: '4px 11px', borderRadius: 4, fontSize: 12, cursor: 'pointer', border: 0, fontFamily: 'inherit',
     background: on ? '#1f6fb2' : '#eef1f4', color: on ? '#fff' : '#5b6472', fontWeight: on ? 600 : 500,
   });
+  // 批次720-C1:「子组」提升为一级醒目控件(工厂二次反馈"没有子组项"——实为可发现性问题,引擎三模式不变)。
+  const effectiveSubgroupNote = capSubgroupMode === 'spc'
+    ? `当前生效:测量列「${prepared.variableName}」 · 沿用控制图数据角色 · 子组大小 = ${M ? M.n : '—'}`
+    : capSubgroupMode === 'const'
+      ? `当前生效:测量列「${prepared.variableName}」 · 按行序每 ${capSubgroupSize} 个观测为一个子组`
+      : `当前生效:测量列「${prepared.variableName}」 · 按子组 ID 列分组`;
   const subgroupEditor = (
-    <Card style={{ padding: '11px 16px', display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
-      <span style={{ fontSize: 12, color: '#8a929d', fontWeight: 600 }}>数据排列 · 子组</span>
-      {([['spc', '沿用 SPC 数据角色'], ['const', '单列 + 子组大小'], ['stacked', '单列 + 子组 ID 列']] as const).map(([m, label]) => (
+    <Card style={{ padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
+      <span style={{ fontSize: 14, color: '#33404f', fontWeight: 700 }}>子组</span>
+      {([['const', '子组大小（使用常量）'], ['stacked', '使用子组 ID 列'], ['spc', '沿用 SPC 数据角色']] as const).map(([m, label]) => (
         <button key={m} type="button" style={modeTab(capSubgroupMode === m)}
           title={m === 'spc' ? '与控制图共用同一数据口径(默认)' : m === 'const' ? '按行序把单列测量值每 z 个分为一个子组(Minitab「子组大小(使用常量)」)' : '一列测量值 + 一列子组 ID(Minitab「使用 ID 列」)'}
           onClick={() => updateSubgroup({ capSubgroupMode: m })}>{label}</button>
       ))}
+      <span style={{ fontSize: 11.5, color: '#697382', fontWeight: 600 }}>{effectiveSubgroupNote}</span>
       {capSubgroupMode !== 'spc' && (
         <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12.5, color: '#5b6472' }}>
           测量列

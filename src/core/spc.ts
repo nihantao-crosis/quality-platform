@@ -1,6 +1,7 @@
 /**
  * SPC 判异 — Nelson 准则引擎，从原型 evalRules 逐字迁移（交接文档 §8.3）。
  */
+import { lgamma } from './basicMath';
 
 export interface NelsonRules {
   r1: boolean; // 1 点超出 3σ
@@ -168,6 +169,7 @@ export interface ControlConstants {
   A2: number;
   A3: number;
   d2: number;
+  d3: number;
   D3: number;
   D4: number;
   B3: number;
@@ -175,18 +177,58 @@ export interface ControlConstants {
   c4: number;
 }
 
-/** 控制图常数表 n=2..10（ASTM E2587 / Minitab 标准值） */
-export const CONTROL_CONSTANTS: Record<number, ControlConstants> = {
-  2: { A2: 1.880, A3: 2.659, d2: 1.128, D3: 0, D4: 3.267, B3: 0, B4: 3.267, c4: 0.7979 },
-  3: { A2: 1.023, A3: 1.954, d2: 1.693, D3: 0, D4: 2.574, B3: 0, B4: 2.568, c4: 0.8862 },
-  4: { A2: 0.729, A3: 1.628, d2: 2.059, D3: 0, D4: 2.282, B3: 0, B4: 2.266, c4: 0.9213 },
-  5: { A2: 0.577, A3: 1.427, d2: 2.326, D3: 0, D4: 2.114, B3: 0, B4: 2.089, c4: 0.9400 },
-  6: { A2: 0.483, A3: 1.287, d2: 2.534, D3: 0, D4: 2.004, B3: 0.030, B4: 1.970, c4: 0.9515 },
-  7: { A2: 0.419, A3: 1.182, d2: 2.704, D3: 0.076, D4: 1.924, B3: 0.118, B4: 1.882, c4: 0.9594 },
-  8: { A2: 0.373, A3: 1.099, d2: 2.847, D3: 0.136, D4: 1.864, B3: 0.185, B4: 1.815, c4: 0.9650 },
-  9: { A2: 0.337, A3: 1.032, d2: 2.970, D3: 0.184, D4: 1.816, B3: 0.239, B4: 1.761, c4: 0.9693 },
-  10: { A2: 0.308, A3: 0.975, d2: 3.078, D3: 0.223, D4: 1.777, B3: 0.284, B4: 1.716, c4: 0.9727 },
+/**
+ * Minitab 公布的标准正态样本极差基础常数（n=2..10）。
+ *
+ * 这里有意保留 Minitab 方法与公式页给出的 d2（三位小数）和 d3（四位小数），
+ * 再由它们按公式派生 A2/D3/D4，而不是直接使用另一张表中已经二次舍入的 A2/D4。
+ * 人工审核 720 的 n=5 压入力案例正是这一口径：d2=2.326、d3=0.8641，
+ * 可同时得到 X̄ 图 UCL=2277.9/LCL=1595.9 与 R 图 UCL=1250（显示舍入后）。
+ */
+const RANGE_BASES: Record<number, { d2: number; d3: number }> = {
+  2: { d2: 1.128, d3: 0.8525 },
+  3: { d2: 1.693, d3: 0.8884 },
+  4: { d2: 2.059, d3: 0.8798 },
+  5: { d2: 2.326, d3: 0.8641 },
+  6: { d2: 2.534, d3: 0.8480 },
+  7: { d2: 2.704, d3: 0.8332 },
+  8: { d2: 2.847, d3: 0.8198 },
+  9: { d2: 2.970, d3: 0.8078 },
+  10: { d2: 3.078, d3: 0.7971 },
 };
+
+/** c4(m)=√(2/(m−1))·Γ(m/2)/Γ((m−1)/2)：lgamma 全精度计算。m 可为任意 ≥2 整数——
+ * 合并标准差无偏化需要 c4(d+1)，d 为合并自由度，远超 n=2..10 查表范围。 */
+export function c4Of(m: number): number {
+  if (!Number.isFinite(m) || m < 2) return Number.NaN;
+  return Math.sqrt(2 / (m - 1)) * Math.exp(lgamma(m / 2) - lgamma((m - 1) / 2));
+}
+
+/** 控制图常数表 n=2..10：由 Minitab 公布的 d2/d3 与 lgamma 计算的 c4 按公式派生（批次720-A1）。
+ * A2=3/(d2√n)；A3=3/(c4√n)；D3/D4=1∓3d3/d2（D3 截 0）；B3/B4=1∓3√(1−c4²)/c4（B3 截 0）。
+ * 显示舍入一律留在 UI 层。 */
+export const CONTROL_CONSTANTS: Record<number, ControlConstants> = (() => {
+  const out: Record<number, ControlConstants> = {};
+  for (const key of Object.keys(RANGE_BASES)) {
+    const n = Number(key);
+    const { d2, d3 } = RANGE_BASES[n];
+    const c4 = c4Of(n);
+    const rtN = Math.sqrt(n);
+    const bHalf = (3 * Math.sqrt(1 - c4 * c4)) / c4;
+    out[n] = {
+      A2: 3 / (d2 * rtN),
+      A3: 3 / (c4 * rtN),
+      d2,
+      d3,
+      D3: Math.max(0, 1 - (3 * d3) / d2),
+      D4: 1 + (3 * d3) / d2,
+      B3: Math.max(0, 1 - bHalf),
+      B4: 1 + bHalf,
+      c4,
+    };
+  }
+  return out;
+})();
 
 /** n=5 常数（原型固定值，向后兼容） */
 export const CONTROL_CONSTANTS_N5 = CONTROL_CONSTANTS[5];

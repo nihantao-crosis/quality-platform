@@ -25,8 +25,9 @@ export const PROJECT_KEYS = [
 
 const FORMAT = 'quality-platform-project';
 // v2 把 SQLite vault/active-ref 与独立 AQL 责任账本定义为不可忽略的项目语义。
-// 当前读取器仍兼容 v1；旧读取器会明确拒绝 v2，避免“成功”导入却静默丢活动表或账本。
-const FORMAT_VERSION = 2;
+// v3 引入分析 snapshotVersion=6（MSA 显式未选语义与 SPC 常数迁移提示）；旧 v1.40 读取器
+// 必须在项目格式层明确提示升级，不能先接受 format2 再把新快照误报成“损坏”。当前读取器兼容 v1/v2。
+const FORMAT_VERSION = 3;
 
 interface ProjectFile {
   format: typeof FORMAT;
@@ -339,6 +340,26 @@ function aqlStateValidationError(raw: unknown): string | null {
   return aqlSwitchValidationError(raw.aqlSwitch);
 }
 
+/** 批次720-B:逐列公差记忆的结构校验(偏好与分析快照共用)。 */
+function gageTolByColValidationError(raw: unknown, where: string): string | null {
+  if (raw === undefined) return null;
+  if (!isObject(raw)) return `${where} gageTolByCol 不是对象`;
+  const entries = Object.entries(raw);
+  if (entries.length > 65) return `${where} gageTolByCol 超过 65 列上限`;
+  for (const [key, entry] of entries) {
+    if (!key.trim()) return `${where} gageTolByCol 含空列名`;
+    if (!isObject(entry)) return `${where} gageTolByCol.${key} 不是对象`;
+    const mode = entry.mode;
+    if (mode !== 'auto' && mode !== 'width' && mode !== 'upper' && mode !== 'lower' && mode !== 'none') {
+      return `${where} gageTolByCol.${key} 公差模式无效`;
+    }
+    if (entry.value !== null && (typeof entry.value !== 'number' || !Number.isFinite(entry.value))) {
+      return `${where} gageTolByCol.${key} 公差数值无效`;
+    }
+  }
+  return null;
+}
+
 function prefsValidationError(raw: unknown): string | null {
   if (!isObject(raw)) return '偏好设置不是有效对象';
   const envelope = raw as { state?: unknown };
@@ -349,9 +370,10 @@ function prefsValidationError(raw: unknown): string | null {
   const allowedStateKeys = new Set([
     'chartStyle', 'showGrid', 'projectName', 'lsl', 'usl', 'tgt', 'lslOn', 'uslOn', 'capabilityBins',
     'gageUseReal', 'gageValueName', 'gagePartName', 'gageOperatorName',
-    'gageTolMode', 'gageTolValue', 'gageStandard',
+    'gageTolMode', 'gageTolValue', 'gageStandard', 'gageBatchCols', 'gageTolByCol',
     'aqlLot', 'aqlLevel', 'aqlAQL', 'aqlRegime', 'aqlMethod', 'aqlAcMethod', 'aqlSwitch',
     'spcRules', 'spcRuleK', 'spcDataLayout', 'spcValueCol', 'spcSubgroupCol', 'spcStageCol',
+    'spcSigmaMethod', 'spcShowZones',
     'doeView', 'doeTab', 'doeFactorCols', 'doeRespCol', 'doeModelTerms', 'doeIncludeCurvature',
     't1ColName', 't1Mu0', 't2ColAName', 't2ColBName', 'regXName', 'regYName',
     'paretoView', 'paretoMergeOther', 'paretoThreshold',
@@ -367,6 +389,7 @@ function prefsValidationError(raw: unknown): string | null {
   const enums: Array<[string, ReadonlySet<string>]> = [
     ['chartStyle', new Set(['经典', '现代', '高对比'])],
     ['spcDataLayout', new Set(['auto', 'rows', 'stacked', 'columns', 'individuals'])],
+    ['spcSigmaMethod', new Set(['pooled', 'classic'])],
     ['doeView', new Set(['main', 'interact', 'pareto', 'cube'])],
     ['doeTab', new Set(['analyze', 'create'])],
     ['paretoView', new Set(['pareto', 'fishbone'])],
@@ -404,11 +427,22 @@ function prefsValidationError(raw: unknown): string | null {
     if (!isObject(state.spcRules) || Object.entries(state.spcRules).some(([key, value]) => !/^r[1-8]$/.test(key)
       || typeof value !== 'boolean')) return 'SPC 判异准则无效';
   }
+  if (state.gageBatchCols !== undefined && state.gageBatchCols !== null && !isStringArray(state.gageBatchCols)) {
+    return 'MSA 批量测量列不是字符串数组或 null';
+  }
+  if (Array.isArray(state.gageBatchCols)
+    && (state.gageBatchCols.length > 64 || new Set(state.gageBatchCols).size !== state.gageBatchCols.length)) {
+    return 'MSA 批量测量列必须去重且不超过 64 列';
+  }
+  {
+    const detail = gageTolByColValidationError(state.gageTolByCol, '偏好设置');
+    if (detail) return detail;
+  }
   if (state.spcRuleK !== undefined) {
     const detail = spcRuleKValidationError(state.spcRuleK, 'SPC 判异参数');
     if (detail) return detail;
   }
-  for (const key of ['showGrid', 'lslOn', 'uslOn', 'gageUseReal', 'doeIncludeCurvature', 'paretoMergeOther'] as const) {
+  for (const key of ['showGrid', 'lslOn', 'uslOn', 'gageUseReal', 'doeIncludeCurvature', 'paretoMergeOther', 'spcShowZones'] as const) {
     if (state[key] !== undefined && typeof state[key] !== 'boolean') return `偏好设置 ${key} 不是布尔值`;
   }
   for (const key of [
@@ -460,12 +494,13 @@ function recentsValidationError(raw: unknown): string | null {
 function snapshotValidationError(raw: unknown): string | null {
   if (!isObject(raw)) return '分析 snapshot 不是对象';
   if (raw.snapshotVersion !== undefined
-    && (!Number.isSafeInteger(raw.snapshotVersion) || ![2, 3, 4, 5].includes(raw.snapshotVersion as number))) {
+    && (!Number.isSafeInteger(raw.snapshotVersion) || ![2, 3, 4, 5, 6].includes(raw.snapshotVersion as number))) {
     return '分析 snapshotVersion 无效';
   }
   const enums: Array<[string, ReadonlySet<string>]> = [
     ['spcType', new Set(['xbar-r', 'xbar-s', 'i-mr', 'ewma', 'cusum', 'p', 'c'])],
     ['spcDataLayout', new Set(['auto', 'rows', 'stacked', 'columns', 'individuals'])],
+    ['spcSigmaMethod', new Set(['pooled', 'classic'])],
     ['aqlLevel', new Set(['S-1', 'S-2', 'S-3', 'S-4', 'I', 'II', 'III'])],
     ['aqlMethod', new Set(['shift', 'gb'])],
     ['aqlAcMethod', new Set(['binom', 'gb'])],
@@ -521,8 +556,19 @@ function snapshotValidationError(raw: unknown): string | null {
       return `分析 snapshot.${key} 不是字符串数组或 null`;
     }
   }
+  if (raw.gageBatchCols !== undefined && raw.gageBatchCols !== null && !isStringArray(raw.gageBatchCols)) {
+    return '分析 snapshot.gageBatchCols 不是字符串数组或 null';
+  }
+  if (Array.isArray(raw.gageBatchCols)
+    && (raw.gageBatchCols.length > 64 || new Set(raw.gageBatchCols).size !== raw.gageBatchCols.length)) {
+    return '分析 snapshot.gageBatchCols 必须去重且不超过 64 列';
+  }
+  {
+    const detail = gageTolByColValidationError(raw.gageTolByCol, '分析 snapshot');
+    if (detail) return detail;
+  }
   for (const key of [
-    'lslOn', 'uslOn', 'gageUseReal', 'gageRequestedReal', 'gageSourceReal', 'doeIncludeCurvature',
+    'lslOn', 'uslOn', 'gageUseReal', 'gageRequestedReal', 'gageSourceReal', 'doeIncludeCurvature', 'spcShowZones',
     'anovaShowDemo', 'paretoMergeOther', 'paretoShowDemo', 'fishboneIsDemo',
   ] as const) {
     if (raw[key] !== undefined && typeof raw[key] !== 'boolean') return `分析 snapshot.${key} 不是布尔值`;

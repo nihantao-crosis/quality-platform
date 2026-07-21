@@ -2,7 +2,7 @@
 /** 批次716-R3 P1-2:GageRR 页默认角色用 recommendGageRoles 预填(工厂列序不再推荐反),
  * 推荐只预填、不覆盖用户手选;推荐生效时显示「自动推荐:…,请确认」小字。 */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { cleanup, render } from '@testing-library/react';
+import { cleanup, fireEvent, render } from '@testing-library/react';
 import { createElement } from 'react';
 import { GageRR } from '../pages/SimplePages';
 import { chartTokens } from '../tokens';
@@ -35,6 +35,16 @@ function importFactory(operators: string[], parts: number, repeats: number) {
   }
   useData.getState().importMatrix('工厂GRR.csv', ['部件', '螺钉高度'], rows,
     [{ name: '测试人', values: operatorValues, sourceIndex: 1 }]);
+}
+
+function importAllCategoryIds() {
+  const rows: number[][] = [];
+  for (const operator of [1, 2]) {
+    for (const part of [1, 2, 3]) {
+      for (let trial = 0; trial < 2; trial++) rows.push([part, operator, 10 + part]);
+    }
+  }
+  useData.getState().importMatrix('全ID列.csv', ['部件ID', '操作员ID', '批次ID'], rows);
 }
 
 const renderPage = () => render(createElement(GageRR, { T: chartTokens('经典', true) })).container;
@@ -97,5 +107,26 @@ describe('GageRR 默认角色推荐(716-R3 P1-2)', () => {
     const selectedText = (i: number) => selects[i].selectedOptions[0]?.textContent ?? '';
     expect(selectedText(1)).toContain('部件');
     expect(selectedText(2)).toContain('测试人');
+  });
+
+  it('全小整数/类别 ID 列不自动把第一列当测量值，UI 要求显式选择', () => {
+    importAllCategoryIds();
+    const container = renderPage();
+    const text = container.textContent ?? '';
+    expect(text).toContain('请选择测量列');
+    expect(text).toContain('不会默认使用第一列');
+    expect(text).toContain('Gage R&R 尚未运行');
+    expect(text).not.toContain('合计 Gage R&R');
+
+    const valueSelect = container.querySelector('select[aria-label="测量列"]') as HTMLSelectElement;
+    expect(valueSelect).not.toBeNull();
+    expect(valueSelect.value).toBe('-1');
+    expect(valueSelect.selectedOptions[0]?.textContent).toBe('请选择测量列');
+
+    // 手动选择后才写入角色状态；这也证明小整数测量仍可由用户明确指定。
+    fireEvent.change(valueSelect, { target: { value: '2' } });
+    expect(useApp.getState().gageValueName).toBe('批次ID');
+    expect(valueSelect.value).toBe('2');
+    expect(container.textContent).not.toContain('不会默认使用第一列');
   });
 });

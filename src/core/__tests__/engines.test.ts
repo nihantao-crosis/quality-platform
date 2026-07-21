@@ -276,19 +276,19 @@ describe('控制图常数表 n=2..10', () => {
 });
 
 describe('变量数据模型 computeVarModel', () => {
-  it('小矩阵手算：2×2', () => {
-    const m = computeVarModel('t.csv', ['a', 'b'], [[1, 3], [2, 4]]);
+  it('小矩阵手算：2×2（Minitab 表值 d2=1.128/d3=0.8525 派生）', () => {
+    const m = computeVarModel('t.csv', ['a', 'b'], [[1, 3], [2, 4]], { sigmaMethod: 'classic' });
     expect(m.subs[0].mean).toBe(2);
     expect(m.subs[1].mean).toBe(3);
     expect(m.rbar).toBe(2);
     expect(m.xbarbar).toBe(2.5);
-    expect(m.uclX).toBeCloseTo(2.5 + 1.88 * 2, 10);
-    expect(m.uclR).toBeCloseTo(3.267 * 2, 10);
-    expect(m.sigmaWithin).toBeCloseTo(2 / 1.128, 10);
+    expect(m.uclX).toBeCloseTo(2.5 + (3 / (1.128 * Math.SQRT2)) * 2, 9);
+    expect(m.uclR).toBeCloseTo((1 + (3 * 0.8525) / 1.128) * 2, 9);
+    expect(m.sigmaWithin).toBeCloseTo(2 / 1.128, 9);
   });
-  it('n=5 时与原型 buildData 数值一致', () => {
+  it('n=5 经典口径与原型 buildData 数值一致', () => {
     const D = buildData();
-    const m = computeVarModel('demo', ['1', '2', '3', '4', '5'], D.subs.map((s) => s.vals));
+    const m = computeVarModel('demo', ['1', '2', '3', '4', '5'], D.subs.map((s) => s.vals), { sigmaMethod: 'classic' });
     expect(m.xbarbar).toBeCloseTo(D.xbarbar, 12);
     expect(m.uclX).toBeCloseTo(D.uclX, 12);
     expect(m.uclR).toBeCloseTo(D.uclR, 12);

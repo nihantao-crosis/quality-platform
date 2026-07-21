@@ -88,7 +88,9 @@ function resolvedGageCategoryColumns(
   valueColumn: string | null,
 ): ResolvedGageCategoryColumn[] {
   const requestedValueIndex = valueColumn ? model.colNames.indexOf(valueColumn) : -1;
-  const valueIndex = requestedValueIndex >= 0 ? requestedValueIndex : 0;
+  // 尚未选测量列时不能偷偷把第一数值列从类别候选中排除。
+  // 这个“位置默认”会让全小整数/ID 表看起来像已选了测量列。
+  const valueIndex = requestedValueIndex >= 0 ? requestedValueIndex : -1;
   const text: ResolvedGageCategoryColumn[] = textCols.map((column) => ({
     name: column.name,
     source: 'text',
@@ -118,6 +120,9 @@ export interface GageRoleRecommendation {
   value: string | null;
   part: string | null;
   operator: string | null;
+  /** 兼容旧调用点的安全兜底。多个有效测量候选并列时必须为 null，要求用户明确选择；
+   * 绝不能再按位置落到第一数值列。 */
+  valueFallback: string | null;
   /** 推荐依据(给 UI 小字展示):每个已推荐角色一条,外加交叉结构一条 */
   reasons: string[];
 }
@@ -236,21 +241,37 @@ export function recommendGageRoles(model: VarModel, textCols: GageTextColumn[]):
   const text: RoleCandidate[] = textCols.map((column) =>
     candidateOf(column.name, 'text', column.values.map((value) => value.trim()), null));
   const all = [...text, ...numeric]; // 与 resolvedGageCategoryColumns 一致:文本列在前
-  if (numeric.length === 0 || n === 0) return { value: null, part: null, operator: null, reasons: [] };
+  if (numeric.length === 0 || n === 0) return { value: null, part: null, operator: null, valueFallback: null, reasons: [] };
 
-  // 1) 测量列:数值列中独立打分,唯一数值列直接锁定;最高分并列则不猜
+  // 数值列也可能是部件/操作员/ID。除非列名明确给出测量语义，
+  // “小整数 + 少量重复水平”不参与自动测量列选择。用户仍可以显式选它作离散测量。
+  const categoryShaped = (col: RoleCandidate) => {
+    const valueNamed = hitKeyword(col.name, VALUE_KEYWORDS);
+    if (valueNamed) return false;
+    if (hitKeyword(col.name, PART_KEYWORDS) || hitKeyword(col.name, OPERATOR_KEYWORDS)) return true;
+    return col.allInt && col.unique <= Math.max(2, n / 2);
+  };
+
+  // 1) 测量列:数值列中独立打分;最高分并列则不猜。
+  // 唯一数值列也只在它不呈类别/ID 形态时自动锁定。
   const valueScored = numeric.map((col) => ({ col, ...valueScore(col, n) }));
+  const valueEligible = valueScored.filter((entry) => !categoryShaped(entry.col));
   let valuePick: { col: RoleCandidate; score: number; why: string[] } | null = null;
-  if (numeric.length === 1) {
-    valuePick = { ...valueScored[0], why: ['唯一数值列', ...valueScored[0].why] };
-  } else {
-    const best = Math.max(...valueScored.map((s) => s.score));
-    const top = valueScored.filter((s) => s.score === best);
+  if (numeric.length === 1 && valueEligible.length === 1) {
+    valuePick = { ...valueEligible[0], why: ['唯一数值列（非 ID 形态）', ...valueEligible[0].why] };
+  } else if (valueEligible.length > 0) {
+    const best = Math.max(...valueEligible.map((s) => s.score));
+    const top = valueEligible.filter((s) => s.score === best);
     if (top.length === 1 && best > 0) valuePick = top[0];
   }
 
+  // 1b) 不再提供“取第一个有效列”的位置兜底。若多个测量候选并列，保持 null；
+  // 这是批量工作表的正常引导态，而不是让系统替用户决定量纲。
+  const valueFallback: string | null = valuePick ? valuePick.col.name : null;
+
   // 2) 部件/操作员:在测量列之外的候选里按角色独立打分,再用交叉结构定夺方向
-  const categories = all.filter((col) => !valuePick || col !== valuePick.col);
+  const effectiveValueCol = valuePick?.col ?? numeric.find((col) => col.name === valueFallback) ?? null;
+  const categories = all.filter((col) => !effectiveValueCol || col !== effectiveValueCol);
   const partScored = categories.map((col) => ({ col, ...partScore(col, n) }));
   const operScored = categories.map((col) => ({ col, ...operatorScore(col, n) }));
   let bestPair: { part: typeof partScored[number]; oper: typeof operScored[number]; total: number; repeats: number | null } | null = null;
@@ -276,6 +297,8 @@ export function recommendGageRoles(model: VarModel, textCols: GageTextColumn[]):
 
   const reasons: string[] = [];
   if (valuePick) reasons.push(`测量=「${valuePick.col.name}」(${valuePick.why.join('、')})`);
+  else if (valueEligible.length > 0) reasons.push('未自动选择测量列(多个有效测量候选并列,请手动选择)');
+  else reasons.push('未自动选择测量列(所有数值列均呈小整数/类别 ID 形态,请手动选择)');
   if (bestPair) {
     reasons.push(`部件=「${bestPair.part.col.name}」(${bestPair.part.why.join('、') || '类别形态'})`);
     reasons.push(`操作员=「${bestPair.oper.col.name}」(${bestPair.oper.why.join('、') || '类别形态'})`);
@@ -285,6 +308,7 @@ export function recommendGageRoles(model: VarModel, textCols: GageTextColumn[]):
     value: valuePick ? valuePick.col.name : null,
     part: bestPair ? bestPair.part.col.name : null,
     operator: bestPair ? bestPair.oper.col.name : null,
+    valueFallback,
     reasons,
   };
 }
@@ -294,7 +318,7 @@ export function recommendGageRoles(model: VarModel, textCols: GageTextColumn[]):
  * 页面、保存摘要和专项导出共用此入口，避免各自猜列或把占位 0 当实测值。
  */
 /** 「生效 Gage 角色」单一来源(批次716-R3 收口):store 手选优先,否则用可解释推荐
- * (推荐与生效测量列撞车时作废,退回 prepareGageStudy 的位置默认)。
+ * (推荐与生效测量列撞车时作废；测量候选并列时保持未选，禁止退回第一数值列)。
  * MSA 页、壳层状态栏、保存记录与专项报告都必须经此函数,否则用户未手选时
  * 页面按推荐算、其他路径按列序算,同一数据两种角色口径。 */
 export function effectiveGageSelection(
@@ -303,9 +327,9 @@ export function effectiveGageSelection(
   stored: { value: string | null; part: string | null; operator: string | null },
 ): { valueColumn: string | null; partColumn: string | null; operatorColumn: string | null } {
   const rec = recommendGageRoles(model, textCols);
-  const valueColumn = stored.value ?? rec.value;
+  const valueColumn = stored.value ?? rec.value ?? rec.valueFallback;
   const namedValueIndex = valueColumn ? model.colNames.indexOf(valueColumn) : -1;
-  const selectedValueName = model.colNames[namedValueIndex >= 0 ? namedValueIndex : 0] ?? null;
+  const selectedValueName = namedValueIndex >= 0 ? model.colNames[namedValueIndex] : null;
   const recPart = rec.part !== selectedValueName ? rec.part : null;
   const recOperator = rec.operator !== selectedValueName ? rec.operator : null;
   return {
@@ -323,11 +347,19 @@ export function prepareGageStudy(
   if (model.colNames.length < 1) {
     return { ok: false, reason: '真实 Gage R&R 需要至少 1 个数值测量列' };
   }
-  const namedValue = selection.valueColumn ? model.colNames.indexOf(selection.valueColumn) : -1;
-  if (selection.valueColumn && namedValue < 0) {
-    return { ok: false, reason: `已选测量列“${selection.valueColumn}”已不存在` };
+  const recommended = selection.valueColumn == null ? recommendGageRoles(model, textCols) : null;
+  const resolvedValueName = selection.valueColumn ?? recommended?.value ?? recommended?.valueFallback ?? null;
+  if (!resolvedValueName) {
+    const tied = recommended?.reasons.some((reason) => reason.includes('多个有效测量候选并列'));
+    return { ok: false, reason: tied
+      ? '请选择测量列：当前有多个有效测量候选并列，系统无法可靠判断量纲，不会默认使用第一列'
+      : '请选择测量列：当前数值列均呈小整数/类别 ID 形态，系统不会默认把第一列当作测量值' };
   }
-  const valueIndex = namedValue >= 0 ? namedValue : 0;
+  const namedValue = model.colNames.indexOf(resolvedValueName);
+  if (namedValue < 0) {
+    return { ok: false, reason: `已选测量列“${resolvedValueName}”已不存在` };
+  }
+  const valueIndex = namedValue;
   const singleOperator = selection.operatorColumn === GAGE_SINGLE_OPERATOR;
   const categories = resolvedGageCategoryColumns(model, textCols, model.colNames[valueIndex]);
   if (categories.length < (singleOperator ? 1 : 2)) {

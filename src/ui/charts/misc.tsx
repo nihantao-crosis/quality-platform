@@ -4,7 +4,7 @@
 import { memo, Fragment } from 'react';
 import { nf, quantile, arrMin, arrMax, mean, stdev, tInv, decimateUniform } from '../../core';
 import type { ChartTokens } from '../tokens';
-import { paretoColors } from '../tokens';
+import { niceTicks, tickDecimals } from '../tokens';
 import { Svg, Ln, Txt } from './primitives';
 
 export interface GageBarCat {
@@ -24,12 +24,16 @@ function ParetoChartImpl(p: {
   title?: string;
 }) {
   const T = p.T;
-  const colors = paretoColors(T);
   const rows = p.rows;
   const W = p.w ?? 960;
   const H = p.h ?? 300;
-  // 经典主题按 Minitab:顶部居中标题 + 底部 类别/频数/百分比/累积% 统计表(高度不足时退回紧凑轴标签)
-  const classic = T.classic;
+  // 批次720-C2:帕累托不再跟随图表风格切换形制——任何主题都输出 Minitab 形制
+  // (顶部居中标题+钢蓝零间距柱+底部 类别/频数/百分比/累积% 统计表+黑色清晰字体)。
+  // 工厂旧持久化 chartStyle='现代'(v1.34 前默认)曾让验收看到彩色渐变柱与灰色小字。
+  const classic = true;
+  // 此图始终使用一套独立的经典白底 token，避免“高对比”主题把白字/深色网格
+  // 混进 Minitab 形制，造成黑底黑字或统计表不可读。
+  const colors = ['#5B9BD5'];
   const showTable = classic && H >= 260;
   const m = {
     t: classic && p.title ? 36 : 24,
@@ -52,11 +56,11 @@ function ParetoChartImpl(p: {
     cum += r.count;
     cumPts.push([m.l + i * bw + bw / 2, Yp((cum / total) * 100), Math.round((cum / total) * 100)]);
   });
-  const cumLine = classic ? '#1F3864' : T.curve;
+  const cumLine = '#1F3864';
   const barStroke = classic ? '#2A4B8D' : undefined;
   // 表格行:类别名按柱宽截断(CJK 字宽 ≈ 10px @ size 9.5)
   const clip = (s: string) => {
-    const maxCh = Math.max(2, Math.floor(bw / 11));
+    const maxCh = Math.max(2, Math.floor(bw / 12));
     return s.length > maxCh ? s.slice(0, maxCh - 1) + '…' : s;
   };
   const tableRows: Array<{ label: string; value: (i: number) => string }> = [
@@ -67,17 +71,17 @@ function ParetoChartImpl(p: {
   ];
   return (
     <Svg w={W} h={H}>
-      <rect x={0} y={0} width={W} height={H} fill={T.bg} />
+      <rect x={0} y={0} width={W} height={H} fill="#FFFFFF" />
       {classic && p.title && (
-        <Txt x={m.l + pw / 2} y={14} s={p.title} fill="#111111" size={13} anchor="middle" weight={700} />
+        <Txt x={m.l + pw / 2} y={15} s={p.title} fill="#111111" size={14} anchor="middle" weight={700} />
       )}
       {Array.from({ length: 5 }, (_, g) => {
         const yy = m.t + (g / 4) * ph;
         return (
           <Fragment key={'g' + g}>
-            <Ln x1={m.l} y1={yy} x2={m.l + pw} y2={yy} stroke={T.grid} sw={1} />
-            <Txt x={m.l - 6} y={yy} s={String(Math.round(yMaxCount - (yMaxCount * g) / 4))} fill={T.axis} size={9} anchor="end" />
-            <Txt x={m.l + pw + 6} y={yy} s={100 - (100 * g) / 4 + '%'} fill={T.axis} size={9} />
+            <Ln x1={m.l} y1={yy} x2={m.l + pw} y2={yy} stroke="#D9D9D9" sw={1} />
+            <Txt x={m.l - 6} y={yy} s={String(Math.round(yMaxCount - (yMaxCount * g) / 4))} fill="#111111" size={10.5} anchor="end" />
+            <Txt x={m.l + pw + 6} y={yy} s={100 - (100 * g) / 4 + '%'} fill="#111111" size={10.5} />
           </Fragment>
         );
       })}
@@ -98,10 +102,10 @@ function ParetoChartImpl(p: {
           </Fragment>
         );
       })}
-      <polyline points={cumPts.map((pt) => pt[0] + ',' + pt[1]).join(' ')} fill="none" stroke={cumLine} strokeWidth={T.sw + 0.4} />
+      <polyline points={cumPts.map((pt) => pt[0] + ',' + pt[1]).join(' ')} fill="none" stroke={cumLine} strokeWidth={2} />
       {cumPts.map((pt, i) => (
         <Fragment key={'c' + i}>
-          <circle cx={pt[0]} cy={pt[1]} r={T.r} fill={cumLine} stroke={T.bg} strokeWidth={1.2} />
+          <circle cx={pt[0]} cy={pt[1]} r={3.4} fill={cumLine} stroke="#FFFFFF" strokeWidth={1.2} />
           {!classic && <Txt x={pt[0]} y={pt[1] - 11} s={pt[2] + '%'} fill={cumLine} size={9.5} anchor="middle" weight={600} />}
         </Fragment>
       ))}
@@ -110,22 +114,22 @@ function ParetoChartImpl(p: {
           const yy = m.t + ph + 16 + ri * 15;
           return (
             <Fragment key={'tr' + ri}>
-              <Txt x={m.l - 6} y={yy} s={row.label} fill={T.text} size={9.5} anchor="end" weight={600} />
+              <Txt x={m.l - 6} y={yy} s={row.label} fill="#111111" size={11} anchor="end" weight={600} />
               {rows.map((_, ci) => (
-                <Txt key={'tc' + ci} x={m.l + ci * bw + bw / 2} y={yy} s={row.value(ci)} fill={T.text} size={9.5} anchor="middle" />
+                <Txt key={'tc' + ci} x={m.l + ci * bw + bw / 2} y={yy} s={row.value(ci)} fill="#111111" size={11} anchor="middle" />
               ))}
             </Fragment>
           );
         })
       ) : (
-        <Txt x={m.l + pw / 2} y={H - 10} s="缺陷 / 原因类别（按频数降序）" fill={T.text} size={10.5} anchor="middle" weight={600} />
+        <Txt x={m.l + pw / 2} y={H - 10} s="缺陷 / 原因类别（按频数降序）" fill="#111111" size={10.5} anchor="middle" weight={600} />
       )}
-      <text x={16} y={m.t + ph / 2} fill={T.text} fontSize={10.5} textAnchor="middle" fontFamily="IBM Plex Mono, monospace" fontWeight={600} transform={`rotate(-90 16 ${m.t + ph / 2})`}>{classic ? '计数' : '频数'}</text>
-      <text x={W - 14} y={m.t + ph / 2} fill={T.text} fontSize={10.5} textAnchor="middle" fontFamily="IBM Plex Mono, monospace" fontWeight={600} transform={`rotate(90 ${W - 14} ${m.t + ph / 2})`}>{classic ? '百分比' : '累计百分比'}</text>
+      <text x={16} y={m.t + ph / 2} fill="#111111" fontSize={10.5} textAnchor="middle" fontFamily="IBM Plex Mono, monospace" fontWeight={600} transform={`rotate(-90 16 ${m.t + ph / 2})`}>计数</text>
+      <text x={W - 14} y={m.t + ph / 2} fill="#111111" fontSize={10.5} textAnchor="middle" fontFamily="IBM Plex Mono, monospace" fontWeight={600} transform={`rotate(90 ${W - 14} ${m.t + ph / 2})`}>百分比</text>
       {classic ? (
-        <rect x={m.l} y={m.t} width={pw} height={ph} fill="none" stroke={T.frame} strokeWidth={1} />
+        <rect x={m.l} y={m.t} width={pw} height={ph} fill="none" stroke="#7F7F7F" strokeWidth={1} />
       ) : (
-        <Ln x1={m.l} y1={m.t + ph} x2={m.l + pw} y2={m.t + ph} stroke={T.axis} sw={1} />
+        <Ln x1={m.l} y1={m.t + ph} x2={m.l + pw} y2={m.t + ph} stroke="#7F7F7F" sw={1} />
       )}
     </Svg>
   );
@@ -424,40 +428,91 @@ function IntervalPlotImpl({ T, groups, h, pooledError }: {
 }
 export const IntervalPlot = memo(IntervalPlotImpl);
 
-/** 迷你直方图 — 残差诊断用(无规格/目标线,带 0 参考线)。 */
-function MiniHistImpl({ T, data, h, xLabel }: { T: ChartTokens; data: number[]; h?: number; xLabel?: string }) {
+/** 迷你直方图 — 残差诊断用(无规格/目标线,带 0 参考线)。
+ * 批次720-C3:整洁分箱(1-2-5 步长对齐)+频数纵轴刻度与「频率」轴题——此前无纵轴,
+ * 横轴为数据极值等分的 3 位小数,工厂对照 Minitab 直方图(频率 0–4/残差 -20..20)判为缺项。 */
+function MiniHistImpl({ T, data, h, title, xLabel, xDomain, xTicks }: {
+  T: ChartTokens;
+  data: number[];
+  h?: number;
+  /** 图内标题，与横轴语义分离（例：「标准化残差分布」）。 */
+  title?: string;
+  /** 横轴变量名（例：「标准化残差」）。 */
+  xLabel?: string;
+  xDomain?: readonly [number, number];
+  xTicks?: readonly number[];
+}) {
   const W = 960;
   const H = h ?? 240;
-  const m = { t: 22, r: 24, b: 34, l: 46 };
+  const m = { t: 22, r: 24, b: 44, l: 52 };
   const pw = W - m.l - m.r;
   const ph = H - m.t - m.b;
-  let lo = arrMin(data);
-  let hi = arrMax(data);
+  const finiteData = data.filter(Number.isFinite);
+  if (finiteData.length === 0) {
+    return (
+      <Svg w={W} h={H}>
+        <rect x={0} y={0} width={W} height={H} fill={T.bg} />
+        <Txt x={W / 2} y={H / 2} s="无有效数据，无法绘制直方图" fill={T.axis} size={12} anchor="middle" />
+      </Svg>
+    );
+  }
+  let lo = arrMin(finiteData);
+  let hi = arrMax(finiteData);
   if (hi === lo) { lo -= 1; hi += 1; }
-  const nb = Math.max(7, Math.min(15, Math.ceil(Math.sqrt(data.length))));
-  const bw = (hi - lo) / nb;
+  // 目标箱数取样本量平方根;箱宽吸附 1-2-5 阶梯,箱边界对齐步长整倍数(Minitab 式整洁分箱)
+  const nbTarget = Math.max(5, Math.min(15, Math.ceil(Math.sqrt(data.length)) + 2));
+  const step0 = (hi - lo) / nbTarget;
+  const mag = Math.pow(10, Math.floor(Math.log10(step0 || 1)));
+  const norm = step0 / mag;
+  const bw = (norm >= 5 ? 10 : norm >= 2.5 ? 5 : norm >= 1.5 ? 2 : 1) * mag;
+  const suppliedDomainValid = xDomain != null
+    && Number.isFinite(xDomain[0]) && Number.isFinite(xDomain[1]) && xDomain[1] > xDomain[0];
+  const binLo = suppliedDomainValid ? xDomain[0] : Math.floor(lo / bw) * bw;
+  const naturalBinCount = Math.max(1, Math.ceil((hi - binLo) / bw + 1e-9));
+  const nb = suppliedDomainValid
+    ? Math.max(1, Math.round((xDomain[1] - xDomain[0]) / bw))
+    : naturalBinCount;
+  const binHi = suppliedDomainValid ? xDomain[1] : binLo + nb * bw;
+  const effectiveBw = (binHi - binLo) / nb;
   const counts = new Array(nb).fill(0);
-  data.forEach((v) => {
-    const b = Math.min(nb - 1, Math.max(0, Math.floor((v - lo) / bw)));
+  finiteData.forEach((v) => {
+    const b = Math.min(nb - 1, Math.max(0, Math.floor((v - binLo) / effectiveBw)));
     counts[b]++;
   });
   const maxc = arrMax(counts) || 1;
-  const X = (v: number) => m.l + ((v - lo) / (hi - lo)) * pw;
+  const X = (v: number) => m.l + ((v - binLo) / (binHi - binLo)) * pw;
+  const Yc = (c: number) => m.t + (1 - c / (maxc * 1.08)) * ph;
+  const yStep = Math.max(1, Math.ceil(maxc / 4));
+  const yTicks = Array.from({ length: Math.floor(maxc / yStep) + 1 }, (_, i) => i * yStep);
+  const axisTicks = (xTicks ?? niceTicks(binLo, binHi, 6))
+    .filter((value) => Number.isFinite(value) && value >= binLo && value <= binHi);
+  const xDp = tickDecimals([...axisTicks]);
+  const legacyAxisLabel = (xLabel ?? '残差').replace(/分布$/, '');
+  const chartTitle = title ?? ((xLabel ?? '残差').endsWith('分布') ? xLabel! : `${xLabel ?? '残差'}分布`);
   return (
     <Svg w={W} h={H}>
       <rect x={0} y={0} width={W} height={H} fill={T.bg} />
+      {yTicks.map((c) => (
+        <Fragment key={'y' + c}>
+          <Ln x1={m.l} y1={Yc(c)} x2={m.l + pw} y2={Yc(c)} stroke={T.grid} sw={1} />
+          <Txt x={m.l - 6} y={Yc(c)} s={String(c)} fill={T.axis} size={10} anchor="end" />
+        </Fragment>
+      ))}
       {counts.map((c, i) => {
-        const x0 = X(lo + i * bw);
+        const x0 = X(binLo + i * effectiveBw);
         const bh = (c / (maxc * 1.08)) * ph;
-        return <rect key={i} x={x0 + 1} y={m.t + ph - bh} width={pw / nb - 2} height={bh} fill={T.bar} opacity={0.85} />;
+        return <rect key={i} x={x0 + 1} y={m.t + ph - bh} width={pw / nb - 2} height={bh} fill={T.bar} opacity={0.85} stroke={T.classic ? '#2A4B8D' : undefined} strokeWidth={T.classic ? 1 : 0} />;
       })}
-      {lo < 0 && hi > 0 && <Ln x1={X(0)} y1={m.t} x2={X(0)} y2={m.t + ph} stroke={T.center} sw={1.4} dash="5 4" />}
-      {Array.from({ length: 5 }, (_, i) => {
-        const v = lo + ((hi - lo) * i) / 4;
-        return <Txt key={'x' + i} x={X(v)} y={H - 10} s={nf(v, 3)} fill={T.axis} size={9.5} anchor="middle" />;
-      })}
-      <Txt x={m.l} y={m.t - 8} s={xLabel ?? '残差'} fill={T.text} size={11} weight={600} />
+      {binLo < 0 && binHi > 0 && <Ln x1={X(0)} y1={m.t} x2={X(0)} y2={m.t + ph} stroke={T.center} sw={1.4} dash="5 4" />}
+      {axisTicks.map((v) => (
+        <Txt key={'x' + v} x={X(v)} y={H - 24} s={nf(v, xDp)} fill={T.axis} size={10} anchor="middle" />
+      ))}
+      <Txt x={m.l} y={m.t - 8} s={chartTitle} fill={T.text} size={11} weight={600} />
+      <text x={16} y={m.t + ph / 2} fill={T.text} fontSize={10.5} textAnchor="middle" fontFamily="IBM Plex Mono, monospace" fontWeight={600}
+        transform={`rotate(-90 16 ${m.t + ph / 2})`}>频率</text>
+      <Txt x={m.l + pw / 2} y={H - 8} s={legacyAxisLabel} fill={T.text} size={10.5} anchor="middle" weight={600} />
       <Ln x1={m.l} y1={m.t + ph} x2={m.l + pw} y2={m.t + ph} stroke={T.axis} sw={1} />
+      <Ln x1={m.l} y1={m.t} x2={m.l} y2={m.t + ph} stroke={T.axis} sw={1} />
     </Svg>
   );
 }

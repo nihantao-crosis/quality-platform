@@ -16,7 +16,7 @@ import {
   computeCapability,
   computeDescriptive,
   computeVarModel,
-  computeGageRR, assessGage, computeGagePanelData, CONTROL_CONSTANTS,
+  computeGageRR, assessGage, computeGagePanelData, CONTROL_CONSTANTS, withSigmaMethod, dataDecimals, GAGE_SINGLE_OPERATOR,
   countAnovaPendingCells,
   DEFECTS,
   DOE_DESIGN,
@@ -53,14 +53,14 @@ import {
   type VarModel,
   assessCapability, countCapabilityViolations,
 } from '../core';
-import { useApp, resolveGageTolerance } from '../store/appStore';
+import { useApp, resolveGageTolerance, normalizeGageBatchCols } from '../store/appStore';
 import { resolveCapabilityMeasurementData, useData } from '../store/dataStore';
 import { expandSpcRuleItems } from '../store/analyses';
 import { paretoReport, spcReport } from '../ui/reportData';
 import { chartTokens } from '../ui/tokens';
 import { ControlChart } from '../ui/charts/ControlChart';
-import { NormalProbPlot } from '../ui/charts/NormalProbPlot';
-import { BoxPlot, IndividualValuePlot, IntervalPlot, ParetoChart } from '../ui/charts/misc';
+import { NormalProbPlot, residualAxisScale } from '../ui/charts/NormalProbPlot';
+import { BoxPlot, IndividualValuePlot, IntervalPlot, ParetoChart, MiniHist } from '../ui/charts/misc';
 import { GageReportFigure, gageBarCategories } from '../ui/charts/gagePanels';
 import { ScatterPlot } from '../ui/charts/ScatterPlot';
 import { Histogram } from '../ui/charts/Histogram';
@@ -461,6 +461,35 @@ function doeRunMetadata(colNames: string[], rows: number[][], textCols: { name: 
   }));
 }
 
+/** 页面与专项报告共用的 DOE 残差图语义：概率图与直方图共享残差横轴；
+ * “与拟合值/与顺序”保留各自横轴变量。非有限删后残差只从绘图层排除，不改统计表。 */
+function doeResidualCharts(
+  residuals: number[],
+  fits: number[],
+  runOrder: number[],
+  residualLabel: string,
+): AnalysisReportChart[] {
+  const finite = residuals.map((value, index) => ({ value, index })).filter((item) => Number.isFinite(item.value));
+  if (!finite.length) return [];
+  const values = finite.map((item) => item.value);
+  const fitValues = finite.map((item) => fits[item.index]);
+  const orderValues = finite.map((item) => runOrder[item.index] ?? item.index + 1);
+  const scale = residualAxisScale(values);
+  return [
+    svgChart('残差图 · 正态概率图', <NormalProbPlot T={T} data={values} h={280} xLabel={residualLabel} xDomain={scale.domain} xTicks={scale.ticks} />, 960, 280),
+    svgChart('残差图 · 直方图', <MiniHist T={T} data={values} h={280} title={`${residualLabel}分布`} xLabel={residualLabel} xDomain={scale.domain} xTicks={scale.ticks} />, 960, 280),
+    svgChart('残差图 · 与拟合值', <ScatterPlot T={T} xs={fitValues} ys={values} slope={0} intercept={0} xLabel="拟合值" yLabel={residualLabel} h={280} />, 960, 280),
+    svgChart('残差图 · 与顺序', <ScatterPlot T={T} xs={orderValues} ys={values} slope={0} intercept={0} xLabel="观测值顺序" yLabel={residualLabel} h={280} />, 960, 280),
+  ];
+}
+
+function doeRandomizationAudit(datasetName: string): string {
+  const seeded = datasetName.match(/_(自动|固定)seed-(\d+)$/);
+  if (seeded) return `随机化审计：${seeded[1]}种子模式，实际 seed=${seeded[2]}（记录于工作表名称）。`;
+  if (/_未随机$/.test(datasetName)) return '随机化审计：未随机化，标准序与运行序相同（记录于工作表名称）。';
+  return `随机化审计：来源工作表“${datasetName}”未包含平台生成的随机化模式/seed 元数据。`;
+}
+
 function buildDoePayload(): AnalysisReportPayload {
   const app = useApp.getState();
   const data = useData.getState();
@@ -529,17 +558,25 @@ function buildDoePayload(): AnalysisReportPayload {
           genPending > 0 ? `响应列还有 ${genPending} 个待录入单元格。` : '响应列没有变异,无法估计因子效应。');
       }
       const gr = analyzeGeneralFactorial(gen.design);
+      const metadata = doeRunMetadata(M.colNames, rows, data.textCols);
+      const residualCharts = doeResidualCharts(
+        gr.residuals,
+        gr.fits,
+        gr.residuals.map((_, index) => metadata?.[index]?.runOrder ?? index + 1),
+        '残差',
+      );
       const fmtP = (value: number | null) => value == null ? '—' : value < 0.001 ? '<0.001' : fmt(value, 3);
       return {
         kind: 'doe',
         title: '因子试验设计（DOE）专项报告 · 一般全因子',
-        subtitle: `${M.colNames[respIdx]} · ${gen.design.factorNames.join(' / ')} · ${gr.nRuns} 次运行`,
+        subtitle: `${M.name} · ${M.colNames[respIdx]} · ${gen.design.factorNames.join(' / ')} · ${gr.nRuns} 次运行`,
         generatedAt: now(),
         summary: [
           gr.rows.some((row) => row.sig)
             ? `显著项(α=0.05):${gr.rows.filter((row) => row.sig).map((row) => row.name).join('、')};R² = ${fmt(gr.r2 * 100, 1)}%。`
             : `未检出显著项(α=0.05);R² = ${fmt(gr.r2 * 100, 1)}%。`,
           ...(gr.interactionNote ? [gr.interactionNote] : []),
+          doeRandomizationAudit(M.name),
         ],
         warnings: gr.inestimableTerms?.length ? [`以下项因缺格/别名不可估计:${gr.inestimableTerms.join('、')}`] : [],
         tables: [{
@@ -550,9 +587,9 @@ function buildDoePayload(): AnalysisReportPayload {
             ['误差', gr.error.df, fmt(gr.error.adjSS, 4), gr.error.adjMS == null ? '—' : fmt(gr.error.adjMS, 4), '', ''],
             ['合计', gr.total.df, fmt(gr.total.adjSS, 4), '', '', ''],
           ],
-          note: '主效应图与残差诊断见 DOE 分析页。',
+          note: '残差诊断已随本专项报告导出；概率图与直方图共享残差横轴。',
         }],
-        charts: [],
+        charts: residualCharts,
       };
     }
     return unrunPayload('doe', '因子试验设计（DOE）专项报告', M.name, `无法识别当前因子设计：${detected.reason}`);
@@ -600,6 +637,12 @@ function buildDoePayload(): AnalysisReportPayload {
   const bars = result.terms.map((term) => ({ name: term.name, abs: isT ? (Number.isFinite(term.tStat) ? Math.abs(term.tStat!) : capT) : Math.abs(term.effect) }));
   const ref = isT ? tInv(0.975, result.dfResid ?? 1) : (result.me ?? 0);
   const residuals = result.stdResiduals ?? result.residuals;
+  const residualCharts = doeResidualCharts(
+    residuals,
+    result.fits,
+    report.runs.map((run) => run.runOrder),
+    result.stdResiduals ? '标准化残差' : '残差',
+  );
   const optimization = factorialOptimizationDecision(result, detected.design);
   const uniqueSettings = optimization.status === 'unique' && optimization.optimum
     ? optimization.optimum.factorValues.map((value, index) =>
@@ -625,13 +668,14 @@ function buildDoePayload(): AnalysisReportPayload {
     kind: 'doe',
     usesWorksheet: true,
     title: '因子试验设计（DOE）专项报告',
-    subtitle: `${report.factors.length} 因子 · ${report.runCount} 运行 · 响应 ${responseName} · ${report.method === 'ttest' ? 't 检验' : 'Lenth 检验'}`,
+    subtitle: `${M.name} · ${report.factors.length} 因子 · ${report.runCount} 运行 · 响应 ${responseName} · ${report.method === 'ttest' ? 't 检验' : 'Lenth 检验'}`,
     generatedAt: now(),
     summary: [
       sig.length ? `显著项：${sig.join('、')}。` : '当前模型未检出显著效应项。',
       `模型项 ${report.model.requestedTerms.join('、') || '无'}；${report.model.includeCurvature ? '包含中心点曲率' : '不包含曲率'}；残差自由度 ${report.model.residualDf ?? '—'}。`,
       result.block ? `已将 ${result.block.levels.length} 个区组（DF=${result.block.df}）作为扰动项调整；主效应图为区组等权调整后的模型均值，与区组混杂的交互项不单独解释。` : '主效应图使用当前拟合模型的调整均值；未检测到多区组调整。',
       optimizationSummary,
+      doeRandomizationAudit(M.name),
     ],
     warnings: [
       report.model.droppedTerms.length ? `以下项因别名/秩亏不能单独估计并已剔除：${report.model.droppedTerms.join('、')}。` : '',
@@ -660,7 +704,7 @@ function buildDoePayload(): AnalysisReportPayload {
     charts: [
       svgChart('主效应图', <MainEffects T={T} factors={main} />, 960, 230),
       svgChart('标准化效应帕累托图', <EffectsBar T={T} terms={bars} refLine={ref} />, 960, 290),
-      svgChart('残差正态概率图', <NormalProbPlot T={T} data={residuals} h={280} />, 960, 280),
+      ...residualCharts,
     ],
   };
 }
@@ -682,7 +726,8 @@ function buildParetoPayload(): AnalysisReportPayload {
       charts: [],
     };
   }
-  const report = paretoReport({ rows: source, mergeOther: app.paretoMergeOther, threshold: app.paretoThreshold });
+  // 人工审核720：页面、总览与专项报告固定展开全部类别；旧偏好中的 mergeOther 不再影响任何展示端。
+  const report = paretoReport({ rows: source, mergeOther: false, threshold: app.paretoThreshold });
   const sourceName = hasImportedData ? model.name : '内置示例（非用户数据）';
   return {
     kind: 'pareto',
@@ -696,13 +741,13 @@ function buildParetoPayload(): AnalysisReportPayload {
         title: '导入的原始缺陷数据',
         headers: ['类别', '频数'],
         rows: source.map((row) => [row.name, row.count]),
-        note: hasImportedData ? '保留导入时的全部类别，便于复算合并阈值。' : '内置演示原始数据。',
+        note: hasImportedData ? '保留导入时的全部类别；本版本不合并尾部类别。' : '内置演示原始数据。',
       },
       {
         title: '缺陷频数与累计贡献',
-        headers: ['类别', '频数', '占比', '累计占比', '合并为其他'],
-        rows: report.rows.map((row) => [row.name, row.count, `${fmt(row.percentage, 2)}%`, `${fmt(row.cumulativePercentage, 2)}%`, row.mergedOther ? '是' : '否']),
-        note: report.mergeOther ? `累计阈值 ${fmt(report.threshold * 100, 0)}%，合并 ${report.mergedCategoryCount} 个尾部类别。` : '未启用尾部类别合并。',
+        headers: ['类别', '频数', '占比', '累计占比'],
+        rows: report.rows.map((row) => [row.name, row.count, `${fmt(row.percentage, 2)}%`, `${fmt(row.cumulativePercentage, 2)}%`]),
+        note: '固定展开全部类别，未启用尾部类别合并。',
       },
     ],
     charts: [svgChart('帕累托图', <ParetoChart T={T} rows={report.rows.map((row) => ({ name: row.name, count: row.count }))} title={`${hasImportedData ? model.name : '示例数据'} 的 Pareto 图`} />, 960, 300)],
@@ -816,14 +861,63 @@ function buildGagePayload(): AnalysisReportPayload {
   const app = useApp.getState();
   const data = useData.getState();
   const requestedReal = !data.model.isDemo && app.gageUseReal;
-  // 与 MSA 页同源(716-R3):未手选角色用推荐补齐
-  const prepared = prepareGageStudy(data.model, data.textCols, {
-    ...effectiveGageSelection(data.model, data.textCols,
-      { value: app.gageValueName, part: app.gagePartName, operator: app.gageOperatorName }),
-    pendingCells: data.pendingCells,
-  });
+  // 与 MSA 页同源(716-R3):未手选角色用推荐补齐;锚定角色供批量表复用(审查修复:逐行不得各自按位置默认解析)
+  const effSel = effectiveGageSelection(data.model, data.textCols,
+    { value: app.gageValueName, part: app.gagePartName, operator: app.gageOperatorName });
+  const prepared = prepareGageStudy(data.model, data.textCols, { ...effSel, pendingCells: data.pendingCells });
+  // 批次720-B:批量 GRR 逐响应明细表——列过滤与页面同源(剔除生效部件/操作员列),
+  // 且在主研究失败时仍随「尚未运行」报告输出(页面失败态也显示批量卡,两端必须对称)。
+  const gageBatchTable = (() => {
+    if (!requestedReal) return null;
+    // 锚定角色与页面同规则:effective 为 null 时用主研究解析出的实际列(避免逐行位置默认漂移)
+    const anchorPart = effSel.partColumn ?? (prepared.ok ? prepared.study.partName : null);
+    const anchorOperator = effSel.operatorColumn ?? (prepared.ok ? (prepared.study.operatorName ?? GAGE_SINGLE_OPERATOR) : null);
+    const selected = (normalizeGageBatchCols(app.gageBatchCols) ?? []).filter((name) =>
+      data.model.colNames.includes(name) && name !== anchorPart && name !== anchorOperator);
+    if (selected.length < 2) return null;
+    // 报告是审计记录：用户选中的响应必须全部逐列列出，不做 UI 预览数量截断。
+    const rows = selected.map((col) => {
+      const prepCol = prepareGageStudy(data.model, data.textCols, {
+        valueColumn: col, partColumn: anchorPart, operatorColumn: anchorOperator, pendingCells: data.pendingCells,
+      });
+      if (!prepCol.ok) return [col, '—', '—', '—', '—', '—', '—', '—', '—', `未计算：${prepCol.reason}`];
+      const mem = col === effSel.valueColumn
+        ? { mode: app.gageTolMode, value: app.gageTolValue }
+        : app.gageTolByCol[col] ?? { mode: 'none' as const, value: null };
+      const spec = resolveGageTolerance({ gageTolMode: mem.mode, gageTolValue: mem.value, lsl: app.lsl, usl: app.usl, lslOn: app.lslOn, uslOn: app.uslOn });
+      try {
+        const r = computeGageRR(prepCol.study.observations, spec);
+        const grrRow = r.components.find((component) => component.key === 'grr');
+        const factoryVerdict = assessGage(r, 'factory');
+        const aiagVerdict = assessGage(r, 'aiag');
+        return [
+          col,
+          fmt(grrRow?.variance, 8),
+          fmt(grrRow?.sd, 6),
+          fmt(grrRow?.studyVar, 6),
+          fmt(grrRow?.pctStudyVar ?? r.totalGageRR, 2),
+          grrRow?.pctTolerance == null ? '未设' : fmt(grrRow.pctTolerance, 2),
+          r.ndc === Infinity ? '∞' : String(r.ndc),
+          factoryVerdict.label,
+          aiagVerdict.label,
+          '已计算',
+        ];
+      } catch (error) {
+        return [col, '—', '—', '—', '—', '—', '—', '—', '—', `未计算：${(error as Error).message}`];
+      }
+    });
+    return {
+      title: `批量 GRR 逐响应明细 · ${selected.length} 个测量列(逐列独立计算)`,
+      headers: ['测量列', 'GRR 方差分量', 'GRR 标准差(SD)', '研究变异(6×SD)', '%研究变异', '%公差', 'ndc', '工厂判定', 'AIAG 对照', '计算状态'],
+      rows,
+      note: '每个测量列都使用同一对部件/操作员角色独立重新计算；不合并响应、不共用方差。单列失败只在该行标记“未计算”，不会阻断其他列。图形报告仅对应当前测量响应，其余已选响应以本明细表为准。',
+    };
+  })();
   if (requestedReal && !prepared.ok) {
-    return unrunPayload('gagerr', '测量系统分析 Gage R&R 专项报告', data.model.name, prepared.reason, true);
+    return {
+      ...unrunPayload('gagerr', '测量系统分析 Gage R&R 专项报告', data.model.name, prepared.reason, true),
+      tables: gageBatchTable ? [gageBatchTable] : [],
+    };
   }
   const observations = requestedReal && prepared.ok ? prepared.study.observations : gageStudyData();
   const tolerance = requestedReal
@@ -833,7 +927,10 @@ function buildGagePayload(): AnalysisReportPayload {
   try {
     result = computeGageRR(observations, tolerance);
   } catch (error) {
-    return unrunPayload('gagerr', '测量系统分析 Gage R&R 专项报告', data.model.name, (error as Error).message, requestedReal);
+    return {
+      ...unrunPayload('gagerr', '测量系统分析 Gage R&R 专项报告', data.model.name, (error as Error).message, requestedReal),
+      tables: gageBatchTable ? [gageBatchTable] : [],
+    };
   }
   const realStudy = requestedReal && prepared.ok ? prepared.study : null;
   const primary = assessGage(result, app.gageStandard);
@@ -875,6 +972,7 @@ function buildGagePayload(): AnalysisReportPayload {
       ...(result.toleranceNote ? [result.toleranceNote] : []),
     ],
     tables: [
+      ...(gageBatchTable ? [gageBatchTable] : []),
       {
         title: requestedReal
           ? single ? '导入的单操作员研究原始观测' : '导入的交叉研究原始观测'
@@ -913,6 +1011,9 @@ function buildGagePayload(): AnalysisReportPayload {
         <GageReportFigure {...figureProps} />,
         1160,
         single ? 690 : 1030,
+        gageBatchTable
+          ? `本图仅对应当前测量响应“${realStudy?.valueName ?? '演示测量'}”；其他已选响应的独立结果见“批量 GRR 逐响应明细”。`
+          : undefined,
       ),
     ],
   };
@@ -977,7 +1078,7 @@ function buildSpcPayload(): AnalysisReportPayload | undefined {
       ],
       charts: [svgChart(`${typeLabel} 控制图 · ${modelName}`, <ControlChart
         T={T} data={values} cl={cl} ucl={ucl} lcl={lcl} clLabel={isP ? 'p̄' : 'c̄'}
-        zones={!isP || !data.pModel.pVariableN}
+        zones={app.spcShowZones && (!isP || !data.pModel.pVariableN)}
         uclSeries={isP && data.pModel.pVariableN ? data.pModel.pUcls : undefined}
         lclSeries={isP && data.pModel.pVariableN ? data.pModel.pLcls : undefined}
         h={300} violations={evaluated.viol} xLabel={isP ? '样本序号' : '单位序号'} yLabel={isP ? '样本不良率' : '单位缺陷数'}
@@ -997,7 +1098,13 @@ function buildSpcPayload(): AnalysisReportPayload | undefined {
       summary: ['控制图未运行，未生成统计结论。'], warnings: [prepared.error ?? '当前数据角色配置无效。'], tables: [], charts: [],
     };
   }
-  const M = prepared.model;
+  const M = withSigmaMethod(prepared.model, app.spcSigmaMethod);
+  const rCenterLabel = app.spcSigmaMethod === 'classic' ? 'R̄' : 'd₂σ̂';
+  const sCenterLabel = app.spcSigmaMethod === 'classic' ? 'S̄' : 'c₄σ̂';
+  // 审查修复(720-A3):报告图表标签位数与页面同一派生规则(均值类=数据位数+1,极差类=数据位数)
+  const dataDp = dataDecimals(M.hasSubgroups ? M.all : M.indiv);
+  const meanDec = Math.min(dataDp + 1, 4);
+  const rangeDec = Math.min(dataDp, 4);
   // 与 SPC 页面保持一致：自动布局只解析到单值时，X̄-R / X̄-S
   // 没有合法子组统计量，必须明确按 I-MR 分析，不能导出“未运行”或伪子组。
   const effectiveType = !M.hasSubgroups && (app.spcType === 'xbar-r' || app.spcType === 'xbar-s')
@@ -1049,8 +1156,8 @@ function buildSpcPayload(): AnalysisReportPayload | undefined {
         { title: '判异明细', headers: ['观测', '子图', '准则', '说明'], rows: [...iItems, ...mrItems].map((item) => [labels?.[item.i] ?? item.i + 1, item.chartLabel, item.rule, item.desc]) },
       ],
       charts: [
-        svgChart(`${prepared.variableName} 的单值控制图 (I)`, <ControlChart T={T} data={M.indiv} cl={M.indMean} ucl={M.iUcl} lcl={M.iLcl} clLabel="X̄" zones h={250} violations={iEval.viol} xLabel={prepared.xAxisLabel} yLabel={`${prepared.variableName} · 单值`} xLabels={labels} />, 960, 250),
-        svgChart(`${prepared.variableName} 的移动极差图 (MR)`, <ControlChart T={T} data={mr} cl={M.mrbar} ucl={M.mrUcl} lcl={0} clLabel="MR̄" h={210} violations={mrEval.viol} xIndexOffset={1} xLabel="观测序号（MR 从第 2 个观测开始）" yLabel={`${prepared.variableName} · 移动极差`} xLabels={labels?.slice(1)} />, 960, 210),
+        svgChart(`${prepared.variableName} 的单值控制图 (I)`, <ControlChart T={T} data={M.indiv} cl={M.indMean} ucl={M.iUcl} lcl={M.iLcl} clLabel="X̄" zones={app.spcShowZones} dec={meanDec} h={250} violations={iEval.viol} xLabel={prepared.xAxisLabel} yLabel={`${prepared.variableName} · 单值`} xLabels={labels} />, 960, 250),
+        svgChart(`${prepared.variableName} 的移动极差图 (MR)`, <ControlChart T={T} data={mr} cl={M.mrbar} ucl={M.mrUcl} lcl={0} clLabel="MR̄" zones={app.spcShowZones} dec={rangeDec} h={210} violations={mrEval.viol} xIndexOffset={1} xLabel="观测序号（MR 从第 2 个观测开始）" yLabel={`${prepared.variableName} · 移动极差`} xLabels={labels?.slice(1)} />, 960, 210),
       ],
     };
   }
@@ -1058,7 +1165,7 @@ function buildSpcPayload(): AnalysisReportPayload | undefined {
   if (effectiveType === 'ewma' || effectiveType === 'cusum') {
     const source = M.hasSubgroups ? means : M.indiv;
     const mu = M.hasSubgroups ? M.xbarbar : M.indMean;
-    const sigma = M.hasSubgroups ? M.sigmaWithin / Math.sqrt(M.n) : M.iSig;
+    const sigma = M.hasSubgroups ? withSigmaMethod(M, app.spcSigmaMethod).sigmaChart / Math.sqrt(M.n) : M.iSig;
     const isEwma = effectiveType === 'ewma';
     const ewma = isEwma ? ewmaSeries(source, mu, sigma) : null;
     const cusum = isEwma ? null : cusumSeries(source, mu, sigma, 0.5, M.hasSubgroups ? 4 : 5);
@@ -1092,7 +1199,7 @@ function buildSpcPayload(): AnalysisReportPayload | undefined {
 
   if (effectiveType === 'xbar-s') {
     const xEval = evalRules(means, M.xbarbar, (M.uclXs - M.xbarbar) / 3, app.spcRules, app.spcRuleK);
-    const sEval = evalLimitedRules(M.svals, M.sbar, M.uclS, M.lclS, app.spcRules, app.spcRuleK);
+    const sEval = evalLimitedRules(M.svals, M.sCl, M.uclS, M.lclS, app.spcRules, app.spcRuleK);
     const xItems = expandSpcRuleItems(xEval.viol, xEval.list, 'X̄', app.spcRuleK);
     const sItems = expandSpcRuleItems(sEval.viol, sEval.list, 'S', app.spcRuleK);
     const all = [...xItems, ...sItems];
@@ -1107,12 +1214,12 @@ function buildSpcPayload(): AnalysisReportPayload | undefined {
       summary: [report.headline, `判读顺序：${report.details.readingOrder}。`, prepared.note], warnings: sItems.length ? ['S 图存在特殊原因信号，先调查组内标准差异常，再解释 X̄ 图。'] : [],
       tables: [
         spcSourceTable,
-        { title: '控制限', headers: ['图', 'CL', 'UCL', 'LCL', '异常点数'], rows: [['X̄', fmt(M.xbarbar), fmt(M.uclXs), fmt(M.lclXs), new Set(xItems.map((item) => item.i)).size], ['S', fmt(M.sbar), fmt(M.uclS), fmt(M.lclS), new Set(sItems.map((item) => item.i)).size]] },
+        { title: '控制限', headers: ['图', 'CL', 'UCL', 'LCL', '异常点数'], rows: [['X̄', fmt(M.xbarbar), fmt(M.uclXs), fmt(M.lclXs), new Set(xItems.map((item) => item.i)).size], ['S', fmt(M.sCl), fmt(M.uclS), fmt(M.lclS), new Set(sItems.map((item) => item.i)).size]] },
         { title: '判异明细', headers: ['子组', '子图', '准则', '说明'], rows: all.map((item) => [labels?.[item.i] ?? item.i + 1, item.chartLabel, item.rule, item.desc]) },
       ],
       charts: [
-        svgChart(`${prepared.variableName} 的均值控制图 (X̄)`, <ControlChart T={T} data={means} cl={M.xbarbar} ucl={M.uclXs} lcl={M.lclXs} clLabel="X̄" zones h={250} violations={xEval.viol} xLabel={prepared.xAxisLabel} yLabel={`${prepared.variableName} · 子组均值`} xLabels={labels} />, 960, 250),
-        svgChart(`${prepared.variableName} 的标准差控制图 (S)`, <ControlChart T={T} data={M.svals} cl={M.sbar} ucl={M.uclS} lcl={M.lclS} clLabel="S̄" h={210} violations={sEval.viol} xLabel={prepared.xAxisLabel} yLabel={`${prepared.variableName} · 子组标准差`} xLabels={labels} />, 960, 210),
+        svgChart(`${prepared.variableName} 的均值控制图 (X̄)`, <ControlChart T={T} data={means} cl={M.xbarbar} ucl={M.uclXs} lcl={M.lclXs} clLabel="X̄" zones={app.spcShowZones} dec={meanDec} h={250} violations={xEval.viol} xLabel={prepared.xAxisLabel} yLabel={`${prepared.variableName} · 子组均值`} xLabels={labels} />, 960, 250),
+        svgChart(`${prepared.variableName} 的标准差控制图 (S)`, <ControlChart T={T} data={M.svals} cl={M.sCl} ucl={M.uclS} lcl={M.lclS} clLabel={sCenterLabel} zones={app.spcShowZones} dec={Math.min(dataDp + 2, 4)} h={210} violations={sEval.viol} xLabel={prepared.xAxisLabel} yLabel={`${prepared.variableName} · 子组标准差`} xLabels={labels} />, 960, 210),
       ],
     };
   }
@@ -1131,10 +1238,13 @@ function buildSpcPayload(): AnalysisReportPayload | undefined {
     };
   }
   const useStage = Boolean(stageValues);
-  const staged = useStage ? { x: stagedXbar(M.subs.map((sub) => sub.vals), stageValues!, app.spcRules), r: stagedRange(M.subs.map((sub) => sub.vals), stageValues!, app.spcRules) } : null;
+  const staged = useStage ? {
+    x: stagedXbar(M.subs.map((sub) => sub.vals), stageValues!, app.spcRules, app.spcSigmaMethod, app.spcRuleK),
+    r: stagedRange(M.subs.map((sub) => sub.vals), stageValues!, app.spcRules, app.spcSigmaMethod, app.spcRuleK),
+  } : null;
   const x = staged ?? null;
   const xEval = x ? { viol: x.x.viol, list: x.x.list } : evalRules(means, M.xbarbar, (M.uclX - M.xbarbar) / 3, app.spcRules, app.spcRuleK);
-  const rEval = x ? { viol: x.r.viol, list: x.r.list } : evalLimitedRules(ranges, M.rbar, M.uclR, M.lclR, app.spcRules, app.spcRuleK);
+  const rEval = x ? { viol: x.r.viol, list: x.r.list } : evalLimitedRules(ranges, M.rCl, M.uclR, M.lclR, app.spcRules, app.spcRuleK);
   const xItems = expandSpcRuleItems(xEval.viol, xEval.list, 'X̄', app.spcRuleK);
   const rItems = expandSpcRuleItems(rEval.viol, rEval.list, 'R', app.spcRuleK);
   const all = [...xItems, ...rItems];
@@ -1176,7 +1286,7 @@ function buildSpcPayload(): AnalysisReportPayload | undefined {
               [`X̄ · ${segment.label}`, fmt(segment.cl), fmt(segment.ucl), fmt(segment.lcl), new Set(xItems.filter((item) => item.i >= segment.start && item.i <= segment.end).map((item) => item.i)).size],
               [`R · ${staged.r.segments[index].label}`, fmt(staged.r.segments[index].cl), fmt(staged.r.segments[index].ucl), fmt(staged.r.segments[index].lcl), new Set(rItems.filter((item) => item.i >= segment.start && item.i <= segment.end).map((item) => item.i)).size],
             ])
-          : [['X̄', fmt(M.xbarbar), fmt(M.uclX), fmt(M.lclX), new Set(xItems.map((item) => item.i)).size], ['R', fmt(M.rbar), fmt(M.uclR), fmt(M.lclR), new Set(rItems.map((item) => item.i)).size]],
+          : [['X̄', fmt(M.xbarbar), fmt(M.uclX), fmt(M.lclX), new Set(xItems.map((item) => item.i)).size], ['R', fmt(M.rCl), fmt(M.uclR), fmt(M.lclR), new Set(rItems.map((item) => item.i)).size]],
       },
       {
         title: '判异明细',
@@ -1186,8 +1296,8 @@ function buildSpcPayload(): AnalysisReportPayload | undefined {
       },
     ],
     charts: [
-      svgChart(`${prepared.variableName} 的均值控制图 (X̄)`, <ControlChart T={T} data={means} cl={M.xbarbar} ucl={M.uclX} lcl={M.lclX} clLabel="X̄" zones h={250} violations={xEval.viol} xLabel={prepared.xAxisLabel} yLabel={`${prepared.variableName} · 子组均值`} xLabels={labels} {...xProps} />, 960, 250),
-      svgChart(`${prepared.variableName} 的极差控制图 (R)`, <ControlChart T={T} data={ranges} cl={M.rbar} ucl={M.uclR} lcl={M.lclR} clLabel="R̄" h={210} violations={rEval.viol} xLabel={prepared.xAxisLabel} yLabel={`${prepared.variableName} · 子组极差`} xLabels={labels} {...rProps} />, 960, 210, '必须先判断 R 图是否受控，再解释 X̄ 图。'),
+      svgChart(`${prepared.variableName} 的均值控制图 (X̄)`, <ControlChart T={T} data={means} cl={M.xbarbar} ucl={M.uclX} lcl={M.lclX} clLabel="X̄" zones={app.spcShowZones} dec={meanDec} h={250} violations={xEval.viol} xLabel={prepared.xAxisLabel} yLabel={`${prepared.variableName} · 子组均值`} xLabels={labels} {...xProps} />, 960, 250),
+      svgChart(`${prepared.variableName} 的极差控制图 (R)`, <ControlChart T={T} data={ranges} cl={M.rCl} ucl={M.uclR} lcl={M.lclR} clLabel={rCenterLabel} zones={app.spcShowZones} dec={rangeDec} h={210} violations={rEval.viol} xLabel={prepared.xAxisLabel} yLabel={`${prepared.variableName} · 子组极差`} xLabels={labels} {...rProps} />, 960, 210, '必须先判断 R 图是否受控，再解释 X̄ 图。'),
     ],
   };
 }
@@ -1223,7 +1333,8 @@ export function buildActiveAnalysisExport(): { report?: AnalysisReportPayload; m
       subgroupColumn: app.spcSubgroupCol,
       pendingCells: data.pendingCells,
     });
-    if (prepared.model && !prepared.error) model = prepared.model;
+    // SPC 页的通用导出与页面同口径（σ 估计方法随页面设置；能力路径 sigmaWithin 语义不受影响）
+    if (prepared.model && !prepared.error) model = withSigmaMethod(prepared.model, app.spcSigmaMethod);
   } else if (app.page === 'spc' && app.spcType === 'p') {
     model = computeVarModel(
       data.pModel.name,

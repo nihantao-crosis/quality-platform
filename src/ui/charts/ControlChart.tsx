@@ -116,6 +116,24 @@ function ControlChartImpl(cfg: ControlChartProps) {
   const lblSep = T.classic ? '=' : ' ';
   const limitLblFill = T.classic ? '#111111' : T.limit;
   const centerLblFill = T.classic ? '#111111' : T.center;
+  // ±1SL/±2SL 数值标注(批次720-A4,Minitab「显示控制图的 σ 区带」口径;SL=sigma level,
+  // 与规格限 USL/LSL 无关)。审查修复:σ 区带线/标注严格夹在 (LCL,UCL) 开区间内——
+  // R/S/MR/C/P 图 LCL 截 0 后,cl±2σ 可能低于 LCL 甚至为负(非负统计量不存在负参考线);
+  // 标签改为逐条与 UCL/CL/LCL 标签逐对测距,间距不足 11px 的 SL 标签丢弃(线仍按区间画)。
+  const zoneLblFill = T.classic ? '#111111' : T.axis;
+  const zoneInside = (v: number) => v > cfg.lcl + (cfg.ucl - cfg.lcl) * 1e-9 && v < cfg.ucl - (cfg.ucl - cfg.lcl) * 1e-9;
+  const fixedLabelYs = [Y(cfg.ucl), Y(cfg.cl), Y(cfg.lcl)];
+  const zoneLabelOk = (v: number) => {
+    if (!cfg.zones || cfg.stepSeries || !zoneInside(v)) return false;
+    const y = Y(v);
+    return fixedLabelYs.every((fy) => Math.abs(y - fy) >= 11);
+  };
+  const stagedZoneRanges = cfg.zones && cfg.stepSeries && cfg.clSeries && cfg.uclSeries && cfg.lclSeries
+    ? [0, ...(cfg.stageBoundaries ?? []), data.length]
+        .slice(0, -1)
+        .map((start, index) => ({ start, end: [0, ...(cfg.stageBoundaries ?? []), data.length][index + 1] - 1 }))
+        .filter(({ start, end }) => start >= 0 && end >= start && end < data.length)
+    : [];
 
   return (
     <Svg w={W} h={H}>
@@ -130,14 +148,54 @@ function ControlChartImpl(cfg: ControlChartProps) {
           </Fragment>
         );
       })}
-      {cfg.zones &&
+      {stagedZoneRanges.flatMap(({ start, end }, stageIndex) => {
+        const cl = cfg.clSeries![start];
+        const ucl = cfg.uclSeries![start];
+        const lcl = cfg.lclSeries![start];
+        const stageSigma = (ucl - cl) / 3;
+        const left = start === 0 ? X(start) : (X(start - 1) + X(start)) / 2;
+        const right = end === data.length - 1 ? X(end) : (X(end) + X(end + 1)) / 2;
+        return [1, 2].flatMap((z) => ([1, -1] as const).flatMap((sign) => {
+          const value = cl + sign * z * stageSigma;
+          if (!(value > lcl + (ucl - lcl) * 1e-9 && value < ucl - (ucl - lcl) * 1e-9)) return [];
+          const y = Y(value);
+          // 跨阶段量级悬殊时，小量级阶段的 1σ 像素间距可能不足字体高度；
+          // 标签改为在段内按 z 错开横向位置，保留全部数值而不与右侧 UCL/CL/LCL 文本碰撞。
+          const labelX = left + (right - left) * (z === 1 ? 0.32 : 0.68);
+          return [
+            <Fragment key={`sz-${stageIndex}-${sign}-${z}`}>
+              <Ln x1={left} y1={y} x2={right} y2={y} stroke={zoneStroke} sw={1} dash="2 4" />
+              <Txt
+                x={labelX}
+                y={y - 3}
+                s={`${sign > 0 ? '+' : '-'}${z}SL${lblSep}${nf(value, dec)}`}
+                fill={zoneLblFill}
+                size={8.5}
+                anchor="middle"
+                weight={600}
+              />
+            </Fragment>,
+          ];
+        }));
+      })}
+      {cfg.zones && !cfg.clSeries &&
         [1, 2].map((z) => (
           <Fragment key={'z' + z}>
-            {Y(cfg.cl + z * sigma) > m.t && (
-              <Ln x1={m.l} y1={Y(cfg.cl + z * sigma)} x2={m.l + pw} y2={Y(cfg.cl + z * sigma)} stroke={zoneStroke} sw={1} dash="2 4" />
+            {zoneInside(cfg.cl + z * sigma) && Y(cfg.cl + z * sigma) > m.t && (
+              <>
+                <Ln x1={m.l} y1={Y(cfg.cl + z * sigma)} x2={m.l + pw} y2={Y(cfg.cl + z * sigma)} stroke={zoneStroke} sw={1} dash="2 4" />
+                {zoneLabelOk(cfg.cl + z * sigma) && (
+                  <Txt x={m.l + pw + 8} y={Y(cfg.cl + z * sigma)} s={'+' + z + 'SL' + lblSep + nf(cfg.cl + z * sigma, dec)} fill={zoneLblFill} size={10} weight={600} />
+                )}
+              </>
             )}
-            {Y(cfg.cl - z * sigma) < m.t + ph && (
-              <Ln x1={m.l} y1={Y(cfg.cl - z * sigma)} x2={m.l + pw} y2={Y(cfg.cl - z * sigma)} stroke={zoneStroke} sw={1} dash="2 4" />
+            {zoneInside(cfg.cl - z * sigma) && Y(cfg.cl - z * sigma) < m.t + ph && (
+              <>
+                <Ln x1={m.l} y1={Y(cfg.cl - z * sigma)} x2={m.l + pw} y2={Y(cfg.cl - z * sigma)} stroke={zoneStroke} sw={1} dash="2 4" />
+                {zoneLabelOk(cfg.cl - z * sigma) && (
+                  <Txt x={m.l + pw + 8} y={Y(cfg.cl - z * sigma)} s={'-' + z + 'SL' + lblSep + nf(cfg.cl - z * sigma, dec)} fill={zoneLblFill} size={10} weight={600} />
+                )}
+              </>
             )}
           </Fragment>
         ))}

@@ -3,7 +3,7 @@
  * 716-R3:创建页扩展为设计类型选择(两水平全因子/一般全因子/分数因子 2^(k−p) 含折叠);
  * 分析页在两水平检测失败且数据为多水平(每因子 2–5 水平)时自动走一般全因子 ANOVA,
  * 5–7 个两水平因子(分数因子)走同一 OLS 引擎的放宽版;既有 2–4 因子两水平路径与文案不回归。 */
-import { Fragment, useMemo, useState } from 'react';
+import { Fragment, useMemo, useRef, useState } from 'react';
 import { useApp, type DoeView } from '../../store/appStore';
 import { useData } from '../../store/dataStore';
 import {
@@ -20,7 +20,7 @@ import {
 } from '../../core';
 import type { ChartTokens } from '../tokens';
 import { Card, CardHeader, tabStyle, EmptyStateCard, DemoBadge, numInput } from '../common';
-import { NormalProbPlot } from '../charts/NormalProbPlot';
+import { NormalProbPlot, residualAxisScale } from '../charts/NormalProbPlot';
 import { EffectsNormalPlot } from '../charts/EffectsNormalPlot';
 import { ScatterPlot } from '../charts/ScatterPlot';
 import { MiniHist } from '../charts/misc';
@@ -525,6 +525,7 @@ function AnalyzeDesign({ T }: { T: ChartTokens }) {
         // 删后残差在 r²=ν 边界可为 ±∞;图形只画有限值,数量差单独说明
         const finiteRows = rrAll.map((value, row) => ({ value, row })).filter((p) => Number.isFinite(p.value));
         const rr = finiteRows.map((p) => p.value);
+        const residualScale = residualAxisScale(rr);
         const runOrder = finiteRows.map((p) => p.row + 1);
         const fitsF = finiteRows.map((p) => res.fits[p.row]);
         const infCount = rrAll.length - rr.length;
@@ -546,11 +547,22 @@ function AnalyzeDesign({ T }: { T: ChartTokens }) {
         const PANES: Array<['normal' | 'fits' | 'hist' | 'order', string]> = [
           ['normal', '正态图'], ['fits', 'vs 拟合值'], ['hist', '直方图'], ['order', 'vs 顺序'],
         ];
+        // 批次720-C3:面板标题与轴题对齐 Minitab「〈响应〉残差图」四联(正态概率图/与拟合值/直方图/与顺序);
+        // 正态概率图与直方图共享同一残差 x 变量,「与拟合值/与顺序」保留各自横轴变量只统一整洁刻度。
+        const PANE_TITLE: Record<'normal' | 'fits' | 'hist' | 'order', string> = {
+          normal: '正态概率图', fits: '与拟合值', hist: '直方图', order: '与顺序',
+        };
         const paneChart = (pane: 'normal' | 'fits' | 'hist' | 'order', height: number) =>
-          pane === 'normal' ? <NormalProbPlot T={T} data={rr} h={height} />
+          pane === 'normal' ? <NormalProbPlot T={T} data={rr} h={height} xLabel={yl} xDomain={residualScale.domain} xTicks={residualScale.ticks} />
             : pane === 'fits' ? <ScatterPlot T={T} xs={fitsF} ys={rr} slope={0} intercept={0} xLabel="拟合值" yLabel={yl} h={height} />
-              : pane === 'hist' ? <MiniHist T={T} data={rr} h={height} xLabel={`${yl}分布`} />
-                : <ScatterPlot T={T} xs={runOrder} ys={rr} slope={0} intercept={0} xLabel="运行序" yLabel={yl} h={height} />;
+              : pane === 'hist' ? <MiniHist T={T} data={rr} h={height} title={`${yl}分布`} xLabel={yl} xDomain={residualScale.domain} xTicks={residualScale.ticks} />
+                : <ScatterPlot T={T} xs={runOrder} ys={rr} slope={0} intercept={0} xLabel="观测值顺序" yLabel={yl} h={height} />;
+        const captioned = (pane: 'normal' | 'fits' | 'hist' | 'order', height: number) => (
+          <div>
+            <div style={{ textAlign: 'center', fontSize: 12, fontWeight: 700, color: '#33404f', padding: '2px 0 4px' }}>{PANE_TITLE[pane]}</div>
+            {paneChart(pane, height)}
+          </div>
+        );
         return (
           <>
             <Card>
@@ -595,10 +607,10 @@ function AnalyzeDesign({ T }: { T: ChartTokens }) {
                 <div style={{ padding: 20, color: '#9aa2ad', fontSize: 12.5 }}>当前残差类型下没有可绘制的有限值。</div>
               ) : residLayout === 'grid' ? (
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, padding: '10px 12px 12px' }}>
-                  {paneChart('normal', 220)}
-                  {paneChart('fits', 220)}
-                  {paneChart('hist', 220)}
-                  {paneChart('order', 220)}
+                  {captioned('normal', 220)}
+                  {captioned('fits', 220)}
+                  {captioned('hist', 220)}
+                  {captioned('order', 220)}
                 </div>
               ) : (
                 <div style={{ padding: '10px 12px 12px' }}>{paneChart(residPane, 320)}</div>
@@ -660,8 +672,46 @@ function AnalyzeDesign({ T }: { T: ChartTokens }) {
 }
 
 // ---------- 创建因子设计 ----------
-/** 随机化种子默认值:沿用原实现的固定 LCG 种子,保证默认行为不变。 */
+/** 种子输入框的初始参考值；默认「自动」模式生成时会换成实际使用值。 */
 const DEFAULT_DOE_SEED = 20260713;
+const MAX_DOE_SEED = 0x7fffffff;
+
+/** 批次720-C4:生成新随机种子(仅事件处理器调用,不进入渲染路径)。 */
+function freshDoeSeed(previous?: number | null): number {
+  const candidate = Math.floor(Math.random() * MAX_DOE_SEED) + 1;
+  // 自动模式的精确语义是「连续生成换种子」；即使随机源碰巧重复也不复用上一个。
+  return candidate === previous ? candidate % MAX_DOE_SEED + 1 : candidate;
+}
+
+/** 关闭随机化时按原标准序恢复设计行，再令工作表的标准序和运行序逐行相等。
+ * 仅改编号会把分区组生成器的因子组合贴上错误标准序；文本元数据也必须随行重排。 */
+export function alignUnrandomizedDoeOrders<T extends {
+  rows: number[][];
+  textCols?: Array<{ name: string; values: string[]; [key: string]: unknown }>;
+}>(design: T): T {
+  const order = design.rows.map((_, index) => index).sort((left, right) => {
+    const a = design.rows[left]?.[0];
+    const b = design.rows[right]?.[0];
+    if (!Number.isFinite(a) || !Number.isFinite(b) || a === b) return left - right;
+    return a - b;
+  });
+  return {
+    ...design,
+    rows: order.map((sourceIndex, index) => {
+      const row = design.rows[sourceIndex];
+      const next = [...row];
+      next[0] = index + 1;
+      next[1] = index + 1;
+      return next;
+    }),
+    ...(design.textCols ? {
+      textCols: design.textCols.map((column) => ({
+        ...column,
+        values: order.map((sourceIndex) => column.values[sourceIndex]),
+      })),
+    } : {}),
+  } as T;
+}
 
 /** 716-R3:创建页扩展为设计类型选择;两水平全因子路径的输入/文案/生成行为保持原样。 */
 type CreateDesignType = 'two-level' | 'general' | 'fractional';
@@ -690,7 +740,25 @@ function CreateDesign() {
   const [reps, setReps] = useState(1);
   const [blocks, setBlocks] = useState(1);
   const [randomize, setRandomize] = useState(true);
+  // 批次720-C4:自动模式每次生成换种子；固定模式持续使用用户值，直到用户显式切回自动。
   const [seedText, setSeedText] = useState(String(DEFAULT_DOE_SEED));
+  const [seedMode, setSeedMode] = useState<'auto' | 'fixed'>('auto');
+  const lastAutoSeed = useRef<number | null>(null);
+  const resolveRandomization = (): { seed?: number; auditSuffix: string; auditText: string } | null => {
+    if (!randomize) return { auditSuffix: '未随机', auditText: '未随机化（标准序=运行序）' };
+    if (seedMode === 'fixed') {
+      const parsed = Number(seedText);
+      if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > MAX_DOE_SEED) {
+        showToast(`固定随机种子须为 1–${MAX_DOE_SEED} 的整数`);
+        return null;
+      }
+      return { seed: parsed, auditSuffix: `固定seed-${parsed}`, auditText: `固定随机种子 ${parsed}` };
+    }
+    const seed = freshDoeSeed(lastAutoSeed.current);
+    lastAutoSeed.current = seed;
+    setSeedText(String(seed));
+    return { seed, auditSuffix: `自动seed-${seed}`, auditText: `自动随机种子 ${seed}` };
+  };
   const [storeDesign, setStoreDesign] = useState(true);
   const [createdPreview, setCreatedPreview] = useState<CreatedDesignPreview | null>(null);
 
@@ -715,8 +783,6 @@ function CreateDesign() {
   const parsedK = Number.parseInt(kText, 10);
   const kOutOfRange = !(Number.isInteger(parsedK) && parsedK >= 2 && parsedK <= 4);
   const k = Number.isInteger(parsedK) ? Math.max(2, Math.min(4, parsedK)) : 2;
-  const parsedSeed = Number.parseInt(seedText, 10);
-  const seed = Number.isFinite(parsedSeed) ? parsedSeed : DEFAULT_DOE_SEED;
 
   const maxBlocks = 1 << (k - 1);
   const blocksEff = Math.min(blocks, maxBlocks);
@@ -746,10 +812,13 @@ function CreateDesign() {
     if (facs.some((f) => !f.name.trim())) { showToast('请填写所有因子名'); return; }
     if (new Set(facs.map((f) => f.name.trim())).size !== facs.length) { showToast('因子名不能重复'); return; }
     if (facs.some((f) => !(f.low < f.high))) { showToast('每个因子必须满足低水平 < 高水平'); return; }
-    const d = generateFactorialDesign(facs.map((f) => ({ name: f.name.trim(), low: f.low, high: f.high })),
-      { centerPoints: center, replicates: reps, blocks: blocksEff, randomize, seed });
+    const audit = resolveRandomization();
+    if (!audit) return;
+    const generated = generateFactorialDesign(facs.map((f) => ({ name: f.name.trim(), low: f.low, high: f.high })),
+      { centerPoints: center, replicates: reps, blocks: blocksEff, randomize, seed: audit.seed });
+    const d = randomize ? generated : alignUnrandomizedDoeOrders(generated);
     const stamp = new Date().toLocaleTimeString('zh-CN', { hour12: false }).replace(/:/g, '');
-    deliverDesign(`DOE设计_${stamp}`, d, `已生成 ${d.rows.length} 运行 / ${d.blockCount} 区组的因子设计（含标准序、运行序、区组、点类型）`);
+    deliverDesign(`DOE设计_${stamp}_${audit.auditSuffix}`, d, `已生成 ${d.rows.length} 运行 / ${d.blockCount} 区组的因子设计（含标准序、运行序、区组、点类型；${audit.auditText}）`);
   };
 
   // —— 一般全因子:派生值与生成 ——
@@ -787,9 +856,12 @@ function CreateDesign() {
       if (new Set(f.levels).size !== f.levels.length) { showToast(`因子「${f.name}」的水平值不能重复`); return; }
     }
     try {
-      const d = generateGeneralFactorialDesign(parsed, { replicates: gReps, randomize, seed });
+      const audit = resolveRandomization();
+      if (!audit) return;
+      const generated = generateGeneralFactorialDesign(parsed, { replicates: gReps, randomize, seed: audit.seed });
+      const d = randomize ? generated : alignUnrandomizedDoeOrders(generated);
       const stamp = new Date().toLocaleTimeString('zh-CN', { hour12: false }).replace(/:/g, '');
-      deliverDesign(`DOE一般全因子_${stamp}`, d, `已生成 ${d.rows.length} 运行的一般全因子设计（标准序、运行序、点类型；区组恒为 1），多水平数据将走一般全因子 ANOVA`);
+      deliverDesign(`DOE一般全因子_${stamp}_${audit.auditSuffix}`, d, `已生成 ${d.rows.length} 运行的一般全因子设计（标准序、运行序、点类型；区组恒为 1；${audit.auditText}），多水平数据将走一般全因子 ANOVA`);
     } catch (error) { showToast((error as Error).message); }
   };
 
@@ -818,20 +890,23 @@ function CreateDesign() {
     if (new Set(facs.map((f) => f.name.trim())).size !== facs.length) { showToast('因子名不能重复'); return; }
     if (facs.some((f) => !(f.low < f.high))) { showToast('每个因子必须满足低水平 < 高水平'); return; }
     try {
-      const d = generateFractionalFactorialDesign(
+      const audit = resolveRandomization();
+      if (!audit) return;
+      const generated = generateFractionalFactorialDesign(
         facs.map((f) => ({ name: f.name.trim(), low: f.low, high: f.high })),
         fSpec.p,
         {
           fold: foldArg,
           fraction: fFractionEff,
-          replicates: fReps, randomize, seed,
+          replicates: fReps, randomize, seed: audit.seed,
         },
       );
+      const d = randomize ? generated : alignUnrandomizedDoeOrders(generated);
       const stamp = new Date().toLocaleTimeString('zh-CN', { hour12: false }).replace(/:/g, '');
       deliverDesign(
-        `DOE分数因子_${stamp}`,
+        `DOE分数因子_${stamp}_${audit.auditSuffix}`,
         d,
-        `已生成 ${fSpec.p === 0 ? `2^${fK} 全因子` : `${fSpec.label} 分数因子（第 ${d.fraction}/${1 << fSpec.p} 分部）`}，实际分辨率 ${d.resolutionLabel}，共 ${d.rows.length} 运行${d.folded ? '（折叠追加运行记为区组 2）' : ''}；${d.generators.length ? `生成元 ${d.generators.join('、')}，别名项按低阶优先剔除` : '无别名'}`,
+        `已生成 ${fSpec.p === 0 ? `2^${fK} 全因子` : `${fSpec.label} 分数因子（第 ${d.fraction}/${1 << fSpec.p} 分部）`}，实际分辨率 ${d.resolutionLabel}，共 ${d.rows.length} 运行${d.folded ? '（折叠追加运行记为区组 2）' : ''}；${d.generators.length ? `生成元 ${d.generators.join('、')}，别名项按低阶优先剔除` : '无别名'}；${audit.auditText}`,
       );
     } catch (error) { showToast((error as Error).message); }
   };
@@ -842,11 +917,16 @@ function CreateDesign() {
       <label style={{ display: 'inline-flex', alignItems: 'center', gap: 5, cursor: 'pointer' }}>
         <input type="checkbox" checked={randomize} onChange={(e) => setRandomize(e.target.checked)} /> 随机化运行序
       </label>
-      <label title="随机化使用确定性 LCG 伪随机数:种子相同 → 打乱后的运行序完全相同,便于复现与审计;默认沿用平台固定种子" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+      <label title="默认自动换新种子；固定模式持续使用输入值，同种子完全复现" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
         随机化种子
-        <input type="number" value={seedText} onChange={(e) => setSeedText(e.target.value)} disabled={!randomize}
+        <select aria-label="随机化种子模式" value={seedMode} onChange={(e) => setSeedMode(e.target.value as 'auto' | 'fixed')} disabled={!randomize} style={{ ...selStyle, opacity: randomize ? 1 : 0.5 }}>
+          <option value="auto">自动换新</option>
+          <option value="fixed">固定复现</option>
+        </select>
+        <input type="number" min={1} max={MAX_DOE_SEED} value={seedText} onChange={(e) => { setSeedText(e.target.value); setSeedMode('fixed'); }} disabled={!randomize}
           style={{ ...inp, width: 100, ...(randomize ? {} : { opacity: 0.5 }) }} />
       </label>
+      <span style={{ fontSize: 11, color: '#8a929d' }}>数据集名会保存「未随机」或实际 seed</span>
     </>
   );
   const storageControl = (
@@ -1120,14 +1200,7 @@ function CreateDesign() {
                 .map((value) => <option key={value} value={value}>{value}</option>)}
             </select>
           </label>
-          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 5, cursor: 'pointer' }}>
-            <input type="checkbox" checked={randomize} onChange={(e) => setRandomize(e.target.checked)} /> 随机化运行序
-          </label>
-          <label title="随机化使用确定性 LCG 伪随机数:种子相同 → 打乱后的运行序完全相同,便于复现与审计;默认沿用平台固定种子" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            随机化种子
-            <input type="number" value={seedText} onChange={(e) => setSeedText(e.target.value)} disabled={!randomize}
-              style={{ ...inp, width: 100, ...(randomize ? {} : { opacity: 0.5 }) }} />
-          </label>
+          {randomizeControls}
           {storageControl}
           <span style={{ color: '#1c4e7a' }}>共 <b className="mono">{runs}</b> 次试验</span>
         </div>

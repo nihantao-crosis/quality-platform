@@ -46,6 +46,8 @@ beforeEach(() => {
     spcValueCol: null,
     spcSubgroupCol: null,
     spcStageCol: null,
+    spcSigmaMethod: 'classic',
+    spcShowZones: true,
     capabilityBins: 13,
     gageUseReal: true,
     gageValueName: null,
@@ -211,6 +213,31 @@ describe('buildActiveAnalysisReport', () => {
     const design = report?.tables.find((table) => table.title === '设计矩阵、拟合与残差');
     expect(design?.headers).toContain('标准化残差');
     expect(design?.rows).toHaveLength(7);
+    expect(report?.charts.map((chart) => chart.title)).toEqual(expect.arrayContaining([
+      '残差图 · 正态概率图', '残差图 · 直方图', '残差图 · 与拟合值', '残差图 · 与顺序',
+    ]));
+    const probability = report?.charts.find((chart) => chart.title === '残差图 · 正态概率图')?.svg ?? '';
+    const histogram = report?.charts.find((chart) => chart.title === '残差图 · 直方图')?.svg ?? '';
+    expect(probability).toContain('标准化残差');
+    expect(histogram).toContain('标准化残差分布');
+    expect(histogram).toContain('频率');
+  });
+
+  it('DOE 专项报告保留自动/固定/未随机审计信息，外部工作表不伪造 seed', () => {
+    const rows = [[-1, -1, 10], [1, -1, 20], [-1, 1, 12], [1, 1, 22]];
+    const cases: Array<[string, string]> = [
+      ['DOE设计_120000_自动seed-314159', '自动种子模式，实际 seed=314159'],
+      ['DOE设计_120001_固定seed-42', '固定种子模式，实际 seed=42'],
+      ['DOE设计_120002_未随机', '未随机化，标准序与运行序相同'],
+      ['外部DOE工作表', '未包含平台生成的随机化模式/seed 元数据'],
+    ];
+    for (const [name, expected] of cases) {
+      useData.getState().importMatrix(name, ['A', 'B', 'Y'], rows);
+      useApp.setState({ page: 'doe', doeFactorCols: ['A', 'B'], doeRespCol: 'Y' });
+      const report = buildActiveAnalysisReport();
+      expect(report?.subtitle).toContain(name);
+      expect(report?.summary.join(' ')).toContain(expected);
+    }
   });
 
   it('DOE 专项追溯表识别 Minitab StdOrder/RunOrder/Blocks/PtType 元数据别名', () => {
@@ -263,6 +290,27 @@ describe('buildActiveAnalysisReport', () => {
     expect(report?.summary.join(' ')).toContain('「子组」仅作子组标签');
     expect(report?.charts.map((chart) => chart.title).join(' ')).toContain('极差控制图');
     expect(buildActiveAnalysisExport().model.n).toBe(5);
+  });
+
+  it('Xbar-R 专项报告两张子图共同遵循区带开关，pooled 中心线不冒充 R̄', () => {
+    useApp.setState({ page: 'spc', spcType: 'xbar-r', spcSigmaMethod: 'classic', spcShowZones: true });
+    const withZones = buildActiveAnalysisReport()!;
+    expect(withZones.charts).toHaveLength(2);
+    for (const chart of withZones.charts) {
+      expect(chart.svg).toContain('+1SL');
+      expect(chart.svg).toContain('+2SL');
+      expect(chart.svg).toContain('-1SL');
+      expect(chart.svg).toContain('-2SL');
+    }
+    expect(withZones.charts[1].svg).toContain('R̄');
+
+    useApp.setState({ spcShowZones: false });
+    const withoutZones = buildActiveAnalysisReport()!;
+    for (const chart of withoutZones.charts) expect(chart.svg).not.toMatch(/[+-][12]SL/);
+
+    useApp.setState({ spcSigmaMethod: 'pooled', spcShowZones: true });
+    const pooled = buildActiveAnalysisReport()!;
+    expect(pooled.charts[1].svg).toContain('d₂σ̂');
   });
 
   it('所有 SPC 图型都有当前分析专项报告，不回落通用能力报告', () => {
@@ -345,16 +393,19 @@ describe('buildActiveAnalysisReport', () => {
     expect(report?.charts).toHaveLength(0);
   });
 
-  it('帕累托报告使用导入数据、累计占比和其他合并设置', () => {
+  it('帕累托报告即使遗留状态要求合并，也固定使用导入数据的全部类别', () => {
     useData.getState().importPareto('柏拉图人工反馈', [
       { name: '不良A', count: 35 }, { name: '不良B', count: 15 }, { name: '不良C', count: 36 },
       { name: '不良D', count: 68 }, { name: '不良E', count: 30 }, { name: '不良F', count: 65 },
     ]);
-    useApp.setState({ page: 'pareto', paretoView: 'pareto' });
+    useApp.setState({ page: 'pareto', paretoView: 'pareto', paretoMergeOther: true, paretoThreshold: 0.5 });
     const report = buildActiveAnalysisReport();
     expect(report?.kind).toBe('pareto');
     expect(report?.subtitle).toContain('柏拉图人工反馈');
-    expect(report?.tables.find((table) => table.title === '缺陷频数与累计贡献')?.headers).toContain('累计占比');
+    const contribution = report?.tables.find((table) => table.title === '缺陷频数与累计贡献');
+    expect(contribution?.headers).toEqual(['类别', '频数', '占比', '累计占比']);
+    expect(contribution?.rows).toHaveLength(6);
+    expect(contribution?.rows.some((row) => row[0] === '其他')).toBe(false);
     expect(report?.charts[0].svg).toContain('不良D');
     expect(report?.tables.find((table) => table.title.includes('原始缺陷'))?.rows).toHaveLength(6);
   });

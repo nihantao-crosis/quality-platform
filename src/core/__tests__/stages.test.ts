@@ -37,7 +37,7 @@ describe('stagedXbar', () => {
     [19.9, 20.1], [20.0, 20.2], [19.8, 20.0], [20.1, 20.1],
   ];
   const labels = ['改进前', '改进前', '改进前', '改进前', '改进后', '改进后', '改进后', '改进后'];
-  const r = stagedXbar(rows, labels, RULES);
+  const r = stagedXbar(rows, labels, RULES, 'classic');
 
   it('两段独立中心线(≈10 与 ≈20)', () => {
     expect(r.segments.length).toBe(2);
@@ -45,9 +45,9 @@ describe('stagedXbar', () => {
     expect(r.segments[1].cl).toBeCloseTo(20.025, 3);
     expect(r.boundaries).toEqual([4]);
   });
-  it('限值序列与段对齐,并对拍公开常数 n=2 的 A2=1.880', () => {
+  it('限值序列与段对齐,并对拍 Minitab 表值派生常数 A2(2)=3/(d2√2)', () => {
     const seg0Rbar = (0.2 + 0.2 + 0.2 + 0.0) / 4;
-    expect(r.uclSeries[0]).toBeCloseTo(10.025 + 1.880 * seg0Rbar, 10);
+    expect(r.uclSeries[0]).toBeCloseTo(10.025 + (3 / (1.128 * Math.SQRT2)) * seg0Rbar, 9);
     expect(r.clSeries[3]).toBeCloseTo(r.segments[0].cl, 10);
     expect(r.clSeries[4]).toBeCloseTo(r.segments[1].cl, 10);
   });
@@ -59,6 +59,20 @@ describe('stagedXbar', () => {
     const rows2 = rows.map((row, i) => (i === 2 ? [30, 30.2] : row)); // 前段插入异常点
     const r2 = stagedXbar(rows2, labels, RULES);
     expect([...r2.viol]).toContain(2);
+  });
+  it('分阶段判异使用用户自定义 K，不能静默回到默认 Nelson 参数', () => {
+    const trendRows = [
+      [1, 1], [2, 2], [3, 3], [4, 4],
+      [11, 11], [12, 12], [13, 13], [14, 14],
+    ];
+    const trendLabels = ['A', 'A', 'A', 'A', 'B', 'B', 'B', 'B'];
+    const trendOnly = {
+      r1: false, r2: false, r3: true, r4: false,
+      r5: false, r6: false, r7: false, r8: false,
+    };
+    expect(stagedXbar(trendRows, trendLabels, trendOnly).list.some((item) => item.rule === 3)).toBe(false);
+    const custom = stagedXbar(trendRows, trendLabels, trendOnly, 'classic', { k3: 3 });
+    expect(custom.list.some((item) => item.rule === 3 && item.desc.includes('连续 3 点'))).toBe(true);
   });
   it('零极差阶段使用精确零宽控制限，不用固定 epsilon 吞掉小量纲越界', () => {
     const tinyRows = [[0, 0], [1e-13, 1e-13], [0, 0], [1e-13, 1e-13]];
@@ -75,16 +89,17 @@ describe('stagedXbar', () => {
 });
 
 describe('stagedRange', () => {
-  it('R 图段内 UCL 对拍公开常数 n=2 的 D4=3.267', () => {
+  it('R 图段内 UCL 对拍 Minitab 表值派生常数 D4(2)=1+3d3/d2', () => {
     const rows = [
       [1, 2], [1, 2], [1, 2],
       [5, 9], [5, 9], [5, 9],
     ];
     const labels = ['a', 'a', 'a', 'b', 'b', 'b'];
-    const r = stagedRange(rows, labels, RULES);
+    const r = stagedRange(rows, labels, RULES, 'classic');
+    const d4 = 1 + (3 * 0.8525) / 1.128;
     expect(r.segments[0].cl).toBeCloseTo(1, 10);
-    expect(r.segments[0].ucl).toBeCloseTo(3.267, 10);
+    expect(r.segments[0].ucl).toBeCloseTo(d4, 9);
     expect(r.segments[1].cl).toBeCloseTo(4, 10);
-    expect(r.segments[1].ucl).toBeCloseTo(13.068, 10);
+    expect(r.segments[1].ucl).toBeCloseTo(4 * d4, 9);
   });
 });

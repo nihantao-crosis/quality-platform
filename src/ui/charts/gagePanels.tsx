@@ -271,10 +271,17 @@ function byPartBody(T: ChartTokens, panel: GagePanelData, partLabels: string[], 
 // ---------- 箱线:空心箱 + ⊕ 均值 + 均值连线(Minitab 1.5×IQR 规则) ----------
 
 function quantileOf(sorted: number[], q: number): number {
-  const position = (sorted.length - 1) * q;
-  const lower = Math.floor(position);
-  const upper = Math.ceil(position);
-  return sorted[lower] + (sorted[upper] - sorted[lower]) * (position - lower);
+  if (!sorted.length) return Number.NaN;
+  // Minitab 箱线图四分位数：位置=(n+1)p（1-based），相邻次序统计量间线性插值；
+  // 超出首尾时钳到最小/最大值。不得使用常见的 (n-1)p 浏览器/NumPy 默认口径。
+  const position = (sorted.length + 1) * q;
+  if (position <= 1) return sorted[0];
+  if (position >= sorted.length) return sorted[sorted.length - 1];
+  const lowerPosition = Math.floor(position);
+  const fraction = position - lowerPosition;
+  const lower = sorted[lowerPosition - 1];
+  const upper = sorted[lowerPosition];
+  return lower + (upper - lower) * fraction;
 }
 
 export interface BoxplotStats {

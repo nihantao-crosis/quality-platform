@@ -29,7 +29,7 @@ export function countCapabilityViolations(M: VarModel, rules: NelsonRules, ruleK
     ? evalRules(M.subs.map((s) => s.mean), M.xbarbar, (M.uclX - M.xbarbar) / 3, rules, ruleK)
     : evalRules(M.indiv, M.indMean, M.iSig, rules, ruleK);
   const dispersion = M.hasSubgroups
-    ? evalLimitedRules(M.subs.map((s) => s.range), M.rbar, M.uclR, M.lclR, rules, ruleK)
+    ? evalLimitedRules(M.subs.map((s) => s.range), M.rCl, M.uclR, M.lclR, rules, ruleK)
     : evalLimitedRules(M.mr.slice(1) as number[], M.mrbar, M.mrUcl, 0, rules, ruleK);
   return location.viol.size + dispersion.viol.size;
 }

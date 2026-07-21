@@ -15,7 +15,7 @@ import { ScatterPlot } from '../charts/ScatterPlot';
 import { NormalProbPlot } from '../charts/NormalProbPlot';
 import { Fishbone } from './Fishbone';
 import { loadFishboneState } from '../../store/fishboneStore';
-import { useApp, resolveGageTolerance } from '../../store/appStore';
+import { useApp, resolveGageTolerance, GAGE_BATCH_COL_CAP, normalizeGageBatchCols } from '../../store/appStore';
 import { useData } from '../../store/dataStore';
 import type { ChartTokens } from '../tokens';
 import { paretoColors } from '../tokens';
@@ -85,7 +85,10 @@ function GageRRInner({ T }: { T: ChartTokens }) {
   const {
     lsl, usl, lslOn, uslOn, gageUseReal, gageValueName, gagePartName, gageOperatorName,
     gageTolMode, gageTolValue, gageStandard, setGageOptions,
+    gageBatchCols, gageTolByCol, switchGageMeasurement, setGageBatchCols, applyGageTolToCols, showToast,
   } = useApp();
+  // 「应用到全部」两步确认(防误触把当前公差覆盖到所有列)
+  const [tolApplyArmed, setTolApplyArmed] = useState(false);
   // 批次716-R3 P1-2:默认角色不再按列序猜(工厂列序「部件、测试人、螺钉高度」曾被推荐反),
   // 改用 recommendGageRoles 的可解释打分做「预填」;store 字段非 null(用户手动选过)时绝不覆盖。
   const recommend = useMemo(() => recommendGageRoles(model, textCols), [model, textCols]);
@@ -95,8 +98,10 @@ function GageRRInner({ T }: { T: ChartTokens }) {
   [model, textCols, gageValueName, gagePartName, gageOperatorName]);
   const effValueName = effective.valueColumn;
   const namedValueIndex = effValueName ? model.colNames.indexOf(effValueName) : -1;
-  const valCol = namedValueIndex >= 0 ? namedValueIndex : 0;
-  const selectedValueName = model.colNames[valCol] ?? null;
+  // 全小整数/ID 列时推荐会明确返回 null；下拉框也必须保持
+  // “请选择”，不能视觉上偷选第一列。
+  const valCol = namedValueIndex >= 0 ? namedValueIndex : -1;
+  const selectedValueName = valCol >= 0 ? model.colNames[valCol] : null;
   const categoryColumns = listGageCategoryColumns(model, textCols, selectedValueName);
   // 部件/操作员可以是文本编码或数字 ID;单操作员研究可只有部件一个类别列(操作员选「无」)。
   const canReal = model.colNames.length >= 1 && categoryColumns.length >= 1;
@@ -110,13 +115,19 @@ function GageRRInner({ T }: { T: ChartTokens }) {
   const operCol = Math.min(namedOperatorIndex >= 0 ? namedOperatorIndex : 1, Math.max(0, categoryColumns.length - 1));
   // 任一角色用了推荐值(而非用户手选)时,展示推荐依据小字请用户确认
   const usedRecommend = canReal && !model.isDemo && recommend.reasons.length > 0 && (
-    (gageValueName == null && recommend.value != null)
+    // 审查修复(720-B1):兜底测量列生效时同样要出「请确认」提示
+    (gageValueName == null && (recommend.value != null || recommend.valueFallback != null))
     || (gagePartName == null && recPartName != null)
     || (gageOperatorName == null && recOperatorName != null)
   );
   const recommendHint = usedRecommend ? (
     <div style={{ margin: '8px 16px 0', fontSize: 11, color: '#8a929d', lineHeight: 1.6 }}>
       自动推荐:{recommend.reasons.join('；')},请确认
+    </div>
+  ) : null;
+  const measurementSelectionHint = canReal && !model.isDemo && gageUseReal && effective.valueColumn == null ? (
+    <div role="alert" style={{ margin: '8px 16px 0', padding: '8px 10px', color: '#8a5a00', background: '#fff8e8', borderRadius: 4, fontSize: 12, lineHeight: 1.6 }}>
+      <b>请选择测量列。</b>当前存在多个并列候选，或数值列呈类别/ID 形态；系统无法可靠判断量纲，因此不会默认使用第一列。
     </div>
   ) : null;
   const controls = (!model.isDemo || canReal) ? (
@@ -128,7 +139,11 @@ function GageRRInner({ T }: { T: ChartTokens }) {
       {canReal && (
         <>
           测量
-          <select style={selStyle} value={valCol} onChange={(e) => setGageOptions({ gageValueName: model.colNames[+e.target.value] })}>
+          <select aria-label="测量列" style={selStyle} value={valCol} onChange={(e) => {
+            const next = +e.target.value;
+            if (next >= 0) switchGageMeasurement(selectedValueName, model.colNames[next]);
+          }}>
+            <option value={-1} disabled>请选择测量列</option>
             {model.colNames.map((n, i) => <option key={n} value={i}>{n}</option>)}
           </select>
           部件
@@ -157,6 +172,140 @@ function GageRRInner({ T }: { T: ChartTokens }) {
   }), [model, textCols, effective, pendingCells]);
   const requestedReal = !model.isDemo && gageUseReal;
   const tolSpec = resolveGageTolerance({ gageTolMode, gageTolValue, lsl, usl, lslOn, uslOn });
+  // ---------- 批次720-B:多测量列批量 GRR ----------
+  // 审查修复(720):批量行锚定同一对部件/操作员列——effective 为 null(推荐并列)时
+  // 逐行按各自测量列做位置默认会漂移出不同角色,与主研究/报告端口径分裂。
+  const anchorPart = effective.partColumn ?? (prepared.ok ? prepared.study.partName : null);
+  const anchorOperator = effective.operatorColumn
+    ?? (prepared.ok ? (prepared.study.operatorName ?? GAGE_SINGLE_OPERATOR) : null);
+  // 候选=除锚定部件/操作员列外的全部数值列;选中列按名存储,换表自动过滤失效项
+  const batchCandidates = model.colNames.filter((name) => name !== anchorPart && name !== anchorOperator);
+  const batchSelected = (normalizeGageBatchCols(gageBatchCols) ?? []).filter((name) => batchCandidates.includes(name));
+  const batchKey = batchSelected.join('\u0000');
+  const BATCH_CAP = GAGE_BATCH_COL_CAP;
+  const batchRows = useMemo(() => {
+    if (!requestedReal || batchSelected.length < 2) return [];
+    return batchSelected.slice(0, BATCH_CAP).map((col) => {
+      const prep = prepareGageStudy(model, textCols, {
+        valueColumn: col, partColumn: anchorPart, operatorColumn: anchorOperator, pendingCells,
+      });
+      if (!prep.ok) return { col, error: prep.reason } as const;
+      // 公差严格逐列:当前列用在用值,其余列只用各自记忆(无记忆=不设,绝不静默套用别列公差)
+      const mem = col === selectedValueName
+        ? { mode: gageTolMode, value: gageTolValue }
+        : gageTolByCol[col] ?? { mode: 'none' as const, value: null };
+      const spec = resolveGageTolerance({ gageTolMode: mem.mode, gageTolValue: mem.value, lsl, usl, lslOn, uslOn });
+      try {
+        const result = computeGageRR(prep.study.observations, spec);
+        return {
+          col, result,
+          assess: assessGage(result, gageStandard),
+          reference: assessGage(result, gageStandard === 'factory' ? 'aiag' : 'factory'),
+        } as const;
+      } catch (error) {
+        return { col, error: (error as Error).message } as const;
+      }
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- batchKey 是 batchSelected 的字符串快照
+  }, [requestedReal, batchKey, model, textCols, anchorPart, anchorOperator, pendingCells,
+    gageTolByCol, gageTolMode, gageTolValue, gageStandard, lsl, usl, lslOn, uslOn, selectedValueName]);
+  const batchGrade = { good: '#2c8a45', warn: '#d98324', bad: '#c22f2f' } as const;
+  const toggleBatchCol = (name: string) => {
+    const cur = new Set(batchSelected);
+    if (cur.has(name)) cur.delete(name);
+    else if (cur.size >= 64) {
+      showToast('批量 GRR 最多选择 64 个测量列');
+      return;
+    } else cur.add(name);
+    setGageBatchCols(cur.size ? batchCandidates.filter((c) => cur.has(c)) : null);
+  };
+  const batchCard = requestedReal && batchCandidates.length >= 2 ? (
+    <Card>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 16px', borderBottom: '1px solid #edf0f3', flexWrap: 'wrap' }}>
+        <div style={{ fontWeight: 600, color: '#33404f' }}>批量 GRR · 多测量列</div>
+        <span style={{ fontSize: 11.5, color: '#8a929d' }}>同一工作表按相同部件/操作员角色,逐列独立计算(不合并 ANOVA)</span>
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+          <button type="button" style={{ ...tabStyle(false), fontSize: 11.5 }} onClick={() => {
+            setGageBatchCols(batchCandidates);
+            if (batchCandidates.length > 64) showToast('候选列超过 64 个，已选择前 64 个测量列');
+          }}>全选测量列</button>
+          <button type="button" style={{ ...tabStyle(false), fontSize: 11.5 }} onClick={() => setGageBatchCols(null)}>清空</button>
+        </div>
+      </div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, padding: '10px 16px 0', fontSize: 12, color: '#5b6472' }}>
+        {batchCandidates.map((name) => (
+          <label key={name} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
+            <input type="checkbox" checked={batchSelected.includes(name)} onChange={() => toggleBatchCol(name)} />
+            {name}
+          </label>
+        ))}
+      </div>
+      {batchSelected.length > BATCH_CAP && (
+        <div role="alert" style={{ margin: '8px 16px 0', fontSize: 11.5, color: '#b0620f' }}>已选 {batchSelected.length} 列,本表仅计算前 {BATCH_CAP} 列。</div>
+      )}
+      {batchRows.length >= 2 ? (
+        <div style={{ overflowX: 'auto', padding: '6px 0 4px' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, minWidth: 620 }}>
+            <thead>
+              <tr style={{ color: '#98a1ac', textAlign: 'left' }}>
+                <th style={{ padding: '6px 16px', fontWeight: 600 }}>测量列</th>
+                <th style={{ padding: '6px 8px', fontWeight: 600, textAlign: 'right' }}>%研究变异</th>
+                <th style={{ padding: '6px 8px', fontWeight: 600, textAlign: 'right' }}>%公差</th>
+                <th style={{ padding: '6px 8px', fontWeight: 600, textAlign: 'right' }}>ndc</th>
+                <th style={{ padding: '6px 8px', fontWeight: 600 }}>{gageStandard === 'factory' ? '工厂判定' : 'AIAG 判定'}</th>
+                <th style={{ padding: '6px 8px', fontWeight: 600 }}>{gageStandard === 'factory' ? 'AIAG 对照' : '工厂对照'}</th>
+                <th style={{ padding: '6px 16px', fontWeight: 600 }}>明细</th>
+              </tr>
+            </thead>
+            <tbody>
+              {batchRows.map((row) => (
+                <tr key={row.col} style={{ borderTop: '1px solid #f0f2f5', background: row.col === selectedValueName ? '#f6f9fc' : undefined }}>
+                  <td style={{ padding: '6px 16px', color: '#33404f', fontWeight: row.col === selectedValueName ? 700 : 400 }}>{row.col}</td>
+                  {'error' in row ? (
+                    <td colSpan={5} style={{ padding: '6px 8px', color: '#b0620f' }}>未计算:{row.error}(其余列不受影响)</td>
+                  ) : (
+                    <>
+                      <td className="mono" style={{ padding: '6px 8px', textAlign: 'right' }}>{nf(row.result.totalGageRR, 2)}</td>
+                      <td className="mono" style={{ padding: '6px 8px', textAlign: 'right' }}>{(() => {
+                        const grr = row.result.components.find((c) => c.key === 'grr');
+                        return grr?.pctTolerance == null ? '未设' : nf(grr.pctTolerance, 2);
+                      })()}</td>
+                      <td className="mono" style={{ padding: '6px 8px', textAlign: 'right' }}>{Number.isFinite(row.result.ndc) ? String(row.result.ndc) : '∞'}</td>
+                      <td style={{ padding: '6px 8px', color: batchGrade[row.assess.grade], fontWeight: 700 }}>{row.assess.label}</td>
+                      <td style={{ padding: '6px 8px', color: batchGrade[row.reference.grade] }}>{row.reference.label}</td>
+                    </>
+                  )}
+                  <td style={{ padding: '6px 16px' }}>
+                    <button type="button" style={{ ...tabStyle(false), fontSize: 11.5 }} onClick={() => switchGageMeasurement(selectedValueName, row.col)}>查看明细</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div style={{ padding: '10px 16px 12px', fontSize: 12, color: '#8a929d' }}>勾选 ≥2 个测量列即可批量计算;每列的过程公差独立设置(切到该列后在右侧「过程公差」录入,自动按列记忆)。</div>
+      )}
+      {batchRows.length >= 2 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '4px 16px 12px', fontSize: 11.5, color: '#8a929d' }}>
+          <span>各列公差相互独立;当前列公差不会自动套用到其他列。</span>
+          <button
+            type="button"
+            style={{ ...tabStyle(tolApplyArmed), fontSize: 11.5, marginLeft: 'auto', ...(tolApplyArmed ? { color: '#c22f2f', borderColor: '#e6b3b3' } : {}) }}
+            onClick={() => {
+              if (!tolApplyArmed) { setTolApplyArmed(true); return; }
+              applyGageTolToCols(batchSelected.filter((c) => c !== selectedValueName));
+              setTolApplyArmed(false);
+              showToast(`已把当前公差口径应用到 ${batchSelected.filter((c) => c !== selectedValueName).length} 个测量列`);
+            }}
+            onBlur={() => setTolApplyArmed(false)}
+          >
+            {tolApplyArmed ? '再点一次确认:覆盖所有所选列的公差' : '把当前公差应用到全部所选列…'}
+          </button>
+        </div>
+      )}
+    </Card>
+  ) : null;
   let real: ReturnType<typeof computeGageRR> | null = null;
   let realError = requestedReal && !prepared.ok ? prepared.reason : '';
   if (requestedReal && prepared.ok) {
@@ -175,10 +324,12 @@ function GageRRInner({ T }: { T: ChartTokens }) {
             {controls}
           </div>
           {recommendHint && <div style={{ paddingBottom: 10 }}>{recommendHint}</div>}
+          {measurementSelectionHint && <div style={{ paddingBottom: 10 }}>{measurementSelectionHint}</div>}
         </Card>
         <Card style={{ padding: '18px 20px', fontSize: 12.5, color: '#b0620f', background: '#fff8e8', lineHeight: 1.7 }}>
           <b>Gage R&R 尚未运行：</b>{realError}。系统不会静默回落到演示研究；可修正列角色/数据，或取消“用导入数据”明确查看示例。
         </Card>
+        {batchCard}
       </div>
     );
   }
@@ -216,6 +367,7 @@ function GageRRInner({ T }: { T: ChartTokens }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <ReportCard data={gageReport({ primary, reference, ndc: g.ndc, grr: g.totalGageRR })} />
+      {batchCard}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 16 }}>
       <Card>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 16px', borderBottom: '1px solid #edf0f3', flexWrap: 'wrap' }}>
@@ -224,6 +376,7 @@ function GageRRInner({ T }: { T: ChartTokens }) {
           {controls}
         </div>
         {recommendHint}
+        {measurementSelectionHint}
         {!isReal && <div style={{ margin: '10px 16px 0' }}><DemoBadge /></div>}
         {isReal && g.toleranceNote && (
           <div role="alert" style={{ margin: '10px 16px 0', padding: '8px 10px', color: '#8a5a00', background: '#fff8e8', borderRadius: 4, fontSize: 12 }}>{g.toleranceNote}</div>
@@ -993,7 +1146,7 @@ export function Pareto({ T }: { T: ChartTokens }) {
 function ParetoInner({ T }: { T: ChartTokens }) {
   const {
     openModal, setImportTab, setImportKind,
-    paretoMergeOther: mergeOther, paretoThreshold, setParetoOptions,
+    paretoThreshold,
     paretoShowDemo: showDemo, setParetoShowDemo: setShowDemo,
   } = useApp();
   const pareto = useData((st) => st.paretoModel);
@@ -1012,7 +1165,7 @@ function ParetoInner({ T }: { T: ChartTokens }) {
   }
 
   const source = isReal ? pareto!.rows : DEFECTS;
-  const analysis = paretoReport({ rows: source, mergeOther, threshold: paretoThreshold });
+  const analysis = paretoReport({ rows: source, mergeOther: false, threshold: paretoThreshold });
   const display = analysis.rows.map(({ name, count }) => ({ name, count }));
   const total0 = analysis.total;
   const rows = analysis.rows.map((d, i) => ({
@@ -1027,31 +1180,7 @@ function ParetoInner({ T }: { T: ChartTokens }) {
       <Card>
         <CardHeader
           title={isReal ? `缺陷帕累托图 · ${pareto!.name}` : '缺陷帕累托图 · 示例'}
-          right={
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              {analysis.sourceCategoryCount > 3 && (
-                <div style={{ display: 'inline-flex', alignItems: 'center', gap: 7, fontSize: 12, color: '#5b6472' }}>
-                  <label style={{ display: 'inline-flex', alignItems: 'center', gap: 5, cursor: 'pointer' }}>
-                    <input type="checkbox" checked={mergeOther} onChange={(e) => setParetoOptions({ paretoMergeOther: e.target.checked })} />
-                    合并尾部为「其他」
-                  </label>
-                  <input
-                    type="number" min={50} max={100} step={1}
-                    value={Math.round(paretoThreshold * 100)}
-                    onChange={(e) => {
-                      const value = e.currentTarget.valueAsNumber;
-                      if (Number.isFinite(value)) setParetoOptions({ paretoThreshold: value / 100 });
-                    }}
-                    disabled={!mergeOther}
-                    aria-label="合并其他累计阈值"
-                    className="mono"
-                    style={{ width: 58, padding: '3px 5px', border: '1px solid #cfd5dd', borderRadius: 4, color: '#4a5462', background: mergeOther ? '#fff' : '#f4f6f8' }}
-                  />%
-                </div>
-              )}
-              {!isReal && <DemoBadge />}
-            </div>
-          }
+          right={!isReal ? <DemoBadge /> : undefined}
         />
         <div style={{ padding: '14px 16px 6px' }}>
           <ParetoChart T={T} rows={display} w={960} h={340} title={`${isReal ? pareto!.name : '示例数据'} 的 Pareto 图`} />

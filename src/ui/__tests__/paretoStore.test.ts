@@ -38,7 +38,7 @@ describe('paretoModel', () => {
     expect(saved?.title).toContain('六月缺陷');
   });
 
-  it('保存 A、导入 B 后回看 A：恢复当时数据与合并参数', () => {
+  it('保存 A、导入 B 后回看 A：恢复当时数据并按720迁移为显示全部类别', () => {
     useData.getState().importPareto('帕累托A', [{ name: '划伤', count: 30 }, { name: '毛刺', count: 10 }]);
     useApp.setState({ page: 'pareto', paretoView: 'pareto', paretoMergeOther: true, paretoThreshold: 0.9 });
     const saved = useAnalyses.getState().saveCurrent()!;
@@ -51,7 +51,7 @@ describe('paretoModel', () => {
     expect(useData.getState().paretoModel).toEqual({
       name: '帕累托A', rows: [{ name: '划伤', count: 30 }, { name: '毛刺', count: 10 }],
     });
-    expect(useApp.getState().paretoMergeOther).toBe(true);
+    expect(useApp.getState().paretoMergeOther).toBe(false);
     expect(useApp.getState().paretoThreshold).toBe(0.9);
     expect('paretoData' in useApp.getState()).toBe(false);
   });

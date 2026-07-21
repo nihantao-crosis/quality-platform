@@ -4,7 +4,7 @@ import { useApp } from '../../store/appStore';
 import { useData, resolveCapabilityMeasurementData } from '../../store/dataStore';
 import {
   nf, DEFECTS, evalRules, evalLimitedRules, capabilityInputError, computeCapability, oneWayAnova, anovaGroups, andersonDarling,
-  prepareSpcData, countCapabilityViolations,
+  prepareSpcData, countCapabilityViolations, withSigmaMethod,
 } from '../../core';
 import type { ChartTokens } from '../tokens';
 import { Card, Badge } from '../common';
@@ -15,15 +15,16 @@ import { paretoReport } from '../reportData';
 
 export function Dashboard({ T }: { T: ChartTokens }) {
   const {
-    goTo, lsl, usl, tgt, lslOn, uslOn, spcRules, spcRuleK, spcDataLayout, spcValueCol, spcSubgroupCol,
-    paretoMergeOther, paretoThreshold, capSubgroupMode, capSubgroupSize, capValueCol, capSubgroupIdCol,
+    goTo, lsl, usl, tgt, lslOn, uslOn, spcRules, spcRuleK, spcDataLayout, spcValueCol, spcSubgroupCol, spcSigmaMethod,
+    paretoThreshold, capSubgroupMode, capSubgroupSize, capValueCol, capSubgroupIdCol,
   } = useApp();
   const { model: M, textCols, pendingCells } = useData();
   const prepared = prepareSpcData(M, textCols, {
     layout: spcDataLayout, valueColumn: spcValueCol, subgroupColumn: spcSubgroupCol,
     pendingCells,
   });
-  const SM = prepared.model;
+  // 审查修复(720):总览与 SPC 页同口径——σ 估计方法一并套用,R 判异中心线用 rCl(pooled 时 ≠ R̄)
+  const SM = prepared.model ? withSigmaMethod(prepared.model, spcSigmaMethod) : null;
   // 批次716-R3:Cpk/PPM 卡改走能力口径解析(resolveCapabilityMeasurementData),与能力页/
   // 保存记录/专项报告同源;趋势图与 SPC 告警仍属 SPC 口径,继续使用上面的 prepared/SM。
   // resolver 从 store 内部读取以下口径/角色字段,依赖需手工列全以便口径变化时失效。
@@ -40,7 +41,7 @@ export function Dashboard({ T }: { T: ChartTokens }) {
   // 与 SPC 页共用数据角色和判异口径。离散图失控时先告警，不把均值图单独解释为“受控”。
   const means = SM?.subs.map((s) => s.mean) ?? [];
   const dispersion = !SM ? null : SM.hasSubgroups
-    ? evalLimitedRules(SM.subs.map((s) => s.range), SM.rbar, SM.uclR, SM.lclR, spcRules, spcRuleK)
+    ? evalLimitedRules(SM.subs.map((s) => s.range), SM.rCl, SM.uclR, SM.lclR, spcRules, spcRuleK)
     : evalLimitedRules(SM.mr.slice(1) as number[], SM.mrbar, SM.mrUcl, 0, spcRules, spcRuleK);
   const mainRules = !SM ? null : SM.hasSubgroups
     ? evalRules(means, SM.xbarbar, (SM.uclX - SM.xbarbar) / 3, spcRules, spcRuleK)
@@ -108,7 +109,7 @@ export function Dashboard({ T }: { T: ChartTokens }) {
   const paretoRows = paretoModel && paretoModel.rows.length > 0
     ? paretoReport({
         rows: paretoModel.rows,
-        mergeOther: paretoMergeOther,
+        mergeOther: false,
         threshold: paretoThreshold,
       }).rows.map((row) => ({ name: row.name, count: row.count }))
     : null;

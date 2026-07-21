@@ -229,3 +229,18 @@ export function fCdf(f: number, d1: number, d2: number): number {
   if (f <= 0) return 0;
   return betai(d1 / 2, d2 / 2, (d1 * f) / (d1 * f + d2));
 }
+
+/** 数据显示分辨率：一组原始值的最大小数位数（批次720-A3，Minitab 式控制图标签位数：
+ * 均值类图 = 数据位数+1，极差类图 = 数据位数）。科学计数法值直接取 cap。 */
+export function dataDecimals(xs: number[], cap = 3): number {
+  let dp = 0;
+  for (const v of xs) {
+    if (!Number.isFinite(v)) continue;
+    const s = String(v);
+    if (s.includes('e') || s.includes('E')) return cap;
+    const dot = s.indexOf('.');
+    if (dot >= 0) dp = Math.max(dp, Math.min(cap, s.length - dot - 1));
+    if (dp >= cap) break;
+  }
+  return dp;
+}

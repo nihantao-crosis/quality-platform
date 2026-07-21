@@ -64,6 +64,116 @@ describe('偏好持久化安全', () => {
     expect(useApp.getState()).toMatchObject({ gageTolMode: 'auto', gageTolValue: null, gageStandard: 'factory' });
   });
 
+  it('批次720 MSA 公差随列记忆:切列换口径不串用、记忆可恢复、应用到全部显式生效', () => {
+    useApp.setState({ gageValueName: '螺钉高度', gageTolMode: 'width', gageTolValue: 1, gageTolByCol: {}, gageBatchCols: null });
+    // 切到平衡量值:螺钉高度的公差入记忆,新列无记忆 → none(绝不带旧值)
+    useApp.getState().switchGageMeasurement('螺钉高度', '平衡量值');
+    expect(useApp.getState()).toMatchObject({ gageValueName: '平衡量值', gageTolMode: 'none', gageTolValue: null });
+    expect(useApp.getState().gageTolByCol['螺钉高度']).toEqual({ mode: 'width', value: 1 });
+    // 平衡量值设上限 100 后切回螺钉高度:各自恢复
+    useApp.setState({ gageTolMode: 'upper', gageTolValue: 100 });
+    useApp.getState().switchGageMeasurement('平衡量值', '螺钉高度');
+    expect(useApp.getState()).toMatchObject({ gageValueName: '螺钉高度', gageTolMode: 'width', gageTolValue: 1 });
+    useApp.getState().switchGageMeasurement('螺钉高度', '平衡量值');
+    expect(useApp.getState()).toMatchObject({ gageTolMode: 'upper', gageTolValue: 100 });
+    // 应用到全部:显式覆盖
+    useApp.getState().applyGageTolToCols(['电阻值', '螺钉高度']);
+    expect(useApp.getState().gageTolByCol['电阻值']).toEqual({ mode: 'upper', value: 100 });
+    expect(useApp.getState().gageTolByCol['螺钉高度']).toEqual({ mode: 'upper', value: 100 });
+  });
+
+  it('MSA 批量列去重并封顶 64；公差记忆按最近使用保留而非误删刚触碰列', () => {
+    const cols = Array.from({ length: 65 }, (_, index) => `响应${index + 1}`);
+    useApp.getState().setGageBatchCols([...cols, '响应1']);
+    expect(useApp.getState().gageBatchCols).toHaveLength(64);
+    expect(new Set(useApp.getState().gageBatchCols).size).toBe(64);
+    const selected = useApp.getState().gageBatchCols ?? [];
+    expect(selected[selected.length - 1]).toBe('响应64');
+
+    const memory = Object.fromEntries(Array.from({ length: 64 }, (_, index) => [
+      `历史响应${index + 1}`, { mode: 'width' as const, value: index + 1 },
+    ]));
+    useApp.setState({
+      gageValueName: '历史响应1', gageTolMode: 'upper', gageTolValue: 999,
+      gageTolByCol: memory,
+    });
+    useApp.getState().switchGageMeasurement('历史响应1', '新响应');
+    useApp.setState({ gageTolMode: 'lower', gageTolValue: 123 });
+    useApp.getState().switchGageMeasurement('新响应', '另一个响应');
+    const remembered = useApp.getState().gageTolByCol;
+    expect(Object.keys(remembered)).toHaveLength(65);
+    expect(remembered['历史响应1']).toEqual({ mode: 'upper', value: 999 });
+    expect(remembered['历史响应2']).toEqual({ mode: 'width', value: 2 });
+    expect(remembered['新响应']).toEqual({ mode: 'lower', value: 123 });
+  });
+
+  it('MSA 满容量切换先恢复目标公差，并保全 64 个批量列', () => {
+    const selected = Array.from({ length: 64 }, (_, index) => `C${index + 1}`);
+    const memory = Object.fromEntries([
+      ...selected.map((name, index) => [name, { mode: 'width' as const, value: index + 1 }] as const),
+      ['C65', { mode: 'lower' as const, value: -5 }] as const,
+    ]);
+    useApp.setState({
+      gageValueName: 'C66', gageTolMode: 'upper', gageTolValue: 999,
+      gageBatchCols: selected, gageTolByCol: memory,
+    });
+    useApp.getState().switchGageMeasurement('C66', 'C1');
+    expect(useApp.getState()).toMatchObject({ gageValueName: 'C1', gageTolMode: 'width', gageTolValue: 1 });
+    expect(Object.keys(useApp.getState().gageTolByCol)).toHaveLength(65);
+    for (const name of selected) expect(useApp.getState().gageTolByCol[name]).toBeDefined();
+  });
+
+  it('批次720 gageTolByCol/gageBatchCols 持久化往返;坏条目逐项丢弃不废整包', async () => {
+    useApp.setState({ gageTolByCol: {}, gageBatchCols: null });
+    localStorage.setItem('qp-prefs-v1', JSON.stringify({
+      version: 3,
+      state: {
+        gageBatchCols: ['螺钉高度', '平衡量值'],
+        gageTolByCol: {
+          '螺钉高度': { mode: 'width', value: 1 },
+          '坏模式': { mode: '任意', value: 1 },
+          '坏数值': { mode: 'upper', value: 'NaN' },
+          '电阻值': { mode: 'none', value: null },
+        },
+      },
+    }));
+    await useApp.persist.rehydrate();
+    expect(useApp.getState().gageBatchCols).toEqual(['螺钉高度', '平衡量值']);
+    expect(useApp.getState().gageTolByCol).toEqual({
+      '螺钉高度': { mode: 'width', value: 1 },
+      '电阻值': { mode: 'none', value: null },
+    });
+  });
+
+  it('批次720 SPC σ 估计方法/区带开关持久化往返;非法值回落', async () => {
+    useApp.setState({ spcSigmaMethod: 'pooled', spcShowZones: true });
+    localStorage.setItem('qp-prefs-v1', JSON.stringify({
+      version: 3,
+      state: { spcSigmaMethod: 'classic', spcShowZones: false },
+    }));
+    await useApp.persist.rehydrate();
+    expect(useApp.getState()).toMatchObject({ spcSigmaMethod: 'classic', spcShowZones: false });
+
+    useApp.setState({ spcSigmaMethod: 'pooled', spcShowZones: true });
+    localStorage.setItem('qp-prefs-v1', JSON.stringify({
+      version: 3,
+      state: { spcSigmaMethod: 'rbar-ish', spcShowZones: 'no' },
+    }));
+    await useApp.persist.rehydrate();
+    expect(useApp.getState()).toMatchObject({ spcSigmaMethod: 'pooled', spcShowZones: true });
+  });
+
+  it('旧 Pareto 合并状态首次水合时明确提示并重置为展开全部类别', async () => {
+    useApp.setState({ toast: null, paretoMergeOther: false });
+    localStorage.setItem('qp-prefs-v1', JSON.stringify({
+      version: 3,
+      state: { paretoMergeOther: true },
+    }));
+    await useApp.persist.rehydrate();
+    expect(useApp.getState().paretoMergeOther).toBe(false);
+    expect(useApp.getState().toast).toContain('展开全部类别');
+  });
+
   it('合法偏好仍能恢复', async () => {
     localStorage.setItem('qp-prefs-v1', JSON.stringify({
       version: 3,

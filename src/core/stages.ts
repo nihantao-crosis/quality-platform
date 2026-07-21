@@ -2,7 +2,8 @@
  * 分阶段控制图 — 按阶段列（如 改进前/后、班次、批次）分段计算控制限。
  * 每个连续段独立估计中心线与 σ,判异在段内进行（Minitab Stages 语义）。
  */
-import { CONTROL_CONSTANTS, evalLimitedRules, evalRules, type NelsonRules, type RuleViolation } from './spc';
+import { CONTROL_CONSTANTS, DEFAULT_RULE_K, c4Of, evalLimitedRules, evalRules, type NelsonRuleK, type NelsonRules, type RuleViolation } from './spc';
+import type { SpcSigmaMethod } from './model';
 
 export interface StageSegment {
   label: string;
@@ -61,7 +62,13 @@ export function stageValidationError(labels: string[], pointCount = labels.lengt
  * X̄ 图分阶段：rows 为子组矩阵,labels 与行对齐。
  * 每段：X̿ ± A2·R̄（段内估计）;段长 < 2 时限值退化为段均值（不判异）。
  */
-export function stagedXbar(rows: number[][], labels: string[], rules: NelsonRules): StagedResult {
+export function stagedXbar(
+  rows: number[][],
+  labels: string[],
+  rules: NelsonRules,
+  sigmaMethod: SpcSigmaMethod = 'classic',
+  ruleK: Partial<NelsonRuleK> = DEFAULT_RULE_K,
+): StagedResult {
   if (rows.length === 0 || rows[0].length < 2) throw new RangeError('分阶段 X̄ 图至少需要一个含 2 个测量值的子组');
   const validationError = stageValidationError(labels, rows.length);
   if (validationError) throw new RangeError(validationError);
@@ -71,26 +78,49 @@ export function stagedXbar(rows: number[][], labels: string[], rules: NelsonRule
     const segRows = rows.slice(seg.start, seg.end + 1);
     const means = segRows.map((r) => r.reduce((a, b) => a + b, 0) / r.length);
     const xbarbar = means.reduce((a, b) => a + b, 0) / means.length;
-    const rbar = segRows.map((r) => Math.max(...r) - Math.min(...r)).reduce((a, b) => a + b, 0) / segRows.length;
-    const half = C.A2 * rbar;
+    const sigmaHat = segmentSigma(segRows, n, C, sigmaMethod);
+    const half = (3 * sigmaHat) / Math.sqrt(n);
     return { cl: xbarbar, ucl: xbarbar + half, lcl: xbarbar - half, sigma: half / 3 };
-  }, rules, false);
+  }, rules, false, ruleK);
 }
 
-/** R 图分阶段：UCL=D4·R̄,LCL=D3·R̄（段内估计） */
-export function stagedRange(rows: number[][], labels: string[], rules: NelsonRules): StagedResult {
+/** R 图分阶段：CL=d2σ̂（classic=R̄），UCL/LCL=CL±3d3σ̂，LCL 截 0（段内估计） */
+export function stagedRange(
+  rows: number[][],
+  labels: string[],
+  rules: NelsonRules,
+  sigmaMethod: SpcSigmaMethod = 'classic',
+  ruleK: Partial<NelsonRuleK> = DEFAULT_RULE_K,
+): StagedResult {
   if (rows.length === 0 || rows[0].length < 2) throw new RangeError('分阶段 R 图至少需要一个含 2 个测量值的子组');
   const validationError = stageValidationError(labels, rows.length);
   if (validationError) throw new RangeError(validationError);
   const n = rows[0].length;
   const C = CONTROL_CONSTANTS[Math.max(2, Math.min(10, n))];
   return buildStaged(labels, rows.map((r) => Math.max(...r) - Math.min(...r)), (seg) => {
-    const segRanges = rows.slice(seg.start, seg.end + 1).map((r) => Math.max(...r) - Math.min(...r));
+    const segRows = rows.slice(seg.start, seg.end + 1);
+    const segRanges = segRows.map((r) => Math.max(...r) - Math.min(...r));
     const rbar = segRanges.reduce((a, b) => a + b, 0) / segRanges.length;
-    const ucl = C.D4 * rbar;
-    const lcl = C.D3 * rbar;
-    return { cl: rbar, ucl, lcl, sigma: (ucl - rbar) / 3 };
-  }, rules, true);
+    const sigmaHat = segmentSigma(segRows, n, C, sigmaMethod);
+    const cl = sigmaMethod === 'pooled' ? C.d2 * sigmaHat : rbar;
+    const ucl = cl + 3 * C.d3 * sigmaHat;
+    const lcl = Math.max(0, cl - 3 * C.d3 * sigmaHat);
+    return { cl, ucl, lcl, sigma: C.d3 * sigmaHat };
+  }, rules, true, ruleK);
+}
+
+/** 段内 σ̂：classic=R̄/d2（Minitab 标准 X̄-R 默认）；pooled=Sp/c4(d+1)（显式可选）。 */
+function segmentSigma(segRows: number[][], n: number, C: (typeof CONTROL_CONSTANTS)[number], sigmaMethod: SpcSigmaMethod): number {
+  if (sigmaMethod === 'classic') {
+    const rbar = segRows.map((r) => Math.max(...r) - Math.min(...r)).reduce((a, b) => a + b, 0) / segRows.length;
+    return rbar / C.d2;
+  }
+  const df = segRows.length * (n - 1);
+  const ssq = segRows.reduce((a, r) => {
+    const m = r.reduce((x, y) => x + y, 0) / r.length;
+    return a + r.reduce((x, y) => x + (y - m) * (y - m), 0);
+  }, 0);
+  return Math.sqrt(ssq / df) / c4Of(df + 1);
 }
 
 function buildStaged(
@@ -99,6 +129,7 @@ function buildStaged(
   limitsOf: (seg: { start: number; end: number }) => { cl: number; ucl: number; lcl: number; sigma: number },
   rules: NelsonRules,
   limited: boolean,
+  ruleK: Partial<NelsonRuleK>,
 ): StagedResult {
   const raw = splitStages(labels);
   const clSeries = new Array<number>(points.length);
@@ -120,8 +151,8 @@ function buildStaged(
     if (seg.end - seg.start >= 1) {
       const segData = points.slice(seg.start, seg.end + 1);
       const r = limited
-        ? evalLimitedRules(segData, lim.cl, lim.ucl, lim.lcl, rules)
-        : evalRules(segData, lim.cl, lim.sigma, rules);
+        ? evalLimitedRules(segData, lim.cl, lim.ucl, lim.lcl, rules, ruleK)
+        : evalRules(segData, lim.cl, lim.sigma, rules, ruleK);
       r.viol.forEach((i) => viol.add(i + seg.start));
       r.list.forEach((v) => list.push({ ...v, i: v.i + seg.start }));
     }

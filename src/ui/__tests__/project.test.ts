@@ -40,7 +40,7 @@ describe('项目文件', () => {
     const json = buildProjectJson('9.9.9');
     const file = JSON.parse(json);
     expect(file.format).toBe('quality-platform-project');
-    expect(file.formatVersion).toBe(2);
+    expect(file.formatVersion).toBe(3);
     expect(file.appVersion).toBe('9.9.9');
     expect(Object.keys(file.stores)).toContain('qp-dataset-v1');
 
@@ -50,6 +50,52 @@ describe('项目文件', () => {
     expect(localStorage.getItem('qp-dataset-v1')).toContain('"name":"t"');
     expect(localStorage.getItem('qp-analysis-data-v1')).toContain('历史数据');
     expect(JSON.parse(localStorage.getItem('qp-aql-state-v1')!).aqlLot).toBe(2000);
+  });
+
+  it('v3 qproj 对批次720新增 SPC/MSA 字段与 v6 分析快照完整往返', () => {
+    const prefs = {
+      version: 3,
+      state: {
+        chartStyle: '经典', showGrid: true, projectName: '720往返',
+        lsl: 0, tgt: 5, usl: 10, lslOn: true, uslOn: true, capabilityBins: 13,
+        spcSigmaMethod: 'classic', spcShowZones: true,
+        gageUseReal: true, gageValueName: '响应A', gagePartName: '部件', gageOperatorName: '测试人',
+        gageTolMode: 'width', gageTolValue: 10, gageStandard: 'factory',
+        gageBatchCols: ['响应A', '响应B'],
+        gageTolByCol: {
+          响应A: { mode: 'width', value: 10 },
+          响应B: { mode: 'upper', value: 100 },
+        },
+        aqlLot: 2000, aqlLevel: 'II', aqlAQL: 1, aqlRegime: 'percent',
+        aqlMethod: 'gb', aqlAcMethod: 'gb', aqlSwitch: freshSwitchStatus(),
+      },
+    };
+    const analysis = {
+      id: 'msa-720', kind: 'gagerr', title: 'MSA批量', datasetName: '工厂表', metric: '2个响应', status: '已分析',
+      statusColor: '#2c8a45', statusBg: '#e8f4ea', createdAt: 1,
+      snapshot: {
+        snapshotVersion: 6,
+        gageValueName: null,
+        gagePartName: '部件',
+        gageOperatorName: '测试人',
+        gageBatchCols: ['响应A', '响应B'],
+        gageTolByCol: {
+          响应A: { mode: 'width', value: 10 },
+          响应B: { mode: 'upper', value: 100 },
+        },
+        spcSigmaMethod: 'classic',
+        spcShowZones: true,
+      },
+    };
+    localStorage.setItem('qp-prefs-v1', JSON.stringify(prefs));
+    localStorage.setItem('qp-analyses-v1', JSON.stringify([analysis]));
+    const project = buildProjectJson('1.41.0');
+    expect(JSON.parse(project).formatVersion).toBe(3);
+
+    localStorage.clear();
+    expect(applyProjectJson(project)).toBeNull();
+    expect(JSON.parse(localStorage.getItem('qp-prefs-v1')!)).toEqual(prefs);
+    expect(JSON.parse(localStorage.getItem('qp-analyses-v1')!)).toEqual([analysis]);
   });
 
   it('导入会清掉文件中不存在的项目键(完整替换语义)', () => {

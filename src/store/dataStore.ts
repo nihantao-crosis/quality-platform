@@ -550,6 +550,17 @@ function suggestSpec(model: VarModel, textCols: TextColumn[]) {
  * SPC 的列角色属于某一张工作表，不能跨数据集沿用。否则旧的 rows/阶段配置可能把
  * 新工作表的不同物理量静默当成组内重复值，或造成页面与保存/导出口径分裂。
  */
+function resetDatasetNonSpcRoles(): void {
+  useApp.setState({
+    // Gage 下拉框不能视觉回退到新列、计算却继续提交旧列名。
+    gageValueName: null, gagePartName: null, gageOperatorName: null,
+    // 批量响应选择与逐列公差属于当前工作表；即使新表恰有同名列，也不能沿用上一数据集的物理规格。
+    gageBatchCols: null, gageTolByCol: {}, gageTolMode: 'auto', gageTolValue: null,
+    // 能力子组配置同属列角色:跨数据集沿用会把上一张表的口径静默套在新表同名列上。
+    capSubgroupMode: 'spc', capSubgroupSize: 5, capValueCol: null, capSubgroupIdCol: null,
+  });
+}
+
 function resetDatasetSpcRoles(): void {
   const currentType = useApp.getState().spcType;
   useApp.setState({
@@ -557,11 +568,8 @@ function resetDatasetSpcRoles(): void {
     spcType: currentType === 'p' || currentType === 'c' ? 'xbar-r' : currentType,
     spcDataLayout: 'auto', spcValueCol: null, spcSubgroupCol: null, spcStageCol: null,
     selSub: null,
-    // Gage 下拉框不能视觉回退到新列、计算却继续提交旧列名。
-    gageValueName: null, gagePartName: null, gageOperatorName: null,
-    // 能力子组配置同属列角色:跨数据集沿用会把上一张表的口径静默套在新表同名列上。
-    capSubgroupMode: 'spc', capSubgroupSize: 5, capValueCol: null, capSubgroupIdCol: null,
   });
+  resetDatasetNonSpcRoles();
 }
 
 // ---------- 启动恢复 ----------
@@ -1059,7 +1067,8 @@ export const useData = create<DataState>((set, get) => ({
         const model = modelFromStored(r.data);
         if (!isCurrentDatasetIntent(revision)) return false;
         set({ model, textCols: r.data.textCols ?? [], pendingCells: pendingFromStored(r.data), undoStack: [], redoStack: [] });
-        if (!preserveSpcRoles) resetDatasetSpcRoles();
+        if (preserveSpcRoles) resetDatasetNonSpcRoles();
+        else resetDatasetSpcRoles();
         useApp.setState({ anovaShowDemo: false });
         persistActive(r.data);
         suggestSpec(model, r.data.textCols ?? []);
@@ -1081,7 +1090,8 @@ export const useData = create<DataState>((set, get) => ({
       const model = modelFromStored(data);
       if (!isCurrentDatasetIntent(revision)) return false;
       set({ model, textCols: data.textCols ?? [], pendingCells: pendingFromStored(data), undoStack: [], redoStack: [] });
-      if (!preserveSpcRoles) resetDatasetSpcRoles();
+      if (preserveSpcRoles) resetDatasetNonSpcRoles();
+      else resetDatasetSpcRoles();
       useApp.setState({ anovaShowDemo: false });
       persistActive(data);
       suggestSpec(model, data.textCols ?? []);

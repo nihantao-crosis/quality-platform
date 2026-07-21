@@ -108,6 +108,36 @@ describe('uncodedEquation:压装数据的实际单位换算自证', () => {
   });
 });
 
+describe('generateFactorialDesign:多区组标准序与随机化审计', () => {
+  const factors = [
+    { name: 'A', low: -1, high: 1 },
+    { name: 'B', low: -1, high: 1 },
+  ];
+
+  it('未随机设计按区组连续，中心点位于各区组末尾，标准序=运行序', () => {
+    const design = generateFactorialDesign(factors, { blocks: 2, centerPoints: 1, randomize: false });
+    expect(design.rows.map((row) => row.slice(0, 3))).toEqual([
+      [1, 1, 1], [2, 2, 1], [3, 3, 1],
+      [4, 4, 2], [5, 5, 2], [6, 6, 2],
+    ]);
+    expect(design.textCols[0].values).toEqual([
+      '因子点', '因子点', '中心点', '因子点', '因子点', '中心点',
+    ]);
+  });
+
+  it('固定种子只在区组内改运行序；每个因子组合的标准序与未随机设计一致', () => {
+    const base = generateFactorialDesign(factors, { blocks: 2, centerPoints: 1, randomize: false });
+    const randomized = generateFactorialDesign(factors, { blocks: 2, centerPoints: 1, randomize: true, seed: 42 });
+    expect(randomized.rows.map((row) => row[2])).toEqual([1, 1, 1, 2, 2, 2]);
+    const key = (row: number[], pointType: string) => `${row.slice(2, 5).join('|')}|${pointType}`;
+    const baseStd = new Map(base.rows.map((row, index) => [key(row, base.textCols[0].values[index]), row[0]]));
+    randomized.rows.forEach((row, index) => {
+      expect(row[0]).toBe(baseStd.get(key(row, randomized.textCols[0].values[index])));
+      expect(row[1]).toBe(index + 1);
+    });
+  });
+});
+
 describe('uncodedEquation:适用范围守卫', () => {
   it('模型含三因子交互时返回 null;去掉高阶交互后可展开', () => {
     const detected = detectFactorial(
@@ -369,14 +399,17 @@ describe('Doe 页真实数据渲染冒烟:本批次新增卡与控件', () => {
     expect(view.container.innerHTML).toContain('残差诊断(单独放大)');
     expect(view.container.innerHTML).toContain('删后残差 t = r·√((ν−1)/(ν−r²))');
     fireEvent.click(view.getByText('vs 顺序'));
-    expect(view.container.innerHTML).toContain('运行序');
+    // 批次720-C3:轴题对齐 Minitab「与顺序」面板 → 观测值顺序
+    expect(view.container.innerHTML).toContain('观测值顺序');
     expect(view.container.innerHTML).not.toContain('NaN');
   });
 
   it('创建页:因子数为数字输入、随机化种子可见且默认沿用固定种子、仿行数标签明确角点重复', () => {
     useApp.setState({ doeTab: 'create' });
     const html = renderDoe();
-    for (const probe of ['因子数', '随机化种子', '仿行数(角点重复)', '20260713', '种子相同']) {
+    // 批次720-C4:默认自动换种子(工厂反馈「运行序非随机」=固定默认种子每次生成相同);
+    // 输入框初始仍显示固定种子,tooltip 说明改为自动换种+同种子可复现
+    for (const probe of ['因子数', '随机化种子', '仿行数(角点重复)', '20260713', '同种子完全复现', '自动换新种子']) {
       expect(html, `创建页应包含「${probe}」`).toContain(probe);
     }
     expect(html).not.toContain('本版支持 2–4 因子'); // 默认 k=2 合法,不出现越界提示

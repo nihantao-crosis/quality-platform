@@ -48,7 +48,7 @@ describe('.qproj × 数据集库', () => {
     const file = JSON.parse(await buildProjectJsonFull('9.9.9'));
     expect(file.vault).toBeDefined();
     expect(Object.keys(file.vault)).toEqual(['超大集']);
-    expect(file.formatVersion).toBe(2); // 旧读取器必须明确拒绝，不能静默忽略 vault/AQL 新语义
+    expect(file.formatVersion).toBe(3); // 旧读取器必须明确拒绝，不能静默忽略 vault/AQL 或 v6 快照新语义
   });
 
   it('导入把 vault 恢复进本机库并给出提示', async () => {
@@ -94,10 +94,10 @@ describe('.qproj × 数据集库', () => {
     expect(fake.store.has('坏')).toBe(false);
   });
 
-  it('旧 v1 格式(无 vault)照常导入；当前导出明确使用 v2', async () => {
+  it('旧 v1 格式(无 vault)照常导入；当前导出明确使用 v3', async () => {
     localStorage.setItem('qp-specs-v1', '{}');
     const legacy = buildProjectJson('1.0.0');
-    expect(JSON.parse(legacy).formatVersion).toBe(2);
+    expect(JSON.parse(legacy).formatVersion).toBe(3);
     const r = await applyProjectText(legacy);
     expect(r.error).toBeNull();
     expect(r.note).toBeUndefined();

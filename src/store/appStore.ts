@@ -3,7 +3,7 @@
  */
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
-import type { NelsonRules, NelsonRuleK, InspectionLevel, CalcState, AnovaMode, AqlMethod, AqlAcMethod, AqlRegime, SwitchStatus, SpcDataLayout, GageStandard, GageToleranceSpec } from '../core';
+import type { NelsonRules, NelsonRuleK, InspectionLevel, CalcState, AnovaMode, AqlMethod, AqlAcMethod, AqlRegime, SwitchStatus, SpcDataLayout, SpcSigmaMethod, GageStandard, GageToleranceSpec } from '../core';
 import {
   AQL_COLS, MAX_LOT_SIZE, aqlRegime, aqlRegimeAllows, calcKey as coreCalcKey, CALC_INIT,
   freshSwitchStatus, normalizeSwitchStatus, DEFAULT_RULE_K, normalizeRuleK,
@@ -15,6 +15,7 @@ export type Page =
   | 'dashboard' | 'assistant' | 'worksheet' | 'summary' | 'spc' | 'capability' | 'gagerr'
   | 'anova' | 'pareto' | 'doe' | 'aql';
 export type SpcType = 'xbar-r' | 'xbar-s' | 'i-mr' | 'ewma' | 'cusum' | 'p' | 'c';
+export type GageTolMode = 'auto' | 'width' | 'upper' | 'lower' | 'none';
 export type Modal = 'import' | 'export' | 'calc' | 'formula' | 'subset' | 'vault' | 'findreplace' | 'about' | 'sort' | 'colstats' | 'random' | 'help' | 'options' | null;
 export type ImportTab = 'csv' | 'excel' | 'clip' | 'mes';
 export type ImportKind = 'var' | 'p' | 'c' | 'pareto';
@@ -24,6 +25,37 @@ export type DoeTab = 'analyze' | 'create';
 export type HypoTab = 'anova' | 't1' | 't2' | 'reg';
 export type ParetoView = 'pareto' | 'fishbone';
 export type ChartStyle = '经典' | '现代' | '高对比';
+
+/** 批量研究最多 64 个响应；公差记忆还必须额外容纳当前明细列（它可能不在批量集合中）。 */
+export const GAGE_BATCH_COL_CAP = 64;
+export const GAGE_TOL_MEMORY_CAP = GAGE_BATCH_COL_CAP + 1;
+function clampGageTolMemory<T>(map: Record<string, T>, protectedKeys: Array<string | null | undefined> = []): Record<string, T> {
+  const keys = Object.keys(map);
+  if (keys.length <= GAGE_TOL_MEMORY_CAP) return map;
+  // 批量列和当前/目标明细列优先保留；其余位置再按插入序保留最近使用项。
+  const kept = new Set<string>();
+  for (const key of protectedKeys) {
+    if (key && Object.prototype.hasOwnProperty.call(map, key) && kept.size < GAGE_TOL_MEMORY_CAP) kept.add(key);
+  }
+  for (let index = keys.length - 1; index >= 0 && kept.size < GAGE_TOL_MEMORY_CAP; index -= 1) kept.add(keys[index]);
+  const out: Record<string, T> = {};
+  // 沿用原插入序，后续“最近使用”截断仍有稳定语义。
+  for (const key of keys) if (kept.has(key)) out[key] = map[key];
+  return out;
+}
+
+export function normalizeGageBatchCols(cols: string[] | null): string[] | null {
+  if (cols == null) return null;
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const col of cols) {
+    if (!col.trim() || seen.has(col)) continue;
+    seen.add(col);
+    normalized.push(col);
+    if (normalized.length === GAGE_BATCH_COL_CAP) break;
+  }
+  return normalized.length ? normalized : null;
+}
 
 export const DEFAULT_SPC_RULES: NelsonRules = {
   r1: true, r2: true, r3: true, r4: false, r5: true, r6: false, r7: false, r8: false,
@@ -47,6 +79,10 @@ interface AppState {
   spcSubgroupCol: string | null;
   /** X̄-R 分阶段列名；按名存储，避免文本列重排后指向错列 */
   spcStageCol: string | null;
+  /** SPC 图 σ 估计方法(批次720-A1):'classic'=R̄/d2、S̄/c4(Minitab 标准图默认);'pooled'=显式可选的合并标准差。 */
+  spcSigmaMethod: SpcSigmaMethod;
+  /** ±1SL/±2SL σ 区带线与数值标注(批次720-A4,默认开,对齐工厂 Minitab 图) */
+  spcShowZones: boolean;
   selSub: number | null;
   projectName: string;
   lsl: number;
@@ -65,7 +101,11 @@ interface AppState {
   gagePartName: string | null;
   gageOperatorName: string | null;
   /** MSA 过程公差口径：auto=联动全局规格限（双开=宽度，单开=对应单侧），width/upper/lower=手动值，none=不设。 */
-  gageTolMode: 'auto' | 'width' | 'upper' | 'lower' | 'none';
+  gageTolMode: GageTolMode;
+  /** 批次720-B:多测量列批量 GRR 的选中列(null=仅当前测量列;列名引用,换表由页面过滤失效项) */
+  gageBatchCols: string[] | null;
+  /** 批次720-B:公差口径按测量列记忆(防止一列的公差被静默套到另一列);键=测量列名 */
+  gageTolByCol: Record<string, { mode: GageTolMode; value: number | null }>;
   /** width/upper/lower 手动模式的数值；auto/none 模式忽略。 */
   gageTolValue: number | null;
   /** MSA 判定标准：factory=工厂口径（≤10 理想/≤20 可接受，%SV 与 %公差取较差），aiag=AIAG（10/30，%SV）。 */
@@ -127,6 +167,8 @@ interface AppState {
   setSpcRuleK(patch: Partial<NelsonRuleK>): void;
   setSpcRoles(patch: Partial<Pick<AppState, 'spcDataLayout' | 'spcValueCol' | 'spcSubgroupCol'>>): void;
   setSpcStageCol(name: string | null): void;
+  setSpcSigmaMethod(m: SpcSigmaMethod): void;
+  toggleSpcZones(): void;
   setSelSub(i: number | null): void;
   setSpec(patch: Partial<Pick<AppState, 'lsl' | 'usl' | 'tgt'>>): void;
   setProjectName(name: string): void;
@@ -134,6 +176,11 @@ interface AppState {
   setCapabilityBins(v: number): void;
   setCapabilitySubgroup(patch: Partial<Pick<AppState, 'capSubgroupMode' | 'capSubgroupSize' | 'capValueCol' | 'capSubgroupIdCol'>>): void;
   setGageOptions(patch: Partial<Pick<AppState, 'gageUseReal' | 'gageValueName' | 'gagePartName' | 'gageOperatorName' | 'gageTolMode' | 'gageTolValue' | 'gageStandard'>>): void;
+  /** 切换测量列:旧列公差入记忆,新列公差从记忆恢复(无记忆=none,绝不带旧列的值) */
+  switchGageMeasurement(prev: string | null, next: string | null): void;
+  setGageBatchCols(cols: string[] | null): void;
+  /** 把当前公差口径显式应用到这些测量列(批量摘要的「应用到全部」,需用户二次确认后调用) */
+  applyGageTolToCols(cols: string[]): void;
   setDoeView(v: DoeView): void;
   setDoeTab(v: DoeTab): void;
   setDoeCols(factorCols: string[] | null, respCol: string | null): void;
@@ -254,12 +301,16 @@ function persistedPrefsOf(s: AppState) {
     gageTolMode: s.gageTolMode,
     gageTolValue: s.gageTolValue,
     gageStandard: s.gageStandard,
+    gageBatchCols: s.gageBatchCols,
+    gageTolByCol: s.gageTolByCol,
     spcRules: s.spcRules,
     spcRuleK: s.spcRuleK,
     spcDataLayout: s.spcDataLayout,
     spcValueCol: s.spcValueCol,
     spcSubgroupCol: s.spcSubgroupCol,
     spcStageCol: s.spcStageCol,
+    spcSigmaMethod: s.spcSigmaMethod,
+    spcShowZones: s.spcShowZones,
     doeView: s.doeView,
     doeTab: s.doeTab,
     doeFactorCols: s.doeFactorCols,
@@ -323,6 +374,8 @@ const initialAql = loadPersistedAqlState();
 
 let toastTimer: ReturnType<typeof setTimeout> | undefined;
 
+let paretoMergeMigrationPending = false;
+
 export const useApp = create<AppState>()(persist((set, get) => ({
   page: 'dashboard',
   spcType: 'xbar-r',
@@ -333,6 +386,8 @@ export const useApp = create<AppState>()(persist((set, get) => ({
   spcValueCol: null,
   spcSubgroupCol: null,
   spcStageCol: null,
+  spcSigmaMethod: 'classic',
+  spcShowZones: true,
   selSub: null,
   projectName: '质检项目 2026-Q2',
   lsl: 24.9,
@@ -352,6 +407,8 @@ export const useApp = create<AppState>()(persist((set, get) => ({
   gageTolMode: 'auto',
   gageTolValue: null,
   gageStandard: 'factory',
+  gageBatchCols: null,
+  gageTolByCol: {},
   doeView: 'main',
   doeTab: 'analyze',
   doeFactorCols: null,
@@ -413,6 +470,8 @@ export const useApp = create<AppState>()(persist((set, get) => ({
   setSpcRuleK: (patch) => set((s) => ({ spcRuleK: normalizeRuleK({ ...s.spcRuleK, ...patch }) })),
   setSpcRoles: (patch) => set({ ...patch, selSub: null, spcStageCol: null }),
   setSpcStageCol: (spcStageCol) => set({ spcStageCol, selSub: null }),
+  setSpcSigmaMethod: (spcSigmaMethod) => set({ spcSigmaMethod, selSub: null }),
+  toggleSpcZones: () => set((s) => ({ spcShowZones: !s.spcShowZones })),
   setSelSub: (selSub) => set({ selSub }),
   setSpec: (patch) => set(patch),
   setProjectName: (projectName) => set({ projectName: projectName.trim() || '未命名项目' }),
@@ -425,6 +484,35 @@ export const useApp = create<AppState>()(persist((set, get) => ({
   setCapabilityBins: (value) => set({ capabilityBins: Math.max(5, Math.min(40, Math.round(value))) }),
   setCapabilitySubgroup: (patch) => set(patch),
   setGageOptions: (patch) => set(patch),
+  switchGageMeasurement: (prev, next) => set((s) => {
+    if (prev === next) return {};
+    const memory = { ...s.gageTolByCol };
+    // 必须在截断前读取目标列；否则满容量时，最旧的目标项会先被逐出并错误恢复为“未设置”。
+    const restored = next ? memory[next] : undefined;
+    // 触碰过的列移到插入序末尾，截断语义才是真正的“保留最近使用”。
+    if (prev) {
+      delete memory[prev];
+      memory[prev] = { mode: s.gageTolMode, value: s.gageTolValue };
+    }
+    const gageTolByCol = clampGageTolMemory(memory, [...(s.gageBatchCols ?? []), next, prev]);
+    return {
+      gageValueName: next,
+      gageTolByCol,
+      // 新列无记忆时公差归「不设」——绝不把旧列的公差带过去(720-B,工厂多列表串用风险)
+      gageTolMode: restored ? restored.mode : 'none',
+      gageTolValue: restored ? restored.value : null,
+    };
+  }),
+  setGageBatchCols: (gageBatchCols) => set({ gageBatchCols: normalizeGageBatchCols(gageBatchCols) }),
+  applyGageTolToCols: (cols) => set((s) => {
+    const gageTolByCol = { ...s.gageTolByCol };
+    const normalized = normalizeGageBatchCols(cols) ?? [];
+    for (const col of normalized) {
+      delete gageTolByCol[col];
+      gageTolByCol[col] = { mode: s.gageTolMode, value: s.gageTolValue };
+    }
+    return { gageTolByCol: clampGageTolMemory(gageTolByCol, [...normalized, s.gageValueName]) };
+  }),
   setDoeView: (doeView) => set({ doeView }),
   setDoeTab: (doeTab) => set({ doeTab }),
   setDoeCols: (doeFactorCols, doeRespCol) => set({ doeFactorCols, doeRespCol, doeModelTerms: null }),
@@ -557,6 +645,29 @@ export const useApp = create<AppState>()(persist((set, get) => ({
       ? p.gageTolValue as number | null
       : current.gageTolValue;
     merged.gageStandard = p.gageStandard === 'factory' || p.gageStandard === 'aiag' ? p.gageStandard : current.gageStandard;
+    // 批次720-B:批量选中列与逐列公差记忆——写读两侧对称,逐项校验,坏一项不废整包
+    merged.gageBatchCols = p.gageBatchCols === null
+      || (Array.isArray(p.gageBatchCols) && p.gageBatchCols.every((c) => typeof c === 'string'))
+      ? normalizeGageBatchCols(p.gageBatchCols as string[] | null)
+      : current.gageBatchCols;
+    merged.gageTolByCol = (() => {
+      const raw = p.gageTolByCol;
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return current.gageTolByCol;
+      const out: Record<string, { mode: GageTolMode; value: number | null }> = {};
+      for (const [key, entry] of Object.entries(raw as Record<string, unknown>)) {
+        if (!entry || typeof entry !== 'object') continue;
+        const mode = (entry as { mode?: unknown }).mode;
+        const value = (entry as { value?: unknown }).value;
+        if (mode !== 'auto' && mode !== 'width' && mode !== 'upper' && mode !== 'lower' && mode !== 'none') continue;
+        if (value !== null && (typeof value !== 'number' || !Number.isFinite(value))) continue;
+        out[key] = { mode, value: value as number | null };
+      }
+      // 批量列与当前列不可因记忆截断丢失；其余超限项保留最近使用值。
+      return clampGageTolMemory(out, [...(merged.gageBatchCols ?? []), merged.gageValueName]);
+    })();
+    // 批次720:SPC σ 估计方法与区带线开关——写读两侧对称
+    merged.spcSigmaMethod = p.spcSigmaMethod === 'pooled' || p.spcSigmaMethod === 'classic' ? p.spcSigmaMethod : current.spcSigmaMethod;
+    merged.spcShowZones = typeof p.spcShowZones === 'boolean' ? p.spcShowZones : current.spcShowZones;
     const rules = p.spcRules && typeof p.spcRules === 'object' && !Array.isArray(p.spcRules)
       ? p.spcRules as Partial<NelsonRules>
       : {};
@@ -584,7 +695,10 @@ export const useApp = create<AppState>()(persist((set, get) => ({
     merged.regXName = stringOrNull(p.regXName, current.regXName);
     merged.regYName = stringOrNull(p.regYName, current.regYName);
     merged.paretoView = p.paretoView === 'pareto' || p.paretoView === 'fishbone' ? p.paretoView : current.paretoView;
-    merged.paretoMergeOther = typeof p.paretoMergeOther === 'boolean' ? p.paretoMergeOther : current.paretoMergeOther;
+    // 批次720-C2:合并尾部控件已移出图面,旧持久化里的 true 一律迁移为关——
+    // 不能让工厂验收图被无人知情的历史开关静默合并类别(历史「分析记录」回放不走本路径,保存时行为不受影响)。
+    if (p.paretoMergeOther === true) paretoMergeMigrationPending = true;
+    merged.paretoMergeOther = false;
     merged.paretoThreshold = typeof p.paretoThreshold === 'number' && Number.isFinite(p.paretoThreshold)
       && p.paretoThreshold >= 0.5 && p.paretoThreshold <= 1 ? p.paretoThreshold : current.paretoThreshold;
     const separateAql = loadPersistedAqlState();
@@ -609,6 +723,12 @@ export const useApp = create<AppState>()(persist((set, get) => ({
     merged.aqlAcMethod = 'gb';
     merged.aqlSwitch = normalizeSwitchStatus(aql.aqlSwitch ?? current.aqlSwitch);
     return merged;
+  },
+  onRehydrateStorage: () => (state, error) => {
+    if (!error && state && paretoMergeMigrationPending) {
+      paretoMergeMigrationPending = false;
+      state.showToast('旧版帕累托“合并其他”设置已停用；现按 Minitab 经典图展开全部类别');
+    }
   },
 }));
 
@@ -696,8 +816,10 @@ export function resetUiPreferences(): void {
     lsl: 24.9, usl: 25.1, tgt: 25, lslOn: true, uslOn: true, capabilityBins: 13,
     gageUseReal: true, gageValueName: null, gagePartName: null, gageOperatorName: null,
     gageTolMode: 'auto', gageTolValue: null, gageStandard: 'factory',
+    gageBatchCols: null, gageTolByCol: {},
     spcRules: { ...DEFAULT_SPC_RULES }, spcRuleK: { ...DEFAULT_RULE_K },
     spcDataLayout: 'auto', spcValueCol: null, spcSubgroupCol: null, spcStageCol: null,
+    spcSigmaMethod: 'classic', spcShowZones: true,
     capSubgroupMode: 'spc', capSubgroupSize: 5, capValueCol: null, capSubgroupIdCol: null,
     doeView: 'main', doeTab: 'analyze', doeFactorCols: null, doeRespCol: null, doeModelTerms: null, doeIncludeCurvature: true,
     t1ColName: null, t1Mu0: null, t2ColAName: null, t2ColBName: null, regXName: null, regYName: null,

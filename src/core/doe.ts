@@ -962,11 +962,10 @@ export function generateFactorialDesign(
   };
 
   const generated: GeneratedRun[] = [];
-  let standardOrder = 1;
   for (let r = 0; r < reps; r++) {
     for (let combo = 0; combo < (1 << k); combo++) {
       generated.push({
-        standardOrder: standardOrder++,
+        standardOrder: 0,
         block: blockFor(combo),
         pointType: '因子点',
         factorValues: factors.map((factor, j) => (combo & (1 << j) ? factor.high : factor.low)),
@@ -976,7 +975,7 @@ export function generateFactorialDesign(
   for (let block = 1; block <= blocks; block++) {
     for (let c = 0; c < centers; c++) {
       generated.push({
-        standardOrder: standardOrder++,
+        standardOrder: 0,
         block,
         pointType: '中心点',
         factorValues: factors.map((factor) => factor.low / 2 + factor.high / 2),
@@ -985,6 +984,12 @@ export function generateFactorialDesign(
   }
 
   const byBlock = Array.from({ length: blocks }, (_, i) => generated.filter((run) => run.block === i + 1));
+  // Minitab 的标准序以“各区组的确定性基线”为准：区组连续，中心点位于该区组因子点之后。
+  // 随机化只在区组内部打乱运行序，不能改变同一设计点的标准序。
+  let standardOrder = 1;
+  for (const blockRuns of byBlock) {
+    for (const run of blockRuns) run.standardOrder = standardOrder++;
+  }
   // 按区组内随机化；同一种子确定性可复现，区组顺序保持 1..b。
   if (opts.randomize) {
     let s = (opts.seed ?? 12345) >>> 0;

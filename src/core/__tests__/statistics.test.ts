@@ -46,10 +46,10 @@ describe('样本数据（种子 20260601）与 SPC', () => {
     expect(M.subs.length).toBe(25);
     expect(M.all.length).toBe(125);
   });
-  it('X̄-R 控制限关系成立', () => {
-    expect(M.uclX).toBeCloseTo(M.xbarbar + 0.577 * M.rbar, 10);
-    expect(M.uclR).toBeCloseTo(2.114 * M.rbar, 10);
-    expect(M.sigmaWithin).toBeCloseTo(M.rbar / 2.326, 10);
+  it('X̄-R 控制限关系成立（Minitab d2/d3 表值派生 A2/D4）', () => {
+    expect(M.uclX).toBeCloseTo(M.xbarbar + (3 / (2.326 * Math.sqrt(5))) * M.rbar, 9);
+    expect(M.uclR).toBeCloseTo((1 + (3 * 0.8641) / 2.326) * M.rbar, 9);
+    expect(M.sigmaWithin).toBeCloseTo(M.rbar / 2.326, 9);
   });
   it('注入的偏移被判异检出（子组 16–18 上移、22 下移 → 有失控点）', () => {
     const sig = (M.uclX - M.xbarbar) / 3;

@@ -6,7 +6,7 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 import type { CSSProperties } from 'react';
 import { useApp } from '../../store/appStore';
 import { useData } from '../../store/dataStore';
-import { nf, evalRules, parseMatrix, arrMin, arrMax, prepareSpcData, columnDisplayDp, worksheetDisplayOrder } from '../../core';
+import { nf, evalRules, parseMatrix, arrMin, arrMax, prepareSpcData, columnDisplayDp, worksheetDisplayOrder, withSigmaMethod } from '../../core';
 import { Card, KvRows } from '../common';
 import { Icon, type IconName } from '../icons';
 
@@ -115,7 +115,7 @@ function HeaderCell({ name, canDelete, onRename, onDelete }: {
 export function Worksheet() {
   const {
     openModal, setImportTab, showToast, spcRules, spcRuleK, selSub,
-    spcDataLayout, spcValueCol, spcSubgroupCol,
+    spcDataLayout, spcValueCol, spcSubgroupCol, spcSigmaMethod,
   } = useApp();
   const { model: M, textCols, pendingCells, updateCell, addSubgroupRow, deleteRow, renameColumn, deleteColumn, insertColumn } = useData();
   const prepared = prepareSpcData(M, textCols, {
@@ -123,9 +123,10 @@ export function Worksheet() {
     pendingCells,
   });
   // 只有行式转换与原工作表行一一对齐，才能把均值/极差安全回显到原行。
+  // 审查修复(720):行高亮判异随 SPC 页 σ 估计方法,两视图同口径
   const rowSpc = !prepared.error && prepared.layout === 'rows'
     && prepared.model?.hasSubgroups && prepared.model.k === M.k
-    ? prepared.model
+    ? withSigmaMethod(prepared.model, spcSigmaMethod)
     : null;
 
   const importMatrix = useData((s) => s.importMatrix);

@@ -3,6 +3,16 @@ import { describe, expect, it } from 'vitest';
 import { boxplotStats } from '../charts/gagePanels';
 
 describe('boxplotStats — Minitab 1.5×IQR 箱线规则(Codex 复审 P1)', () => {
+  it('Minitab 官方十值示例使用 (n+1)p：Q1=14.25、Q3=46.50', () => {
+    const stats = boxplotStats([7, 9, 16, 36, 39, 45, 45, 46, 48, 51]);
+    expect(stats.q1).toBeCloseTo(14.25, 12);
+    expect(stats.median).toBeCloseTo(42, 12);
+    expect(stats.q3).toBeCloseTo(46.5, 12);
+    expect(stats.whiskerLo).toBe(7);
+    expect(stats.whiskerHi).toBe(51);
+    expect(stats.outliers).toEqual([]);
+  });
+
   it('箱须延伸到栅栏内最远相邻值,不是最小/最大;栅栏外单独作离群点', () => {
     // 主体 10 个点集中在 10±0.5,两个明显离群(6 与 15)
     const values = [9.5, 9.7, 9.8, 10.0, 10.0, 10.1, 10.2, 10.3, 10.4, 10.5, 6.0, 15.0];

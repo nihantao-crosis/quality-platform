@@ -7,7 +7,7 @@ import { syncSpecForActiveMeasurement, useData } from '../../store/dataStore';
 import { expandSpcRuleItems, uniqueSpcPointCount, type SpcViolationItem } from '../../store/analyses';
 import {
   nf, evalRules, evalLimitedRules, RULE_DEFS, DEFAULT_RULE_K, ruleKDesc, ewmaSeries, cusumSeries, stagedXbar, stagedRange, stageValidationError,
-  prepareSpcData, spcMeasurementColumnNames, spcRoleOptions,
+  prepareSpcData, spcMeasurementColumnNames, spcRoleOptions, withSigmaMethod, dataDecimals,
   type NelsonRuleK, type RuleNo, type SpcDataLayout, type SpcPreparedData, type VarModel, type TextColumn,
 } from '../../core';
 import { ReportCard } from '../ReportCard';
@@ -127,6 +127,7 @@ export function Spc({ T }: { T: ChartTokens }) {
     spcType, setSpcType, spcRules, toggleRule, spcRuleK, setSpcRuleK,
     spcDataLayout, spcValueCol, spcSubgroupCol, setSpcRoles,
     spcStageCol, setSpcStageCol, selSub, setSelSub, showToast,
+    spcSigmaMethod, setSpcSigmaMethod, spcShowZones, toggleSpcZones,
   } = useApp();
   const { model: rawModel, textCols: rawTextCols, pendingCells, pModel, cModel, mesRunning, transposeDataset } = useData();
   const prepared = prepareSpcData(rawModel, rawTextCols, {
@@ -164,12 +165,18 @@ export function Spc({ T }: { T: ChartTokens }) {
       </div>
     );
   }
-  const M = prepared.model ?? rawModel;
+  const M = withSigmaMethod(prepared.model ?? rawModel, spcSigmaMethod);
+  const rCenterLabel = spcSigmaMethod === 'classic' ? 'R̄' : 'd₂σ̂';
+  const sCenterLabel = spcSigmaMethod === 'classic' ? 'S̄' : 'c₄σ̂';
   const textCols = prepared.textCols;
 
   const means = M.subs.map((s) => s.mean);
   const subgroupLabels = prepared.subgroupLabels;
   const labelsFor = (length: number) => subgroupLabels.length === length ? subgroupLabels : undefined;
+  // 批次720-A3:控制限标签位数由数据分辨率派生(Minitab 口径:均值类=数据位数+1,极差类=数据位数)。
+  const dataDp = dataDecimals(M.hasSubgroups ? M.all : M.indiv);
+  const meanDec = Math.min(dataDp + 1, 4);
+  const rangeDec = Math.min(dataDp, 4);
 
   // 分阶段：选择一个文本列作为阶段变量（仅 X̄-R,需 ≥2 段）
   const stageCol = spcStageCol == null ? -1 : textCols.findIndex((c) => c.name === spcStageCol);
@@ -179,14 +186,14 @@ export function Spc({ T }: { T: ChartTokens }) {
   const staged =
     stageLabels && !stageError && M.hasSubgroups
       ? {
-          x: stagedXbar(M.subs.map((s) => s.vals), stageLabels, spcRules),
-          r: stagedRange(M.subs.map((s) => s.vals), stageLabels, spcRules),
+          x: stagedXbar(M.subs.map((s) => s.vals), stageLabels, spcRules, spcSigmaMethod, spcRuleK),
+          r: stagedRange(M.subs.map((s) => s.vals), stageLabels, spcRules, spcSigmaMethod, spcRuleK),
         }
       : null;
   // EWMA/CUSUM 数据源：子组均值（σ/√n）或单值序列
   const advData = M.hasSubgroups ? means : M.indiv;
   const advMu = M.hasSubgroups ? M.xbarbar : M.indMean;
-  const advSigma = M.hasSubgroups ? M.sigmaWithin / Math.sqrt(M.n) : M.iSig;
+  const advSigma = M.hasSubgroups ? M.sigmaChart / Math.sqrt(M.n) : M.iSig;
   const ewma = ewmaSeries(advData, advMu, advSigma);
   const cusum = cusumSeries(advData, advMu, advSigma, 0.5, M.hasSubgroups ? 4 : 5);
   const variableName = prepared.variableName;
@@ -224,9 +231,10 @@ export function Spc({ T }: { T: ChartTokens }) {
       charts: staged
         ? [
             {
-              t: `${variableName} 的均值控制图 (X̄) · 分阶段`, main: true, dec: 3,
+              t: `${variableName} 的均值控制图 (X̄) · 分阶段`, main: true, dec: meanDec,
               props: {
                 data: means, cl: M.xbarbar, ucl: M.uclX, lcl: M.lclX, clLabel: 'X̄', h: 250,
+                zones: spcShowZones,
                 xLabel: groupXLabel, yLabel: `${variableName} · 子组均值`, xLabels: groupPointLabels,
                 clSeries: staged.x.clSeries, uclSeries: staged.x.uclSeries, lclSeries: staged.x.lclSeries,
                 stepSeries: true, stageBoundaries: staged.x.boundaries,
@@ -234,9 +242,10 @@ export function Spc({ T }: { T: ChartTokens }) {
               },
             },
             {
-              t: `${variableName} 的极差控制图 (R) · 分阶段`, dec: 3,
+              t: `${variableName} 的极差控制图 (R) · 分阶段`, dec: rangeDec,
               props: {
-                data: M.subs.map((s) => s.range), cl: M.rbar, ucl: M.uclR, lcl: M.lclR, clLabel: 'R̄', h: 210,
+                data: M.subs.map((s) => s.range), cl: M.rCl, ucl: M.uclR, lcl: M.lclR, clLabel: rCenterLabel, h: 210,
+                zones: spcShowZones,
                 xLabel: groupXLabel, yLabel: `${variableName} · 子组极差`, xLabels: groupPointLabels,
                 clSeries: staged.r.clSeries, uclSeries: staged.r.uclSeries, lclSeries: staged.r.lclSeries,
                 stepSeries: true, stageBoundaries: staged.r.boundaries,
@@ -244,8 +253,8 @@ export function Spc({ T }: { T: ChartTokens }) {
             },
           ]
         : [
-            { t: `${variableName} 的均值控制图 (X̄)`, main: true, dec: 3, props: { data: means, cl: M.xbarbar, ucl: M.uclX, lcl: M.lclX, clLabel: 'X̄', zones: true, h: 250, xLabel: groupXLabel, yLabel: `${variableName} · 子组均值`, xLabels: groupPointLabels } },
-            { t: `${variableName} 的极差控制图 (R)`, dec: 3, props: { data: M.subs.map((s) => s.range), cl: M.rbar, ucl: M.uclR, lcl: M.lclR, clLabel: 'R̄', h: 210, xLabel: groupXLabel, yLabel: `${variableName} · 子组极差`, xLabels: groupPointLabels } },
+            { t: `${variableName} 的均值控制图 (X̄)`, main: true, dec: meanDec, props: { data: means, cl: M.xbarbar, ucl: M.uclX, lcl: M.lclX, clLabel: 'X̄', zones: spcShowZones, h: 250, xLabel: groupXLabel, yLabel: `${variableName} · 子组均值`, xLabels: groupPointLabels } },
+            { t: `${variableName} 的极差控制图 (R)`, dec: rangeDec, props: { data: M.subs.map((s) => s.range), cl: M.rCl, ucl: M.uclR, lcl: M.lclR, clLabel: rCenterLabel, zones: spcShowZones, h: 210, xLabel: groupXLabel, yLabel: `${variableName} · 子组极差`, xLabels: groupPointLabels } },
           ],
     },
     'xbar-s': {
@@ -253,16 +262,16 @@ export function Spc({ T }: { T: ChartTokens }) {
       disabled: !M.hasSubgroups,
       shewhart: true,
       charts: [
-        { t: `${variableName} 的均值控制图 (X̄)`, main: true, dec: 3, props: { data: means, cl: M.xbarbar, ucl: M.uclXs, lcl: M.lclXs, clLabel: 'X̄', zones: true, h: 250, xLabel: groupXLabel, yLabel: `${variableName} · 子组均值`, xLabels: groupPointLabels } },
-        { t: `${variableName} 的标准差控制图 (S)`, dec: 4, props: { data: M.svals, cl: M.sbar, ucl: M.uclS, lcl: M.lclS, clLabel: 'S̄', h: 210, xLabel: groupXLabel, yLabel: `${variableName} · 子组标准差`, xLabels: groupPointLabels } },
+        { t: `${variableName} 的均值控制图 (X̄)`, main: true, dec: meanDec, props: { data: means, cl: M.xbarbar, ucl: M.uclXs, lcl: M.lclXs, clLabel: 'X̄', zones: spcShowZones, h: 250, xLabel: groupXLabel, yLabel: `${variableName} · 子组均值`, xLabels: groupPointLabels } },
+        { t: `${variableName} 的标准差控制图 (S)`, dec: Math.min(dataDp + 2, 4), props: { data: M.svals, cl: M.sCl, ucl: M.uclS, lcl: M.lclS, clLabel: sCenterLabel, zones: spcShowZones, h: 210, xLabel: groupXLabel, yLabel: `${variableName} · 子组标准差`, xLabels: groupPointLabels } },
       ],
     },
     'i-mr': {
       sub: M.isDemo ? '单值 - 移动极差 · 演示序列' : '单值 - 移动极差 · 全部观测',
       shewhart: true,
       charts: [
-        { t: `${variableName} 的单值控制图 (I)`, main: true, dec: 3, props: { data: M.indiv, cl: M.indMean, ucl: M.iUcl, lcl: M.iLcl, clLabel: 'X̄', zones: true, h: 250, xLabel: prepared.layout === 'individuals' ? groupXLabel : '观测序号', yLabel: `${variableName} · 单值`, xLabels: indivPointLabels } },
-        { t: `${variableName} 的移动极差图 (MR)`, dec: 3, props: { data: M.mr.slice(1) as number[], cl: M.mrbar, ucl: M.mrUcl, lcl: 0, clLabel: 'MR̄', h: 210, xIndexOffset: 1, xLabel: prepared.layout === 'individuals' ? groupXLabel : '观测序号（MR 从第 2 个观测开始）', yLabel: `${variableName} · 移动极差`, xLabels: indivPointLabels?.slice(1) } },
+        { t: `${variableName} 的单值控制图 (I)`, main: true, dec: meanDec, props: { data: M.indiv, cl: M.indMean, ucl: M.iUcl, lcl: M.iLcl, clLabel: 'X̄', zones: spcShowZones, h: 250, xLabel: prepared.layout === 'individuals' ? groupXLabel : '观测序号', yLabel: `${variableName} · 单值`, xLabels: indivPointLabels } },
+        { t: `${variableName} 的移动极差图 (MR)`, dec: rangeDec, props: { data: M.mr.slice(1) as number[], cl: M.mrbar, ucl: M.mrUcl, lcl: 0, clLabel: 'MR̄', zones: spcShowZones, h: 210, xIndexOffset: 1, xLabel: prepared.layout === 'individuals' ? groupXLabel : '观测序号（MR 从第 2 个观测开始）', yLabel: `${variableName} · 移动极差`, xLabels: indivPointLabels?.slice(1) } },
       ],
     },
     ewma: {
@@ -289,7 +298,7 @@ export function Spc({ T }: { T: ChartTokens }) {
           t: `不良率控制图 (P) · ${pModel.name}`, main: true, dec: 3,
           props: {
             data: pModel.pprop, cl: pModel.pbar, ucl: pModel.pUcl, lcl: pModel.pLcl, clLabel: 'p̄',
-            zones: !pModel.pVariableN,
+            zones: spcShowZones && !pModel.pVariableN,
             uclSeries: pModel.pVariableN ? pModel.pUcls : undefined,
             lclSeries: pModel.pVariableN ? pModel.pLcls : undefined,
             h: 300, xLabel: '样本序号', yLabel: '样本不良率',
@@ -301,7 +310,7 @@ export function Spc({ T }: { T: ChartTokens }) {
       sub: `单位缺陷数 · ${cModel.isDemo ? '演示数据' : cModel.name}`,
       shewhart: true,
       charts: [
-        { t: `缺陷数控制图 (C) · ${cModel.name}`, main: true, dec: 1, props: { data: cModel.cdata, cl: cModel.cbar, ucl: cModel.cUcl, lcl: cModel.cLcl, clLabel: 'c̄', zones: true, h: 300, xLabel: '检验单位序号', yLabel: '单位缺陷数' } },
+        { t: `缺陷数控制图 (C) · ${cModel.name}`, main: true, dec: 1, props: { data: cModel.cdata, cl: cModel.cbar, ucl: cModel.cUcl, lcl: cModel.cLcl, clLabel: 'c̄', zones: spcShowZones, h: 300, xLabel: '检验单位序号', yLabel: '单位缺陷数' } },
       ],
     },
   };
@@ -423,8 +432,16 @@ export function Spc({ T }: { T: ChartTokens }) {
         stats.push({ k: `「${sg.label}」CL·UCL·LCL`, v: `${nf(sg.cl, 3)} / ${nf(sg.ucl, 3)} / ${nf(sg.lcl, 3)}` });
       });
       stats.push({ k: '段数', v: String(staged.x.segments.length) }, { k: '子组数', v: String(M.k) });
-    } else if (effType === 'xbar-r') stats.push({ k: 'R̄', v: nf(M.rbar, 3) }, { k: 'σ̂ 组内', v: nf(M.sigmaWithin, 4) }, { k: '子组数', v: String(M.k) });
-    else if (effType === 'xbar-s') stats.push({ k: 'S̄', v: nf(M.sbar, 4) }, { k: 'σ̂ (S̄/c₄)', v: nf(M.sbar / M.c4, 4) }, { k: '子组数', v: String(M.k) });
+    } else if (effType === 'xbar-r') {
+      // 审查修复(720):pooled 时图上「R̄」标签=中心线 d₂σ̂ ≠ 数据极差均值,统计卡分列两值避免同屏同符号矛盾
+      stats.push({ k: 'R̄ (数据均值)', v: nf(M.rbar, 3) });
+      if (spcSigmaMethod === 'pooled') stats.push({ k: 'R 图 CL (d₂σ̂)', v: nf(M.rCl, 3) });
+      stats.push({ k: spcSigmaMethod === 'pooled' ? 'σ̂ (合并标准差)' : 'σ̂ (R̄/d₂)', v: nf(M.sigmaChart, 4) }, { k: '子组数', v: String(M.k) });
+    } else if (effType === 'xbar-s') {
+      stats.push({ k: 'S̄ (数据均值)', v: nf(M.sbar, 4) });
+      if (spcSigmaMethod === 'pooled') stats.push({ k: 'S 图 CL (c₄σ̂)', v: nf(M.sCl, 4) });
+      stats.push({ k: spcSigmaMethod === 'pooled' ? 'σ̂ (合并标准差)' : 'σ̂ (S̄/c₄)', v: nf(M.sigmaChartS, 4) }, { k: '子组数', v: String(M.k) });
+    }
     else if (effType === 'i-mr') stats.push({ k: 'MR̄', v: nf(M.mrbar, 3) }, { k: 'σ̂ (MR̄/d₂)', v: nf(M.iSig, 4) }, { k: '观测数', v: String(M.indiv.length) });
     else stats.push({ k: 'c̄', v: nf(cModel.cbar, 3) }, { k: '单位数', v: String(cModel.cdata.length) });
   }
@@ -558,6 +575,28 @@ export function Spc({ T }: { T: ChartTokens }) {
           </>
         ) : (
           <span style={{ fontSize: 12, color: '#9aa2ad' }}>判异：超出控制限（Nelson 准则不适用）</span>
+        )}
+        {spec.shewhart && (effType === 'xbar-r' || effType === 'xbar-s') && (
+          <>
+            <span style={{ width: 1, height: 22, background: '#e5e9ee' }} />
+            <span style={{ fontSize: 12, color: '#8a929d', fontWeight: 600 }}>σ 估计</span>
+            <select
+              style={stageSelStyle}
+              value={spcSigmaMethod}
+              onChange={(e) => setSpcSigmaMethod(e.target.value === 'classic' ? 'classic' : 'pooled')}
+              title="控制限 σ̂ 估计方法：Minitab 标准 X̄-R/X̄-S 图默认使用 R̄/d2 或 S̄/c4；合并标准差 Sp/c4(d+1) 为显式可选口径"
+            >
+              <option value="classic">{effType === 'xbar-s' ? 'S̄/c₄（Minitab 默认）' : 'R̄/d₂（Minitab 默认）'}</option>
+              <option value="pooled">合并标准差（可选）</option>
+            </select>
+          </>
+        )}
+        {spec.shewhart && (
+          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 12, color: '#5b6472', cursor: 'pointer' }}
+            title="±1SL/±2SL σ 区带线与数值标注（SL=sigma level，与规格限 USL/LSL 无关）">
+            <input type="checkbox" checked={spcShowZones} onChange={toggleSpcZones} />
+            σ 区带（±1/±2SL）
+          </label>
         )}
         {canStage && effType === 'xbar-r' && (
           <>
