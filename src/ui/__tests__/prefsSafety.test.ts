@@ -21,6 +21,58 @@ beforeEach(() => {
 });
 
 describe('偏好持久化安全', () => {
+  it('能力子组控件修改后立即写入偏好白名单', () => {
+    useApp.getState().setCapabilitySubgroup({
+      capSubgroupMode: 'const', capSubgroupSize: 4,
+      capValueCol: '过盈量', capSubgroupIdCol: null,
+    });
+    const persisted = JSON.parse(localStorage.getItem('qp-prefs-v1') ?? '{}').state;
+    expect(persisted).toMatchObject({
+      capSubgroupMode: 'const', capSubgroupSize: 4,
+      capValueCol: '过盈量', capSubgroupIdCol: null,
+    });
+  });
+
+  it('能力子组口径在刷新水合与项目导出中四字段对称保留', async () => {
+    localStorage.setItem('qp-prefs-v1', JSON.stringify({
+      version: 3,
+      state: {
+        capSubgroupMode: 'stacked', capSubgroupSize: 7,
+        capValueCol: '过盈量', capSubgroupIdCol: '批次号',
+      },
+    }));
+    await useApp.persist.rehydrate();
+    expect(useApp.getState()).toMatchObject({
+      capSubgroupMode: 'stacked', capSubgroupSize: 7,
+      capValueCol: '过盈量', capSubgroupIdCol: '批次号',
+    });
+
+    const project = JSON.parse(await buildProjectJsonFull('1.42.2'));
+    expect(JSON.parse(project.stores['qp-prefs-v1']).state).toMatchObject({
+      capSubgroupMode: 'stacked', capSubgroupSize: 7,
+      capValueCol: '过盈量', capSubgroupIdCol: '批次号',
+    });
+  });
+
+  it('能力子组口径的非法持久化值逐字段回落，不污染当前口径', async () => {
+    useApp.setState({
+      capSubgroupMode: 'const', capSubgroupSize: 4,
+      capValueCol: '直径', capSubgroupIdCol: null,
+    });
+    localStorage.setItem('qp-prefs-v1', JSON.stringify({
+      version: 3,
+      state: {
+        capSubgroupMode: 'invalid', capSubgroupSize: 1,
+        capValueCol: 42, capSubgroupIdCol: [],
+      },
+    }));
+    await useApp.persist.rehydrate();
+    expect(useApp.getState()).toMatchObject({
+      capSubgroupMode: 'const', capSubgroupSize: 4,
+      capValueCol: '直径', capSubgroupIdCol: null,
+    });
+  });
+
   it('拒绝当前版本 envelope 中的非法类型、枚举、NaN 语义和双侧同时关闭', async () => {
     localStorage.setItem('qp-prefs-v1', JSON.stringify({
       version: 3,

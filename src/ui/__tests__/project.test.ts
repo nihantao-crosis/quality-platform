@@ -58,6 +58,8 @@ describe('项目文件', () => {
       state: {
         chartStyle: '经典', showGrid: true, projectName: '720往返',
         lsl: 0, tgt: 5, usl: 10, lslOn: true, uslOn: true, capabilityBins: 13,
+        capSubgroupMode: 'stacked', capSubgroupSize: 4,
+        capValueCol: '响应A', capSubgroupIdCol: '部件',
         spcSigmaMethod: 'classic', spcShowZones: true,
         gageUseReal: true, gageValueName: '响应A', gagePartName: '部件', gageOperatorName: '测试人',
         gageTolMode: 'width', gageTolValue: 10, gageStandard: 'factory',

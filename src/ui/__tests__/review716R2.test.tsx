@@ -172,6 +172,26 @@ describe('自查F2:legacy 导出在哨兵状态下能力章节写「未运行」
     expect(text).toContain('1000 倍标准差');
     expect(text).toContain('SPC');
   });
+
+  it('仅 R 图失控时通用报告先报变异未受控，不再同时写「过程受控」', () => {
+    const rows = Array.from({ length: 24 }, () => [9, 11]);
+    rows.push([0, 20]);
+    useData.getState().importMatrix('R-only.csv', ['x1', 'x2'], rows, []);
+    const text = textReport(useData.getState().model, { lsl: 0, tgt: 10, usl: 20 });
+    expect(text).toMatch(/R 图检出 \d+ 个异常点，过程变异尚未受控/);
+    expect(text).not.toContain('未检出失控点，过程受控');
+  });
+
+  it('仅 MR 图存在模式异常时也不会把 I 图无异常写成整体受控', () => {
+    const values: number[] = Array.from({ length: 25 }, (_, index) => index % 2 === 0 ? -1 : 1);
+    values[10] = -3.5;
+    values[11] = 3.5;
+    useData.getState().importMatrix('MR-only.csv', ['位移'], values.map((value) => [value]), []);
+    const text = textReport(useData.getState().model, { lsl: -10, tgt: 0, usl: 10 });
+    expect(text).toMatch(/MR 图检出 \d+ 个异常点，过程变异尚未受控/);
+    expect(text).toContain('暂不解释 I 图');
+    expect(text).not.toContain('未检出失控点，过程受控');
+  });
 });
 
 describe('自查F3:删除数值列后文本列相对显示序不漂移', () => {

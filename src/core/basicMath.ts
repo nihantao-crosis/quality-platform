@@ -106,6 +106,28 @@ function offsetMean(xs: number[]): { origin: number; offset: number } {
   return { origin, offset: (sum + correction) / xs.length };
 }
 
+/**
+ * 缩放后的 Neumaier 补偿求和。先除以最大绝对值可避免合法有限输入因中间加法
+ * 提前溢出；补偿项保留大数相消后的低位。最终真实结果超出 Number 范围时仍返回 ±∞。
+ */
+export function stableSum(xs: number[]): number {
+  if (xs.some((value) => !Number.isFinite(value))) return xs.reduce((sum, value) => sum + value, 0);
+  let scale = 0;
+  for (const value of xs) scale = Math.max(scale, Math.abs(value));
+  if (scale === 0) return 0;
+  let sum = 0;
+  let correction = 0;
+  for (const raw of xs) {
+    const value = raw / scale;
+    const next = sum + value;
+    correction += Math.abs(sum) >= Math.abs(value)
+      ? (sum - next) + value
+      : (value - next) + sum;
+    sum = next;
+  }
+  return (sum + correction) * scale;
+}
+
 export function mean(xs: number[]): number {
   const centered = offsetMean(xs);
   return xs.length === 0 ? Number.NaN : centered.origin + centered.offset;

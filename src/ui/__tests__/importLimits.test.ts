@@ -3,10 +3,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   MAX_QPROJ_IMPORT_BYTES,
   MAX_TEXT_DATA_IMPORT_BYTES,
+  assertQprojExportByteLength,
   assertTextImportSize,
+  qprojExportByteLength,
   textImportLimit,
+  utf8ByteLength,
 } from '../../platform/importLimits';
-import { platform } from '../../platform/adapter';
+import { assertExportJobSize, platform } from '../../platform/adapter';
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -45,5 +48,28 @@ describe('文本与项目文件导入上限', () => {
 
     await expect(platform.pickImportFile()).rejects.toThrow('项目文件超过 64 MB 导入上限');
     expect(text).not.toHaveBeenCalled();
+  });
+
+  it('导出按实际 UTF-8+BOM 字节计数，超限错误说明为何取消与如何缩小', () => {
+    expect(utf8ByteLength('A测试😀')).toBe(1 + 6 + 4);
+    expect(qprojExportByteLength('{}')).toBe(5); // 3 字节 BOM + 2 字节 JSON
+    expect(() => assertQprojExportByteLength(MAX_QPROJ_IMPORT_BYTES)).not.toThrow();
+    expect(() => assertQprojExportByteLength(MAX_QPROJ_IMPORT_BYTES + 1)).toThrow('软件无法重新打开');
+    expect(() => assertQprojExportByteLength(MAX_QPROJ_IMPORT_BYTES + 1)).toThrow('项目管理器');
+  });
+
+  it('Web/桌面共用的导出任务闸门在任何落盘副作用前拒绝超限 QPROJ', () => {
+    const oversizedBytes = { byteLength: MAX_QPROJ_IMPORT_BYTES + 1 } as unknown as Uint8Array;
+    // 项目实际使用文本任务；多字节字符用更小的 JS 字符串即可越过 64 MB UTF-8+BOM 边界。
+    const oversizedText = '汉'.repeat(Math.floor((MAX_QPROJ_IMPORT_BYTES - 3) / 3) + 1);
+    expect(() => assertExportJobSize({
+      defaultName: 'backup', ext: 'qproj', filterLabel: '项目', bytes: oversizedBytes,
+    })).toThrow('已取消导出');
+    expect(() => assertExportJobSize({
+      defaultName: 'backup', ext: 'qproj', filterLabel: '项目', text: oversizedText,
+    })).toThrow('已取消导出');
+    expect(() => assertExportJobSize({
+      defaultName: 'report', ext: 'txt', filterLabel: '报告', bytes: oversizedBytes,
+    })).not.toThrow();
   });
 });

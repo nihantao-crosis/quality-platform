@@ -241,7 +241,7 @@ function BoxPlotImpl({ T, groups }: { T: ChartTokens; groups: { name: string; va
         const q3 = quantile(grp.vals, 0.75);
         const mn = arrMin(grp.vals);
         const mx = arrMax(grp.vals);
-        const mean = grp.vals.reduce((a, b) => a + b, 0) / grp.vals.length;
+        const groupMean = mean(grp.vals);
         return (
           <Fragment key={'b' + i}>
             <Ln x1={cx} y1={Y(mn)} x2={cx} y2={Y(mx)} stroke={T.axis} sw={1.4} />
@@ -249,7 +249,7 @@ function BoxPlotImpl({ T, groups }: { T: ChartTokens; groups: { name: string; va
             <Ln x1={cx - bw * 0.4} y1={Y(mx)} x2={cx + bw * 0.4} y2={Y(mx)} stroke={T.axis} sw={1.4} />
             <rect x={cx - bw} y={Y(q3)} width={bw * 2} height={Y(q1) - Y(q3)} fill={T.point} opacity={0.28} stroke={T.point} strokeWidth={1.6} />
             <Ln x1={cx - bw} y1={Y(q2)} x2={cx + bw} y2={Y(q2)} stroke={T.center} sw={2.4} />
-            <circle cx={cx} cy={Y(mean)} r={T.r} fill={T.limit} stroke={T.bg} strokeWidth={1.2} />
+            <circle cx={cx} cy={Y(groupMean)} r={T.r} fill={T.limit} stroke={T.bg} strokeWidth={1.2} />
             <Txt x={cx} y={H - 24} s={grp.name} fill={T.text} size={11} anchor="middle" weight={500} />
           </Fragment>
         );

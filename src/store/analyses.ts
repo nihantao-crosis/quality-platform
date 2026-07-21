@@ -355,8 +355,8 @@ function buildSummary(kind: AnalysisKind): Omit<SavedAnalysis, 'id' | 'createdAt
           const x = stagedXbar(rows, stageLabels, app.spcRules, app.spcSigmaMethod, app.spcRuleK);
           const r = stagedRange(rows, stageLabels, app.spcRules, app.spcSigmaMethod, app.spcRuleK);
           items = [
-            ...expandSpcRuleItems(x.viol, x.list, 'X̄'),
-            ...expandSpcRuleItems(r.viol, r.list, 'R'),
+            ...expandSpcRuleItems(x.viol, x.list, 'X̄', app.spcRuleK),
+            ...expandSpcRuleItems(r.viol, r.list, 'R', app.spcRuleK),
           ];
           stageCount = x.segments.length;
         } else {

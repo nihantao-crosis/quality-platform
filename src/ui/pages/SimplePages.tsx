@@ -1018,9 +1018,9 @@ function AnovaInner({ T }: { T: ChartTokens }) {
       </div>
     );
   }
-  const means = groups.map((g) => g.vals.reduce((x, y) => x + y, 0) / g.vals.length);
   const groupStats = anovaGroupSummaries(groups, a);
-  const hi = groups[means.indexOf(Math.max(...means))].name;
+  // 结论与描述统计表共用 core 的稳定组均值，避免大基准微扰数据被展示层朴素累加改写最高组。
+  const hi = groupStats.reduce((highest, current) => current.mean > highest.mean ? current : highest).name;
   const rows = [
     { src: factorName, df: String(a.factorDf), ss: nf(a.factorSS, 5), ms: nf(a.factorMS, 5), f: nf(a.fStat, 2), p: nf(a.pValue, 3), pColor: a.significant ? '#c22f2f' : '#5b6472' },
     { src: '误差', df: String(a.errorDf), ss: nf(a.errorSS, 5), ms: nf(a.errorMS, 5), f: '', p: '', pColor: '#5b6472' },

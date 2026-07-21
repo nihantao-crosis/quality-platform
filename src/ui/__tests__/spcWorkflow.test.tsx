@@ -5,6 +5,7 @@ import { cleanup, fireEvent, render } from '@testing-library/react';
 import { Spc } from '../pages/Spc';
 import { Dashboard } from '../pages/Dashboard';
 import { chartTokens } from '../tokens';
+import { DEFAULT_RULE_K } from '../../core';
 import { useApp } from '../../store/appStore';
 import { useData } from '../../store/dataStore';
 
@@ -73,6 +74,30 @@ describe('SPC 页面端到端数据角色', () => {
     expect(html).toContain('暂不解释其信号');
     expect(html).toContain('R 图 · 子组 25 · 准则 1');
     expect(html).toContain('共 1 个失控点 · 1 个点-准则命中');
+  });
+
+  it('分阶段自定义 K2=12 时图上红点、结论卡与明细都按 24 个实际点', () => {
+    // 每阶段均值 12/13：首点 0 低于中心线，随后 12 点连续高于中心线。
+    // core/图每段标 12 点，若消费层错用默认 K2=9，则每段只展开 9 点（合计 18）。
+    const stage = [0, ...Array(12).fill(1)] as number[];
+    const values = [...stage, ...stage];
+    useData.getState().importMatrix(
+      '分阶段自定义K.csv', ['x1', 'x2'], values.map((value) => [value, value]),
+      [{ name: '阶段', values: [...Array(13).fill('A'), ...Array(13).fill('B')] }],
+    );
+    useApp.setState({
+      spcType: 'xbar-r', spcDataLayout: 'rows', spcStageCol: '阶段',
+      spcRules: { r1: false, r2: true, r3: false, r4: false, r5: false, r6: false, r7: false, r8: false },
+      spcRuleK: { ...DEFAULT_RULE_K, k2: 12 },
+    });
+
+    const tokens = chartTokens('经典', true);
+    const view = render(createElement(Spc, { T: tokens }));
+    const text = view.container.textContent ?? '';
+    expect(view.container.querySelectorAll(`circle[fill="${tokens.limit}"]`)).toHaveLength(24);
+    expect(text).toContain('X̄-R 检测到 24 个失控点');
+    expect(text).toContain('共 24 个失控点 · 24 个点-准则命中');
+    expect(text).toContain('连续 12 点落在中心线同一侧');
   });
 
   it('数值 ID 堆叠格式自动分组，并在横轴显示实际子组 ID', () => {

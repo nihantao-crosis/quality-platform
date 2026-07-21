@@ -2,11 +2,11 @@
  * PlatformAdapter — 平台能力抽象（交接文档 §4.2）。
  * Web 与桌面（Tauri）各自实现导入/导出，UI 与 core 不感知运行端。
  */
-import { assertTextImportSize } from './importLimits';
+import { assertQprojExportByteLength, assertQprojExportText, assertTextImportSize } from './importLimits';
 
 export interface ExportJob {
   defaultName: string; // 不含扩展名
-  ext: string; // 'xlsx' | 'csv' | 'txt'
+  ext: string; // 'xlsx' | 'csv' | 'txt' | 'qproj'
   filterLabel: string;
   text?: string; // 文本载荷（与 bytes 二选一）
   bytes?: Uint8Array; // 二进制载荷（.xlsx）
@@ -14,7 +14,7 @@ export interface ExportJob {
 
 export interface PickedFile {
   name: string;
-  contents?: string; // 文本（csv/txt）
+  contents?: string; // 文本（csv/txt/qproj）
   bytes?: Uint8Array; // 二进制（xlsx/xls）
 }
 
@@ -50,6 +50,13 @@ export interface PlatformAdapter {
   datasetDb: DatasetDb | null;
 }
 
+/** Web 下载与桌面落盘共用的最后一道项目文件大小闸门。 */
+export function assertExportJobSize(job: ExportJob): void {
+  if (!/^qproj$/i.test(job.ext)) return;
+  if (job.bytes) assertQprojExportByteLength(job.bytes.byteLength);
+  else assertQprojExportText(job.text ?? '');
+}
+
 const BINARY_EXT = /\.(xlsx|xls)$/i;
 
 /** Excel 导入文件上限（Web 和桌面端共用）。 */
@@ -82,6 +89,7 @@ const webAdapter: PlatformAdapter = {
   isDesktop: false,
   datasetDb: null,
   async exportFile(job) {
+    assertExportJobSize(job);
     const name = `${job.defaultName}.${job.ext}`;
     const blob = job.bytes
       ? new Blob([job.bytes.slice().buffer as ArrayBuffer], { type: 'application/octet-stream' })
@@ -157,6 +165,7 @@ const desktopAdapter: PlatformAdapter = {
   isDesktop: true,
   datasetDb: desktopDatasetDb,
   async exportFile(job) {
+    assertExportJobSize(job); // 打开保存对话框前拒绝，不让用户误以为已生成可用备份
     const { save } = await import('@tauri-apps/plugin-dialog');
     const { invoke } = await import('@tauri-apps/api/core');
     const path = await save({

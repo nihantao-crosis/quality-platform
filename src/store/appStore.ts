@@ -303,6 +303,10 @@ function persistedPrefsOf(s: AppState) {
     lslOn: s.lslOn,
     uslOn: s.uslOn,
     capabilityBins: s.capabilityBins,
+    capSubgroupMode: s.capSubgroupMode,
+    capSubgroupSize: s.capSubgroupSize,
+    capValueCol: s.capValueCol,
+    capSubgroupIdCol: s.capSubgroupIdCol,
     gageUseReal: s.gageUseReal,
     gageValueName: s.gageValueName,
     gagePartName: s.gagePartName,
@@ -651,6 +655,14 @@ export const useApp = create<AppState>()(persist((set, get) => ({
     merged.capabilityBins = Number.isSafeInteger(p.capabilityBins) && p.capabilityBins! >= 5 && p.capabilityBins! <= 40
       ? p.capabilityBins!
       : current.capabilityBins;
+    // 能力口径会直接改变 sigmaWithin/Cpk；偏好写入、刷新水合与 .qproj 必须四字段成组对称。
+    merged.capSubgroupMode = p.capSubgroupMode === 'spc' || p.capSubgroupMode === 'const'
+      || p.capSubgroupMode === 'stacked' ? p.capSubgroupMode : current.capSubgroupMode;
+    merged.capSubgroupSize = Number.isSafeInteger(p.capSubgroupSize) && p.capSubgroupSize! >= 2 && p.capSubgroupSize! <= 10
+      ? p.capSubgroupSize!
+      : current.capSubgroupSize;
+    merged.capValueCol = stringOrNull(p.capValueCol, current.capValueCol);
+    merged.capSubgroupIdCol = stringOrNull(p.capSubgroupIdCol, current.capSubgroupIdCol);
     merged.gageUseReal = typeof p.gageUseReal === 'boolean' ? p.gageUseReal : current.gageUseReal;
     merged.gageValueName = stringOrNull(p.gageValueName, current.gageValueName);
     merged.gagePartName = stringOrNull(p.gagePartName, current.gagePartName);

@@ -357,7 +357,7 @@ export function Spc({ T }: { T: ChartTokens }) {
         // 分阶段极差图:采用段内准则判异(否则整段被跳过、极差失控不显示)
         if (staged.r.viol.size) {
           dispViolByChart.set(ch.t, staged.r.viol);
-          expandSpcRuleItems(staged.r.viol, staged.r.list, chartLabel).forEach((o) =>
+          expandSpcRuleItems(staged.r.viol, staged.r.list, chartLabel, spcRuleK).forEach((o) =>
             dispItems.push({ ...o, desc: `${chartLabel} 图：${o.desc}` }));
         }
       } else if (!spec.coreViol && ch.props.ucl != null) {
@@ -378,8 +378,9 @@ export function Spc({ T }: { T: ChartTokens }) {
     'xbar-r': 'X̄', 'xbar-s': 'X̄', 'i-mr': 'I', ewma: 'EWMA', cusum: 'CUSUM', p: 'P', c: 'C',
   };
   const allViolItems = [
-    // 分阶段/EWMA/CUSUM 的 coreViol 由 core 按标准窗口给出;仅本页 evalRules 结果按自定义 K 展开
-    ...expandSpcRuleItems(viol, violList, mainChartLabel[effType], spec.coreViol ? undefined : spcRuleK),
+    // 分阶段的 coreViol 虽已按自定义 K 判异，明细仍必须用同一 K 展开窗口；
+    // 否则 K 大于默认值时图上红点会多于列表/结论卡。EWMA/CUSUM 均是单点明细，传 K 无影响。
+    ...expandSpcRuleItems(viol, violList, mainChartLabel[effType], spcRuleK),
     ...dispItems,
   ].sort((a, b) => a.i - b.i || a.chartLabel.localeCompare(b.chartLabel) || a.rule - b.rule);
   const uniqueViolCount = uniqueSpcPointCount(allViolItems);

@@ -10,7 +10,7 @@
  * 每行独立求值;聚合函数对「其参数在所有行上的取值」做一次归约并缓存。
  */
 
-import { arrMin, arrMax, mean, stdev } from './basicMath';
+import { arrMin, arrMax, mean, stableSum, stdev } from './basicMath';
 
 export interface FormulaCtx {
   /** 各列的数值数组，columns[j] 为第 j 列(0 基) */
@@ -238,7 +238,7 @@ function aggregate(fn: string, xs: number[]): number {
   const finite = xs.filter(Number.isFinite);
   const n = finite.length;
   if (n === 0) return NaN;
-  const sum = finite.reduce((a, b) => a + b, 0);
+  const sum = stableSum(finite);
   const average = mean(finite);
   switch (fn) {
     case 'sum': return sum;

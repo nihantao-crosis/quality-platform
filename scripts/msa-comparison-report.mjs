@@ -25,6 +25,10 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { buildSync } = require('esbuild');
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+const appVersion = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version;
+if (typeof appVersion !== 'string' || !/^\d+\.\d+\.\d+$/.test(appVersion)) {
+  throw new Error('package.json version 必须是 X.Y.Z');
+}
 
 const args = process.argv.slice(2);
 const opt = (name, fallback) => {
@@ -33,7 +37,7 @@ const opt = (name, fallback) => {
 };
 const workbookPath = opt('workbook', join(root, 'src/core/__tests__/fixtures/gage-factory-workbook-2026-07.xlsx'));
 const leftDir = opt('left-images', '');
-const outPath = opt('out', join(root, '..', '对比报告_MSA工厂案例_v1.40.0.html'));
+const outPath = opt('out', join(root, '..', `对比报告_MSA工厂案例_v${appVersion}.html`));
 const metadataValue = (name) => String(opt(name, '') ?? '').trim() || '未填写';
 const reportMetadata = {
   gaugeName: metadataValue('gauge-name'),
@@ -119,7 +123,7 @@ for (const spec of CASES) {
   <div class="pair">
     ${leftPng}
     <div class="appside">
-      <div class="cap">本应用 v1.40.0 实算输出（同产品导入/引擎链路）</div>
+      <div class="cap">本应用 v${esc(appVersion)} 实算输出（同产品导入/引擎链路）</div>
       <table><thead><tr><th>来源</th><th>标准差(SD)</th><th>研究变异(6×SD)</th><th>%研究变异</th><th>%公差</th></tr></thead><tbody>${rows}</tbody></table>
       <div class="mono">可区分的类别数 = ${result.ndc === Infinity ? '∞' : result.ndc} ｜ 工厂标准判定：<b>${esc(assessment.label)}</b></div>
     </div>
@@ -136,7 +140,7 @@ for (const spec of CASES) {
 
 const html = `<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8">
-<title>MSA 工厂 5 案例对比报告 · v1.40.0（应用实抓版）</title>
+<title>MSA 工厂 5 案例对比报告 · v${esc(appVersion)}（应用实抓版）</title>
 <style>
 body{font-family:"PingFang SC",-apple-system,sans-serif;margin:28px auto;max-width:1200px;color:#26303c;line-height:1.6}
 h1{font-size:22px} h2{font-size:17px;border-left:4px solid #1f6fb2;padding-left:10px;margin-top:40px}
@@ -155,7 +159,7 @@ th{background:#f4f7fa;color:#5b6472}
 .summary td,.summary th{text-align:center}
 .note{background:#f8fafc;border:1px solid #e2e7ed;border-radius:6px;padding:12px 16px;font-size:13px}
 </style></head><body>
-<h1>MSA 工厂 5 案例对比报告 · v1.40.0（应用实抓版）</h1>
+<h1>MSA 工厂 5 案例对比报告 · v${esc(appVersion)}（应用实抓版）</h1>
 <p class="meta">数据源：MSA案例数据源7.18.xlsx（电机一厂）· 对照：MSA案例结果5个7.18.pptx（Minitab 17）· 生成：scripts/msa-comparison-report.mjs（可复现）</p>
 <div class="note"><b>结论：5 个案例的 SD、6×SD、%研究变异、%公差、ndc 与工厂 Minitab 17 输出逐位一致；工厂标准判定（≤10% 理想/≤20% 可接受）与工厂 OK/NG 结论完全一致（1/2/4 OK，3/5 NG）。</b>右侧数值与图形均为本应用真实代码链路实算/实渲染（导入→引擎→UI 组件），非手工誊写。</div>
 <h2>汇总</h2>

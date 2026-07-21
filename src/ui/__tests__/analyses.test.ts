@@ -10,6 +10,7 @@ import { useApp } from '../../store/appStore';
 import { useData } from '../../store/dataStore';
 import { loadFishboneState, saveFishboneState, type FishboneData } from '../../store/fishboneStore';
 import { freshSwitchStatus, recordInspection, type SwitchStatus } from '../../core/aqlSwitch';
+import { DEFAULT_RULE_K } from '../../core';
 import { platform } from '../../platform/adapter';
 
 const R1_ONLY = { r1: true, r2: false, r3: false, r4: false, r5: false, r6: false, r7: false, r8: false };
@@ -322,6 +323,24 @@ describe('保存分析', () => {
     useAnalyses.getState().restore(staged.id);
     expect(useApp.getState().spcStageCol).toBe('阶段');
     expect(useApp.getState().spcRules).toEqual(R1_ONLY);
+  });
+
+  it('分阶段摘要展开自定义 K 的完整窗口，不用默认 K2=9 将 24 点少算成 18 点', () => {
+    const stage = [0, ...Array(12).fill(1)] as number[];
+    const values = [...stage, ...stage];
+    useData.getState().importMatrix(
+      '分阶段自定义K.csv', ['x1', 'x2'], values.map((value) => [value, value]),
+      [{ name: '阶段', values: [...Array(13).fill('A'), ...Array(13).fill('B')] }],
+    );
+    useApp.setState({
+      page: 'spc', spcType: 'xbar-r', spcDataLayout: 'rows', spcStageCol: '阶段',
+      spcRules: { r1: false, r2: true, r3: false, r4: false, r5: false, r6: false, r7: false, r8: false },
+      spcRuleK: { ...DEFAULT_RULE_K, k2: 12 },
+    });
+
+    const saved = useAnalyses.getState().saveCurrent()!;
+    expect(saved.metric).toBe('2 阶段 · 24 个失控点');
+    expect(saved.snapshot.spcRuleK).toMatchObject({ k2: 12 });
   });
 
   it('非法单点阶段保存为未分析，不回退全局控制限伪报受控', () => {

@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::Path;
 
 mod db;
@@ -22,6 +22,23 @@ fn text_import_limit(path: &Path) -> (u64, &'static str) {
             "CSV/TXT 文件超过 20 MB 导入上限",
         )
     }
+}
+
+/// 读取过程本身最多消费 limit+1 字节；即使 metadata 检查后文件被替换/追加，
+/// 也不会先把任意大文件完整装入内存再事后拒绝。
+fn read_file_bounded(path: &Path, limit: u64, limit_error: &str) -> Result<Vec<u8>, String> {
+    let metadata = fs::metadata(path).map_err(|e| e.to_string())?;
+    if metadata.len() > limit {
+        return Err(limit_error.into());
+    }
+    let file = fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut reader = file.take(limit + 1);
+    let mut bytes = Vec::with_capacity(metadata.len().min(limit) as usize);
+    reader.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > limit {
+        return Err(limit_error.into());
+    }
+    Ok(bytes)
 }
 
 /// Write a complete replacement beside the destination, make its bytes durable,
@@ -80,15 +97,7 @@ fn save_text_file(path: String, contents: String) -> Result<(), String> {
 fn read_text_file(path: String) -> Result<String, String> {
     let path = Path::new(&path);
     let (limit, limit_error) = text_import_limit(path);
-    let metadata = fs::metadata(path).map_err(|e| e.to_string())?;
-    if metadata.len() > limit {
-        return Err(limit_error.into());
-    }
-    let bytes = fs::read(path).map_err(|e| e.to_string())?;
-    // 防止 metadata 检查后文件被替换或继续写入。
-    if bytes.len() as u64 > limit {
-        return Err(limit_error.into());
-    }
+    let bytes = read_file_bounded(path, limit, limit_error)?;
     String::from_utf8(bytes).map_err(|e| e.to_string())
 }
 
@@ -96,15 +105,11 @@ fn read_text_file(path: String) -> Result<String, String> {
 #[tauri::command]
 fn read_binary_file(path: String) -> Result<String, String> {
     use base64::Engine;
-    let metadata = fs::metadata(&path).map_err(|e| e.to_string())?;
-    if metadata.len() > MAX_XLSX_IMPORT_BYTES {
-        return Err("Excel 文件超过 20 MB 导入上限".into());
-    }
-    let bytes = fs::read(&path).map_err(|e| e.to_string())?;
-    // 防止 metadata 检查后文件被替换或继续写入。
-    if bytes.len() as u64 > MAX_XLSX_IMPORT_BYTES {
-        return Err("Excel 文件超过 20 MB 导入上限".into());
-    }
+    let bytes = read_file_bounded(
+        Path::new(&path),
+        MAX_XLSX_IMPORT_BYTES,
+        "Excel 文件超过 20 MB 导入上限",
+    )?;
     Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
 }
 

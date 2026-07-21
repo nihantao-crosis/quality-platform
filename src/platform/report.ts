@@ -4,9 +4,9 @@
  */
 import type { ExportFmt } from '../store/appStore';
 import {
-  nf, fmtCap, computeCapability, capabilityInputError, evalRules, DEFAULT_RULES, oneWayAnova, computeGageRR,
+  nf, fmtCap, computeCapability, capabilityInputError, evalRules, evalLimitedRules, DEFAULT_RULES, oneWayAnova, computeGageRR,
   anovaGroups, gageStudyData, GAGE_TOLERANCE, type VarModel,
-  assessCapability, countCapabilityViolations, andersonDarling,
+  assessCapability, andersonDarling,
 } from '../core';
 
 const OPS = ['张伟', '李娜', '王强'];
@@ -38,7 +38,22 @@ export function textReport(M: VarModel, spec: ReportSpec): string {
   const spc = M.hasSubgroups
     ? { values: M.subs.map((s) => s.mean), cl: M.xbarbar, sigma: (M.uclX - M.xbarbar) / 3 }
     : { values: M.indiv, cl: M.indMean, sigma: M.iSig };
-  const { list } = evalRules(spc.values, spc.cl, spc.sigma, DEFAULT_RULES);
+  // 通用报告也必须先判 R/MR：只重算 X̄/I 会在离散图失控时同屏写出
+  // 「过程受控」与「过程不稳定」。下方结论和能力判定共用这一次结构化判异结果。
+  const location = evalRules(spc.values, spc.cl, spc.sigma, DEFAULT_RULES);
+  const dispersion = M.hasSubgroups
+    ? evalLimitedRules(M.subs.map((s) => s.range), M.rCl, M.uclR, M.lclR, DEFAULT_RULES)
+    : evalLimitedRules(M.mr.slice(1) as number[], M.mrbar, M.mrUcl, 0, DEFAULT_RULES);
+  const locationLabel = M.hasSubgroups ? 'X̄' : 'I';
+  const dispersionLabel = M.hasSubgroups ? 'R' : 'MR';
+  const dispersionOffset = M.hasSubgroups ? 0 : 1;
+  const dispersionPoints = new Set([...dispersion.viol].map((i) => i + dispersionOffset));
+  const allViolationPoints = new Set([...location.viol, ...dispersionPoints]);
+  const capabilityViolationCount = location.viol.size + dispersion.viol.size;
+  const violationEvents = [
+    ...location.list.map((item) => ({ ...item, chart: locationLabel })),
+    ...dispersion.list.map((item) => ({ ...item, i: item.i + dispersionOffset, chart: dispersionLabel })),
+  ].sort((a, b) => a.i - b.i || a.chart.localeCompare(b.chart) || a.rule - b.rule);
   const anova = M.isDemo ? oneWayAnova(anovaGroups().map((g) => g.vals)) : null;
   const gage = M.isDemo ? computeGageRR(gageStudyData(), { mode: 'width', value: GAGE_TOLERANCE }) : null;
   const L: string[] = [];
@@ -61,10 +76,16 @@ export function textReport(M: VarModel, spec: ReportSpec): string {
     L.push('【SPC · I-MR 控制图】');
     L.push(`  中心线 X̄ ${nf(M.indMean, 3)} · UCL ${nf(M.iUcl, 3)} · LCL ${nf(M.iLcl, 3)} · MR̄ ${nf(M.mrbar, 3)}`);
   }
-  if (list.length === 0) L.push('  ✓ 未检出失控点，过程受控');
-  else {
-    L.push(`  ✗ 检出 ${list.length} 项失控（Nelson 准则）:`);
-    list.forEach((v) => L.push(`    · 点 ${v.i + 1} · 准则 ${v.rule} · ${v.desc}`));
+  if (dispersionPoints.size > 0) {
+    L.push(`  ✗ ${dispersionLabel} 图检出 ${dispersionPoints.size} 个异常点，过程变异尚未受控；暂不解释 ${locationLabel} 图，先调查离散异常`);
+  } else if (allViolationPoints.size === 0) {
+    L.push('  ✓ 未检出失控点，过程受控');
+  } else {
+    L.push(`  ✗ ${locationLabel} 图检出 ${location.viol.size} 个失控点，存在特殊原因变异`);
+  }
+  if (violationEvents.length > 0) {
+    L.push(`  判异明细（${allViolationPoints.size} 个实际点）:`);
+    violationEvents.forEach((v) => L.push(`    · ${v.chart} 图 · 点 ${v.i + 1} · 准则 ${v.rule} · ${v.desc}`));
   }
   L.push('');
   L.push('【过程能力】规格 ' + nf(spec.lsl, 2) + ' / ' + nf(spec.tgt, 2) + ' / ' + nf(spec.usl, 2));
@@ -78,7 +99,8 @@ export function textReport(M: VarModel, spec: ReportSpec): string {
     const capAd = M.all.length >= 8 ? andersonDarling(M.all) : null;
     const capAssessment = assessCapability({
       cpk: cap.cpk, verdict: cap.verdict, adP: capAd ? capAd.p : null, n: M.all.length,
-      spcViolations: countCapabilityViolations(M, DEFAULT_RULES),
+      // 保持能力判定既有的「位置图点数 + 离散图点数」口径，但复用上方结果，不再二次重算。
+      spcViolations: capabilityViolationCount,
     });
     L.push(`  判定: ${capAssessment.status}`);
     if (capAssessment.spcViolations > 0) L.push(`  ⚠ ${capAssessment.headline}`);

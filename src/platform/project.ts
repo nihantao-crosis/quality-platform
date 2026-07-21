@@ -5,6 +5,13 @@
  */
 import { platform } from './adapter';
 import { isIsoCalendarDate } from './calendarDate';
+import {
+  MAX_QPROJ_IMPORT_BYTES,
+  QprojExportSizeError,
+  assertQprojExportByteLength,
+  assertQprojExportText,
+  qprojExportByteLength,
+} from './importLimits';
 import { AQL_COLS, MAX_AQL_RECORDS, MAX_LOT_SIZE, aqlRegimeAllows, normalizeSwitchStatus, ruleKValueError, type AqlRegime, type NelsonRuleK, type SwitchStatus } from '../core';
 
 /** 允许进出项目文件的存储键；各 store 仍须自行做字段级校验。 */
@@ -370,6 +377,7 @@ function prefsValidationError(raw: unknown): string | null {
   const state = envelope.state;
   const allowedStateKeys = new Set([
     'chartStyle', 'showGrid', 'projectName', 'lsl', 'usl', 'tgt', 'lslOn', 'uslOn', 'capabilityBins',
+    'capSubgroupMode', 'capSubgroupSize', 'capValueCol', 'capSubgroupIdCol',
     'gageUseReal', 'gageValueName', 'gagePartName', 'gageOperatorName',
     'gageGaugeName', 'gageReportBy', 'gageStudyDate', 'gageNotes',
     'gageTolMode', 'gageTolValue', 'gageStandard', 'gageBatchCols', 'gageTolByCol',
@@ -390,6 +398,7 @@ function prefsValidationError(raw: unknown): string | null {
   }
   const enums: Array<[string, ReadonlySet<string>]> = [
     ['chartStyle', new Set(['经典', '现代', '高对比'])],
+    ['capSubgroupMode', new Set(['spc', 'const', 'stacked'])],
     ['spcDataLayout', new Set(['auto', 'rows', 'stacked', 'columns', 'individuals'])],
     ['spcSigmaMethod', new Set(['pooled', 'classic'])],
     ['doeView', new Set(['main', 'interact', 'pareto', 'cube'])],
@@ -414,6 +423,9 @@ function prefsValidationError(raw: unknown): string | null {
   if (state.capabilityBins !== undefined
     && (!Number.isSafeInteger(state.capabilityBins) || (state.capabilityBins as number) < 5
       || (state.capabilityBins as number) > 40)) return '能力直方图分组数无效';
+  if (state.capSubgroupSize !== undefined
+    && (!Number.isSafeInteger(state.capSubgroupSize) || (state.capSubgroupSize as number) < 2
+      || (state.capSubgroupSize as number) > 10)) return '能力子组大小无效';
   if (state.t1Mu0 !== undefined && state.t1Mu0 !== null
     && (typeof state.t1Mu0 !== 'number' || !Number.isFinite(state.t1Mu0))) return '单样本检验目标值无效';
   if (state.paretoThreshold !== undefined && (typeof state.paretoThreshold !== 'number'
@@ -448,7 +460,8 @@ function prefsValidationError(raw: unknown): string | null {
     if (state[key] !== undefined && typeof state[key] !== 'boolean') return `偏好设置 ${key} 不是布尔值`;
   }
   for (const key of [
-    'projectName', 'gageValueName', 'gagePartName', 'gageOperatorName', 'spcValueCol', 'spcSubgroupCol',
+    'projectName', 'capValueCol', 'capSubgroupIdCol',
+    'gageValueName', 'gagePartName', 'gageOperatorName', 'spcValueCol', 'spcSubgroupCol',
     'spcStageCol', 'doeRespCol', 't1ColName', 't2ColAName', 't2ColBName', 'regXName', 'regYName',
   ] as const) {
     if (state[key] !== undefined && state[key] !== null && typeof state[key] !== 'string') {
@@ -895,6 +908,8 @@ export function buildProjectJson(
     stores,
   };
   const encoded = JSON.stringify(file, null, 2);
+  // 项目文本即使尚未嵌入桌面 vault，也必须先满足同一导入上限。
+  assertQprojExportText(encoded);
   // Web 项目不含 SQLite 活动引用，可立即执行完整的自导入校验。
   if (Object.keys(stores).length > 0 && stores['qp-active-ref-v1'] === undefined) {
     const checked = validateProjectFile(encoded);
@@ -924,9 +939,24 @@ export async function buildProjectJsonFull(appVersion: string): Promise<string> 
         for (const r of recents) if (r.data != null) inRecents.add(r.name);
       } catch { /* 解析失败按全部嵌入处理 */ }
       const vault: Record<string, string> = {};
-      for (const meta of await db.list()) {
+      const metas = await db.list();
+      const selectedMetas = metas.filter((meta) => !inRecents.has(meta.name) || meta.name === activeRef);
+      // SQLite bytes 是各数据集 JSON 的 UTF-8 字节数。其与 base 之和是最终 QPROJ 的下界；
+      // 若下界已超限，无需再把所有大字符串读进 WebView 内存。
+      const knownVaultBytes = selectedMetas.reduce((sum, meta) => {
+        if (!Number.isSafeInteger(meta.bytes) || meta.bytes < 0) return sum;
+        const next = sum + meta.bytes;
+        // 损坏的元数据不能让累加越过 JS 安全整数后反而绕过上限。
+        return Number.isSafeInteger(next) && next <= MAX_QPROJ_IMPORT_BYTES
+          ? next
+          : MAX_QPROJ_IMPORT_BYTES + 1;
+      }, 0);
+      assertQprojExportByteLength(
+        qprojExportByteLength(JSON.stringify(base, null, 2)) + knownVaultBytes,
+        true,
+      );
+      for (const meta of selectedMetas) {
         // 活动引用必须始终随 vault 导出；即使最近列表意外含有同名全量副本也不能省略。
-        if (inRecents.has(meta.name) && meta.name !== activeRef) continue;
         const json = await db.get(meta.name);
         if (json == null) throw new Error(`数据集「${meta.name}」在导出期间不可读取`);
         vault[meta.name] = json;
@@ -940,6 +970,7 @@ export async function buildProjectJsonFull(appVersion: string): Promise<string> 
       if (checkedVault.error) throw new Error(checkedVault.error);
       if (Object.keys(vault).length > 0) base.vault = vault;
     } catch (error) {
+      if (error instanceof QprojExportSizeError) throw error;
       // 完整项目不能在库读取失败时静默降级成残缺备份。
       const failure = new Error(`读取本机数据集库失败，项目未导出：${errorMessage(error)}`) as Error & {
         cause?: unknown;
@@ -949,6 +980,8 @@ export async function buildProjectJsonFull(appVersion: string): Promise<string> 
     }
   }
   const encoded = JSON.stringify(base, null, 2);
+  // 元数据只能做下界预判；JSON 转义、名称和结构开销必须以最终实际 UTF-8+BOM 字节数收口。
+  assertQprojExportText(encoded);
   const checked = validateProjectFile(encoded);
   if (checked.file === null) throw new Error(`生成的完整项目文件未通过自校验：${checked.error}`);
   return encoded;

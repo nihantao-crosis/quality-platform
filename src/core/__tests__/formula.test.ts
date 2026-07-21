@@ -101,6 +101,15 @@ describe('聚合函数(广播为常量)', () => {
     expect(read('var', blocked)).toBeCloseTo(expectedSd ** 2, 24);
     expect(Math.abs(read('var', blocked) - read('var', reversed)) / (expectedSd ** 2)).toBeLessThan(1e-12);
   });
+  it('SUM 在大数相消时不因中间溢出或行序丢失有限结果', () => {
+    const sum = (values: number[]) => evalFormula('sum(C1)', {
+      columns: [values], colNames: ['大数'], rowCount: values.length,
+    }).values[0];
+    expect(sum([1e308, 1e308, -1e308])).toBe(1e308);
+    expect(sum([-1e308, 1e308, 1e308])).toBe(1e308);
+    expect(sum([1e308, 1, -1e308])).toBeCloseTo(1, 12);
+    expect(sum([-1e308, 1, 1e308])).toBeCloseTo(1, 12);
+  });
 });
 
 describe('比较与逻辑', () => {

@@ -18,6 +18,14 @@ import { BoxPlot, IndividualValuePlot, IntervalPlot } from '../charts/misc';
 import { chartTokens } from '../tokens';
 import { Anova } from '../pages/SimplePages';
 
+// 独立复现 GPT 复审给出的 P≈0.0168076：两组各 500 点，只有 1e9±5e-6 两个值。
+// A 的稳定均值高于 B；刻意安排相反的行序后，旧展示层朴素 reduce 会错误判成 B 更高。
+const ANOVA_AUDIT_BASE = 1e9;
+const ANOVA_AUDIT_LOW = ANOVA_AUDIT_BASE - 5e-6;
+const ANOVA_AUDIT_HIGH = ANOVA_AUDIT_BASE + 5e-6;
+const ANOVA_AUDIT_A = [...Array(50).fill(ANOVA_AUDIT_LOW), ...Array(450).fill(ANOVA_AUDIT_HIGH)] as number[];
+const ANOVA_AUDIT_B = [...Array(425).fill(ANOVA_AUDIT_HIGH), ...Array(75).fill(ANOVA_AUDIT_LOW)] as number[];
+
 beforeEach(() => {
   cleanup();
   localStorage.clear();
@@ -37,6 +45,55 @@ describe('ANOVA 常数数据图形边界', () => {
       groups: [{ name: 'A', vals: [1, 1] }, { name: 'B', vals: [1, 1] }],
     }));
     expect(svg).not.toContain('NaN');
+  });
+});
+
+describe('ANOVA 大基准微扰展示链稳定性', () => {
+  it('核心组均值判 A 最高且 P≈0.0168076，正反序结果一致', () => {
+    const result = oneWayAnova([ANOVA_AUDIT_A, ANOVA_AUDIT_B]);
+    const reversed = oneWayAnova([[...ANOVA_AUDIT_A].reverse(), [...ANOVA_AUDIT_B].reverse()]);
+    const summaries = anovaGroupSummaries([
+      { name: '稳定A', vals: ANOVA_AUDIT_A },
+      { name: '稳定B', vals: ANOVA_AUDIT_B },
+    ], result);
+    // 证明该夹具确实会触发旧展示缺陷，而非只验证一个普通显著样本。
+    const legacyMeans = [ANOVA_AUDIT_A, ANOVA_AUDIT_B]
+      .map((values) => values.reduce((sum, value) => sum + value, 0) / values.length);
+    expect(legacyMeans[0]).toBeLessThan(legacyMeans[1]);
+    expect(summaries[0].mean).toBeGreaterThan(summaries[1].mean);
+    expect(result.pValue).toBeCloseTo(0.016807634457, 10);
+    expect(reversed.pValue).toBeCloseTo(result.pValue, 12);
+    expect(result.significant).toBe(true);
+  });
+
+  it('页面最高组直接跟随核心稳定摘要，组内正反序都判稳定A', () => {
+    const pageConclusion = (a: number[], b: number[]) => {
+      useData.getState().importMatrix(
+        'ANOVA微扰.csv',
+        ['稳定A', '稳定B'],
+        a.map((value, index) => [value, b[index]]),
+      );
+      useApp.setState({
+        page: 'anova', hypoTab: 'anova', anovaMode: 'wide',
+        anovaRespName: null, anovaFactorName: null, anovaShowDemo: false,
+      });
+      const text = render(createElement(Anova, { T: chartTokens('经典', true) })).container.textContent ?? '';
+      cleanup();
+      return text;
+    };
+    expect(pageConclusion(ANOVA_AUDIT_A, ANOVA_AUDIT_B)).toContain('「稳定A」组均值最高');
+    expect(pageConclusion([...ANOVA_AUDIT_A].reverse(), [...ANOVA_AUDIT_B].reverse()))
+      .toContain('「稳定A」组均值最高');
+  });
+
+  it('箱线图均值标记使用稳定 mean，同一组正反序 SVG 完全一致', () => {
+    const T = chartTokens('经典', true);
+    const draw = (a: number[], b: number[]) => renderToStaticMarkup(createElement(BoxPlot, {
+      T,
+      groups: [{ name: '稳定A', vals: a }, { name: '稳定B', vals: b }],
+    }));
+    expect(draw(ANOVA_AUDIT_A, ANOVA_AUDIT_B))
+      .toBe(draw([...ANOVA_AUDIT_A].reverse(), [...ANOVA_AUDIT_B].reverse()));
   });
 });
 

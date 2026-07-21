@@ -2,9 +2,10 @@
  * .qproj × 数据集库整合 — 导出嵌入 vault / 导入恢复 / 去重 / Web 跳过 / 旧格式兼容。
  * @vitest-environment jsdom
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { applyProjectJson, applyProjectText, buildProjectJson, buildProjectJsonFull } from '../../platform/project';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { applyProjectJson, applyProjectText, buildProjectJson, buildProjectJsonFull, exportProject } from '../../platform/project';
 import { platform, type DatasetDb } from '../../platform/adapter';
+import { MAX_QPROJ_IMPORT_BYTES } from '../../platform/importLimits';
 
 function fakeDb() {
   const store = new Map<string, string>();
@@ -35,7 +36,10 @@ beforeEach(() => {
   fake = fakeDb();
   platform.datasetDb = fake.db;
 });
-afterEach(() => { platform.datasetDb = null; });
+afterEach(() => {
+  platform.datasetDb = null;
+  vi.restoreAllMocks();
+});
 
 describe('.qproj × 数据集库', () => {
   it('导出嵌入库数据集;最近列表已带全量的不重复嵌入', async () => {
@@ -49,6 +53,28 @@ describe('.qproj × 数据集库', () => {
     expect(file.vault).toBeDefined();
     expect(Object.keys(file.vault)).toEqual(['超大集']);
     expect(file.formatVersion).toBe(4); // 旧读取器必须明确拒绝，不能静默忽略 vault/AQL 或 v7 快照新语义
+  });
+
+  it('多个本机归档在元数据预判已超过可再导入上限时，拒绝读入大字符串且不创建导出任务', async () => {
+    localStorage.setItem('qp-specs-v1', '{}');
+    const get = vi.fn(async () => datasetJson('归档A', 1));
+    platform.datasetDb = {
+      ...fake.db,
+      async list() {
+        return [
+          { name: '归档A', saved_at: 't', bytes: Math.floor(MAX_QPROJ_IMPORT_BYTES * 0.6) },
+          { name: '归档B', saved_at: 't', bytes: Math.floor(MAX_QPROJ_IMPORT_BYTES * 0.6) },
+        ];
+      },
+      get,
+    };
+    const exportFile = vi.spyOn(platform, 'exportFile');
+
+    const attempt = exportProject('9.9.9', '超大项目');
+    await expect(attempt).rejects.toThrow('预计至少');
+    await expect(attempt).rejects.toThrow('删除不再需要的本机归档数据集');
+    expect(get).not.toHaveBeenCalled();
+    expect(exportFile).not.toHaveBeenCalled();
   });
 
   it('导入把 vault 恢复进本机库并给出提示', async () => {
