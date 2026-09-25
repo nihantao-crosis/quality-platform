@@ -8,6 +8,7 @@ import ReactDOM from 'react-dom/client';
 import { registerSW } from 'virtual:pwa-register';
 import { bootstrapApplication } from './bootstrap';
 import { acquireAppWriterLease } from './platform/singleWriter';
+import { installDesktopCloseGuard, showDesktopStartupNotice } from './platform/desktopCloseGuard';
 // 字体本地打包（桌面端离线可用，交接文档 §10）
 import '@fontsource/ibm-plex-sans/400.css';
 import '@fontsource/ibm-plex-sans/500.css';
@@ -52,6 +53,12 @@ function PwaUpdatePrompt() {
     </div>
   );
 }
+
+// fix2609j G16-desktop:桌面壳关窗/Cmd+Q 不触发 beforeunload——监听窗口 close-requested,
+// 复用同一未持久化判定弹原生确认;并取走 Rust 启动期提示(损坏库备份路径/另一实例占用)。
+// 两者都不加载业务 store,可在启动屏障之前安装;Web/PWA 下均为空操作。
+void installDesktopCloseGuard().catch((error) => console.warn('桌面关窗保护安装失败', error));
+void showDesktopStartupNotice().catch((error) => console.warn('桌面启动提示读取失败', error));
 
 const rootElement = document.getElementById('root')!;
 
