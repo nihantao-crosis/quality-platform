@@ -6,7 +6,10 @@ import { useState, useEffect, useLayoutEffect, useRef, useMemo } from 'react';
 import type { CSSProperties } from 'react';
 import { useApp } from '../../store/appStore';
 import { PROJECT_BACKUP_HINT, datasetWriteNotes, useData } from '../../store/dataStore';
-import { nf, evalRules, evalLimitedRules, parseMatrix, arrMin, arrMax, prepareSpcData, columnDisplayDp, worksheetDisplayOrder, withSigmaMethod } from '../../core';
+import {
+  nf, parseMatrix, arrMin, arrMax, prepareSpcData, columnDisplayDp, worksheetDisplayOrder, withSigmaMethod,
+  evaluateSpcChartRules, resolveSpcStage, spcViewFamilyFor,
+} from '../../core';
 import { errText } from '../../platform/adapter';
 import { assertClipboardImportText } from '../../platform/importLimits';
 import { Card, KvRows } from '../common';
@@ -294,7 +297,7 @@ function HeaderCell({ name, canDelete, gridCol, ariaColIndex, fixedWidth = false
 export function Worksheet() {
   const {
     openModal, setImportTab, showToast, spcType, spcRules, spcRuleK, selSub,
-    spcDataLayout, spcValueCol, spcSubgroupCol, spcSigmaMethod,
+    spcDataLayout, spcValueCol, spcSubgroupCol, spcSigmaMethod, spcStageCol,
   } = useApp();
   const { model: M, textCols, pendingCells, updateCell, addSubgroupRow, deleteRow, renameColumn, deleteColumn, insertColumn } = useData();
   // 记忆化(双审 P2):大工作表滚动/击键时不重跑 O(N) 解析
@@ -380,20 +383,41 @@ export function Worksheet() {
     return () => window.removeEventListener('paste', onPaste);
   }, [importMatrix, showToast]);
 
-  // 均值失控行高亮（与 SPC 主图一致：准则引擎）
-  const rowSpcUsesS = Boolean(rowSpc && spcType === 'xbar-s');
-  const { meanViol, dispersionViol, dispersionValues } = useMemo(() => {
-    if (!rowSpc) return { meanViol: new Set<number>(), dispersionViol: new Set<number>(), dispersionValues: [] as number[] };
-    const means = rowSpc.subs.map((sub) => sub.mean);
-    const sig = ((rowSpcUsesS ? rowSpc.uclXs : rowSpc.uclX) - rowSpc.xbarbar) / 3;
-    const options = { collectDetails: false };
-    const meanResult = evalRules(means, rowSpc.xbarbar, sig, spcRules, spcRuleK, options);
+  // 均值/离散失控行高亮(CORE-09 残余 / UI-12 / CORE-08):与 SPC 页、质量总览同源——
+  // 图型 spcViewFamilyFor、阶段 resolveSpcStage、判异唯一原语 evaluateSpcChartRules(含 σ̂ 守卫)。
+  // 不再按全局控制限自行 evalRules:分阶段时 SPC 页段内 0 失控,工作表也必须 0 红格。
+  // I-MR 视图按单个观测判异,无法落到子组均值/离散列;分阶段未运行、σ̂ 不可判定时同样不高亮并说明原因。
+  const rowSpcFamily = rowSpc ? spcViewFamilyFor(rowSpc, spcType) : null;
+  const rowSpcUsesS = rowSpcFamily === 'xbar-s';
+  const { meanViol, dispersionViol, dispersionValues, rowSpcHint } = useMemo(() => {
+    const none = new Set<number>();
+    if (!rowSpc || !rowSpcFamily) {
+      return { meanViol: none, dispersionViol: none, dispersionValues: [] as number[], rowSpcHint: null as string | null };
+    }
     const dispersionValues = rowSpcUsesS ? rowSpc.svals : rowSpc.subs.map((sub) => sub.range);
-    const dispersionResult = rowSpcUsesS
-      ? evalLimitedRules(dispersionValues, rowSpc.sCl, rowSpc.uclS, rowSpc.lclS, spcRules, spcRuleK, undefined, options)
-      : evalLimitedRules(dispersionValues, rowSpc.rCl, rowSpc.uclR, rowSpc.lclR, spcRules, spcRuleK, undefined, options);
-    return { meanViol: meanResult.viol, dispersionViol: dispersionResult.viol, dispersionValues };
-  }, [rowSpc, rowSpcUsesS, spcRules, spcRuleK]);
+    const unhighlighted = (rowSpcHint: string) => ({ meanViol: none, dispersionViol: none, dispersionValues, rowSpcHint });
+    if (rowSpcFamily === 'i-mr') {
+      return unhighlighted('当前 SPC 视图为 I-MR（按单个观测判异），子组均值/极差列不做失控高亮；失控观测请在控制图页查看。');
+    }
+    const stage = resolveSpcStage({
+      stageColumn: spcStageCol, textCols: prepared.textCols, spcType, hasSubgroups: rowSpc.hasSubgroups, pointCount: rowSpc.k,
+    });
+    if (stage.state === 'invalid') {
+      return unhighlighted(`SPC 分阶段未运行：${stage.reason}；与控制图页一致不出结论，均值/极差列不做失控高亮。`);
+    }
+    const evaluation = evaluateSpcChartRules(rowSpc, spcRules, spcRuleK, rowSpcFamily, false, stage);
+    if (evaluation.unavailableReason) {
+      return unhighlighted(`SPC 不可判定：${evaluation.unavailableReason}；均值/${rowSpcUsesS ? '标准差' : '极差'}列不做失控高亮。`);
+    }
+    return {
+      meanViol: evaluation.location.viol,
+      dispersionViol: evaluation.dispersion.viol,
+      dispersionValues,
+      rowSpcHint: stage.state === 'active'
+        ? `均值/极差高亮按「${stage.column}」分阶段段内控制限判异（与控制图页一致）。`
+        : null,
+    };
+  }, [rowSpc, rowSpcFamily, rowSpcUsesS, prepared, spcType, spcStageCol, spcRules, spcRuleK]);
 
   // 列统计(大数组安全 min/max)
   const { allMin, allMax } = useMemo(() => {
@@ -563,6 +587,11 @@ export function Worksheet() {
   return (
     <div ref={worksheetRef} className="responsive-grid-2" style={{ display: 'grid', gridTemplateColumns: '1fr 268px', gap: 16 }}>
       <div style={{ background: '#fff', border: '1px solid #d7dbe1', borderRadius: 5, overflow: 'hidden', boxShadow: '0 1px 2px rgba(20,30,50,0.04)' }}>
+        {rowSpcHint && (
+          <div role="status" style={{ padding: '6px 12px', borderBottom: '1px solid #eceff3', background: '#fbfaf5', color: '#8a5a00', fontSize: 11.5, lineHeight: 1.5 }}>
+            {rowSpcHint}
+          </div>
+        )}
         <div
           ref={scrollRef}
           onFocus={(event) => { lastGridFocus.current = event.target instanceof HTMLElement ? event.target : null; }}

@@ -149,8 +149,9 @@ export function buildHtmlReport(
 
   // 位置图+离散图统一判异明细(v1.42.3):结论行与明细同源,离散图失控不再与「受控」并存
   const countSummary = `各图累计 ${assessment.chartPointCount} 个失控点（${assessment.locationLabel} 图 ${assessment.locationPoints} 个 + ${assessment.dispersionLabel} 图 ${assessment.dispersionPoints} 个）；去重${assessment.analysisUnitLabel} ${assessment.uniqueAnalysisUnitCount} 个`;
+  // CORE-08:σ̂ 不可判定时结论行不得套绿色「受控」样式。
   const violHtml = assessment.events.length === 0
-    ? `<p class="verdict-ok">${esc(assessment.verdictLine)}</p>`
+    ? `<p class="${assessment.unavailableReason ? 'verdict-warn' : 'verdict-ok'}">${esc(assessment.verdictLine)}</p>`
     : `<p class="verdict-bad">${esc(assessment.verdictLine)}（${esc(countSummary)}）</p>`
       + `<table><tr><th>点号</th><th>图</th><th>准则</th><th>描述</th></tr>${assessment.events
         // 行数硬上限(v1.42.4):对抗性数据可产出 50 万+事件,完整渲染会冻结浏览器;截断行写明总数

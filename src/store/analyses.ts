@@ -12,6 +12,7 @@ import {
   prepareGageStudy, effectiveGageSelection, listGageCategoryColumns, resolveNumericColumn,
   oneWayAnova, oneSampleT, twoSampleT, linearRegression, anovaGroups, buildAnovaInput, resolveAnovaRoles, wideScaleDisparate, resolveAnovaMode, countAnovaPendingCells, isDoeAnalysisColumn, analyzeDoe, detectFactorial, analyzeFactorial, detectGeneralFactorial, analyzeGeneralFactorial, detectFractionalFactorial, analyzeFractionalFactorial, resolveDoeColumnsWide, MAX_FRACTIONAL_FACTORS, factorialModelTerms, factorialHierarchyClosure, resolveDoeBlockValues, plansByState, computeDescriptive,
   ewmaSeries, cusumSeries, stagedXbar, stagedRange, resolveSpcStage, normalizeSwitchStatus, spcChartFamilyFor, capabilityStabilityCaliber,
+  shewhartSigmaIssue, spcStabilityViewFromRoles,
   normalizeRuleK, assessGage, withSigmaMethod, MAX_SAVED_ANALYSES,
   type InspectionLevel, type AnovaMode, type AqlMethod, type AqlAcMethod, type AqlRegime, type GageStandard, type NelsonRules, type NelsonRuleK, type SwitchStatus, type SpcDataLayout, type SpcSigmaMethod,
 } from '../core';
@@ -378,6 +379,13 @@ function buildSummary(kind: AnalysisKind): Omit<SavedAnalysis, 'id' | 'createdAt
       };
       let violations: Set<number>;
       let stageCount = 0;
+      // CORE-08:Shewhart 图 σ̂ 守卫(与 SPC 页/看板/报告同源)。分阶段 X̄-R 按段内限值,不走全局 σ̂。
+      const shewhartUnavailable = (family: 'xbar-r' | 'xbar-s' | 'i-mr') => {
+        const reason = shewhartSigmaIssue(SM, family);
+        return reason
+          ? { kind, title: SPC_TITLE[effType], metric: reason, status: '未分析', ...pick(WARN) }
+          : null;
+      };
 
       if (effType === 'xbar-r') {
         // 阶段口径与 SPC 页/看板/专项报告同源解析(PLATFORM-21):校验失败统一拒绝出结论。
@@ -397,6 +405,8 @@ function buildSummary(kind: AnalysisKind): Omit<SavedAnalysis, 'id' | 'createdAt
           violations = mergeViolations(x.viol, r.viol);
           stageCount = x.segments.length;
         } else {
+          const unavailable = shewhartUnavailable('xbar-r');
+          if (unavailable) return unavailable;
           violations = mergeViolations(
             ruleViolations(means, SM.xbarbar, (SM.uclX - SM.xbarbar) / 3),
             // 判异中心线与图表同口径(pooled 时 R 图 CL=d2σ̂ 而非 R̄,批次720)
@@ -404,11 +414,15 @@ function buildSummary(kind: AnalysisKind): Omit<SavedAnalysis, 'id' | 'createdAt
           );
         }
       } else if (effType === 'xbar-s') {
+        const unavailable = shewhartUnavailable('xbar-s');
+        if (unavailable) return unavailable;
         violations = mergeViolations(
           ruleViolations(means, SM.xbarbar, (SM.uclXs - SM.xbarbar) / 3),
           limitedViolations(SM.svals, SM.sCl, SM.uclS, SM.lclS),
         );
       } else if (effType === 'i-mr') {
+        const unavailable = shewhartUnavailable('i-mr');
+        if (unavailable) return unavailable;
         violations = mergeViolations(
           ruleViolations(SM.indiv, SM.indMean, (SM.iUcl - SM.indMean) / 3),
           // MR[0] 无定义，图上第 1 个 MR 对应原始观测 2，故全局点索引 +1。
@@ -481,7 +495,12 @@ function buildSummary(kind: AnalysisKind): Omit<SavedAnalysis, 'id' | 'createdAt
         spcViolations: countCapabilityViolations(capabilitySpcModel, app.spcRules, app.spcRuleK, capabilityFamily),
       });
       // CORE-09/UI-12:能力稳定性有意按全局子组图评估;与 SPC 页视图不同时记录里必须写明口径。
-      const caliber = capabilityStabilityCaliber({ capabilityFamily, spcType: app.spcType, spcStageCol: app.spcStageCol });
+      // fix2609k G20:视图/阶段取 SPC 页实际生效口径(与能力页/看板/专项报告/Modals 同源)。
+      const { spcViewType, spcStage } = spcStabilityViewFromRoles(M, dataState.textCols, {
+        layout: app.spcDataLayout, valueColumn: app.spcValueCol, subgroupColumn: app.spcSubgroupCol,
+        pendingCells: dataState.pendingCells,
+      }, app.spcType, app.spcStageCol);
+      const caliber = capabilityStabilityCaliber({ capabilityFamily, spcViewType, spcStage });
       return {
         kind, title: '过程能力分析', metric: `Cpk ${nf(cap.cpk, 2)}${caliber ? ` · ${caliber.short}` : ''}`,
         status: assessment.status,

@@ -7,7 +7,7 @@ import { suggestedSpec, rememberSpecForCapabilityMeasurement, syncSpecForCapabil
 import {
   nf, fmtCap, capabilityInputError, capabilitySpecDistanceWarning, capabilityWarningFingerprint,
   computeCapability, andersonDarling, bestLambda, transformWithSpec, stdev, countCapabilityViolations, withSigmaMethod,
-  spcMeasurementColumnNames, spcChartFamilyFor, capabilityStabilityCaliber,
+  spcMeasurementColumnNames, spcChartFamilyFor, capabilityStabilityCaliber, spcStabilityViewFromRoles,
 } from '../../core';
 import { ReportCard } from '../ReportCard';
 import { capabilityReport } from '../reportData';
@@ -53,7 +53,7 @@ function CapabilityView({ T }: { T: ChartTokens }) {
   // fix2609i G14:prepared 与壳层/总览共用 useCapabilityPrepared(依赖清单唯一:能力子组口径 +
   // SPC 数据角色 + pendingCells)。此前本页漏了 spcDataLayout/spcValueCol/spcSubgroupCol/pendingCells,
   // 「重置界面偏好」等不经 SPC 页的角色写入后页面沿用旧测量列,与状态栏不同源。
-  const { prepared, model: rawModel, textCols } = useCapabilityPrepared();
+  const { prepared, model: rawModel, textCols, pendingCells, roles } = useCapabilityPrepared();
   const M = prepared.model;
   // fix2609i G14:O(N) 的输入闸门、确认指纹、能力计算、AD 检验与 Box-Cox 链路整体记忆化,
   // 只随数据/口径(prepared 已随全部口径字段失效)、规格与确认值变化重算;toast/菜单/组数滑块不触发。
@@ -107,9 +107,14 @@ function CapabilityView({ T }: { T: ChartTokens }) {
     const capabilityFamily = spcChartFamilyFor(capSpcModel, spcType);
     const spcViol = countCapabilityViolations(capSpcModel, spcRules, spcRuleK, capabilityFamily);
     // CORE-09/UI-12:能力稳定性有意不分阶段、按子组图评估;SPC 页视图不同(分阶段/I-MR 等)时写明口径。
-    const stabilityCaliber = capabilityStabilityCaliber({ capabilityFamily, spcType, spcStageCol });
+    // fix2609k G20:视图/阶段取 SPC 页实际生效口径(与看板/记录/专项报告/Modals 同源)。
+    const { spcViewType, spcStage } = spcStabilityViewFromRoles(rawModel, textCols, {
+      layout: roles.spcDataLayout, valueColumn: roles.spcValueCol, subgroupColumn: roles.spcSubgroupCol, pendingCells,
+    }, spcType, spcStageCol);
+    const stabilityCaliber = capabilityStabilityCaliber({ capabilityFamily, spcViewType, spcStage });
     return { spcViol, stabilityCaliber };
-  }, [M, analysis, spcSigmaMethod, spcType, spcRules, spcRuleK, spcStageCol]);
+  }, [M, analysis, spcSigmaMethod, spcType, spcRules, spcRuleK, spcStageCol, rawModel, textCols, pendingCells,
+    roles.spcDataLayout, roles.spcValueCol, roles.spcSubgroupCol]);
   // 批次716-R2 P0:子组口径(模式/测量列/ID 列)变化 = 测量特性可能变化,规格必须跟随切换,
   // 否则沿用旧量纲规格会产出虚假 Cpk。有该特性的记忆规格用记忆,否则按新口径 μ±4σ 重建议。
   const updateSubgroup = (patch: Parameters<typeof setCapabilitySubgroup>[0]) => {

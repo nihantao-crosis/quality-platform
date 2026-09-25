@@ -80,7 +80,9 @@ describe('assessSpcCharts 结构化点明细', () => {
 
   it('K2=12 的连续 24 点输出 24 条点×准则明细，不退化为窗口触发终点', () => {
     // 前 24 个子组均值在中心线上方，最后一个极低值把总中心线拉到 0；只启用准则 2。
-    const rows = [...Array.from({ length: 24 }, () => [1, 1]), [-24, -24]];
+    // fix2609k G20(CORE-08):组内极差须非零——R̄=0 时 σ̂=0,X̄-R 按通用 σ̂ 守卫统一「不可判定」。
+    // 极差 0.2/0.4 交替,R 图不构成连续 12 点同侧。
+    const rows = [...Array.from({ length: 24 }, (_, i) => (i % 2 ? [0.8, 1.2] : [0.9, 1.1])), [-24.15, -23.85]];
     const M = computeVarModel('K2-12.csv', ['a', 'b'], rows);
     const assessment = assessSpcCharts(
       M,

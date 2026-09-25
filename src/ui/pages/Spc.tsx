@@ -7,7 +7,7 @@ import { useApp, type SpcType } from '../../store/appStore';
 import { datasetWriteNotes, syncSpecForActiveMeasurement, useData } from '../../store/dataStore';
 import {
   nf, evalRules, evalLimitedRules, RULE_DEFS, DEFAULT_RULE_K, ruleKDesc, ewmaSeries, cusumSeries, stagedXbar, stagedRange, resolveSpcStage,
-  prepareSpcData, spcMeasurementColumnNames, spcRoleOptions, withSigmaMethod, dataDecimals,
+  prepareSpcData, spcMeasurementColumnNames, spcRoleOptions, withSigmaMethod, dataDecimals, shewhartSigmaIssue,
   type NelsonRuleK, type NelsonRules, type RuleNo, type SpcDataLayout, type SpcPreparedData, type VarModel, type TextColumn,
   type PointRuleSummary, type SpcSigmaMethod, type PChartModel, type CChartModel,
 } from '../../core';
@@ -271,7 +271,7 @@ export function computeSpcPageView({
       ],
     },
     ewma: {
-      sub: ewma.unavailableReason ? 'EWMA · 不可判定（σ̂=0/非有限）' : `EWMA · ${ewmaParamsText(ewma.lambda, ewma.L)} · 对小漂移敏感`,
+      sub: ewma.unavailableReason ? 'EWMA · 不可判定（σ̂ 无有效变异）' : `EWMA · ${ewmaParamsText(ewma.lambda, ewma.L)} · 对小漂移敏感`,
       shewhart: false,
       coreViol: ewma.viol,
       charts: [
@@ -279,7 +279,7 @@ export function computeSpcPageView({
       ],
     },
     cusum: {
-      sub: cusum.unavailableReason ? 'CUSUM · 不可判定（σ̂=0/非有限）' : `CUSUM · ${cusumParamsText(CUSUM_K, cusumHValue)} · 累积和`,
+      sub: cusum.unavailableReason ? 'CUSUM · 不可判定（σ̂ 无有效变异）' : `CUSUM · ${cusumParamsText(CUSUM_K, cusumHValue)} · 累积和`,
       shewhart: false,
       coreViol: cusum.viol,
       charts: [
@@ -318,11 +318,21 @@ export function computeSpcPageView({
   const stageBlocked = effType === 'xbar-r' && stageError ? stageError : null;
   // CORE-08:σ̂=0/非有限时 EWMA/CUSUM 不可判定,与保存记录/专项报告同一原因文案。
   const advancedUnavailable = effType === 'ewma' ? ewma.unavailableReason : effType === 'cusum' ? cusum.unavailableReason : null;
+  // CORE-08 残余:Shewhart X̄/I 图同一 σ̂ 守卫(evaluateSpcChartRules/看板/保存记录/报告同源)。
+  // 分阶段按段内限值判异,不走全局 σ̂;分阶段被拒时整页已不出结论。
+  const shewhartUnavailable = !staged && !stageBlocked && (effType === 'xbar-r' || effType === 'xbar-s' || effType === 'i-mr')
+    ? shewhartSigmaIssue(M, effType)
+    : null;
+  const sigmaUnavailable = advancedUnavailable ?? shewhartUnavailable;
   const main = spec.charts.find((c) => c.main)!;
 
   let viol: Set<number>;
   let mainSummary: PointRuleSummary;
-  if (spec.coreViol && spec.coreSummary) {
+  if (sigmaUnavailable) {
+    // 控制限塌缩:不判异、不出点(与看板/保存记录/报告一致),结论卡写「不可判定」。
+    viol = new Set<number>();
+    mainSummary = singlePointSummary(viol, '');
+  } else if (spec.coreViol && spec.coreSummary) {
     // 分阶段：判异已在段内完成
     viol = spec.coreViol;
     mainSummary = spec.coreSummary;
@@ -346,7 +356,7 @@ export function computeSpcPageView({
   // 分阶段模式下用段内判异结果 staged.r(否则会因固定控制限而漏判/误判)。
   const dispViolByChart = new Map<string, Set<number>>();
   const variationSources: SpcChartViolations[] = [];
-  if (spec.shewhart) {
+  if (spec.shewhart && !sigmaUnavailable) {
     for (const ch of spec.charts) {
       if (ch.main) continue;
       const chartLabel = effType === 'xbar-r' ? 'R' : effType === 'xbar-s' ? 'S' : effType === 'i-mr' ? 'MR' : ch.props.clLabel ?? '离散';
@@ -379,19 +389,21 @@ export function computeSpcPageView({
   );
   const variationChartLabel = effType === 'xbar-r' ? 'R' : effType === 'xbar-s' ? 'S' : effType === 'i-mr' ? 'MR' : null;
 
+  // CORE-08:不可判定时 UCL/LCL/H/K 只是占位(塌缩到中心线/0),不得当作真实参数展示。
+  const UNDETERMINED = '—（不可判定）';
   const stats: { k: string; v: string }[] = [];
   if (effType === 'ewma') {
     stats.push(
       { k: '中心线 μ₀', v: nf(ewma.cl, 4) },
-      { k: 'UCL（末端）', v: nf(ewma.ucl[ewma.ucl.length - 1], 4) },
-      { k: 'LCL（末端）', v: nf(ewma.lcl[ewma.lcl.length - 1], 4) },
+      { k: 'UCL（末端）', v: advancedUnavailable ? UNDETERMINED : nf(ewma.ucl[ewma.ucl.length - 1], 4) },
+      { k: 'LCL（末端）', v: advancedUnavailable ? UNDETERMINED : nf(ewma.lcl[ewma.lcl.length - 1], 4) },
       { k: 'λ / L', v: `${ewma.lambda} / ${ewma.L}` },
       { k: '点数', v: String(advData.length) },
     );
   } else if (effType === 'cusum') {
     stats.push(
-      { k: '判定限 H', v: nf(cusum.H, 4) },
-      { k: '允差 K', v: nf(cusum.K, 4) },
+      { k: '判定限 H', v: advancedUnavailable ? UNDETERMINED : nf(cusum.H, 4) },
+      { k: '允差 K', v: advancedUnavailable ? UNDETERMINED : nf(cusum.K, 4) },
       { k: 'k / h', v: `${CUSUM_K} / ${cusumHValue}` },
       { k: 'C⁺ 末值', v: nf(cusum.cp[cusum.cp.length - 1], 4) },
       { k: 'C⁻ 末值', v: nf(cusum.cn[cusum.cn.length - 1], 4) },
@@ -400,8 +412,8 @@ export function computeSpcPageView({
   } else {
     stats.push(
       { k: '中心线 ' + (main.props.clLabel ?? 'CL'), v: nf(main.props.cl, main.dec) },
-      { k: 'UCL', v: nf(main.props.ucl, main.dec) },
-      { k: 'LCL', v: nf(main.props.lcl, main.dec) },
+      { k: 'UCL', v: shewhartUnavailable ? UNDETERMINED : nf(main.props.ucl, main.dec) },
+      { k: 'LCL', v: shewhartUnavailable ? UNDETERMINED : nf(main.props.lcl, main.dec) },
     );
     if (effType === 'p') {
       stats.length = 0;
@@ -456,19 +468,21 @@ export function computeSpcPageView({
   });
 
   const typeLabel = TYPE_TABS.find(([k]) => k === effType)?.[1] ?? effType;
-  const report = advancedUnavailable
+  // CORE-08:σ̂ 不可判定时 X̄-R/I-MR 同样塌缩(同一 σ̂),不再建议「改用 X̄-R/I-MR」,只提示核查量具分辨率。
+  const report = sigmaUnavailable
     ? {
         ...baseReport,
         verdict: 'warn' as const,
-        headline: `${typeLabel} 不可判定——${advancedUnavailable}。请先确认量具分辨率或改用 ${M.hasSubgroups ? 'X̄-R' : 'I-MR'} 查看数据。`,
+        headline: `${typeLabel} 不可判定——${sigmaUnavailable}。控制限塌缩为一条线，任何控制图都无法判异；请先核查量具分辨率（读数是否全部相同）或补测有效变异后再分析。`,
         checks: baseReport.checks.map((check) => check.name === '过程稳定性'
-          ? { name: '过程稳定性', level: 'warn' as const, note: advancedUnavailable }
+          ? { name: '过程稳定性', level: 'warn' as const, note: sigmaUnavailable }
           : check),
       }
     : baseReport;
 
   return {
-    M, textCols, labelsFor, stageCol, canStage, stageError, stageBlocked, advancedUnavailable, staged, advData, ewma, cusum, variableName,
+    M, textCols, labelsFor, stageCol, canStage, stageError, stageBlocked, advancedUnavailable, shewhartUnavailable, sigmaUnavailable,
+    staged, advData, ewma, cusum, variableName,
     specs, effType, spec, main, viol, dispViolByChart, violations, variationChartLabel, stats, report,
   };
 }
@@ -542,7 +556,7 @@ function SpcView({ T }: { T: ChartTokens }) {
     );
   }
   const {
-    M, textCols, labelsFor, stageCol, canStage, stageError, stageBlocked, advancedUnavailable, advData, ewma, cusum, variableName,
+    M, textCols, labelsFor, stageCol, canStage, stageError, stageBlocked, sigmaUnavailable, advData, ewma, cusum, variableName,
     specs, effType, spec, main, viol, dispViolByChart, violations, variationChartLabel, stats, report,
   } = view;
   const uniqueViolCount = violations.affectedPointCount;
@@ -763,7 +777,7 @@ function SpcView({ T }: { T: ChartTokens }) {
         </div>
       )}
 
-      {!stageBlocked && variationChartLabel && (
+      {!stageBlocked && !sigmaUnavailable && variationChartLabel && (
         <div style={{
           padding: '10px 16px', borderRadius: 5, border: `1px solid ${variationViolCount ? '#efc7c7' : '#cfe5d3'}`,
           background: variationViolCount ? '#fff6f6' : '#f5fbf6', color: variationViolCount ? '#a62b2b' : '#2c6b3c',
@@ -779,12 +793,12 @@ function SpcView({ T }: { T: ChartTokens }) {
       {!stageBlocked && <div className="responsive-grid-2" style={{ display: 'grid', gridTemplateColumns: '1fr 300px', gap: 16 }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           {(() => {
-            if (advancedUnavailable) {
-              // CORE-08:σ̂=0 时控制限塌缩到中心线,图形无判读意义,与专项报告一致不出图。
+            if (sigmaUnavailable) {
+              // CORE-08:σ̂=0/亚分辨率时控制限塌缩到中心线,图形无判读意义,与专项报告一致不出图。
               return (
                 <Card style={{ padding: 20, borderColor: '#efd9b4', color: '#8a4f08', lineHeight: 1.7 }}>
-                  <b>{MAIN_CHART_LABEL[effType]} 控制图不可判定：</b>{advancedUnavailable}。<br />
-                  零变异数据的控制限塌缩为一条线，任何舍入误差都会被误判为超限；请先确认量具分辨率或补测后再用 {MAIN_CHART_LABEL[effType]} 监控小漂移。
+                  <b>{TYPE_TABS.find(([k]) => k === effType)?.[1] ?? effType} 控制图不可判定：</b>{sigmaUnavailable}。<br />
+                  零变异数据的控制限塌缩为一条线，任何舍入误差都会被误判为超限；X̄-R/X̄-S/I-MR/EWMA/CUSUM 共用同一 σ̂，换图型同样无法判异。请先核查量具分辨率（读数是否全部相同）或补测有效变异后再分析。
                 </Card>
               );
             }
@@ -867,10 +881,14 @@ function SpcView({ T }: { T: ChartTokens }) {
           <div style={{ background: '#fff', border: '1px solid #f0d3d3', borderRadius: 5, padding: '15px 16px', boxShadow: '0 1px 2px rgba(20,30,50,0.04)' }}>
             <div style={{ fontWeight: 600, color: '#c22f2f', marginBottom: 6, display: 'flex', alignItems: 'center' }}>
               检验结果（按实际点去重）
-              <span className="mono" style={{ marginLeft: 8, background: '#e23b3b', color: '#fff', fontSize: 11, padding: '1px 7px', borderRadius: 9 }}>{uniqueViolCount} 点</span>
+              {sigmaUnavailable ? (
+                <span style={{ marginLeft: 8, background: '#eef0f3', color: '#5b6472', fontSize: 11, padding: '1px 7px', borderRadius: 9 }}>不可判定</span>
+              ) : (
+                <span className="mono" style={{ marginLeft: 8, background: '#e23b3b', color: '#fff', fontSize: 11, padding: '1px 7px', borderRadius: 9 }}>{uniqueViolCount} 点</span>
+              )}
             </div>
-            {advancedUnavailable ? (
-              <div style={{ padding: '8px 0', fontSize: 12.5, color: '#b65400', fontWeight: 500 }}>不可判定：{advancedUnavailable}</div>
+            {sigmaUnavailable ? (
+              <div style={{ padding: '8px 0', fontSize: 12.5, color: '#b65400', fontWeight: 500 }}>不可判定：{sigmaUnavailable}</div>
             ) : uniqueViolCount === 0 && (
               <div style={{ padding: '8px 0', fontSize: 12.5, color: '#2c8a45', fontWeight: 500 }}>✓ 未检出失控点，过程受控</div>
             )}

@@ -60,8 +60,8 @@ import {
   type PointRuleSummary,
   type RuleEvaluationResult,
   type RuleNo,
-  type VarModel, type SpcChartFamily, type SpcStageResolution, spcChartFamilyFor,
-  assessCapability, countCapabilityViolations, capabilityStabilityCaliber,
+  type VarModel, type SpcChartFamily, type SpcStageResolution, spcChartFamilyFor, spcViewFamilyFor,
+  assessCapability, countCapabilityViolations, capabilityStabilityCaliber, shewhartSigmaIssue, spcStabilityViewFromRoles,
 } from '../core';
 import { useApp, resolveGageTolerance, normalizeGageBatchCols } from '../store/appStore';
 import { capabilitySpecKey, capabilitySubgroupSemantics, resolveCapabilityMeasurementData, useData } from '../store/dataStore';
@@ -1062,7 +1062,12 @@ function buildCapabilityPayload(): AnalysisReportPayload {
     spcViolations: countCapabilityViolations(capabilitySpcModel, app.spcRules, app.spcRuleK, capabilityFamily),
   });
   // CORE-09/UI-12:能力稳定性有意不分阶段、按子组图评估;与 SPC 页视图不同时报告必须写明口径。
-  const stabilityCaliber = capabilityStabilityCaliber({ capabilityFamily, spcType: app.spcType, spcStageCol: app.spcStageCol });
+  // fix2609k G20:视图/阶段取 SPC 页实际生效口径(与能力页/看板/保存记录/Modals 同源)。
+  const { spcViewType, spcStage } = spcStabilityViewFromRoles(data.model, data.textCols, {
+    layout: app.spcDataLayout, valueColumn: app.spcValueCol, subgroupColumn: app.spcSubgroupCol,
+    pendingCells: data.pendingCells,
+  }, app.spcType, app.spcStageCol);
+  const stabilityCaliber = capabilityStabilityCaliber({ capabilityFamily, spcViewType, spcStage });
   const verdict = assessment.status;
   const capabilitySourceRowCount = Math.min(
     M.hasSubgroups ? M.subs.length : M.indiv.length,
@@ -1436,7 +1441,37 @@ function buildSpcPayload(): AnalysisReportPayload | undefined {
         note: boundedReportTableNote(prepared.note, M.indiv.length, sourceRowCount),
       };
 
+  // CORE-08:Shewhart σ̂ 守卫(与 SPC 页/看板/保存记录/通用导出同源)。控制限塌缩时不判异、不出图
+  // (亚 ulp 纵轴无判读意义),UCL/LCL 只写「不可判定」,不把中心线冒充控制限。
+  const shewhartUnavailablePayload = (family: SpcChartFamily, pointCount: number, unitLabel: string): AnalysisReportPayload | null => {
+    const reason = shewhartSigmaIssue(M, family);
+    if (!reason) return null;
+    const typeLabel = family === 'i-mr' ? 'I-MR' : family === 'xbar-s' ? 'X̄-S' : 'X̄-R';
+    const cl = family === 'i-mr' ? M.indMean : M.xbarbar;
+    return {
+      kind: 'spc', title: `${typeLabel} 控制图专项报告 · 不可判定`,
+      subtitle: `${prepared.variableName} · ${prepared.layoutLabel} · ${pointCount} 个${unitLabel}`, generatedAt: now(),
+      summary: [
+        `${typeLabel} 不可判定：${reason}。`,
+        '控制限塌缩为一条线，任何舍入误差都会被误判为超限，未执行判异；请先核查量具分辨率（读数是否全部相同）或补测有效变异。',
+        prepared.note,
+      ],
+      warnings: [reason],
+      tables: [
+        spcSourceTable,
+        {
+          title: '控制限', headers: ['图', 'CL', 'UCL', 'LCL', '异常点数'],
+          rows: [[family === 'i-mr' ? 'I' : 'X̄', fmt(cl), '—（不可判定）', '—（不可判定）', '—']],
+          note: `σ̂ 不可判定：${reason}。`,
+        },
+      ],
+      charts: [],
+    };
+  };
+
   if (effectiveType === 'i-mr') {
+    const unavailable = shewhartUnavailablePayload('i-mr', M.indiv.length, '观测');
+    if (unavailable) return unavailable;
     const iEval = evalRules(
       M.indiv, M.indMean, (M.iUcl - M.indMean) / 3,
       app.spcRules, app.spcRuleK, SPC_REPORT_RULE_OPTIONS,
@@ -1500,23 +1535,27 @@ function buildSpcPayload(): AnalysisReportPayload | undefined {
     const sigmaNote = M.hasSubgroups
       ? `子组均值序列的 σ̂/√n(σ̂ 取 ${app.spcSigmaMethod === 'pooled' ? '合并标准差' : 'R̄/d₂'})`
       : '单值序列的 σ̂(MR̄/d₂)';
+    // CORE-08:σ̂=0/非有限/亚分辨率时不可判定,与页面/保存记录同一原因,不写「超限/小漂移」或「未检出」。
+    const unavailableReason = ewma ? ewma.unavailableReason : cusum!.unavailableReason;
+    // 不可判定时 UCL/LCL(塌缩到 μ₀)与 H/K(记 0)只是占位,不得当作真实参数写进可复算的常数表;
+    // λ/L/k/h 设计常数本身仍有效,照常披露。
+    const UNDETERMINED = '—（不可判定）';
+    const sigmaText = Number.isFinite(sigma) ? fmt(sigma, 8) : '—（非有限）';
     const paramRows: (string | number)[][] = ewma
       ? [
           ['中心线 μ₀', fmt(mu, 8), M.hasSubgroups ? '子组均值的总均值 X̿' : '单值均值 X̄'],
-          ['σ(每点)', fmt(sigma, 8), sigmaNote],
+          ['σ(每点)', sigmaText, sigmaNote],
           ['权重 λ', ewma.lambda, 'z_i = λx_i + (1−λ)z_{i−1},z_0 = μ₀'],
           ['控制限宽度 L', ewma.L, `时变控制限 μ₀ ± L·σ·√(λ/(2−λ)·(1−(1−λ)^{2i}));Minitab 默认 L=${MINITAB_DEFAULT_EWMA_L}`],
-          ['UCL(末端)', fmt(ewma.ucl[ewma.ucl.length - 1], 8), ''],
-          ['LCL(末端)', fmt(ewma.lcl[ewma.lcl.length - 1], 8), ''],
+          ['UCL(末端)', unavailableReason ? UNDETERMINED : fmt(ewma.ucl[ewma.ucl.length - 1], 8), ''],
+          ['LCL(末端)', unavailableReason ? UNDETERMINED : fmt(ewma.lcl[ewma.lcl.length - 1], 8), ''],
         ]
       : [
           ['目标 μ₀', fmt(mu, 8), M.hasSubgroups ? '子组均值的总均值 X̿' : '单值均值 X̄'],
-          ['σ(每点)', fmt(sigma, 8), sigmaNote],
-          ['允差系数 k', CUSUM_K, `K = k·σ = ${fmt(cusum!.K, 8)}`],
-          ['判定限系数 h', hValue, `H = h·σ = ${fmt(cusum!.H, 8)};Minitab 默认 h=${MINITAB_DEFAULT_CUSUM_H}`],
+          ['σ(每点)', sigmaText, sigmaNote],
+          ['允差系数 k', CUSUM_K, `K = k·σ = ${unavailableReason ? UNDETERMINED : fmt(cusum!.K, 8)}`],
+          ['判定限系数 h', hValue, `H = h·σ = ${unavailableReason ? UNDETERMINED : fmt(cusum!.H, 8)};Minitab 默认 h=${MINITAB_DEFAULT_CUSUM_H}`],
         ];
-    // CORE-08:σ̂=0/非有限时不可判定,与页面/保存记录同一原因,不写「超限/小漂移」或「未检出」。
-    const unavailableReason = ewma ? ewma.unavailableReason : cusum!.unavailableReason;
     return {
       kind: 'spc', title: `${typeLabel} 控制图专项报告`, subtitle: `${prepared.variableName} · ${source.length} 个点`, generatedAt: now(),
       summary: [
@@ -1531,7 +1570,9 @@ function buildSpcPayload(): AnalysisReportPayload | undefined {
         title: `${typeLabel} 设计常数`,
         headers: ['参数', '值', '说明'],
         rows: paramRows,
-        note: `${paramsText}。按本表常数与源数据可逐点复算。`,
+        note: unavailableReason
+          ? `${paramsText}。σ̂ 不可判定，控制限未计算：${unavailableReason}。`
+          : `${paramsText}。按本表常数与源数据可逐点复算。`,
       }, {
         title: '超限点',
         headers: ['点', '说明'],
@@ -1561,6 +1602,8 @@ function buildSpcPayload(): AnalysisReportPayload | undefined {
   }
 
   if (effectiveType === 'xbar-s') {
+    const unavailable = shewhartUnavailablePayload('xbar-s', M.k, '子组');
+    if (unavailable) return unavailable;
     const xEval = evalRules(
       means, M.xbarbar, (M.uclXs - M.xbarbar) / 3,
       app.spcRules, app.spcRuleK, SPC_REPORT_RULE_OPTIONS,
@@ -1626,6 +1669,10 @@ function buildSpcPayload(): AnalysisReportPayload | undefined {
       app.spcSigmaMethod, app.spcRuleK, SPC_REPORT_RULE_OPTIONS,
     ),
   } : null;
+  if (!staged) {
+    const unavailable = shewhartUnavailablePayload('xbar-r', M.k, '子组');
+    if (unavailable) return unavailable;
+  }
   const x = staged ?? null;
   const xEval = x ? x.x : evalRules(
     means, M.xbarbar, (M.uclX - M.xbarbar) / 3,
@@ -1787,6 +1834,11 @@ export function buildActiveAnalysisExport(): {
       capabilityModel = withSigmaMethod(capability.model, app.spcSigmaMethod);
     }
   }
-  const spcFamily: SpcChartFamily = spcChartFamilyFor(model, app.spcType);
+  // UI-12 残余(fix2609k G20 方案 a):总览/工作表/助手页导出的通用报告 SPC 段与质量总览同一视图
+  // 图型(spcViewFamilyFor:子组数据选 I-MR 时按全部单值),导出与屏幕同源;能力段由 Modals 在
+  // capabilityFamily!==spcFamily 时按能力口径独立计数并披露。
+  const spcFamily: SpcChartFamily = app.page === 'dashboard' || app.page === 'worksheet' || app.page === 'assistant'
+    ? spcViewFamilyFor(model, app.spcType)
+    : spcChartFamilyFor(model, app.spcType);
   return { report: buildActiveAnalysisReport(), model, capabilityModel, spcFamily, spcStage };
 }

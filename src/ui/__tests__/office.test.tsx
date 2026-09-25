@@ -23,7 +23,8 @@ const RULES_OFF: NelsonRules = { r1: false, r2: false, r3: false, r4: false, r5:
 const K12 = computeVarModel(
   'K2-12.csv',
   ['a', 'b'],
-  [...Array.from({ length: 24 }, () => [1, 1]), [-24, -24]],
+  // fix2609k G20(CORE-08):组内极差须非零(R̄=0 时 σ̂=0 统一不可判定);0.2/0.4 交替使 R 图不成连续同侧。
+  [...Array.from({ length: 24 }, (_, i) => (i % 2 ? [0.8, 1.2] : [0.9, 1.1])), [-24.15, -23.85]],
 );
 
 // 两份字节不同的最小 PNG，用于验证 OOXML 中位置图和离散图都真正入包。
@@ -149,7 +150,9 @@ describe('Office 真渲染导出（无图降级）', () => {
 
     for (const content of [wordXml, slideXml]) {
       expect(content).toContain('能力分析未运行');
-      expect(content).toContain('未检出失控点');
+      // fix2609k G20(CORE-08):零变异 σ̂=0 → SPC「不可判定」,不写「未检出失控点」。
+      expect(content).toContain('不可判定');
+      expect(content).not.toContain('未检出失控点');
       expect(content).toContain('数据无可估计变异，正态性不可判定');
     }
   });

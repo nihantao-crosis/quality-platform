@@ -104,12 +104,12 @@ describe('CORE-09 唯一评估器支持阶段口径', () => {
 
   it('能力口径有意保持全局(Minitab 能力分析不分阶段)，由 capabilityStabilityCaliber 明示', () => {
     expect(countCapabilityViolations(M, RULES, DEFAULT_RULE_K, spcChartFamilyFor(M, 'xbar-r'))).toBe(20);
-    const caliber = capabilityStabilityCaliber({ capabilityFamily: 'xbar-r', spcType: 'xbar-r', spcStageCol: '阶段' });
+    const caliber = capabilityStabilityCaliber({ capabilityFamily: 'xbar-r', spcViewType: 'xbar-r', spcStage: { state: 'active', column: '阶段', labels: [] } });
     expect(caliber?.text).toContain('稳定性按 X̄-R 图、全局控制限（未分阶段）评估');
     expect(caliber?.text).toContain('能力分析不分阶段');
     expect(caliber?.short).toContain('全局限（未分阶段）');
-    expect(capabilityStabilityCaliber({ capabilityFamily: 'xbar-r', spcType: 'xbar-r', spcStageCol: null })).toBeNull();
-    expect(capabilityStabilityCaliber({ capabilityFamily: 'i-mr', spcType: 'xbar-r', spcStageCol: null })).toBeNull();
+    expect(capabilityStabilityCaliber({ capabilityFamily: 'xbar-r', spcViewType: 'xbar-r', spcStage: { state: 'off' } })).toBeNull();
+    expect(capabilityStabilityCaliber({ capabilityFamily: 'i-mr', spcViewType: 'i-mr', spcStage: { state: 'off' } })).toBeNull();
   });
 });
 
@@ -131,7 +131,7 @@ describe('UI-12 子组数据选 I-MR 的图型口径', () => {
     // 能力口径仍按 X̄-R(0 失控)——与 SPC 页结论相反，必须经文案披露
     expect(countCapabilityViolations(M, RULE1, DEFAULT_RULE_K, spcChartFamilyFor(M, 'i-mr'))).toBe(0);
     expect(() => countCapabilityViolations(M, RULE1, DEFAULT_RULE_K, 'i-mr')).toThrow('能力稳定性不得按 I-MR');
-    const caliber = capabilityStabilityCaliber({ capabilityFamily: 'xbar-r', spcType: 'i-mr', spcStageCol: null });
+    const caliber = capabilityStabilityCaliber({ capabilityFamily: 'xbar-r', spcViewType: 'i-mr', spcStage: { state: 'off' } });
     expect(caliber?.text).toBe('稳定性按 X̄-R 图评估；与 SPC 页当前 I-MR 视图口径不同');
   });
 });

@@ -58,16 +58,30 @@ export function paretoColors(T: ChartTokens): string[] {
   return [T.bar, T.bar2, T.bar3, '#8fb4dd', '#b7cbe4', '#cdd8e6'];
 }
 
-/** Minitab 式圆整刻度:1-2-5 阶梯,覆盖 [lo,hi],约 target 个 */
+/** 单轴刻度数硬上限:正常 1-2-5 阶梯约 target..2·target 个,远超此值必是退化输入。 */
+const NICE_TICKS_MAX = 1000;
+
+/** Minitab 式圆整刻度:1-2-5 阶梯,覆盖 [lo,hi],约 target 个
+ *
+ * UI-03/CORE-08:亚 ulp 跨度(如 3 个 0.1 的均值=0.1+1ulp)下 step 小于 v 的半个 ulp,
+ * `v += step` 不前进,旧实现一直 push 到 RangeError(卡死数秒,整页进 ErrorBoundary)。
+ * 入口识别退化跨度直接返回端点,循环另设硬上限兜底其他未知退化输入。 */
 export function niceTicks(lo: number, hi: number, target = 5): number[] {
   if (!(hi > lo)) return [lo];
+  // 跨度只有数个 ulp:圆整刻度无意义(且会加不动),只给两端点
+  if (hi - lo <= Number.EPSILON * Math.max(Math.abs(lo), Math.abs(hi)) * 8) return [lo, hi];
   const step0 = (hi - lo) / Math.max(1, target - 1);
   const mag = Math.pow(10, Math.floor(Math.log10(step0)));
   const norm = step0 / mag;
   const step = (norm >= 5 ? 10 : norm >= 2.5 ? 5 : norm >= 1.5 ? 2 : 1) * mag;
   const start = Math.ceil(lo / step - 1e-9) * step;
+  // 非有限量程:与旧实现一致不产出刻度(旧循环条件对 NaN 恒假)
+  if (!Number.isFinite(step) || !Number.isFinite(start)) return [];
+  if (start + step <= start) return [lo, hi];
   const out: number[] = [];
-  for (let v = start; v <= hi + step * 1e-9; v += step) out.push(Math.abs(v) < step * 1e-9 ? 0 : v);
+  for (let v = start; v <= hi + step * 1e-9 && out.length < NICE_TICKS_MAX; v += step) {
+    out.push(Math.abs(v) < step * 1e-9 ? 0 : v);
+  }
   return out;
 }
 

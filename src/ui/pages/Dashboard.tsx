@@ -6,7 +6,7 @@ import { useData, isCapabilityWarningAcknowledged } from '../../store/dataStore'
 import {
   nf, DEFECTS, capabilityInputError, computeCapability, oneWayAnova, anovaGroups, andersonDarling,
   prepareSpcData, countCapabilityViolations, withSigmaMethod, spcChartFamilyFor, spcViewFamilyFor, SPC_FAMILY_LABEL,
-  evaluateSpcChartRules, resolveSpcStage, capabilityStabilityCaliber,
+  evaluateSpcChartRules, resolveSpcStage, capabilityStabilityCaliber, spcStabilityView,
 } from '../../core';
 import { STATUS_COLORS, sameChartTokens } from '../tokens';
 import type { ChartTokens } from '../tokens';
@@ -91,6 +91,8 @@ function DashboardView({ T }: { T: ChartTokens }) {
   const spcIndividual = spcFamily === 'i-mr';
   const spcStageError = spcView?.stageError ?? null;
   const spcStaged = spcView?.evaluation?.staged ?? null;
+  // CORE-08:σ̂ 不可判定(零变异/亚分辨率)时与 SPC 页同一原因，不出「受控」也不出失控告警。
+  const spcUnavailable = spcView?.evaluation?.unavailableReason ?? null;
   const dispersionLabel = spcIndividual ? 'MR' : spcFamily === 'xbar-s' ? 'S' : 'R';
   const dispersion = spcView?.evaluation?.dispersion ?? null;
   const mainRules = spcView?.evaluation?.location ?? null;
@@ -133,11 +135,13 @@ function DashboardView({ T }: { T: ChartTokens }) {
     const capSpcModel = CM ? withSigmaMethod(CM, spcSigmaMethod) : null;
     if (!capSpcModel) return { dashSpcViol: 0, capStabilityCaliber: null };
     const capabilityFamily = spcChartFamilyFor(capSpcModel, spcType);
+    // fix2609k G20:口径披露的视图/阶段取 SPC 页实际生效值(与 Modals 同源)，不按 spcType/原始阶段列猜。
+    const { spcViewType, spcStage } = spcStabilityView({ spcModel: SM, textCols: prepared.textCols, spcType, spcStageCol });
     return {
       dashSpcViol: countCapabilityViolations(capSpcModel, spcRules, spcRuleK, capabilityFamily),
-      capStabilityCaliber: capabilityStabilityCaliber({ capabilityFamily, spcType, spcStageCol }),
+      capStabilityCaliber: capabilityStabilityCaliber({ capabilityFamily, spcViewType, spcStage }),
     };
-  }, [CM, spcSigmaMethod, spcRules, spcRuleK, spcType, spcStageCol]);
+  }, [CM, SM, prepared, spcSigmaMethod, spcRules, spcRuleK, spcType, spcStageCol]);
   const cpkStable = dashSpcViol === 0;
   const hasCap = cap != null;
   const dashAd = useMemo(
@@ -168,9 +172,12 @@ function DashboardView({ T }: { T: ChartTokens }) {
       : { label: '一次合格率', value: '—', tag: '', color: STATUS_COLORS.muted, sub: '当前工作表没有批次一次合格数据' },
     { label: '不良 PPM', value: cap ? Math.round(cap.ppm.overall.total).toLocaleString() : '—', tag: '', color: cap ? STATUS_COLORS.bad : STATUS_COLORS.muted, sub: cap ? '预计缺陷率' : capError ?? '能力输入无效' },
     {
-      label: '未处理告警', value: String(alertCount), tag: '', color: alertCount > 0 ? STATUS_COLORS.warn : STATUS_COLORS.ok,
+      label: '未处理告警', value: String(alertCount), tag: '',
+      color: alertCount > 0 ? STATUS_COLORS.warn : spcStageError || spcUnavailable ? STATUS_COLORS.muted : STATUS_COLORS.ok,
       sub: spcStageError
         ? `SPC 分阶段未运行${anovaAlertCount ? ` · ${anovaAlertCount} 演示 ANOVA` : ''}`
+        : spcUnavailable
+          ? `SPC 不可判定（σ̂ 无有效变异）${anovaAlertCount ? ` · ${anovaAlertCount} 演示 ANOVA` : ''}`
         : alertCount > 0
           ? `${spcAlertCount} SPC${anovaAlertCount ? ` · ${anovaAlertCount} 演示 ANOVA` : ''}${spcStaged ? ` · 分阶段 ${spcStaged.x.segments.length} 段` : ''}`
           : SM ? `过程受控${spcStaged ? `(分阶段 ${spcStaged.x.segments.length} 段)` : ''}` : 'SPC 未运行',
@@ -234,6 +241,11 @@ function DashboardView({ T }: { T: ChartTokens }) {
               <div style={{ height: 190, display: 'grid', placeItems: 'center', color: '#b05b2f', fontSize: 12.5, lineHeight: 1.7, textAlign: 'center' }}>
                 X̄-R 分阶段未运行：{spcStageError}<br />
                 与控制图页、保存记录和导出同口径拒绝出结论；请在“控制图”修正阶段列或改为“不分阶段”。
+              </div>
+            ) : spcUnavailable ? (
+              <div style={{ height: 190, display: 'grid', placeItems: 'center', color: '#b05b2f', fontSize: 12.5, lineHeight: 1.7, textAlign: 'center' }}>
+                {SPC_FAMILY_LABEL[spcFamily]} 不可判定：{spcUnavailable}<br />
+                控制限塌缩为一条线，与控制图页、保存记录和导出同口径不出结论；请先确认量具分辨率或补测。
               </div>
             ) : !spcIndividual ? (
               <ControlChart
@@ -326,8 +338,11 @@ function DashboardView({ T }: { T: ChartTokens }) {
           </div>
           <div style={{ padding: '6px 0' }}>
             {alertCount === 0 && (
-              <div style={{ padding: '14px 16px', fontSize: 12.5, color: SM ? STATUS_COLORS.ok : STATUS_COLORS.muted, fontWeight: 500 }}>
-                {SM ? '✓ 过程受控，暂无告警' : '尚未运行 SPC；完成数据角色配置后再判断过程状态'}
+              <div style={{ padding: '14px 16px', fontSize: 12.5, color: SM && !spcStageError && !spcUnavailable ? STATUS_COLORS.ok : STATUS_COLORS.muted, fontWeight: 500 }}>
+                {!SM ? '尚未运行 SPC；完成数据角色配置后再判断过程状态'
+                  : spcStageError ? 'SPC 分阶段未运行，未判断过程状态'
+                  : spcUnavailable ? `SPC 不可判定：${spcUnavailable}`
+                  : '✓ 过程受控，暂无告警'}
               </div>
             )}
             {alerts.map((a) => (

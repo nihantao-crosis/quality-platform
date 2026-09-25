@@ -70,6 +70,28 @@ function coordinateRange(values: readonly number[]): number {
   return hi - lo;
 }
 
+/**
+ * CORE-08:整列读数逐位相同(零变异)时返回该值,否则 null。
+ * 精确展开和再除以 n 仍会产生 1 ulp 舍入漂移(3 个 0.1 的均值 = 0.10000000000000002),
+ * 使中心线偏离全部读数、σ̂=0 时控制限塌缩后全部点被判失控。零变异时均值必须等于读数本身。
+ * 全 0 列的均值本就精确(且须保留 mean 的符号约定),返回 null 走原路径;任一值不同同样返回 null,
+ * 非零变异数据的全部统计量逐位不变。
+ */
+function zeroVariationValue(values: number[]): number | null {
+  if (values.length === 0) return null;
+  const first = values[0];
+  if (first === 0 || !Number.isFinite(first)) return null;
+  for (let index = 1; index < values.length; index++) {
+    if (values[index] !== first) return null;
+  }
+  return first;
+}
+
+/** 零变异序列取原值(消除 1 ulp 均值漂移),其余与 basicMath.mean 逐位一致。 */
+function spcCenterMean(values: number[]): number {
+  return zeroVariationValue(values) ?? mean(values);
+}
+
 /** mean(xs.slice(start)) 的无中间数组版；与 basicMath.mean 共用同一展开求和内核,逐位一致。 */
 function finiteTailMean(values: readonly number[], start: number): number {
   const count = values.length - start;
@@ -199,7 +221,11 @@ export function computeVarModel(
   const coordinateIndiv = coordinateScale === 1
     ? indiv
     : indiv.map((value) => value / coordinateScale);
-  const subgroupMeans = coordinateRows.map((vals) => mean(vals));
+  // CORE-08:整表零变异时子组均值/X̿/总均值直接取读数本身(见 zeroVariationValue)。
+  const constantCoordinate = zeroVariationValue(coordinateAll);
+  const subgroupMeans = constantCoordinate != null
+    ? coordinateRows.map(() => constantCoordinate)
+    : coordinateRows.map((vals) => mean(vals));
   const subgroupRanges = coordinateRows.map((vals) => coordinateRange(vals));
 
   const subs: SubgroupRow[] = rows.map((vals, i) => ({
@@ -210,12 +236,12 @@ export function computeVarModel(
     // R̄ 必须在未饱和的缩放域极差上求平均。
     range: restoreCoordinate(subgroupRanges[i], coordinateScale),
   }));
-  const oMeanCoordinate = mean(coordinateAll);
+  const oMeanCoordinate = constantCoordinate ?? mean(coordinateAll);
   const oSdCoordinate = stdev(coordinateAll);
   const oMean = restoreCoordinate(oMeanCoordinate, coordinateScale);
   const oSd = restoreCoordinate(oSdCoordinate, coordinateScale);
 
-  const xbarbarCoordinate = mean(subgroupMeans);
+  const xbarbarCoordinate = constantCoordinate ?? mean(subgroupMeans);
   const rbarCoordinate = mean(subgroupRanges);
   const xbarbar = restoreCoordinate(xbarbarCoordinate, coordinateScale);
   const rbar = restoreCoordinate(rbarCoordinate, coordinateScale);
@@ -298,7 +324,9 @@ export function computeVarModel(
     value == null ? null : restoreCoordinate(value, coordinateScale)
   ));
   const mrbarCoordinate = mean(mrCoordinate.slice(1) as number[]);
-  const indMeanCoordinate = mean(coordinateIndiv);
+  const indMeanCoordinate = coordinateIndiv === coordinateAll && constantCoordinate != null
+    ? constantCoordinate
+    : spcCenterMean(coordinateIndiv);
   const iSigCoordinate = mrbarCoordinate / C2.d2;
   const mrbar = restoreCoordinate(mrbarCoordinate, coordinateScale);
   const indMean = restoreCoordinate(indMeanCoordinate, coordinateScale);
@@ -405,7 +433,7 @@ function resolveUpdatedIndividuals(
   }
   const C2 = CONTROL_CONSTANTS[2];
   const mrbar = finiteTailMean(mr as number[], 1);
-  const indMean = indiv === all ? allMean : mean(indiv);
+  const indMean = indiv === all ? allMean : spcCenterMean(indiv);
   const iSig = mrbar / C2.d2;
   return {
     explicitSeries,
@@ -455,7 +483,10 @@ export function updateVarModelCell(
   const flatIndex = row * model.n + col;
   const all = model.all.slice();
   all[flatIndex] = value;
-  const oMean = mean(all);
+  // CORE-08:零变异(编辑前或编辑后)时子组均值/X̿ 走 computeVarModel 的「取原值」口径;
+  // 增量路径保留的旧子组均值与该口径不同源,必须整体重建才能与全量计算逐位一致。
+  const zeroVariationBoundary = zeroVariationValue(all) != null || zeroVariationValue(model.all) != null;
+  const oMean = spcCenterMean(all);
   const individual = resolveUpdatedIndividuals(model, all, flatIndex, options, oMean);
 
   // 坐标尺度只取决于全部值的最大绝对值。all 就是编辑后按行展平的全部单元格,
@@ -466,7 +497,7 @@ export function updateVarModelCell(
     individual.fields.indiv === all ? undefined : individual.fields.indiv,
   );
 
-  if (scale !== 1) {
+  if (scale !== 1 || zeroVariationBoundary) {
     const rows = model.subs.map((subgroup) => subgroup.vals);
     rows[row] = [...rows[row]];
     rows[row][col] = value;

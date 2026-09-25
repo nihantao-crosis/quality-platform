@@ -3,7 +3,7 @@ import { useState, useEffect, useRef } from 'react';
 import { appVersionText } from '../../platform/reportLabels';
 import { useApp, type ImportTab, type ExportFmt } from '../../store/appStore';
 import { PROJECT_BACKUP_HINT, completeVaultDatasetRemoval, datasetWriteNotes, markActiveDataReplaced, prepareVaultDatasetRemoval, useData, isCapabilityWarningAcknowledged, type PersistOutcome } from '../../store/dataStore';
-import { parseMatrix, parseCategoryCounts, extractPChartColumns, evalFormula, truthy, arrMin, arrMax, mean, stdev, FormulaError, worksheetNumericColumnCodes, detectCsvBlocks, csvBlockLabel, assessSpcCharts, countCapabilityViolations, capabilityStabilityCaliber, spcChartFamilyFor, withSigmaMethod, type CategoryCounts, type CsvBlock, type ParsedMatrix } from '../../core';
+import { parseMatrix, parseCategoryCounts, extractPChartColumns, evalFormula, truthy, arrMin, arrMax, mean, stdev, FormulaError, worksheetNumericColumnCodes, detectCsvBlocks, csvBlockLabel, assessSpcCharts, countCapabilityViolations, capabilityStabilityCaliber, spcChartFamilyFor, spcEffectiveViewType, withSigmaMethod, type CategoryCounts, type CsvBlock, type ParsedMatrix } from '../../core';
 import { errText, decodeTextFileBytes, assertXlsxImportSize, platform } from '../../platform/adapter';
 import { assertClipboardImportText, assertTextImportSize } from '../../platform/importLimits';
 import { buildExportJob } from '../../platform/report';
@@ -724,17 +724,19 @@ function ExportModal() {
       // 不得复用给能力判定,必须按能力口径独立计数。
       const capabilitySpcViolations = analysis
         ? null
+        // CORE-08:SPC 段 σ̂ 不可判定时计数为空评估,能力口径(不设 σ̂ 守卫)必须独立计数。
         : capabilitySpcModel === model && spcStage.state !== 'active' && capabilityFamily === spcFamily
+          && !spcAssessment!.unavailableReason
           ? spcAssessment!.chartPointCount
           : countCapabilityViolations(capabilitySpcModel, spcRules, spcRuleK, capabilityFamily);
-      // 能力段口径披露:与 SPC 段(分阶段/I-MR 视图)不同时四种格式都写明。阶段列以实际生效的
-      // spcStage 为准,避免未生效的残留阶段设置被误写成「未分阶段」对比。
+      // 能力段口径披露:与 SPC 段(分阶段/I-MR 视图)不同时四种格式都写明。阶段取实际生效的
+      // spcStage、视图取 SPC 模型上的实际图型(fix2609k G20:与能力页/看板/记录/专项报告同源)。
       const stabilityCaliber = analysis
         ? null
         : capabilityStabilityCaliber({
             capabilityFamily,
-            spcType: appState.spcType,
-            spcStageCol: spcStage.state === 'active' ? spcStage.column : null,
+            spcViewType: spcEffectiveViewType(model, appState.spcType),
+            spcStage,
           });
       const spec = { lsl: lslOn ? lsl : null, tgt, usl: uslOn ? usl : null };
       const capabilityWarningAcknowledged = isCapabilityWarningAcknowledged(

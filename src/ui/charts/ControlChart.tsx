@@ -104,7 +104,13 @@ function ControlChartImpl(cfg: ControlChartProps) {
       ymax = Math.max(ymax, axisCoordinate(arrMax(s)));
     }
   }
-  const pad = (ymax - ymin) * 0.18 || 1;
+  // UI-03/CORE-08:亚 ulp 跨度(常数读数的均值漂移 1 ulp)按常数处理,与 axisScale.coordinateDomain
+  // 的常量列口径一致(半宽 max(1, 4ulp));否则 pad≈1e-18 被量级吃掉,纵轴只有 1 ulp 宽。
+  const ySpan = ymax - ymin;
+  const yMagnitude = Math.max(Math.abs(ymin), Math.abs(ymax));
+  const pad = ySpan > Number.EPSILON * yMagnitude * 8
+    ? ySpan * 0.18
+    : Number.isFinite(yMagnitude) ? Math.max(1, Number.EPSILON * Math.max(1, yMagnitude) * 4) : 1;
   ymin -= pad;
   ymax += pad;
   const X = (i: number) => m.l + (data.length > 1 ? i / (data.length - 1) : 0.5) * pw;

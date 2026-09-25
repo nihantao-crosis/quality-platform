@@ -30,7 +30,8 @@ function k12Model() {
   return computeVarModel(
     'K2-12.csv',
     ['a', 'b'],
-    [...Array.from({ length: 24 }, () => [1, 1]), [-24, -24]],
+    // fix2609k G20(CORE-08):组内极差须非零(R̄=0 时 σ̂=0 统一不可判定);0.2/0.4 交替使 R 图不成连续同侧。
+  [...Array.from({ length: 24 }, (_, i) => (i % 2 ? [0.8, 1.2] : [0.9, 1.1])), [-24.15, -23.85]],
   );
 }
 
@@ -183,19 +184,23 @@ describe('跨格式一致性(同一 R-only 数据)', () => {
     const assessment = assessSpcCharts(constant, OFF, DEFAULT_RULE_K, 'xbar-r');
     const spec = { lsl: 0, tgt: 1, usl: 2 };
 
+    // fix2609k G20(CORE-08):零变异数据 σ̂=0,SPC 稳定性统一写「不可判定」,不得写「未检出失控点/受控」。
+    expect(assessment.unavailableReason).toContain('σ̂=0');
     const text = textReport(constant, spec, assessment);
     expect(text).toContain('能力分析未运行');
-    expect(text).toContain('未检出失控点');
+    expect(text).toContain('不可判定');
+    expect(text).not.toContain('未检出失控点');
 
     const html = buildHtmlReport(constant, spec, assessment);
     expect(html).toContain('能力分析未运行');
     expect(html).toContain('数据无可估计变异，正态性不可判定');
-    expect(html).toContain('未检出失控点');
+    expect(html).toContain('不可判定');
+    expect(html).not.toContain('未检出失控点');
 
     const workbook = XLSX.read(buildXlsx(constant, spec, assessment), { type: 'array' });
     const rows = XLSX.utils.sheet_to_json<(string | number)[]>(workbook.Sheets['统计摘要'], { header: 1 });
     expect(rows.map((row) => row.join('|')).find((line) => line.includes('过程能力'))).toContain('未运行');
-    expect(rows.map((row) => row.join('|')).find((line) => line.includes('过程稳定性'))).toContain('控制图无失控信号');
+    expect(rows.map((row) => row.join('|')).find((line) => line.includes('过程稳定性'))).toContain('不可判定');
   });
 });
 

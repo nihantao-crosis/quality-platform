@@ -180,7 +180,10 @@ export function buildXlsx(
   // 稳定性是独立于能力计算的 SPC 结果；即使 σ=0/规格闸门使能力未运行，也必须保留这一行。
   const stabilityRow: XlsxCell[] = [
     '过程稳定性',
-    assessment.chartPointCount > 0
+    // CORE-08:σ̂ 不可判定(零变异/亚分辨率)时不得写「无失控信号」。
+    assessment.unavailableReason
+      ? `不可判定：${assessment.unavailableReason}`
+      : assessment.chartPointCount > 0
       ? `各图累计 ${assessment.chartPointCount} 个失控点（${assessment.locationLabel} 图 ${assessment.locationPoints} 个 + ${assessment.dispersionLabel} 图 ${assessment.dispersionPoints} 个）；去重${assessment.analysisUnitLabel} ${assessment.uniqueAnalysisUnitCount} 个${cap ? '——能力值仅描述当前样本' : '——过程不稳定'}`
       : '控制图无失控信号',
   ];

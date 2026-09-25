@@ -10,7 +10,13 @@ import { Modals } from '../shell/Modals';
 
 vi.mock('../../core', async (original) => {
   const actual = await original<typeof import('../../core')>();
-  return { ...actual, evalRules: vi.fn(actual.evalRules), evalLimitedRules: vi.fn(actual.evalLimitedRules) };
+  return {
+    ...actual,
+    evalRules: vi.fn(actual.evalRules),
+    evalLimitedRules: vi.fn(actual.evalLimitedRules),
+    // fix2609k G20:工作表行高亮改走与 SPC 页/看板同源的唯一判异原语 evaluateSpcChartRules
+    evaluateSpcChartRules: vi.fn(actual.evaluateSpcChartRules),
+  };
 });
 
 beforeEach(() => {
@@ -95,14 +101,14 @@ it('虚拟滚动复用判异；修改 K、测量值、图型和 σ 方法后重�
   useData.getState().importMatrix('large', ['X1', 'X2'],
     Array.from({ length: 1000 }, (_, i) => [i % 13, i % 13 + 2]));
   render(<Worksheet />);
-  const location = vi.mocked(core.evalRules);
-  const dispersion = vi.mocked(core.evalLimitedRules);
-  const initial = [location.mock.calls.length, dispersion.mock.calls.length];
+  // fix2609k G20:行高亮经 evaluateSpcChartRules(位置+离散一次评估,count-only)
+  const location = vi.mocked(core.evaluateSpcChartRules);
+  const initial = location.mock.calls.length;
+  expect(initial).toBeGreaterThan(0);
   const scroller = screen.getByRole('grid').parentElement!;
   for (const scrollTop of [300, 600, 1200]) fireEvent.scroll(scroller, { target: { scrollTop } });
-  expect([location.mock.calls.length, dispersion.mock.calls.length]).toEqual(initial);
-  expect(location.mock.calls[location.mock.calls.length - 1]?.[5]).toEqual({ collectDetails: false });
-  expect(dispersion.mock.calls[dispersion.mock.calls.length - 1]?.[7]).toEqual({ collectDetails: false });
+  expect(location.mock.calls.length).toEqual(initial);
+  expect(location.mock.calls[location.mock.calls.length - 1]?.[4]).toBe(false);
   const changes = [
     () => useApp.setState({ spcRuleK: { ...core.DEFAULT_RULE_K, k2: 12 } }),
     () => useData.getState().updateCell(0, 0, 99),
