@@ -1,7 +1,7 @@
 /**
  * 2026-09 全面审查第 6 批 G22a-ui:各修复组自报的跨组小尾巴(界面/文档部分)。
  * (2)  帮助中心「撤销/重做」不再写死「20 层」,改为内存预算 + 菜单显示实际步数;
- * (3)  Ctrl+Z/Ctrl+Y 在项目导出快照期间只是排队,toast 如实写「已暂存」;
+ * (3)  Ctrl+Z/Ctrl+Y 在项目导出快照期间被拒绝(fix2609m A2,不再排队),toast 如实写「请稍后重试」;
  * (4)  错误卡「恢复演示数据集并重试」在替换闸门拒绝时给出可读提示,不再抛出未捕获异常;
  * (5)  DOE 两水平/分数因子低高水平、MSA 过程公差、能力规格限/子组大小、SPC 判异 K 值改为
  *      type=text + 严格解析 + 可见原因;
@@ -152,9 +152,9 @@ describe('(2)(10)(11) 帮助中心与 README 的说明与实际行为一致', ()
   });
 });
 
-// ------------------------------------------------------------------ (3) Ctrl+Z 在导出期间只排队
+// ------------------------------------------------------------------ (3) Ctrl+Z 在导出期间被拒绝
 describe('(3) 项目导出快照期间 Ctrl+Z / Ctrl+Y 的提示', () => {
-  it('撤销被暂存时 toast 写「已暂存」而不是「已撤销」;快照完成后自动应用', async () => {
+  it('快照期间撤销被拒绝(fix2609m A2,不再暂存):toast 写「请稍后重试」而不是「已撤销」/「已暂存」;快照完成后不重放', async () => {
     useData.getState().importMatrix('录入表.csv', ['x', 'y'], [[1, 2], [3, 4], [5, 6]]);
     useData.getState().updateCell(0, 0, 42);
     const snapshot = deferred<DatasetSnapshot>();
@@ -175,11 +175,16 @@ describe('(3) 项目导出快照期间 Ctrl+Z / Ctrl+Y 的提示', () => {
       await exporting;
       await Promise.resolve();
     }
-    expect(seen[0]).toContain('撤销已暂存');
+    expect(seen[0]).toMatch(/撤销未执行.*请稍后重试/);
     expect(seen[0]).not.toContain('已撤销上一次数据编辑');
-    expect(useData.getState().model.subs[0].vals[0]).toBe(1);
+    expect(seen[0]).not.toContain('已暂存');
+    // 被拒绝的撤销不排队，快照完成后编辑仍在
+    expect(useData.getState().model.subs[0].vals[0]).toBe(42);
 
     // 无导出时照常提示已撤销/已重做
+    fireEvent.keyDown(window, { key: 'z', ctrlKey: true });
+    expect(useApp.getState().toast).toBe('已撤销上一次数据编辑');
+    expect(useData.getState().model.subs[0].vals[0]).toBe(1);
     fireEvent.keyDown(window, { key: 'y', ctrlKey: true });
     expect(useApp.getState().toast).toBe('已重做数据编辑');
   });

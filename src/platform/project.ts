@@ -18,6 +18,12 @@ import { worksheetResourceError, worksheetPendingCellsError, attributeChartResou
 /** 共享键放在无业务 store 副作用的项目层，启动预恢复不得反向加载 store。 */
 export const QUARANTINE_STORAGE_KEY = 'qp-quarantine-v1';
 
+/**
+ * 释放浏览器存储空间的操作指引(fix2609m A3)：与 ui/shell/OptionsModal 的 LOCAL_SPACE_RELEASE_HINT 同文。
+ * store 层的导出拒绝文案需要它，而 store 不得反向依赖 ui，故在无 store 副作用的平台层保留一份。
+ */
+export const STORAGE_SPACE_RELEASE_HINT = '在左侧「最近数据集」移除不需要的条目，或删除不需要的已保存分析以释放浏览器存储空间';
+
 /** 允许进出项目文件的存储键；各 store 仍须自行做字段级校验。 */
 export const PROJECT_KEYS = [
   'qp-dataset-v1',

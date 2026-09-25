@@ -1,5 +1,5 @@
 /** 鱼骨图数据与演示标记的单一持久化入口。 */
-import { projectStoreValidationError, registerProjectLifecycleHooks } from '../platform/project';
+import { projectStoreValidationError, registerProjectLifecycleHooks, STORAGE_SPACE_RELEASE_HINT } from '../platform/project';
 import { preserveCorruptStore } from './quarantine';
 // dataStore 不(直接或间接)导入本模块,单向依赖无循环;探针让离开拦截/桌面关窗确认覆盖鱼骨图(STORE-10)。
 import { registerUnpersistedStateProbe } from './dataStore';
@@ -123,7 +123,12 @@ export function clearFishboneState(): void {
 
 registerProjectLifecycleHooks({
   beforeExport: () => {
-    if (protectedCorruptFishbone) throw new Error('损坏的鱼骨图原文尚未成功隔离，项目未导出');
+    // fix2609m A3:鱼骨图只在进入鱼骨图页时读取；启动后直接保存项目时先按读取侧同一函数校验 live 值，
+    // 损坏则先隔离(导出按降级视图省略该键)，隔离失败仍 fail-closed。内存有未落盘载荷时导出取它，无需校验 live。
+    if (dirtyFishboneJson === null) loadFishboneState();
+    if (protectedCorruptFishbone) {
+      throw new Error(`损坏的鱼骨图原文尚未成功复制到隔离区，项目未导出；请先${STORAGE_SPACE_RELEASE_HINT}，再重试保存项目（损坏原文仍保留在本机，不会被覆盖）`);
+    }
   },
   projectStoreOverrides: () => dirtyFishboneJson
     ? { [FISHBONE_STORAGE_KEY]: dirtyFishboneJson }

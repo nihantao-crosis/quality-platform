@@ -666,7 +666,7 @@ export function Worksheet() {
                       onRequestFocus={requestGridFocus}
                       onNavigate={navigateGrid}
                       onRename={(v) => renameColumn(c.measIdx!, v)}
-                      onDelete={() => { deleteColumn(c.measIdx!); showToast(`已删除测量列「${c.name}」`); }}
+                      onDelete={() => { if (deleteColumn(c.measIdx!)) showToast(`已删除测量列「${c.name}」`); }}
                     />
                   ) : (
                     <th
@@ -813,7 +813,8 @@ export function Worksheet() {
                         if (event.target !== event.currentTarget) return;
                         if (event.key === 'Delete' && M.k > 2) {
                           event.preventDefault();
-                          deleteRow(i);
+                          // 项目备份快照期间删行被拒绝(store 已提示「请稍后重试」)：不报成功、不移焦点。
+                          if (!deleteRow(i)) return;
                           showToast(`已删除${rowSpc ? '子组' : '行'} ${s.i}`);
                           requestGridFocus(Math.min(gridRow, M.k - 1), 0);
                           return;
@@ -829,7 +830,7 @@ export function Worksheet() {
                           className="ws-del"
                           aria-label={`删除${rowSpc ? '子组' : '行'} ${s.i}`}
                           onClick={() => {
-                            deleteRow(i);
+                            if (!deleteRow(i)) return;
                             showToast(`已删除${rowSpc ? '子组' : '行'} ${s.i}`);
                             requestGridFocus(Math.min(gridRow, M.k - 1), 0);
                           }}

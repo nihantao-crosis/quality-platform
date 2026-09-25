@@ -5,7 +5,7 @@
  * - STORE-10：AQL 账本/帕累托/计数/偏好写入失败后，离开页面同样拦截(hasUnpersistedState 统一判定)，
  *   启动迁移写入失败也要提示；
  * - STORE-15：最近列表写入与校验同一名称口径(首尾空格)，旧版写下的首尾空格重名列表启动时迁移合并；
- * - GAP-7-15：项目导出快照期间的工作表编辑暂存、导出后自动应用，不抛未捕获异常、不丢草稿；
+ * - GAP-7-15：项目导出快照期间的单格编辑暂存、导出后自动应用，不抛未捕获异常、不丢草稿(结构性编辑按 fix2609m A2 拒绝)；
  * - GAP-10-25：大表撤销栈被字节预算压缩时一次性告知，菜单如实显示可撤销层数。
  * 全部调用真实生产函数(useData / Worksheet / MenuBar / buildProjectJsonFull)，只模拟存储配额与本机库。
  * @vitest-environment jsdom
@@ -270,7 +270,7 @@ describe('GAP-7-15 项目导出快照期间的工作表编辑', () => {
     expect(useData.getState().model.subs[0].vals[0]).toBe(42); // 草稿未丢，已应用
   });
 
-  it('store 层：多次编辑/撤销按顺序暂存并在导出后依次应用；有返回值的入口明确拒绝而非抛错', async () => {
+  it('store 层：单格编辑/列重命名按顺序暂存并在导出后依次应用；结构性编辑与撤销明确拒绝(fix2609m A2)而非抛错', async () => {
     useData.getState().importMatrix('录入表.csv', ['x', 'y'], [[1, 2], [3, 4], [5, 6]]);
     useData.getState().updateCell(0, 1, 20);
     const snapshot = deferred<DatasetSnapshot>();
@@ -282,8 +282,9 @@ describe('GAP-7-15 项目导出快照期间的工作表编辑', () => {
     expect(() => useData.getState().updateCell(0, 0, 42)).not.toThrow();
     expect(() => useData.getState().updateCell(1, 0, 43)).not.toThrow();
     expect(() => useData.getState().renameColumn(0, '新名')).not.toThrow();
-    expect(() => useData.getState().deleteRow(2)).not.toThrow();
-    expect(useData.getState().undoEdit()).toBe(true); // 撤销同样暂存，不再先弹栈后抛错
+    // fix2609m A2:改变下标的编辑在快照期间拒绝、不排队(排队重放会写错行/多删行)
+    expect(useData.getState().deleteRow(2)).toBe(false);
+    expect(useData.getState().undoEdit()).toBe(false); // 撤销同样拒绝，且不先弹栈
     expect(useData.getState().addFormulaColumn('z', 'C1+C2')).toContain('项目备份正在生成');
     expect(useData.getState().model.subs.map((s) => s.vals)).toEqual([[1, 20], [3, 4], [5, 6]]);
 
@@ -291,7 +292,7 @@ describe('GAP-7-15 项目导出快照期间的工作表编辑', () => {
     await exporting;
     await Promise.resolve();
     const st = useData.getState();
-    // 依次应用：42 → 43 → 改名 → 删第 3 行 → 撤销删行
+    // 依次应用：42 → 43 → 改名；被拒绝的删行/撤销不重放
     expect(st.model.colNames).toEqual(['新名', 'y']);
     expect(st.model.subs.map((s) => s.vals)).toEqual([[42, 20], [43, 4], [5, 6]]);
     expect(() => useData.getState().updateCell(0, 0, 9)).not.toThrow();

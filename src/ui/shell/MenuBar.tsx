@@ -165,13 +165,14 @@ const MENUS: { name: string; items: Item[] }[] = [
 ];
 
 /**
- * 撤销/重做结果提示(菜单与 Ctrl+Z/Ctrl+Y 快捷键共用)。GAP-7-15:项目备份快照期间撤销/重做
- * 只是被暂存,快照完成后才应用——不能提示「已撤销」。须在 undoEdit()/redoEdit() 返回后立即调用。
+ * 撤销/重做结果提示(菜单与 Ctrl+Z/Ctrl+Y 快捷键共用)。fix2609m A2:项目备份快照期间撤销/重做
+ * 被拒绝、不排队(排队重放会与其后按显示布局暂存的单格编辑错位)——不能提示「已撤销」，也不能说「没有可撤销」。
+ * 须在 undoEdit()/redoEdit() 返回后立即调用。
  */
 export function undoRedoToast(action: 'undo' | 'redo', ok: boolean): string {
   const label = action === 'undo' ? '撤销' : '重做';
+  if (!ok && isProjectExportInFlight()) return `项目备份正在生成一致性快照，本次${label}未执行；请稍后重试（通常数秒内）`;
   if (!ok) return `没有可${label}的编辑`;
-  if (isProjectExportInFlight()) return `${label}已暂存，项目备份快照完成后自动应用`;
   return action === 'undo' ? '已撤销上一次数据编辑' : '已重做数据编辑';
 }
 
