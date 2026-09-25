@@ -48,7 +48,7 @@ import {
   resolveAnovaMode,
   resolveDoeBlockValues,
   resolveNumericColumn,
-  stageValidationError,
+  resolveSpcStage,
   stagedRange,
   stagedXbar,
   tInv,
@@ -60,8 +60,8 @@ import {
   type PointRuleSummary,
   type RuleEvaluationResult,
   type RuleNo,
-  type VarModel, type SpcChartFamily, spcChartFamilyFor,
-  assessCapability, countCapabilityViolations,
+  type VarModel, type SpcChartFamily, type SpcStageResolution, spcChartFamilyFor,
+  assessCapability, countCapabilityViolations, capabilityStabilityCaliber,
 } from '../core';
 import { useApp, resolveGageTolerance, normalizeGageBatchCols } from '../store/appStore';
 import { capabilitySpecKey, capabilitySubgroupSemantics, resolveCapabilityMeasurementData, useData } from '../store/dataStore';
@@ -1056,10 +1056,13 @@ function buildCapabilityPayload(): AnalysisReportPayload {
   const ad = M.all.length >= 8 ? andersonDarling(M.all) : null;
   // P0-4:与能力页/保存记录共用唯一判定器,失控时专项报告不得写「能力充足」而无警告。
   const capabilitySpcModel = withSigmaMethod(M, app.spcSigmaMethod);
+  const capabilityFamily = spcChartFamilyFor(capabilitySpcModel, app.spcType);
   const assessment = assessCapability({
     cpk: cap.cpk, verdict: cap.verdict, adP: ad ? ad.p : null, n: M.all.length,
-    spcViolations: countCapabilityViolations(capabilitySpcModel, app.spcRules, app.spcRuleK, spcChartFamilyFor(capabilitySpcModel, app.spcType)),
+    spcViolations: countCapabilityViolations(capabilitySpcModel, app.spcRules, app.spcRuleK, capabilityFamily),
   });
+  // CORE-09/UI-12:能力稳定性有意不分阶段、按子组图评估;与 SPC 页视图不同时报告必须写明口径。
+  const stabilityCaliber = capabilityStabilityCaliber({ capabilityFamily, spcType: app.spcType, spcStageCol: app.spcStageCol });
   const verdict = assessment.status;
   const capabilitySourceRowCount = Math.min(
     M.hasSubgroups ? M.subs.length : M.indiv.length,
@@ -1093,6 +1096,7 @@ function buildCapabilityPayload(): AnalysisReportPayload {
     ],
     warnings: [
       assessment.spcViolations > 0 ? `控制图检出 ${assessment.spcViolations} 个失控点——过程不稳定，能力指标只描述当前样本，不能预测未来质量。` : '',
+      stabilityCaliber ? `稳定性口径：${stabilityCaliber.text}。` : '',
       specWarning && warningAcknowledged ? `用户已对当前测量角色与 LSL/Target/USL 显式确认继续；${specWarning.message}，能力指标必须连同本警告解读。` : '',
       !app.lslOn || !app.uslOn ? '当前为单侧规格，Cp/Pp 不适用；Cpm 按启用侧距离 (Minitab 单侧式) 计算；Cpk 退化为启用一侧的 CPU 或 CPL。' : '',
       ad && !ad.normal ? '数据显著偏离正态，正态分布能力指标需谨慎解释，并考虑 Box-Cox 或非正态能力方法。' : '',
@@ -1511,13 +1515,18 @@ function buildSpcPayload(): AnalysisReportPayload | undefined {
           ['允差系数 k', CUSUM_K, `K = k·σ = ${fmt(cusum!.K, 8)}`],
           ['判定限系数 h', hValue, `H = h·σ = ${fmt(cusum!.H, 8)};Minitab 默认 h=${MINITAB_DEFAULT_CUSUM_H}`],
         ];
+    // CORE-08:σ̂=0/非有限时不可判定,与页面/保存记录同一原因,不写「超限/小漂移」或「未检出」。
+    const unavailableReason = ewma ? ewma.unavailableReason : cusum!.unavailableReason;
     return {
       kind: 'spc', title: `${typeLabel} 控制图专项报告`, subtitle: `${prepared.variableName} · ${source.length} 个点`, generatedAt: now(),
       summary: [
-        viol.size ? `${typeLabel} 检出 ${viol.size} 个超限点，存在小漂移/累积偏移信号。` : `${typeLabel} 未检出超限点。`,
+        unavailableReason
+          ? `${typeLabel} 不可判定：${unavailableReason}。`
+          : viol.size ? `${typeLabel} 检出 ${viol.size} 个超限点，存在小漂移/累积偏移信号。` : `${typeLabel} 未检出超限点。`,
         `${typeLabel} 设计常数：${paramsText}。`,
         prepared.note,
-      ], warnings: [],
+      ],
+      warnings: unavailableReason ? [unavailableReason] : [],
       tables: [spcSourceTable, {
         title: `${typeLabel} 设计常数`,
         headers: ['参数', '值', '说明'],
@@ -1529,7 +1538,8 @@ function buildSpcPayload(): AnalysisReportPayload | undefined {
         rows: boundedViolationRows(viol, source.length, isEwma ? 'EWMA 超出时变控制限' : 'CUSUM 超出判定限 H'),
         totalRows: viol.size,
       }],
-      charts: [svgChart(
+      // σ̂=0 时控制限塌缩到中心线，图形没有判读意义(且亚 ulp 纵轴跨度会让刻度生成失控)，不出图。
+      charts: unavailableReason ? [] : [svgChart(
         `${prepared.variableName} 的 ${typeLabel} 控制图`,
         <ControlChart
           T={T} data={values} series2={cusum?.cn} series2Label={cusum ? 'C⁻' : undefined}
@@ -1595,25 +1605,24 @@ function buildSpcPayload(): AnalysisReportPayload | undefined {
 
   // X̄-R
   const ranges = M.subs.map((sub) => sub.range);
-  const stageError = app.spcStageCol
-    ? stageValues
-      ? stageValidationError(stageValues, M.k)
-      : `找不到阶段列“${app.spcStageCol}”`
-    : null;
+  // 阶段口径与 SPC 页/看板/保存记录同源解析(PLATFORM-21):校验失败统一拒绝出结论。
+  const stage = resolveSpcStage({
+    stageColumn: app.spcStageCol, textCols: prepared.textCols, spcType: effectiveType, hasSubgroups: M.hasSubgroups, pointCount: M.k,
+  });
+  const stageError = stage.state === 'invalid' ? stage.reason : null;
   if (stageError) {
     return {
       kind: 'spc', title: 'X̄-R 控制图专项报告 · 分阶段未运行', subtitle: prepared.variableName, generatedAt: now(),
       summary: ['分阶段控制图未运行，未生成统计结论。'], warnings: [stageError], tables: [spcSourceTable], charts: [],
     };
   }
-  const useStage = Boolean(stageValues);
-  const staged = useStage ? {
+  const staged = stage.state === 'active' ? {
     x: stagedXbar(
-      M.subs.map((sub) => sub.vals), stageValues!, app.spcRules,
+      M.subs.map((sub) => sub.vals), stage.labels, app.spcRules,
       app.spcSigmaMethod, app.spcRuleK, SPC_REPORT_RULE_OPTIONS,
     ),
     r: stagedRange(
-      M.subs.map((sub) => sub.vals), stageValues!, app.spcRules,
+      M.subs.map((sub) => sub.vals), stage.labels, app.spcRules,
       app.spcSigmaMethod, app.spcRuleK, SPC_REPORT_RULE_OPTIONS,
     ),
   } : null;
@@ -1710,11 +1719,19 @@ export function buildActiveAnalysisReport(): AnalysisReportPayload | undefined {
  * 例如“子组 + 5 个测量列”在原始工作表中是 6 个数值列，但 SPC 专项分析必须排除子组 ID；
  * Excel 的通用数据/摘要 sheet 若继续使用 raw model，会与专项 sheet 自相矛盾。
  */
-export function buildActiveAnalysisExport(): { report?: AnalysisReportPayload; model: VarModel; capabilityModel: VarModel; spcFamily: SpcChartFamily } {
+export function buildActiveAnalysisExport(): {
+  report?: AnalysisReportPayload;
+  model: VarModel;
+  capabilityModel: VarModel;
+  spcFamily: SpcChartFamily;
+  /** 通用报告 SPC 段的阶段口径(CORE-09):调用方须原样传给 assessSpcCharts 第 5 参。 */
+  spcStage: SpcStageResolution;
+} {
   const app = useApp.getState();
   const data = useData.getState();
   let model = data.model;
   let capabilityModel = data.model;
+  let spcStage: SpcStageResolution = { state: 'off' };
   if ((app.page === 'spc' && app.spcType !== 'p' && app.spcType !== 'c') || app.page === 'capability') {
     const prepared = app.page === 'capability'
       ? resolveCapabilityMeasurementData(data.model, data.textCols)
@@ -1728,7 +1745,7 @@ export function buildActiveAnalysisExport(): { report?: AnalysisReportPayload; m
       // 专项页保持优雅降级(与 v1.42.3 基线一致):buildSpcPayload/buildCapabilityPayload 自会生成
       // 「未运行 + 原因」专项报告,四个构建器在 analysis 分支提前返回,raw model 仅提供工作表名,
       // 不会产出自相矛盾的通用 sheet。整体阻断仅适用于无专项载荷兜底的通用报告页(下方分支)。
-      return { report: buildActiveAnalysisReport(), model: data.model, capabilityModel: data.model, spcFamily: 'i-mr' };
+      return { report: buildActiveAnalysisReport(), model: data.model, capabilityModel: data.model, spcFamily: 'i-mr', spcStage: { state: 'off' } };
     }
     // SPC 与能力稳定性均跟随当前 σ̂ 方法；能力 Cpk 的 sigmaWithin 不受 withSigmaMethod 影响。
     model = app.page === 'spc' ? withSigmaMethod(prepared.model, app.spcSigmaMethod) : prepared.model;
@@ -1753,6 +1770,14 @@ export function buildActiveAnalysisExport(): { report?: AnalysisReportPayload; m
     });
     if (!prepared.model || prepared.error) throw new Error(prepared.error ?? '当前 SPC 数据角色无效，无法导出');
     model = withSigmaMethod(prepared.model, app.spcSigmaMethod);
+    // CORE-09/PLATFORM-21:通用报告 SPC 段与 SPC 页同一阶段口径;阶段校验失败时与页面/看板/
+    // 保存记录一样拒绝出结论,不按全局控制限退化导出。
+    spcStage = resolveSpcStage({
+      stageColumn: app.spcStageCol, textCols: prepared.textCols, spcType: app.spcType, hasSubgroups: model.hasSubgroups, pointCount: model.k,
+    });
+    if (spcStage.state === 'invalid') {
+      throw new Error(`X̄-R 分阶段未运行：${spcStage.reason}；请在控制图页修正阶段列或改为「不分阶段」后再导出`);
+    }
     if (app.capSubgroupMode === 'spc') {
       // 能力沿用 SPC 角色时，二者观测完全相同；withSigmaMethod 只改控制图限值，不改能力 sigmaWithin。
       capabilityModel = model;
@@ -1763,5 +1788,5 @@ export function buildActiveAnalysisExport(): { report?: AnalysisReportPayload; m
     }
   }
   const spcFamily: SpcChartFamily = spcChartFamilyFor(model, app.spcType);
-  return { report: buildActiveAnalysisReport(), model, capabilityModel, spcFamily };
+  return { report: buildActiveAnalysisReport(), model, capabilityModel, spcFamily, spcStage };
 }

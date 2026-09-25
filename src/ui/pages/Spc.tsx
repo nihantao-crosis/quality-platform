@@ -6,7 +6,7 @@ import { useShallow } from 'zustand/react/shallow';
 import { useApp, type SpcType } from '../../store/appStore';
 import { datasetWriteNotes, syncSpecForActiveMeasurement, useData } from '../../store/dataStore';
 import {
-  nf, evalRules, evalLimitedRules, RULE_DEFS, DEFAULT_RULE_K, ruleKDesc, ewmaSeries, cusumSeries, stagedXbar, stagedRange, stageValidationError,
+  nf, evalRules, evalLimitedRules, RULE_DEFS, DEFAULT_RULE_K, ruleKDesc, ewmaSeries, cusumSeries, stagedXbar, stagedRange, resolveSpcStage,
   prepareSpcData, spcMeasurementColumnNames, spcRoleOptions, withSigmaMethod, dataDecimals,
   type NelsonRuleK, type NelsonRules, type RuleNo, type SpcDataLayout, type SpcPreparedData, type VarModel, type TextColumn,
   type PointRuleSummary, type SpcSigmaMethod, type PChartModel, type CChartModel,
@@ -170,16 +170,19 @@ export function computeSpcPageView({
   const meanDec = Math.min(dataDp + 1, 4);
   const rangeDec = Math.min(dataDp, 4);
 
-  // 分阶段：选择一个文本列作为阶段变量（仅 X̄-R,需 ≥2 段）
+  // 分阶段：选择一个文本列作为阶段变量（仅 X̄-R,需 ≥2 段）。阶段口径经 resolveSpcStage 与
+  // 看板/保存记录/专项报告/通用导出同源解析(PLATFORM-21):校验失败或列不存在时本页同样拒绝出结论。
   const stageCol = spcStageCol == null ? -1 : textCols.findIndex((c) => c.name === spcStageCol);
-  const stageLabels = stageCol >= 0 && stageCol < textCols.length ? textCols[stageCol].values : null;
   const canStage = M.hasSubgroups && textCols.length > 0;
-  const stageError = stageLabels ? stageValidationError(stageLabels, M.k) : null;
+  const stage = resolveSpcStage({
+    stageColumn: spcStageCol, textCols, spcType: 'xbar-r', hasSubgroups: M.hasSubgroups, pointCount: M.k,
+  });
+  const stageError = stage.state === 'invalid' ? stage.reason : null;
   const staged =
-    stageLabels && !stageError && M.hasSubgroups
+    stage.state === 'active'
       ? {
-          x: stagedXbar(M.subs.map((s) => s.vals), stageLabels, spcRules, spcSigmaMethod, spcRuleK, detailOptions),
-          r: stagedRange(M.subs.map((s) => s.vals), stageLabels, spcRules, spcSigmaMethod, spcRuleK, detailOptions),
+          x: stagedXbar(M.subs.map((s) => s.vals), stage.labels, spcRules, spcSigmaMethod, spcRuleK, detailOptions),
+          r: stagedRange(M.subs.map((s) => s.vals), stage.labels, spcRules, spcSigmaMethod, spcRuleK, detailOptions),
         }
       : null;
   // EWMA/CUSUM 数据源：子组均值（σ/√n）或单值序列
@@ -214,7 +217,7 @@ export function computeSpcPageView({
     'xbar-r': {
       sub: staged
         ? `分阶段 · ${staged.x.segments.length} 段（按「${textCols[stageCol]?.name}」）· n = ${M.n}`
-        : stageCol >= 0 && stageError
+        : stageError
           ? `分阶段未运行：${stageError}`
           : `子组大小 n = ${M.n} · 均值-极差`,
       disabled: !M.hasSubgroups,
@@ -268,7 +271,7 @@ export function computeSpcPageView({
       ],
     },
     ewma: {
-      sub: `EWMA · ${ewmaParamsText(ewma.lambda, ewma.L)} · 对小漂移敏感`,
+      sub: ewma.unavailableReason ? 'EWMA · 不可判定（σ̂=0/非有限）' : `EWMA · ${ewmaParamsText(ewma.lambda, ewma.L)} · 对小漂移敏感`,
       shewhart: false,
       coreViol: ewma.viol,
       charts: [
@@ -276,7 +279,7 @@ export function computeSpcPageView({
       ],
     },
     cusum: {
-      sub: `CUSUM · ${cusumParamsText(CUSUM_K, cusumHValue)} · 累积和`,
+      sub: cusum.unavailableReason ? 'CUSUM · 不可判定（σ̂=0/非有限）' : `CUSUM · ${cusumParamsText(CUSUM_K, cusumHValue)} · 累积和`,
       shewhart: false,
       coreViol: cusum.viol,
       charts: [
@@ -310,6 +313,11 @@ export function computeSpcPageView({
 
   const effType: SpcType = specs[spcType].disabled ? 'i-mr' : spcType;
   const spec = specs[effType];
+  // PLATFORM-21:分阶段校验失败时页面与保存记录/专项报告/看板同口径拒绝——不展示按全局限值
+  // 退化出的控制图结论(否则屏幕「N 个失控点」与归档件「未分析」对不上)。
+  const stageBlocked = effType === 'xbar-r' && stageError ? stageError : null;
+  // CORE-08:σ̂=0/非有限时 EWMA/CUSUM 不可判定,与保存记录/专项报告同一原因文案。
+  const advancedUnavailable = effType === 'ewma' ? ewma.unavailableReason : effType === 'cusum' ? cusum.unavailableReason : null;
   const main = spec.charts.find((c) => c.main)!;
 
   let viol: Set<number>;
@@ -424,7 +432,7 @@ export function computeSpcPageView({
     else stats.push({ k: 'c̄', v: nf(cModel.cbar, 3) }, { k: '单位数', v: String(cModel.cdata.length) });
   }
 
-  const report = spcReport({
+  const baseReport = spcReport({
     // 有界前缀 + 引擎完整统计:顶部结论卡与右侧列表、导出同口径(含 R/S/MR 离散图失控点)
     violList: violations.items,
     violationSummary: {
@@ -447,8 +455,20 @@ export function computeSpcPageView({
       : effType === 'c' ? undefined : prepared.note,
   });
 
+  const typeLabel = TYPE_TABS.find(([k]) => k === effType)?.[1] ?? effType;
+  const report = advancedUnavailable
+    ? {
+        ...baseReport,
+        verdict: 'warn' as const,
+        headline: `${typeLabel} 不可判定——${advancedUnavailable}。请先确认量具分辨率或改用 ${M.hasSubgroups ? 'X̄-R' : 'I-MR'} 查看数据。`,
+        checks: baseReport.checks.map((check) => check.name === '过程稳定性'
+          ? { name: '过程稳定性', level: 'warn' as const, note: advancedUnavailable }
+          : check),
+      }
+    : baseReport;
+
   return {
-    M, textCols, labelsFor, stageCol, canStage, stageError, staged, advData, ewma, cusum, variableName,
+    M, textCols, labelsFor, stageCol, canStage, stageError, stageBlocked, advancedUnavailable, staged, advData, ewma, cusum, variableName,
     specs, effType, spec, main, viol, dispViolByChart, violations, variationChartLabel, stats, report,
   };
 }
@@ -522,7 +542,7 @@ function SpcView({ T }: { T: ChartTokens }) {
     );
   }
   const {
-    M, textCols, labelsFor, stageCol, canStage, stageError, staged, advData, ewma, cusum, variableName,
+    M, textCols, labelsFor, stageCol, canStage, stageError, stageBlocked, advancedUnavailable, advData, ewma, cusum, variableName,
     specs, effType, spec, main, viol, dispViolByChart, violations, variationChartLabel, stats, report,
   } = view;
   const uniqueViolCount = violations.affectedPointCount;
@@ -578,7 +598,22 @@ function SpcView({ T }: { T: ChartTokens }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       {effType !== 'p' && effType !== 'c' && rolePanel}
-      <ReportCard data={report} />
+      {stageBlocked ? (
+        <Card style={{ padding: 20, borderColor: '#f0caca', color: '#a62b2b', lineHeight: 1.7 }}>
+          <b>X̄-R 分阶段未运行，未生成统计结论：</b>{stageBlocked}。<br />
+          阶段未启用时本页、质量总览、保存记录与导出报告一律不按全局控制限退化出结论，以免屏幕与归档件口径不一致。
+          请修正阶段列（至少 2 个连续阶段、每段 ≥2 个子组），或
+          <button
+            type="button"
+            onClick={() => setSpcStageCol(null)}
+            style={{ ...stageSelStyle, marginLeft: 6, cursor: 'pointer', color: '#1f6fb2', borderColor: '#bcd6ee', fontWeight: 600 }}
+          >
+            改为不分阶段
+          </button>
+        </Card>
+      ) : (
+        <ReportCard data={report} />
+      )}
       <Card style={{ padding: '11px 16px', display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
         <span style={{ fontSize: 12, color: '#8a929d', fontWeight: 600 }}>控制图类型</span>
         <div style={{ display: 'flex', gap: 6 }}>
@@ -675,17 +710,19 @@ function SpcView({ T }: { T: ChartTokens }) {
             <span style={{ fontSize: 12, color: '#8a929d', fontWeight: 600 }}>分阶段</span>
             <select
               style={stageSelStyle}
-              value={stageCol}
+              value={spcStageCol != null && stageCol < 0 ? -2 : stageCol}
               onChange={(e) => {
                 const next = +e.target.value;
                 setSpcStageCol(next >= 0 ? textCols[next]?.name ?? null : null);
               }}
             >
               <option value={-1}>不分阶段</option>
+              {/* 已选阶段列不存在时保留一个占位选项，否则下拉框停在「不分阶段」而无法触发清除 */}
+              {spcStageCol != null && stageCol < 0 && <option value={-2} disabled>按 {spcStageCol}（列不存在）</option>}
               {textCols.map((c, i) => <option key={c.name} value={i}>按 {c.name}</option>)}
             </select>
-            {stageCol >= 0 && !staged && (
-              <span role="alert" style={{ fontSize: 11.5, color: '#b65400' }}>阶段未启用：{stageError ?? '阶段列与控制图数据不匹配'}</span>
+            {stageError && (
+              <span role="alert" style={{ fontSize: 11.5, color: '#b65400' }}>阶段未启用：{stageError}</span>
             )}
           </>
         )}
@@ -726,7 +763,7 @@ function SpcView({ T }: { T: ChartTokens }) {
         </div>
       )}
 
-      {variationChartLabel && (
+      {!stageBlocked && variationChartLabel && (
         <div style={{
           padding: '10px 16px', borderRadius: 5, border: `1px solid ${variationViolCount ? '#efc7c7' : '#cfe5d3'}`,
           background: variationViolCount ? '#fff6f6' : '#f5fbf6', color: variationViolCount ? '#a62b2b' : '#2c6b3c',
@@ -739,9 +776,18 @@ function SpcView({ T }: { T: ChartTokens }) {
         </div>
       )}
 
-      <div className="responsive-grid-2" style={{ display: 'grid', gridTemplateColumns: '1fr 300px', gap: 16 }}>
+      {!stageBlocked && <div className="responsive-grid-2" style={{ display: 'grid', gridTemplateColumns: '1fr 300px', gap: 16 }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           {(() => {
+            if (advancedUnavailable) {
+              // CORE-08:σ̂=0 时控制限塌缩到中心线,图形无判读意义,与专项报告一致不出图。
+              return (
+                <Card style={{ padding: 20, borderColor: '#efd9b4', color: '#8a4f08', lineHeight: 1.7 }}>
+                  <b>{MAIN_CHART_LABEL[effType]} 控制图不可判定：</b>{advancedUnavailable}。<br />
+                  零变异数据的控制限塌缩为一条线，任何舍入误差都会被误判为超限；请先确认量具分辨率或补测后再用 {MAIN_CHART_LABEL[effType]} 监控小漂移。
+                </Card>
+              );
+            }
             const renderChart = (ch: (typeof spec.charts)[number], hideXAxis: boolean) => {
               const chartSelection = ch.main ? sel : effType === 'i-mr' ? (sel != null && sel > 0 ? sel - 1 : null) : sel;
               const selectChartPoint = (index: number) => setSelSub(effType === 'i-mr' && !ch.main ? index + 1 : index);
@@ -823,7 +869,9 @@ function SpcView({ T }: { T: ChartTokens }) {
               检验结果（按实际点去重）
               <span className="mono" style={{ marginLeft: 8, background: '#e23b3b', color: '#fff', fontSize: 11, padding: '1px 7px', borderRadius: 9 }}>{uniqueViolCount} 点</span>
             </div>
-            {uniqueViolCount === 0 && (
+            {advancedUnavailable ? (
+              <div style={{ padding: '8px 0', fontSize: 12.5, color: '#b65400', fontWeight: 500 }}>不可判定：{advancedUnavailable}</div>
+            ) : uniqueViolCount === 0 && (
               <div style={{ padding: '8px 0', fontSize: 12.5, color: '#2c8a45', fontWeight: 500 }}>✓ 未检出失控点，过程受控</div>
             )}
             {violations.items.map((o) => (
@@ -839,7 +887,7 @@ function SpcView({ T }: { T: ChartTokens }) {
             )}
           </div>
         </div>
-      </div>
+      </div>}
     </div>
   );
 }

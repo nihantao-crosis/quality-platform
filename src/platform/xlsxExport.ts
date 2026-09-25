@@ -4,7 +4,7 @@
  */
 import * as XLSX from 'xlsx';
 import {
-  nf, computeCapability, capabilityInputError, evaluateAndersonDarling, type VarModel, type SpcAssessment, type CapabilityInputOptions,
+  nf, computeCapability, capabilityInputError, evaluateAndersonDarling, type VarModel, type SpcAssessment,
   assessCapability,
 } from '../core';
 import type { ReportSpec } from './report';
@@ -12,6 +12,7 @@ import { analysisTableTotalRows, safeSheetName, type AnalysisReportPayload } fro
 import {
   timestampText, appVersionText, reportSpecText, withinSigmaLabel,
   MAX_XLSX_SHEET_ROWS, MAX_XLSX_VIOLATION_ROWS, tableTruncationNote, violationTruncationNote,
+  capabilityCaliberLine, type ReportCapabilityOptions,
 } from './reportLabels';
 
 type XlsxCell = string | number | XLSX.CellObject;
@@ -113,7 +114,7 @@ export function buildXlsx(
   analysis?: AnalysisReportPayload,
   capabilityModel: VarModel = M,
   capabilitySpcViolations?: number | null,
-  capabilityOptions: CapabilityInputOptions = {},
+  capabilityOptions: ReportCapabilityOptions = {},
 ): Uint8Array {
   const wb = XLSX.utils.book_new();
 
@@ -183,6 +184,7 @@ export function buildXlsx(
       ? `各图累计 ${assessment.chartPointCount} 个失控点（${assessment.locationLabel} 图 ${assessment.locationPoints} 个 + ${assessment.dispersionLabel} 图 ${assessment.dispersionPoints} 个）；去重${assessment.analysisUnitLabel} ${assessment.uniqueAnalysisUnitCount} 个${cap ? '——能力值仅描述当前样本' : '——过程不稳定'}`
       : '控制图无失控信号',
   ];
+  const xlsxCaliberLine = capabilityCaliberLine(capabilityOptions, capSpcCount);
   const adEval = evaluateAndersonDarling(C.all);
   const adRow = adEval.result
     ? `A²*=${nf(adEval.result.a2star, 3)}, P ${adEval.result.p < 0.005 ? '< 0.005' : '= ' + nf(adEval.result.p, 3)} → ${adEval.result.normal ? '未拒绝正态假设' : '显著偏离正态'}`
@@ -211,6 +213,7 @@ export function buildXlsx(
     ...(capabilityOptions.allowDistantSpec ? [['规格风险确认', '用户已核对当前测量角色与规格，并显式确认继续计算远距离规格']] : []),
     ...capRows,
     stabilityRow,
+    ...(xlsxCaliberLine ? [['能力稳定性口径', xlsxCaliberLine]] : []),
   ];
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(summary), '统计摘要');
 

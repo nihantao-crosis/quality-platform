@@ -11,10 +11,11 @@ import {
   andersonDarling, assessCapability, countCapabilityViolations,
   prepareGageStudy, effectiveGageSelection, listGageCategoryColumns, resolveNumericColumn,
   oneWayAnova, oneSampleT, twoSampleT, linearRegression, anovaGroups, buildAnovaInput, resolveAnovaRoles, wideScaleDisparate, resolveAnovaMode, countAnovaPendingCells, isDoeAnalysisColumn, analyzeDoe, detectFactorial, analyzeFactorial, detectGeneralFactorial, analyzeGeneralFactorial, detectFractionalFactorial, analyzeFractionalFactorial, resolveDoeColumnsWide, MAX_FRACTIONAL_FACTORS, factorialModelTerms, factorialHierarchyClosure, resolveDoeBlockValues, plansByState, computeDescriptive,
-  ewmaSeries, cusumSeries, stagedXbar, stagedRange, stageValidationError, normalizeSwitchStatus, spcChartFamilyFor,
+  ewmaSeries, cusumSeries, stagedXbar, stagedRange, resolveSpcStage, normalizeSwitchStatus, spcChartFamilyFor, capabilityStabilityCaliber,
   normalizeRuleK, assessGage, withSigmaMethod, MAX_SAVED_ANALYSES,
   type InspectionLevel, type AnovaMode, type AqlMethod, type AqlAcMethod, type AqlRegime, type GageStandard, type NelsonRules, type NelsonRuleK, type SwitchStatus, type SpcDataLayout, type SpcSigmaMethod,
 } from '../core';
+import { CUSUM_K, cusumH } from '../core/advancedSpcParams';
 import { useApp, resolveGageTolerance, DEFAULT_SPC_RULES, GAGE_TOL_MEMORY_CAP, normalizeGageBatchCols, normalizeGageTolMemory, type SpcType, type DoeView, type DoeTab, type HypoTab, type ParetoView } from './appStore';
 import { PROJECT_BACKUP_HINT, datasetWriteNotes, syncSpecForActiveMeasurement, useData, resolveCapabilityMeasurementData, isCapabilityWarningAcknowledged, type ParetoModel } from './dataStore';
 import { loadFishboneState, saveFishboneState, type FishboneData } from './fishboneStore';
@@ -379,25 +380,20 @@ function buildSummary(kind: AnalysisKind): Omit<SavedAnalysis, 'id' | 'createdAt
       let stageCount = 0;
 
       if (effType === 'xbar-r') {
-        const stageLabels = app.spcStageCol
-          ? prepared.textCols.find((c) => c.name === app.spcStageCol)?.values
-          : undefined;
-        const stageError = app.spcStageCol
-          ? stageLabels
-            ? stageValidationError(stageLabels, SM.k)
-            : `找不到阶段列“${app.spcStageCol}”`
-          : null;
-        if (stageError) {
+        // 阶段口径与 SPC 页/看板/专项报告同源解析(PLATFORM-21):校验失败统一拒绝出结论。
+        const stage = resolveSpcStage({
+          stageColumn: app.spcStageCol, textCols: prepared.textCols, spcType: effType, hasSubgroups: SM.hasSubgroups, pointCount: SM.k,
+        });
+        if (stage.state === 'invalid') {
           return {
-            kind, title: `${SPC_TITLE[effType]} · 分阶段未运行`, metric: stageError,
+            kind, title: `${SPC_TITLE[effType]} · 分阶段未运行`, metric: stage.reason,
             status: '未分析', ...pick(WARN),
           };
         }
-        const canUseStages = Boolean(stageLabels);
-        if (canUseStages && stageLabels) {
+        if (stage.state === 'active') {
           const countOnly = { collectDetails: false } as const;
-          const x = stagedXbar(rows, stageLabels, app.spcRules, app.spcSigmaMethod, app.spcRuleK, countOnly);
-          const r = stagedRange(rows, stageLabels, app.spcRules, app.spcSigmaMethod, app.spcRuleK, countOnly);
+          const x = stagedXbar(rows, stage.labels, app.spcRules, app.spcSigmaMethod, app.spcRuleK, countOnly);
+          const r = stagedRange(rows, stage.labels, app.spcRules, app.spcSigmaMethod, app.spcRuleK, countOnly);
           violations = mergeViolations(x.viol, r.viol);
           stageCount = x.segments.length;
         } else {
@@ -423,12 +419,20 @@ function buildSummary(kind: AnalysisKind): Omit<SavedAnalysis, 'id' | 'createdAt
         const mu = SM.hasSubgroups ? SM.xbarbar : SM.indMean;
         const sigma = SM.hasSubgroups ? SM.sigmaChart / Math.sqrt(SM.n) : SM.iSig;
         const r = ewmaSeries(data, mu, sigma);
+        // CORE-08:σ̂=0/非有限不可判定——与页面/专项报告同一原因,不写「N 个失控点」或「受控」。
+        if (r.unavailableReason) {
+          return { kind, title: SPC_TITLE[effType], metric: r.unavailableReason, status: '未分析', ...pick(WARN) };
+        }
         violations = r.viol;
       } else if (effType === 'cusum') {
         const data = SM.hasSubgroups ? means : SM.indiv;
         const mu = SM.hasSubgroups ? SM.xbarbar : SM.indMean;
         const sigma = SM.hasSubgroups ? SM.sigmaChart / Math.sqrt(SM.n) : SM.iSig;
-        const r = cusumSeries(data, mu, sigma, 0.5, SM.hasSubgroups ? 4 : 5);
+        // S-1:与 SPC 页/专项报告同源常数(advancedSpcParams),不再第三处照抄 0.5 / 4|5。
+        const r = cusumSeries(data, mu, sigma, CUSUM_K, cusumH(SM.hasSubgroups));
+        if (r.unavailableReason) {
+          return { kind, title: SPC_TITLE[effType], metric: r.unavailableReason, status: '未分析', ...pick(WARN) };
+        }
         violations = r.viol;
       } else if (effType === 'p') {
         violations = limitedViolations(pModel.pprop, pModel.pbar, pModel.pUcls, pModel.pLcls, 0,
@@ -471,12 +475,15 @@ function buildSummary(kind: AnalysisKind): Omit<SavedAnalysis, 'id' | 'createdAt
       const cap = computeCapability(CM.all, CM.sigmaWithin, spec, { allowDistantSpec: warningAcknowledged });
       // P0-4:与能力页/专项报告共用唯一判定器——过程失控时保存记录不得给绿色「能力充足」。
       const ad = CM.all.length >= 8 ? andersonDarling(CM.all) : null;
+      const capabilityFamily = spcChartFamilyFor(capabilitySpcModel, app.spcType);
       const assessment = assessCapability({
         cpk: cap.cpk, verdict: cap.verdict, adP: ad ? ad.p : null, n: CM.all.length,
-        spcViolations: countCapabilityViolations(capabilitySpcModel, app.spcRules, app.spcRuleK, spcChartFamilyFor(capabilitySpcModel, app.spcType)),
+        spcViolations: countCapabilityViolations(capabilitySpcModel, app.spcRules, app.spcRuleK, capabilityFamily),
       });
+      // CORE-09/UI-12:能力稳定性有意按全局子组图评估;与 SPC 页视图不同时记录里必须写明口径。
+      const caliber = capabilityStabilityCaliber({ capabilityFamily, spcType: app.spcType, spcStageCol: app.spcStageCol });
       return {
-        kind, title: '过程能力分析', metric: `Cpk ${nf(cap.cpk, 2)}`,
+        kind, title: '过程能力分析', metric: `Cpk ${nf(cap.cpk, 2)}${caliber ? ` · ${caliber.short}` : ''}`,
         status: assessment.status,
         ...pick(assessment.level === 'ok' ? OK : assessment.level === 'warn' ? WARN : BAD),
       };

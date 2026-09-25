@@ -76,6 +76,40 @@ export function stageValidationError(labels: string[], pointCount = labels.lengt
 }
 
 /**
+ * 当前 SPC 配置下的阶段口径（CORE-09 / PLATFORM-21）。
+ * - off：未选阶段列，或当前图型不支持分阶段（仅子组 X̄-R 支持，与 SPC 页入口一致）；
+ * - active：阶段列有效，全部 SPC 稳定性消费者必须按段内控制限判异；
+ * - invalid：用户选了阶段列但无法运行（列不存在/只有 1 段/某段点数不足…）。
+ *   页面、看板、保存记录与报告统一「拒绝」：不出统计结论，并明示原因——
+ *   不得静默回退全局控制限（那会让屏幕与归档件口径分裂）。
+ */
+export type SpcStageResolution =
+  | { state: 'off' }
+  | { state: 'active'; column: string; labels: string[] }
+  | { state: 'invalid'; column: string; reason: string };
+
+/**
+ * 解析阶段列的唯一入口：SPC 页、质量总览、保存记录、SPC 专项报告与通用导出必须共用本函数，
+ * 不得各自复刻 find/validate（历史上五处复刻导致「列找不到」时页面静默不分阶段而报告拒绝）。
+ */
+export function resolveSpcStage(args: {
+  stageColumn: string | null | undefined;
+  textCols: ReadonlyArray<{ name: string; values: string[] }>;
+  spcType: string;
+  hasSubgroups: boolean;
+  pointCount: number;
+}): SpcStageResolution {
+  const { stageColumn, textCols, spcType, hasSubgroups, pointCount } = args;
+  if (stageColumn == null || spcType !== 'xbar-r' || !hasSubgroups) return { state: 'off' };
+  const column = textCols.find((candidate) => candidate.name === stageColumn);
+  if (!column) return { state: 'invalid', column: stageColumn, reason: `找不到阶段列“${stageColumn}”` };
+  const reason = stageValidationError(column.values, pointCount);
+  return reason
+    ? { state: 'invalid', column: stageColumn, reason }
+    : { state: 'active', column: stageColumn, labels: column.values };
+}
+
+/**
  * X̄ 图分阶段：rows 为子组矩阵,labels 与行对齐。
  * 每段：X̿ ± A2·R̄（段内估计）;段长 < 2 时限值退化为段均值（不判异）。
  */

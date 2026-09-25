@@ -9,7 +9,7 @@ import {
 } from 'docx';
 import PptxGenJS from 'pptxgenjs';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { nf, fmtCap, computeCapability, capabilityInputError, evaluateAndersonDarling, type VarModel, type SpcAssessment, type CapabilityInputOptions, assessCapability } from '../core';
+import { nf, fmtCap, computeCapability, capabilityInputError, evaluateAndersonDarling, type VarModel, type SpcAssessment, assessCapability } from '../core';
 import { chartTokens } from '../ui/tokens';
 import { ControlChart } from '../ui/charts/ControlChart';
 import { Histogram } from '../ui/charts/Histogram';
@@ -17,7 +17,7 @@ import { NormalProbPlot } from '../ui/charts/NormalProbPlot';
 import type { ReportSpec } from './report';
 import { svgMarkupToPng } from './svgToPng';
 import { analysisTableTotalRows, analysisUsesWorksheet, type AnalysisReportPayload, type AnalysisReportTable } from './analysisReportModel';
-import { MAX_REPORT_TABLE_ROWS, MAX_XLSX_VIOLATION_ROWS, tableTruncationNote, timestampText, appVersionText, reportContextText, reportSpecText, reportNum, withinSigmaLabel } from './reportLabels';
+import { MAX_REPORT_TABLE_ROWS, MAX_XLSX_VIOLATION_ROWS, tableTruncationNote, timestampText, appVersionText, reportContextText, reportSpecText, reportNum, withinSigmaLabel, capabilityCaliberLine, stagedChartProps, type ReportCapabilityOptions } from './reportLabels';
 
 /** OOXML 文本合法化(双审 P2):XML 1.0 禁止绝大多数控制字符,原样写入会产出
  * Word/PowerPoint 拒绝打开的损坏文件而界面仍提示导出成功。导入文本(粘贴/CSV)
@@ -54,7 +54,7 @@ function collectStats(
   M: VarModel,
   spec: ReportSpec,
   assessment: SpcAssessment,
-  capabilityOptions: CapabilityInputOptions = {},
+  capabilityOptions: ReportCapabilityOptions = {},
 ): ReportStats {
   const capError = capabilityInputError(M.all, M.sigmaWithin, spec, capabilityOptions);
   const cap = capError ? null : computeCapability(M.all, M.sigmaWithin, spec, capabilityOptions);
@@ -141,7 +141,10 @@ export async function renderReportImages(
     svgMarkupToPng(renderToStaticMarkup(el), w, h, 2);
   return {
     xbar: await mk(
-      <ControlChart T={T} data={spc.data} cl={spc.cl} ucl={spc.ucl} lcl={spc.lcl} clLabel={spc.clLabel} h={250} zones violations={assessment.locationViolIndexes} />,
+      <ControlChart
+        T={T} data={spc.data} cl={spc.cl} ucl={spc.ucl} lcl={spc.lcl} clLabel={spc.clLabel} h={250} zones violations={assessment.locationViolIndexes}
+        {...stagedChartProps(spc)}
+      />,
       960, 250,
     ),
     dispersion: await mk(
@@ -156,6 +159,7 @@ export async function renderReportImages(
         zones
         violations={assessment.dispersionViolIndexes}
         xIndexOffset={dispersion.xIndexOffset}
+        {...stagedChartProps(dispersion)}
       />,
       960, 250,
     ),
@@ -194,7 +198,7 @@ export async function buildDocx(
   analysis?: AnalysisReportPayload,
   capabilityModel: VarModel = M,
   capabilitySpcViolations?: number | null,
-  capabilityOptions: CapabilityInputOptions = {},
+  capabilityOptions: ReportCapabilityOptions = {},
 ): Promise<Uint8Array> {
   const border = { style: BorderStyle.SINGLE, size: 4, color: 'E2E5EA' };
   const borders = { top: border, bottom: border, left: border, right: border };
@@ -269,6 +273,7 @@ export async function buildDocx(
   const C = capabilityModel;
   const capSpcCount = capabilitySpcViolations ?? assessment.chartPointCount;
   const { cap, capError, viol, verdictLine, violSummary, adText, capabilityOverrideAcknowledged } = collectStats(C, spec, assessment, capabilityOptions);
+  const docxCaliberLine = capabilityCaliberLine(capabilityOptions, capSpcCount);
 
   const children: (Paragraph | Table)[] = [
     new Paragraph({ heading: HeadingLevel.HEADING_1, children: [new TextRun({ text: cleanXml('质量分析报告'), size: 40, bold: true })] }),
@@ -286,6 +291,7 @@ export async function buildDocx(
     p(officeViolationText(viol, verdictLine, violSummary, 12)),
     h('3. 过程能力'),
     ...(capabilityOverrideAcknowledged ? [p('⚠ 用户已核对当前测量角色与规格，并显式确认继续计算远距离规格。')] : []),
+    ...(docxCaliberLine ? [p(docxCaliberLine)] : []),
     ...img(images.hist, 620, 194),
     cap ? kvTable(capPairs(cap)) : p(`能力分析未运行: ${capError}`),
     h('4. 正态性检验'),
@@ -309,7 +315,7 @@ export async function buildPptx(
   analysis?: AnalysisReportPayload,
   capabilityModel: VarModel = M,
   capabilitySpcViolations?: number | null,
-  capabilityOptions: CapabilityInputOptions = {},
+  capabilityOptions: ReportCapabilityOptions = {},
 ): Promise<Uint8Array> {
   const pptx = new PptxGenJS();
   pptx.defineLayout({ name: 'WIDE', width: 13.33, height: 7.5 });
@@ -455,6 +461,12 @@ export async function buildPptx(
   if (capabilityOverrideAcknowledged) {
     s2.addText('⚠ 用户已核对当前测量角色与规格，并显式确认继续计算远距离规格。', {
       x: 0.6, y: 4.85, w: 12.1, h: 0.45, fontSize: 12, color: 'B0620F', fit: 'shrink',
+    });
+  }
+  const pptxCaliberLine = capabilityCaliberLine(capabilityOptions, capSpcCount);
+  if (pptxCaliberLine) {
+    s2.addText(cleanXml(pptxCaliberLine), {
+      x: 0.6, y: capabilityOverrideAcknowledged ? 5.35 : 4.85, w: 12.1, h: 0.6, fontSize: 12, color: 'B0620F', fit: 'shrink',
     });
   }
 

@@ -1,4 +1,31 @@
-import { nf, type SpecLimits, type VarModel } from '../core';
+import { nf, type CapabilityInputOptions, type SpcChartContext, type SpecLimits, type VarModel } from '../core';
+
+/**
+ * 通用报告控制图的限值绘制：分阶段(assessSpcCharts 第 5 参 active)时按段内步进限值画线，
+ * 与红点所依据的段内判异同一口径；未分阶段返回空对象(全局限值)。
+ */
+export function stagedChartProps(chart: SpcChartContext): {
+  clSeries?: number[]; uclSeries?: number[]; lclSeries?: number[]; stepSeries?: boolean; stageBoundaries?: number[];
+} {
+  return chart.clSeries && chart.uclSeries && chart.lclSeries
+    ? { clSeries: chart.clSeries, uclSeries: chart.uclSeries, lclSeries: chart.lclSeries, stepSeries: true, stageBoundaries: chart.stageBoundaries }
+    : {};
+}
+
+/**
+ * 通用报告能力段选项：能力输入选项 + 稳定性口径披露(CORE-09/UI-12)。
+ * stabilityCaliberText 取 capabilityStabilityCaliber(...).text——能力稳定性有意按全局控制限/子组图
+ * 评估,与 SPC 段(分阶段或 I-MR 视图)口径不同时,四种格式的能力段都必须写明,否则两段计数无从对账。
+ */
+export interface ReportCapabilityOptions extends CapabilityInputOptions {
+  stabilityCaliberText?: string | null;
+}
+
+/** 能力段口径披露行;口径与 SPC 段一致(无披露文本)时返回 null。 */
+export function capabilityCaliberLine(options: ReportCapabilityOptions, capabilitySpcViolations: number): string | null {
+  const text = options.stabilityCaliberText;
+  return text ? `能力稳定性口径：${text}（能力口径控制图累计 ${capabilitySpcViolations} 个失控点）` : null;
+}
 
 /** 通用报告的数据结构说明：单值 I-MR 不得被误写成“n=1 的子组”。 */
 export function reportShapeText(M: VarModel): string {

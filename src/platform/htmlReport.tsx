@@ -4,7 +4,7 @@
  */
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
-  nf, fmtCap, computeCapability, capabilityInputError, evaluateAndersonDarling, type VarModel, type SpcAssessment, type CapabilityInputOptions,
+  nf, fmtCap, computeCapability, capabilityInputError, evaluateAndersonDarling, type VarModel, type SpcAssessment,
   assessCapability, } from '../core';
 import { chartTokens } from '../ui/tokens';
 import { ControlChart } from '../ui/charts/ControlChart';
@@ -12,7 +12,7 @@ import { Histogram } from '../ui/charts/Histogram';
 import { NormalProbPlot } from '../ui/charts/NormalProbPlot';
 import type { ReportSpec } from './report';
 import { analysisTableTotalRows, analysisUsesWorksheet, type AnalysisReportPayload } from './analysisReportModel';
-import { MAX_REPORT_TABLE_ROWS, tableTruncationNote, escapeHtml, timestampText, appVersionText, reportContextText, reportSpecText, reportNum, withinSigmaLabel, MAX_HTML_VIOLATION_ROWS, violationTruncationNote } from './reportLabels';
+import { MAX_REPORT_TABLE_ROWS, tableTruncationNote, escapeHtml, timestampText, appVersionText, reportContextText, reportSpecText, reportNum, withinSigmaLabel, MAX_HTML_VIOLATION_ROWS, violationTruncationNote, capabilityCaliberLine, stagedChartProps, type ReportCapabilityOptions } from './reportLabels';
 
 const CSS = `
   body { font-family: "IBM Plex Sans", "PingFang SC", "Microsoft YaHei", sans-serif; color: #2a333f; margin: 0; padding: 32px 40px; }
@@ -87,13 +87,14 @@ export function buildHtmlReport(
   analysis?: AnalysisReportPayload,
   capabilityModel: VarModel = M,
   capabilitySpcViolations?: number | null,
-  capabilityOptions: CapabilityInputOptions = {},
+  capabilityOptions: ReportCapabilityOptions = {},
 ): string {
   // 专项分析自带表格/图形，按原有专项载荷直接导出；下方双 SPC 图只属于通用质量报告。
   if (analysis) return buildAnalysisHtml(M, analysis);
   if (!assessment) throw new Error('通用 HTML 报告缺少 SPC 判异结果');
   const C = capabilityModel;
   const capSpcCount = capabilitySpcViolations ?? assessment.chartPointCount;
+  const caliberLine = capabilityCaliberLine(capabilityOptions, capSpcCount);
   const T = chartTokens('经典', true);
   // 能力输入闸门:规格与数据量纲不匹配(1000σ 哨兵)等情况写「未运行」,其余章节照常导出
   const capError = capabilityInputError(C.all, C.sigmaWithin, spec, capabilityOptions);
@@ -104,7 +105,10 @@ export function buildHtmlReport(
   const ad = adEvaluation.result;
 
   const xbarSvg = renderToStaticMarkup(
-    <ControlChart T={T} data={spc.data} cl={spc.cl} ucl={spc.ucl} lcl={spc.lcl} clLabel={spc.clLabel} h={250} zones violations={assessment.locationViolIndexes} />,
+    <ControlChart
+      T={T} data={spc.data} cl={spc.cl} ucl={spc.ucl} lcl={spc.lcl} clLabel={spc.clLabel} h={250} zones violations={assessment.locationViolIndexes}
+      {...stagedChartProps(spc)}
+    />,
   );
   const dispersionSvg = renderToStaticMarkup(
     <ControlChart
@@ -118,6 +122,7 @@ export function buildHtmlReport(
       zones
       violations={assessment.dispersionViolIndexes}
       xIndexOffset={dispersion.xIndexOffset}
+      {...stagedChartProps(dispersion)}
     />,
   );
   const histSvg = renderToStaticMarkup(
@@ -188,6 +193,7 @@ ${violHtml}
 <h2>3. 过程能力</h2>
 <div class="chart">${histSvg}</div>
 ${capabilityOptions.allowDistantSpec ? '<p class="verdict-warn">⚠ 用户已核对当前测量角色与规格，并显式确认继续计算远距离规格。</p>' : ''}
+${caliberLine ? `<p class="verdict-warn">${esc(caliberLine)}</p>` : ''}
 <table>
   <tr>${capRows.map(([k]) => `<th>${k}</th>`).join('')}</tr>
   <tr>${capRows.map(([, v]) => `<td class="num">${v}</td>`).join('')}</tr>

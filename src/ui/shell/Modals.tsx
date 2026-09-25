@@ -3,7 +3,7 @@ import { useState, useEffect, useRef } from 'react';
 import { appVersionText } from '../../platform/reportLabels';
 import { useApp, type ImportTab, type ExportFmt } from '../../store/appStore';
 import { PROJECT_BACKUP_HINT, completeVaultDatasetRemoval, datasetWriteNotes, markActiveDataReplaced, prepareVaultDatasetRemoval, useData, isCapabilityWarningAcknowledged, type PersistOutcome } from '../../store/dataStore';
-import { parseMatrix, parseCategoryCounts, extractPChartColumns, evalFormula, truthy, arrMin, arrMax, mean, stdev, FormulaError, worksheetNumericColumnCodes, detectCsvBlocks, csvBlockLabel, assessSpcCharts, countCapabilityViolations, spcChartFamilyFor, withSigmaMethod, type CategoryCounts, type CsvBlock, type ParsedMatrix } from '../../core';
+import { parseMatrix, parseCategoryCounts, extractPChartColumns, evalFormula, truthy, arrMin, arrMax, mean, stdev, FormulaError, worksheetNumericColumnCodes, detectCsvBlocks, csvBlockLabel, assessSpcCharts, countCapabilityViolations, capabilityStabilityCaliber, spcChartFamilyFor, withSigmaMethod, type CategoryCounts, type CsvBlock, type ParsedMatrix } from '../../core';
 import { errText, decodeTextFileBytes, assertXlsxImportSize, platform } from '../../platform/adapter';
 import { assertClipboardImportText, assertTextImportSize } from '../../platform/importLimits';
 import { buildExportJob } from '../../platform/report';
@@ -696,20 +696,32 @@ function ExportModal() {
       const appState = useApp.getState();
       const dataState = useData.getState();
       const { lsl, lslOn, tgt, usl, uslOn, spcRules, spcRuleK } = appState;
-      const { report: analysis, model, capabilityModel, spcFamily } = buildActiveAnalysisExport();
+      const { report: analysis, model, capabilityModel, spcFamily, spcStage } = buildActiveAnalysisExport();
       // v1.42.3(审计 P1):通用报告判异用「用户当前规则/K」评估一次,四种格式共用——
       // 不再让各导出器各自按 DEFAULT_RULES 只评位置图。
+      // CORE-09:SPC 段与 SPC 页同一阶段口径(resolveSpcStage 结果原样传入第 5 参)。
       // 专项载荷自带完整统计与图表，不先构建一份随后会被丢弃的通用 SPC 明细。
-      const spcAssessment = analysis ? null : assessSpcCharts(model, spcRules, spcRuleK, spcFamily);
+      const spcAssessment = analysis ? null : assessSpcCharts(model, spcRules, spcRuleK, spcFamily, spcStage);
       // buildActiveAnalysisExport 已返回同口径模型；这里再显式收口，避免将来某专项
       // 返回原始 capabilityModel 时通用四格式悄然退回 classic 判异。
       const capabilitySpcModel = withSigmaMethod(capabilityModel, appState.spcSigmaMethod);
       const capabilityFamily = spcChartFamilyFor(capabilitySpcModel, appState.spcType);
+      // 能力稳定性有意不分阶段(全局控制限):SPC 段分阶段时其 chartPointCount 是段内计数,
+      // 不得复用给能力判定,必须按能力口径独立计数。
       const capabilitySpcViolations = analysis
         ? null
-        : capabilitySpcModel === model
+        : capabilitySpcModel === model && spcStage.state !== 'active' && capabilityFamily === spcFamily
           ? spcAssessment!.chartPointCount
           : countCapabilityViolations(capabilitySpcModel, spcRules, spcRuleK, capabilityFamily);
+      // 能力段口径披露:与 SPC 段(分阶段/I-MR 视图)不同时四种格式都写明。阶段列以实际生效的
+      // spcStage 为准,避免未生效的残留阶段设置被误写成「未分阶段」对比。
+      const stabilityCaliber = analysis
+        ? null
+        : capabilityStabilityCaliber({
+            capabilityFamily,
+            spcType: appState.spcType,
+            spcStageCol: spcStage.state === 'active' ? spcStage.column : null,
+          });
       const spec = { lsl: lslOn ? lsl : null, tgt, usl: uslOn ? usl : null };
       const capabilityWarningAcknowledged = isCapabilityWarningAcknowledged(
         dataState.model,
@@ -726,7 +738,7 @@ function ExportModal() {
         analysis,
         capabilityModel,
         capabilitySpcViolations,
-        { allowDistantSpec: capabilityWarningAcknowledged },
+        { allowDistantSpec: capabilityWarningAcknowledged, stabilityCaliberText: stabilityCaliber?.text ?? null },
       );
       const dest = await platform.exportFile(job);
       if (dest == null) return; // 用户取消

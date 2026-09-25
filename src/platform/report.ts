@@ -7,9 +7,9 @@ import {
   nf, fmtCap, computeCapability, capabilityInputError, oneWayAnova, computeGageRR,
   anovaGroups, gageStudyData, GAGE_TOLERANCE, type VarModel,
   assessCapability, evaluateAndersonDarling,
-  type SpcAssessment, type SpecLimits, type CapabilityInputOptions,
+  type SpcAssessment, type SpecLimits,
 } from '../core';
-import { localDateStamp, sanitizeFileName, timestampText, appVersionText, reportContextText, reportSpecText, reportNum, withinSigmaLabel } from './reportLabels';
+import { localDateStamp, sanitizeFileName, timestampText, appVersionText, reportContextText, reportSpecText, reportNum, withinSigmaLabel, capabilityCaliberLine, type ReportCapabilityOptions } from './reportLabels';
 
 const OPS = ['张伟', '李娜', '王强'];
 const SHIFTS = ['早班', '中班', '夜班'];
@@ -37,7 +37,7 @@ export function textReport(
   assessment: SpcAssessment,
   capabilityModel: VarModel = M,
   capabilitySpcViolations: number = assessment.chartPointCount,
-  capabilityOptions: CapabilityInputOptions = {},
+  capabilityOptions: ReportCapabilityOptions = {},
 ): string {
   const C = capabilityModel;
   // 能力输入闸门:规格与数据量纲不匹配(1000σ 哨兵)等情况下,能力章节写「未运行」而非让整份导出失败
@@ -77,6 +77,8 @@ export function textReport(
     L.push(`  能力分析未运行: ${capError}`);
   } else {
     if (capabilityOptions.allowDistantSpec) L.push('  ⚠ 用户已核对当前测量角色与规格，并显式确认继续计算远距离规格');
+    const caliberLine = capabilityCaliberLine(capabilityOptions, capabilitySpcViolations);
+    if (caliberLine) L.push(`  ${caliberLine}`);
     L.push(`  Cp ${fmtCap(cap.cp)} · Cpk ${nf(cap.cpk, 2)} · Pp ${fmtCap(cap.pp)} · Ppk ${nf(cap.ppk, 2)}`);
     L.push(`  CPU ${fmtCap(cap.cpu)} · CPL ${fmtCap(cap.cpl)} · Z.bench ${nf(cap.zBench, 2)} · 西格玛水平 ${nf(cap.sigmaLevel, 2)}σ`);
     L.push(`  PPM 合计（整体）${Math.round(cap.ppm.overall.total).toLocaleString()}`);
@@ -119,7 +121,7 @@ export async function buildExportJob(
   analysis?: AnalysisReportPayload,
   capabilityModel: VarModel = M,
   capabilitySpcViolations: number | null = assessment?.chartPointCount ?? null,
-  capabilityOptions: CapabilityInputOptions = {},
+  capabilityOptions: ReportCapabilityOptions = {},
 ): Promise<ExportJob> {
   if (!analysis && !assessment) throw new Error('通用报告必须提供当前 SPC 判异结果');
   const stamp = localDateStamp();

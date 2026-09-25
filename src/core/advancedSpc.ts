@@ -3,6 +3,17 @@
  * 对小幅过程漂移比 Shewhart 图更敏感。
  */
 
+/**
+ * CORE-08：σ̂ 非正或非有限时 EWMA/CUSUM 控制限塌缩到中心线，任何 1 ulp 递推舍入都会被判超限，
+ * 结论随读数的二进制表示翻转（0.1 判失控、0.3 不判）。此时必须显式返回「无变异，不可判定」，
+ * 页面、保存记录与专项报告统一显示本原因，不得输出失控点或「受控」结论。
+ */
+export function advancedSpcSigmaIssue(sigma: number): string | null {
+  if (!Number.isFinite(sigma)) return 'σ̂ 不是有限数值，EWMA/CUSUM 不可判定';
+  if (!(sigma > 0)) return 'σ̂=0：数据无变异（组内极差/移动极差全为 0，量具分辨率不足？），EWMA/CUSUM 不可判定';
+  return null;
+}
+
 export interface EwmaResult {
   z: number[]; // EWMA 序列
   ucl: number[]; // 时变上限
@@ -11,6 +22,8 @@ export interface EwmaResult {
   lambda: number;
   L: number;
   viol: Set<number>;
+  /** 非 null 时本图不可判定（σ̂=0 或非有限）：viol 恒为空，控制限仅作占位。 */
+  unavailableReason: string | null;
 }
 
 /**
@@ -19,6 +32,7 @@ export interface EwmaResult {
  * @param sigma 单点标准差（子组均值序列传 σ/√n）
  */
 export function ewmaSeries(data: number[], mu0: number, sigma: number, lambda = 0.2, L = 2.7): EwmaResult {
+  const unavailableReason = advancedSpcSigmaIssue(sigma);
   const z: number[] = [];
   const ucl: number[] = [];
   const lcl: number[] = [];
@@ -28,12 +42,17 @@ export function ewmaSeries(data: number[], mu0: number, sigma: number, lambda = 
     const zi = lambda * data[i] + (1 - lambda) * prev;
     z.push(zi);
     prev = zi;
+    if (unavailableReason) {
+      ucl.push(mu0);
+      lcl.push(mu0);
+      continue;
+    }
     const w = sigma * Math.sqrt((lambda / (2 - lambda)) * (1 - Math.pow(1 - lambda, 2 * (i + 1))));
     ucl.push(mu0 + L * w);
     lcl.push(mu0 - L * w);
     if (zi > ucl[i] || zi < lcl[i]) viol.add(i);
   }
-  return { z, ucl, lcl, cl: mu0, lambda, L, viol };
+  return { z, ucl, lcl, cl: mu0, lambda, L, viol, unavailableReason };
 }
 
 export interface CusumResult {
@@ -42,6 +61,8 @@ export interface CusumResult {
   H: number; // 判定限 h·σ
   K: number; // 允差 k·σ
   viol: Set<number>;
+  /** 非 null 时本图不可判定（σ̂=0 或非有限）：viol 恒为空，H/K 记 0 仅作占位。 */
+  unavailableReason: string | null;
 }
 
 /**
@@ -49,8 +70,9 @@ export interface CusumResult {
  * 常用 k=0.5（检测 1σ 漂移）、h=4（子组）或 5（单值）。
  */
 export function cusumSeries(data: number[], mu0: number, sigma: number, k = 0.5, h = 4): CusumResult {
-  const K = k * sigma;
-  const H = h * sigma;
+  const unavailableReason = advancedSpcSigmaIssue(sigma);
+  const K = unavailableReason ? 0 : k * sigma;
+  const H = unavailableReason ? 0 : h * sigma;
   const cp: number[] = [];
   const cn: number[] = [];
   const viol = new Set<number>();
@@ -61,7 +83,7 @@ export function cusumSeries(data: number[], mu0: number, sigma: number, k = 0.5,
     m = Math.max(0, mu0 - K - data[i] + m);
     cp.push(p);
     cn.push(m);
-    if (p > H || m > H) viol.add(i);
+    if (!unavailableReason && (p > H || m > H)) viol.add(i);
   }
-  return { cp, cn, H, K, viol };
+  return { cp, cn, H, K, viol, unavailableReason };
 }

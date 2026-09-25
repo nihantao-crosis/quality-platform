@@ -3,7 +3,8 @@
  * 必须共用同一份评估结果——过程失控时,任何界面都不得以绿色「能力充足」作为总体状态。
  */
 import type { VarModel } from './model';
-import { evalRules, evalLimitedRules, expandSpcRuleItems, normalizeRuleK, type NelsonRules, type NelsonRuleK } from './spc';
+import { evalRules, evalLimitedRules, expandSpcRuleItems, normalizeRuleK, type NelsonRules, type NelsonRuleK, type RuleViolation } from './spc';
+import { stagedRange, stagedXbar, type SpcStageResolution } from './stages';
 import { nf } from './basicMath';
 
 export type AssessLevel = 'ok' | 'warn' | 'bad';
@@ -38,9 +39,55 @@ export interface SpcChartEvent {
 /** 通用报告的控制图族必须来自当前 SPC 配置，报告层不得按 VarModel 猜回 X̄-R。 */
 export type SpcChartFamily = 'xbar-r' | 'xbar-s' | 'i-mr';
 
-/** 所有稳定性消费者共用：单值模型只能是 I-MR；子组模型仅 X̄-S 显式切换到 S。 */
+/**
+ * 能力稳定性口径：单值模型只能是 I-MR；子组模型仅 X̄-S 显式切换到 S，其余（含 SPC 页选 I-MR）
+ * 一律按 X̄-R——Cpk 用组内 σ（R̄/d₂），稳定性必须按子组图评估（UI-12：此口径有意保留，
+ * 但与 SPC 页视图不同时必须经 capabilityStabilityCaliber 在文案中注明所用图型）。
+ */
 export function spcChartFamilyFor(M: VarModel, spcType: string): SpcChartFamily {
   return !M.hasSubgroups ? 'i-mr' : spcType === 'xbar-s' ? 'xbar-s' : 'xbar-r';
+}
+
+/**
+ * SPC 视图口径（UI-12）：与 SPC 页当前 Shewhart 图型一致——子组数据选 I-MR 时按全部单值出 I/MR 图。
+ * 质量总览的 SPC 告警/趋势图等「SPC 稳定性」消费者用本函数；能力稳定性仍用 spcChartFamilyFor。
+ * EWMA/CUSUM/P/C 没有配对 Shewhart 图，回落到子组 X̄-R / 单值 I-MR 并由调用方注明图型。
+ */
+export function spcViewFamilyFor(M: VarModel, spcType: string): SpcChartFamily {
+  return !M.hasSubgroups || spcType === 'i-mr' ? 'i-mr' : spcType === 'xbar-s' ? 'xbar-s' : 'xbar-r';
+}
+
+export const SPC_FAMILY_LABEL: Record<SpcChartFamily, string> = { 'xbar-r': 'X̄-R', 'xbar-s': 'X̄-S', 'i-mr': 'I-MR' };
+
+const SPC_TYPE_LABEL: Record<string, string> = {
+  'xbar-r': 'X̄-R', 'xbar-s': 'X̄-S', 'i-mr': 'I-MR', ewma: 'EWMA', cusum: 'CUSUM', p: 'P 图', c: 'C 图',
+};
+
+/**
+ * 能力稳定性口径披露（CORE-09 / UI-12）。能力分析（Minitab 同）不分阶段、固定按子组图评估稳定性；
+ * 当 SPC 页当前视图与之不同（分阶段 X̄-R，或子组数据选了 I-MR/EWMA/CUSUM 等）时，能力页、
+ * 总览 Cpk 卡、能力记录与能力专项报告必须写明所用口径，否则同一数据两处结论互相矛盾且无从对账。
+ * 视图一致时返回 null（不增加噪声）。
+ */
+export function capabilityStabilityCaliber(args: {
+  capabilityFamily: SpcChartFamily;
+  spcType: string;
+  spcStageCol: string | null | undefined;
+}): { text: string; short: string } | null {
+  const { capabilityFamily, spcType, spcStageCol } = args;
+  const staged = spcType === 'xbar-r' && spcStageCol != null && capabilityFamily === 'xbar-r';
+  // 单值能力模型下 SPC 页选 X̄-R/X̄-S 也会退回 I-MR，视图一致。
+  const sameView = spcType === capabilityFamily
+    || (capabilityFamily === 'i-mr' && (spcType === 'xbar-r' || spcType === 'xbar-s'));
+  if (!staged && sameView) return null;
+  const familyLabel = SPC_FAMILY_LABEL[capabilityFamily];
+  const parts = [`稳定性按 ${familyLabel} 图${staged ? '、全局控制限（未分阶段）' : ''}评估`];
+  if (staged) parts.push('能力分析不分阶段，与 SPC 页分阶段结论口径不同');
+  if (!sameView) parts.push(`与 SPC 页当前 ${SPC_TYPE_LABEL[spcType] ?? spcType} 视图口径不同`);
+  return {
+    text: parts.join('；'),
+    short: `稳定性按 ${familyLabel} 图${staged ? '·全局限（未分阶段）' : ''}`,
+  };
 }
 
 export interface SpcChartContext {
@@ -48,6 +95,12 @@ export interface SpcChartContext {
   cl: number;
   ucl: number;
   lcl: number;
+  /** 分阶段时与数据点对齐的段内限值（步进线）；未分阶段时缺省。 */
+  clSeries?: number[];
+  uclSeries?: number[];
+  lclSeries?: number[];
+  /** 分阶段时各段起点索引（首段除外）。 */
+  stageBoundaries?: number[];
   /** 图标题/判异明细使用的图名：X̄、R、S、I、MR。 */
   label: string;
   /** 控制中心线标签：X̄、R̄、S̄、I、MR̄。 */
@@ -55,8 +108,17 @@ export interface SpcChartContext {
   xIndexOffset: number;
 }
 
+/** 分阶段评估摘要（仅 stage.state==='active' 时存在）。 */
+export interface SpcStageSummary {
+  column: string;
+  segmentCount: number;
+  segmentLabels: string[];
+}
+
 export interface SpcAssessment {
   family: SpcChartFamily;
+  /** 分阶段时的段信息；null/缺省=按全局控制限评估。 */
+  stage?: SpcStageSummary | null;
   location: SpcChartContext;
   dispersion: SpcChartContext;
   locationLabel: string;   // X̄ / I
@@ -91,44 +153,77 @@ export interface SpcAssessment {
   verdictLine: string;
 }
 
-function evaluateSpcChartRules(
+interface RuleEvaluation {
+  viol: Set<number>;
+  list: RuleViolation[];
+}
+
+/**
+ * SPC 判异唯一原语（CORE-09 / UI-12）：按图族 + 阶段口径评估位置图与离散图。
+ * - family='i-mr' 在子组模型上按全部单值出 I/MR（与 SPC 页一致）；单值模型不得评 X̄ 图。
+ * - stage.state='active' 时复用 stagedXbar/stagedRange 段内判异（与 SPC 页/保存记录/专项报告同源）；
+ *   'invalid' 时拒绝评估——调用方必须先展示「分阶段未运行：原因」，不得静默回退全局控制限。
+ */
+export function evaluateSpcChartRules(
   M: VarModel,
   rules: NelsonRules,
   ruleK: NelsonRuleK,
   family: SpcChartFamily,
   collectDetails: boolean,
-) {
+  stage: SpcStageResolution | null = null,
+): {
+  normalizedK: NelsonRuleK;
+  location: RuleEvaluation;
+  dispersion: RuleEvaluation;
+  staged: { x: ReturnType<typeof stagedXbar>; r: ReturnType<typeof stagedRange>; column: string } | null;
+} {
   if (ruleK == null) throw new TypeError('SPC 判异评估必须显式传入 ruleK，不允许回落默认 K 值');
   const normalizedK = normalizeRuleK(ruleK);
   const options = { collectDetails };
-  if (M.hasSubgroups !== (family !== 'i-mr')) {
+  if (!M.hasSubgroups && family !== 'i-mr') {
     throw new Error(`SPC 图族 ${family} 与当前数据结构不兼容`);
   }
+  if (stage?.state === 'invalid') throw new RangeError(`分阶段未运行：${stage.reason}`);
+  if (stage?.state === 'active') {
+    if (family !== 'xbar-r' || !M.hasSubgroups) throw new Error(`分阶段仅适用于子组 X̄-R，当前图族 ${family}`);
+    const rows = M.subs.map((s) => s.vals);
+    const x = stagedXbar(rows, stage.labels, rules, M.sigmaMethod, normalizedK, options);
+    const r = stagedRange(rows, stage.labels, rules, M.sigmaMethod, normalizedK, options);
+    return { normalizedK, location: x, dispersion: r, staged: { x, r, column: stage.column } };
+  }
   const xUcl = family === 'xbar-s' ? M.uclXs : M.uclX;
-  const location = M.hasSubgroups
+  const location = family !== 'i-mr'
     ? evalRules(M.subs.map((s) => s.mean), M.xbarbar, (xUcl - M.xbarbar) / 3, rules, normalizedK, options)
     // σ 用 (UCL−CL)/3 而非 M.iSig:与页面(Spc.tsx)和保存摘要(analyses.ts)逐位同一浮点表达式。
     : evalRules(M.indiv, M.indMean, (M.iUcl - M.indMean) / 3, rules, normalizedK, options);
-  const dispersion = M.hasSubgroups
-    ? family === 'xbar-s'
-      ? evalLimitedRules(M.svals, M.sCl, M.uclS, M.lclS, rules, normalizedK, undefined, options)
-      : evalLimitedRules(M.subs.map((s) => s.range), M.rCl, M.uclR, M.lclR, rules, normalizedK, undefined, options)
-    : evalLimitedRules(M.mr.slice(1) as number[], M.mrbar, M.mrUcl, 0, rules, normalizedK, undefined, options);
-  return { normalizedK, location, dispersion };
+  const dispersion = family === 'xbar-s'
+    ? evalLimitedRules(M.svals, M.sCl, M.uclS, M.lclS, rules, normalizedK, undefined, options)
+    : family === 'xbar-r'
+      ? evalLimitedRules(M.subs.map((s) => s.range), M.rCl, M.uclR, M.lclR, rules, normalizedK, undefined, options)
+      : evalLimitedRules(M.mr.slice(1) as number[], M.mrbar, M.mrUcl, 0, rules, normalizedK, undefined, options);
+  return { normalizedK, location, dispersion, staged: null };
 }
 
 /** 通用报告(四种导出格式)共用的 SPC 判异评估。rules/ruleK 必须来自用户当前设置——
  * 任何调用点不得回落 DEFAULT_RULES,否则导出与页面口径分裂。 */
-export function assessSpcCharts(M: VarModel, rules: NelsonRules, ruleK: NelsonRuleK, family: SpcChartFamily): SpcAssessment {
+export function assessSpcCharts(
+  M: VarModel,
+  rules: NelsonRules,
+  ruleK: NelsonRuleK,
+  family: SpcChartFamily,
+  /** 当前 SPC 配置的阶段口径（resolveSpcStage）；缺省=不分阶段。invalid 时抛错拒绝评估。 */
+  stage: SpcStageResolution | null = null,
+): SpcAssessment {
   // 公开 API 不允许静默回落标准 K：即使 JavaScript/反序列化调用绕过 TypeScript，
   // 漏传也必须立即暴露，而不是生成一份与用户当前设置不一致的报告。
   // evalRules 会自行规范化 K，明细展开也必须消费同一份规范化结果；
   // 否则 JS/旧快照传入空对象或非法字段时会出现“图 18 点、明细 10 行”。
-  const { normalizedK, location, dispersion } = evaluateSpcChartRules(M, rules, ruleK, family, true);
-  const locationLabel = M.hasSubgroups ? 'X̄' : 'I';
-  const dispersionLabel = family === 'xbar-s' ? 'S' : M.hasSubgroups ? 'R' : 'MR';
+  const { normalizedK, location, dispersion, staged } = evaluateSpcChartRules(M, rules, ruleK, family, true, stage);
+  const isIndividual = family === 'i-mr';
+  const locationLabel = isIndividual ? 'I' : 'X̄';
+  const dispersionLabel = family === 'xbar-s' ? 'S' : isIndividual ? 'MR' : 'R';
   // MR[j] 对应原始观测 j+2;点号空间统一到观测号后才能与 I 图去重
-  const dispersionOffset = M.hasSubgroups ? 0 : 1;
+  const dispersionOffset = isIndividual ? 1 : 0;
   const dispersionPointSet = new Set([...dispersion.viol].map((i) => i + dispersionOffset));
   const unique = new Set([...location.viol, ...dispersionPointSet]);
   const chartPointCount = location.viol.size + dispersion.viol.size;
@@ -140,26 +235,41 @@ export function assessSpcCharts(M: VarModel, rules: NelsonRules, ruleK: NelsonRu
       .map((item) => ({ i: item.i + dispersionOffset, rule: item.rule, desc: item.desc, chart: dispersionLabel })),
   ].sort((a, b) => a.i - b.i || a.chart.localeCompare(b.chart) || a.rule - b.rule);
   const stable = unique.size === 0;
-  const verdictLine = dispersionPointSet.size > 0
+  const stageSummary: SpcStageSummary | null = staged
+    ? { column: staged.column, segmentCount: staged.x.segments.length, segmentLabels: staged.x.segments.map((segment) => segment.label) }
+    : null;
+  // 分阶段口径必须写进结论行本身：通用报告四种格式都只渲染 verdictLine。
+  const stageNote = stageSummary ? `（分阶段：按「${stageSummary.column}」${stageSummary.segmentCount} 段段内控制限判异）` : '';
+  const verdictLine = (dispersionPointSet.size > 0
     ? `✗ ${dispersionLabel} 图检出 ${dispersionPointSet.size} 个异常点，过程变异尚未受控；暂不解释 ${locationLabel} 图，先调查离散异常`
     : stable
       ? '✓ 未检出失控点，过程受控（按当前启用的判异准则）'
-      : `✗ ${locationLabel} 图检出 ${location.viol.size} 个失控点，存在特殊原因变异`;
+      : `✗ ${locationLabel} 图检出 ${location.viol.size} 个失控点，存在特殊原因变异`) + stageNote;
+  const stagedSeries = (result: NonNullable<typeof staged>['x']) => ({
+    clSeries: result.clSeries, uclSeries: result.uclSeries, lclSeries: result.lclSeries, stageBoundaries: result.boundaries,
+  });
   return {
     family,
-    location: M.hasSubgroups
-      ? { data: M.subs.map((s) => s.mean), cl: M.xbarbar, ucl: family === 'xbar-s' ? M.uclXs : M.uclX, lcl: family === 'xbar-s' ? M.lclXs : M.lclX, label: 'X̄', clLabel: 'X̄', xIndexOffset: 0 }
+    stage: stageSummary,
+    location: !isIndividual
+      ? {
+          data: M.subs.map((s) => s.mean), cl: M.xbarbar, ucl: family === 'xbar-s' ? M.uclXs : M.uclX, lcl: family === 'xbar-s' ? M.lclXs : M.lclX, label: 'X̄', clLabel: 'X̄', xIndexOffset: 0,
+          ...(staged ? stagedSeries(staged.x) : {}),
+        }
       : { data: M.indiv, cl: M.indMean, ucl: M.iUcl, lcl: M.iLcl, label: 'I', clLabel: 'I', xIndexOffset: 0 },
     dispersion: family === 'xbar-s'
       ? { data: M.svals, cl: M.sCl, ucl: M.uclS, lcl: M.lclS, label: 'S', clLabel: M.sigmaMethod === 'pooled' ? 'c₄σ̂' : 'S̄', xIndexOffset: 0 }
-      : M.hasSubgroups
-        ? { data: M.subs.map((s) => s.range), cl: M.rCl, ucl: M.uclR, lcl: M.lclR, label: 'R', clLabel: M.sigmaMethod === 'pooled' ? 'd₂σ̂' : 'R̄', xIndexOffset: 0 }
+      : !isIndividual
+        ? {
+            data: M.subs.map((s) => s.range), cl: M.rCl, ucl: M.uclR, lcl: M.lclR, label: 'R', clLabel: M.sigmaMethod === 'pooled' ? 'd₂σ̂' : 'R̄', xIndexOffset: 0,
+            ...(staged ? stagedSeries(staged.r) : {}),
+          }
         : { data: M.mr.slice(1) as number[], cl: M.mrbar, ucl: M.mrUcl, lcl: 0, label: 'MR', clLabel: 'MR̄', xIndexOffset: 1 },
     locationLabel, dispersionLabel,
     locationPoints: location.viol.size,
     dispersionPoints: dispersion.viol.size,
     chartPointCount,
-    analysisUnitLabel: M.hasSubgroups ? '子组' : '观测',
+    analysisUnitLabel: isIndividual ? '观测' : '子组',
     uniqueAnalysisUnitCount: unique.size,
     uniqueObservationCount: unique.size,
     uniquePointCount: unique.size,
@@ -174,6 +284,9 @@ export function assessSpcCharts(M: VarModel, rules: NelsonRules, ruleK: NelsonRu
 /** 能力分析口径的失控点数:位置图 + 离散图(与能力页 158–165 行历史逻辑一致)。
  * K 值需与 SPC 页/报告同源传入,否则同一数据两侧「受控性」结论会分裂。 */
 export function countCapabilityViolations(M: VarModel, rules: NelsonRules, ruleK: NelsonRuleK, family: SpcChartFamily): number {
+  // 能力口径有意不分阶段、不按单值 I-MR 评子组数据（Cpk 用组内 σ）：与 SPC 视图不同时由
+  // capabilityStabilityCaliber 在文案中披露。子组模型传 I-MR 属调用错误，保持显式拒绝。
+  if (M.hasSubgroups && family === 'i-mr') throw new Error('能力稳定性不得按 I-MR 评估子组数据，请用 spcChartFamilyFor');
   // 页面/看板只需要整数；禁止为此构建、展开并排序整份报告明细。
   const { location, dispersion } = evaluateSpcChartRules(M, rules, ruleK, family, false);
   return location.viol.size + dispersion.viol.size;

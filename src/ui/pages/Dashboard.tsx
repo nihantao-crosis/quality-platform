@@ -4,8 +4,9 @@ import { useShallow } from 'zustand/react/shallow';
 import { useApp } from '../../store/appStore';
 import { useData, resolveCapabilityMeasurementData, isCapabilityWarningAcknowledged } from '../../store/dataStore';
 import {
-  nf, DEFECTS, evalRules, evalLimitedRules, capabilityInputError, computeCapability, oneWayAnova, anovaGroups, andersonDarling,
-  prepareSpcData, countCapabilityViolations, withSigmaMethod, spcChartFamilyFor,
+  nf, DEFECTS, capabilityInputError, computeCapability, oneWayAnova, anovaGroups, andersonDarling,
+  prepareSpcData, countCapabilityViolations, withSigmaMethod, spcChartFamilyFor, spcViewFamilyFor, SPC_FAMILY_LABEL,
+  evaluateSpcChartRules, resolveSpcStage, capabilityStabilityCaliber,
 } from '../../core';
 import { STATUS_COLORS, sameChartTokens } from '../tokens';
 import type { ChartTokens } from '../tokens';
@@ -22,12 +23,13 @@ function DashboardView({ T }: { T: ChartTokens }) {
   // GAP-10-22:按字段订阅(useShallow)。toast/openMenu/varOpen 等纯 UI 字段变化不再让本页重渲染;
   // 与文件末尾的 React.memo 一起挡住 App 父级因这些字段重渲染时的连带重算。
   const {
-    goTo, lsl, usl, tgt, lslOn, uslOn, spcType, spcRules, spcRuleK, spcDataLayout, spcValueCol, spcSubgroupCol, spcSigmaMethod,
+    goTo, lsl, usl, tgt, lslOn, uslOn, spcType, spcRules, spcRuleK, spcDataLayout, spcValueCol, spcSubgroupCol, spcSigmaMethod, spcStageCol,
     paretoThreshold, capSubgroupMode, capSubgroupSize, capValueCol, capSubgroupIdCol, capabilityWarningAcknowledgement,
   } = useApp(useShallow((s) => ({
     goTo: s.goTo, lsl: s.lsl, usl: s.usl, tgt: s.tgt, lslOn: s.lslOn, uslOn: s.uslOn,
     spcType: s.spcType, spcRules: s.spcRules, spcRuleK: s.spcRuleK,
     spcDataLayout: s.spcDataLayout, spcValueCol: s.spcValueCol, spcSubgroupCol: s.spcSubgroupCol, spcSigmaMethod: s.spcSigmaMethod,
+    spcStageCol: s.spcStageCol,
     paretoThreshold: s.paretoThreshold, capSubgroupMode: s.capSubgroupMode, capSubgroupSize: s.capSubgroupSize,
     capValueCol: s.capValueCol, capSubgroupIdCol: s.capSubgroupIdCol,
     capabilityWarningAcknowledgement: s.capabilityWarningAcknowledgement,
@@ -73,39 +75,40 @@ function DashboardView({ T }: { T: ChartTokens }) {
   }, [M, textCols, capPrepared, CM, lsl, usl, tgt, lslOn, uslOn, capabilityWarningAcknowledgement]);
   const anova = useMemo(() => oneWayAnova(anovaGroups().map((g) => g.vals)), []);
 
-  // 与 SPC 页共用数据角色和判异口径。离散图失控时先告警，不把均值图单独解释为“受控”。
-  // GAP-10-22:判异(含明细)整体记忆化,只随数据/图型/准则/K 变化重跑。告警计数仍取完整
+  // 与 SPC 页共用数据角色、图型(spcViewFamilyFor:子组数据选 I-MR 时同样按全部单值)与阶段口径
+  // (resolveSpcStage:分阶段时按段内控制限判异,阶段校验失败时同样拒绝出结论),判异走唯一原语
+  // evaluateSpcChartRules(CORE-09/UI-12/PLATFORM-21)。离散图失控时先告警,不把均值图单独解释为“受控”。
+  // GAP-10-22:判异(含明细)整体记忆化,只随数据/图型/准则/K/阶段变化重跑。告警计数仍取完整
   // 明细条数(口径不变),文案对象只构造实际渲染的前 8 条。
-  const { means, subgroupMainUcl, subgroupMainLcl, dispersionLabel, dispersion, mainRules } = useMemo(() => {
-    const means = SM?.subs.map((s) => s.mean) ?? [];
-    const subgroupUsesS = Boolean(SM?.hasSubgroups && spcType === 'xbar-s');
-    const subgroupMainUcl = subgroupUsesS ? SM?.uclXs : SM?.uclX;
-    const subgroupMainLcl = subgroupUsesS ? SM?.lclXs : SM?.lclX;
-    const dispersionLabel = !SM?.hasSubgroups ? 'MR' : subgroupUsesS ? 'S' : 'R';
-    const dispersion = !SM ? null : SM.hasSubgroups
-      ? subgroupUsesS
-        ? evalLimitedRules(SM.svals, SM.sCl, SM.uclS, SM.lclS, spcRules, spcRuleK)
-        : evalLimitedRules(SM.subs.map((s) => s.range), SM.rCl, SM.uclR, SM.lclR, spcRules, spcRuleK)
-      : evalLimitedRules(SM.mr.slice(1) as number[], SM.mrbar, SM.mrUcl, 0, spcRules, spcRuleK);
-    const mainRules = !SM ? null : SM.hasSubgroups
-      ? evalRules(means, SM.xbarbar, (subgroupMainUcl! - SM.xbarbar) / 3, spcRules, spcRuleK)
-      // σ 用 (UCL−CL)/3:与页面/保存摘要/导出(assessSpcCharts)逐位同一浮点表达式,消除 ulp 级分裂
-      : evalRules(SM.indiv, SM.indMean, (SM.iUcl - SM.indMean) / 3, spcRules, spcRuleK);
-    return { means, subgroupMainUcl, subgroupMainLcl, dispersionLabel, dispersion, mainRules };
-  }, [SM, spcType, spcRules, spcRuleK]);
+  const spcView = useMemo(() => {
+    if (!SM) return null;
+    const family = spcViewFamilyFor(SM, spcType);
+    const stage = resolveSpcStage({
+      stageColumn: spcStageCol, textCols: prepared.textCols, spcType, hasSubgroups: SM.hasSubgroups, pointCount: SM.k,
+    });
+    if (stage.state === 'invalid') return { family, stageError: stage.reason, evaluation: null } as const;
+    return { family, stageError: null, evaluation: evaluateSpcChartRules(SM, spcRules, spcRuleK, family, true, stage) } as const;
+  }, [SM, prepared, spcType, spcStageCol, spcRules, spcRuleK]);
+  const spcFamily = spcView?.family ?? 'xbar-r';
+  const spcIndividual = spcFamily === 'i-mr';
+  const spcStageError = spcView?.stageError ?? null;
+  const spcStaged = spcView?.evaluation?.staged ?? null;
+  const dispersionLabel = spcIndividual ? 'MR' : spcFamily === 'xbar-s' ? 'S' : 'R';
+  const dispersion = spcView?.evaluation?.dispersion ?? null;
+  const mainRules = spcView?.evaluation?.location ?? null;
   const { alerts, alertCount, spcAlertCount, anovaAlertCount } = useMemo(() => {
     const dispersionFirst = Boolean(dispersion?.list.length);
     const spcSource = dispersionFirst ? dispersion!.list : mainRules?.list ?? [];
     const spcAlerts = spcSource.slice(0, DASHBOARD_ALERT_ROWS).map((v) => (dispersionFirst
       ? {
           color: STATUS_COLORS.bad,
-          title: `${dispersionLabel} 图点 ${v.i + (SM?.hasSubgroups ? 1 : 2)} 违反准则 ${v.rule}`,
-          desc: `${v.desc}；离散图未稳定，暂不解释${SM?.hasSubgroups ? ' X̄' : ' I'} 图。`,
+          title: `${dispersionLabel} 图点 ${v.i + (spcIndividual ? 2 : 1)} 违反准则 ${v.rule}`,
+          desc: `${v.desc}；离散图未稳定，暂不解释${spcIndividual ? ' I' : ' X̄'} 图。`,
           page: 'spc' as const,
         }
       : {
           color: STATUS_COLORS.bad,
-          title: `${SM?.hasSubgroups ? 'X̄ 图子组' : 'I 图观测'} ${v.i + 1} 违反准则 ${v.rule}`,
+          title: `${spcIndividual ? 'I 图观测' : 'X̄ 图子组'} ${v.i + 1} 违反准则 ${v.rule}`,
           desc: v.desc,
           page: 'spc' as const,
         }));
@@ -119,19 +122,24 @@ function DashboardView({ T }: { T: ChartTokens }) {
       spcAlertCount: spcSource.length,
       anovaAlertCount: anovaAlerts.length,
     };
-  }, [dispersion, mainRules, dispersionLabel, SM, M.isDemo, anova]);
+  }, [dispersion, mainRules, dispersionLabel, spcIndividual, M.isDemo, anova]);
 
   const cpkGood = cap != null && cap.cpk >= 1.33;
   // P0-4:过程失控/非正态时 Cpk 卡不得给绿色「达标」——与能力页/保存记录同一口径。
   // 716-R3:失控计数与正态性检验同步切到能力口径模型(countCapabilityViolations 与能力页/保存记录共用)。
   // 能力 Cpk 继续使用 resolver 的 sigmaWithin；稳定性则必须复用当前 SPC 的 σ̂ 方法，
   // 否则 pooled 控制限下看板会仍按 classic 计数而与能力页/导出分裂。
-  const dashSpcViol = useMemo(() => {
+  // CORE-09/UI-12:能力稳定性有意不分阶段、按子组图评估(与 Minitab 能力分析一致);与 SPC 视图
+  // 不同时卡片小字写明口径,避免与上方 SPC 告警结论并排矛盾而无说明。
+  const { dashSpcViol, capStabilityCaliber } = useMemo(() => {
     const capSpcModel = CM ? withSigmaMethod(CM, spcSigmaMethod) : null;
-    return capSpcModel
-      ? countCapabilityViolations(capSpcModel, spcRules, spcRuleK, spcChartFamilyFor(capSpcModel, spcType))
-      : 0;
-  }, [CM, spcSigmaMethod, spcRules, spcRuleK, spcType]);
+    if (!capSpcModel) return { dashSpcViol: 0, capStabilityCaliber: null };
+    const capabilityFamily = spcChartFamilyFor(capSpcModel, spcType);
+    return {
+      dashSpcViol: countCapabilityViolations(capSpcModel, spcRules, spcRuleK, capabilityFamily),
+      capStabilityCaliber: capabilityStabilityCaliber({ capabilityFamily, spcType, spcStageCol }),
+    };
+  }, [CM, spcSigmaMethod, spcRules, spcRuleK, spcType, spcStageCol]);
   const cpkStable = dashSpcViol === 0;
   const hasCap = cap != null;
   const dashAd = useMemo(
@@ -145,8 +153,9 @@ function DashboardView({ T }: { T: ChartTokens }) {
     : capSubgroupMode === 'stacked'
       ? `能力口径:单列「${capPrepared.variableName}」+子组 ID`
       : null;
-  const capStatusText = !cpkStable ? `控制图 ${dashSpcViol} 个失控点,Cpk 仅描述当前样本`
-    : dashNonNormal ? '数据偏离正态,Cpk 需谨慎解释' : '目标 ≥ 1.33';
+  const capStatusText = (!cpkStable ? `控制图 ${dashSpcViol} 个失控点,Cpk 仅描述当前样本`
+    : dashNonNormal ? '数据偏离正态,Cpk 需谨慎解释' : '目标 ≥ 1.33')
+    + (capStabilityCaliber ? ` · ${capStabilityCaliber.short}` : '');
   const kpis = [
     {
       label: '过程能力 Cpk', value: cap ? nf(cap.cpk, 2) : '—',
@@ -162,9 +171,11 @@ function DashboardView({ T }: { T: ChartTokens }) {
     { label: '不良 PPM', value: cap ? Math.round(cap.ppm.overall.total).toLocaleString() : '—', tag: '', color: cap ? STATUS_COLORS.bad : STATUS_COLORS.muted, sub: cap ? '预计缺陷率' : capError ?? '能力输入无效' },
     {
       label: '未处理告警', value: String(alertCount), tag: '', color: alertCount > 0 ? STATUS_COLORS.warn : STATUS_COLORS.ok,
-      sub: alertCount > 0
-        ? `${spcAlertCount} SPC${anovaAlertCount ? ` · ${anovaAlertCount} 演示 ANOVA` : ''}`
-        : SM ? '过程受控' : 'SPC 未运行',
+      sub: spcStageError
+        ? `SPC 分阶段未运行${anovaAlertCount ? ` · ${anovaAlertCount} 演示 ANOVA` : ''}`
+        : alertCount > 0
+          ? `${spcAlertCount} SPC${anovaAlertCount ? ` · ${anovaAlertCount} 演示 ANOVA` : ''}${spcStaged ? ` · 分阶段 ${spcStaged.x.segments.length} 段` : ''}`
+          : SM ? `过程受控${spcStaged ? `(分阶段 ${spcStaged.x.segments.length} 段)` : ''}` : 'SPC 未运行',
     },
   ];
 
@@ -207,10 +218,12 @@ function DashboardView({ T }: { T: ChartTokens }) {
         <Card>
           <div style={{ display: 'flex', alignItems: 'center', padding: '12px 16px', borderBottom: '1px solid #edf0f3' }}>
             <div style={{ fontWeight: 600, color: '#33404f', fontSize: 13.5 }}>
-              {SM?.hasSubgroups ? '过程均值趋势' : '过程单值趋势'} · {prepared.variableName}
+              {spcIndividual ? '过程单值趋势' : '过程均值趋势'} · {prepared.variableName}
             </div>
             <div className="mono" style={{ marginLeft: 'auto', fontSize: 11.5, color: STATUS_COLORS.muted }}>
-              {SM ? `${SM.k} ${SM.hasSubgroups ? '子组' : '观测'}` : '待配置'}
+              {SM
+                ? `${SPC_FAMILY_LABEL[spcFamily]}${spcStaged ? ` · 分阶段 ${spcStaged.x.segments.length} 段` : ''} · ${spcIndividual ? SM.indiv.length : SM.k} ${spcIndividual ? '观测' : '子组'}`
+                : '待配置'}
             </div>
           </div>
           <div style={{ padding: '10px 14px 6px' }}>
@@ -219,17 +232,28 @@ function DashboardView({ T }: { T: ChartTokens }) {
                 SPC 数据角色存在歧义，请打开“控制图”选择测量值列和子组 ID。<br />
                 本页不会把数值子组列静默混入测量。
               </div>
-            ) : SM.hasSubgroups ? (
+            ) : spcStageError ? (
+              <div style={{ height: 190, display: 'grid', placeItems: 'center', color: '#b05b2f', fontSize: 12.5, lineHeight: 1.7, textAlign: 'center' }}>
+                X̄-R 分阶段未运行：{spcStageError}<br />
+                与控制图页、保存记录和导出同口径拒绝出结论；请在“控制图”修正阶段列或改为“不分阶段”。
+              </div>
+            ) : !spcIndividual ? (
               <ControlChart
-                T={T} data={means} cl={SM.xbarbar} ucl={subgroupMainUcl!} lcl={subgroupMainLcl!} clLabel="X̄" h={210}
+                T={T} data={SM.subs.map((sub) => sub.mean)} cl={SM.xbarbar}
+                ucl={spcFamily === 'xbar-s' ? SM.uclXs : SM.uclX} lcl={spcFamily === 'xbar-s' ? SM.lclXs : SM.lclX} clLabel="X̄" h={210}
                 violations={mainRules?.viol}
+                {...(spcStaged ? {
+                  clSeries: spcStaged.x.clSeries, uclSeries: spcStaged.x.uclSeries, lclSeries: spcStaged.x.lclSeries,
+                  stepSeries: true, stageBoundaries: spcStaged.x.boundaries,
+                } : {})}
                 xLabel={prepared.xAxisLabel} yLabel={`${prepared.variableName} · 子组均值`} xLabels={prepared.subgroupLabels}
               />
             ) : (
               <ControlChart
                 T={T} data={SM.indiv} cl={SM.indMean} ucl={SM.iUcl} lcl={SM.iLcl} clLabel="X̄" h={210}
                 violations={mainRules?.viol}
-                xLabel={prepared.xAxisLabel} yLabel={`${prepared.variableName} · 单值`} xLabels={prepared.subgroupLabels}
+                xLabel={SM.hasSubgroups ? '观测序号' : prepared.xAxisLabel} yLabel={`${prepared.variableName} · 单值`}
+                xLabels={prepared.subgroupLabels.length === SM.indiv.length ? prepared.subgroupLabels : undefined}
               />
             )}
           </div>

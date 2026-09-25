@@ -6,7 +6,7 @@ import { useData, suggestedSpec, rememberSpecForCapabilityMeasurement, resolveCa
 import {
   nf, fmtCap, capabilityInputError, capabilitySpecDistanceWarning, capabilityWarningFingerprint,
   computeCapability, andersonDarling, bestLambda, transformWithSpec, stdev, countCapabilityViolations, withSigmaMethod,
-  spcMeasurementColumnNames, spcChartFamilyFor,
+  spcMeasurementColumnNames, spcChartFamilyFor, capabilityStabilityCaliber,
 } from '../../core';
 import { ReportCard } from '../ReportCard';
 import { capabilityReport } from '../reportData';
@@ -36,6 +36,7 @@ export function Capability({ T }: { T: ChartTokens }) {
   const { lsl, usl, tgt, lslOn, uslOn, toggleSide, setSpec: setSpecRaw, spcRules, spcRuleK, spcType, spcSigmaMethod, goTo, capabilityBins: bins, setCapabilityBins: setBins,
     capSubgroupMode, capSubgroupSize, capValueCol, capSubgroupIdCol, setCapabilitySubgroup, showToast } = useApp();
   const capabilityWarningAcknowledgement = useApp((state) => state.capabilityWarningAcknowledgement);
+  const spcStageCol = useApp((state) => state.spcStageCol);
   const acknowledgeCapabilityWarning = useApp((state) => state.acknowledgeCapabilityWarning);
   const rawModel = useData((s) => s.model);
   const textCols = useData((s) => s.textCols);
@@ -304,7 +305,10 @@ export function Capability({ T }: { T: ChartTokens }) {
   // 能力结论必须先同时检查位置图与离散图;计数逻辑收敛在 countCapabilityViolations(与保存记录/专项报告共用)。
   // 能力指标仍使用 M.sigmaWithin（classic R̄/d₂）；只有控制图稳定性跟随用户选定 σ̂。
   const capSpcModel = withSigmaMethod(M, spcSigmaMethod);
-  const spcViol = countCapabilityViolations(capSpcModel, spcRules, spcRuleK, spcChartFamilyFor(capSpcModel, spcType));
+  const capabilityFamily = spcChartFamilyFor(capSpcModel, spcType);
+  const spcViol = countCapabilityViolations(capSpcModel, spcRules, spcRuleK, capabilityFamily);
+  // CORE-09/UI-12:能力稳定性有意不分阶段、按子组图评估;SPC 页视图不同(分阶段/I-MR 等)时写明口径。
+  const stabilityCaliber = capabilityStabilityCaliber({ capabilityFamily, spcType, spcStageCol });
   const report = capabilityReport({
     cpk: cap.cpk, verdict: cap.verdict,
     adP: ad ? ad.p : null, n: M.all.length, spcViolations: spcViol,
@@ -316,6 +320,11 @@ export function Capability({ T }: { T: ChartTokens }) {
       <ReportCard data={report} />
       <Card style={{ padding: '10px 16px', color: '#5b6472', fontSize: 12.5, lineHeight: 1.6 }}>
         <b style={{ color: '#33404f' }}>能力数据口径：</b>{prepared.note}；变量：{prepared.variableName}；实际观测 N={M.all.length}。
+        {stabilityCaliber && (
+          <div style={{ marginTop: 4, color: '#8a4f08' }}>
+            <b>稳定性口径：</b>{stabilityCaliber.text}（本页失控点 {spcViol} 个按此口径计数）。
+          </div>
+        )}
       </Card>
       {specEditor}
       {specWarning && warningAcknowledged && (
