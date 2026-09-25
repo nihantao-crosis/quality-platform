@@ -499,6 +499,9 @@ function loadPersistedAqlState(): PersistedAqlState | null {
 const initialAql = loadPersistedAqlState();
 
 let toastTimer: ReturnType<typeof setTimeout> | undefined;
+/** 每次 showToast 递增;调用方用「前后序号是否变化」判断 store 是否给出过提示,不按文本比较(同文提示会误判,fix2609n G24f)。 */
+let toastSeq = 0;
+export function toastSequence(): number { return toastSeq; }
 
 let paretoMergeMigrationPending = false;
 
@@ -588,6 +591,7 @@ export const useApp = create<AppState>()(persist((set, get) => ({
   setBusyOverlay: (msg) => set({ busyOverlay: msg }),
   showToast: (msg) => {
     clearTimeout(toastTimer);
+    toastSeq += 1;
     set({ toast: msg, openMenu: null, varOpen: false });
     toastTimer = setTimeout(() => set({ toast: null }), 2400);
   },

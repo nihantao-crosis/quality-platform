@@ -1,7 +1,7 @@
 /** 四个弹窗：导入 / 导出 / 计算器 / 关于 + Toast。 */
 import { useState, useEffect, useRef } from 'react';
 import { appVersionText } from '../../platform/reportLabels';
-import { isProjectExportInFlight, useApp, type ImportTab, type ExportFmt } from '../../store/appStore';
+import { isProjectExportInFlight, toastSequence, useApp, type ImportTab, type ExportFmt } from '../../store/appStore';
 import { PROJECT_BACKUP_HINT, completeVaultDatasetRemoval, datasetWriteNotes, markActiveDataReplaced, prepareVaultDatasetRemoval, useData, isCapabilityWarningAcknowledged, type PersistOutcome } from '../../store/dataStore';
 import { parseMatrix, parseCategoryCounts, extractPChartColumns, evalFormula, truthy, arrMin, arrMax, mean, stdev, FormulaError, worksheetNumericColumnCodes, detectCsvBlocks, csvBlockLabel, assessSpcCharts, countCapabilityViolations, capabilityStabilityCaliber, spcChartFamilyFor, spcEffectiveViewType, withSigmaMethod, type CategoryCounts, type CsvBlock, type ParsedMatrix } from '../../core';
 import { errText, decodeTextFileBytes, assertXlsxImportSize, platform } from '../../platform/adapter';
@@ -1081,13 +1081,13 @@ function FindReplaceModal() {
 
   const apply = () => {
     if (!canApply) return;
-    const toastBefore = useApp.getState().toast;
+    const toastSeqBefore = toastSequence();
     const n = findReplace(findV, replV, col);
     if (n === 0) {
       // fix2609m G23a A2 尾巴:项目导出快照期间替换被 store 拒绝(已提示「请稍后重试」),不关闭、不报成功。
       // fix2609n G24b B3(第 7 批复审 P3):applyEdit 被拒(「工作表编辑已拒绝：…」)同样返回 0;store 已给出
-      // 原因时不得用「未找到」覆盖——只有 store 没有更新提示(旧的无关提示仍在也算没有)时才补这句(G24e)。
-      if (!isProjectExportInFlight() && useApp.getState().toast === toastBefore) showToast('未找到可替换的值');
+      // 原因时不得用「未找到」覆盖——按提示序号而不是文本判断(连点两次同一拒绝原因时文本相同,G24f)。
+      if (!isProjectExportInFlight() && toastSequence() === toastSeqBefore) showToast('未找到可替换的值');
       return;
     }
     closeModal();
@@ -1392,7 +1392,7 @@ function RandomModal() {
               {label}
               <input type="text" inputMode={integer ? 'numeric' : numericInputMode()} autoComplete="off" spellCheck={false}
                 aria-label={label} aria-invalid={bad ? true : undefined} value={texts[field]}
-                style={{ ...inp, ...(bad ? { borderColor: '#c22f2f' } : {}) }}
+                style={{ ...inp, ...(bad ? { border: '1px solid #c22f2f' } : {}) }}
                 onChange={(e) => { const value = e.target.value; setTexts((prev) => ({ ...prev, [field]: value })); }} />
             </label>
           );

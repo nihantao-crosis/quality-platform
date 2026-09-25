@@ -89,7 +89,7 @@ function FactorRows({ factors, count, setF, inp, showLetter }: {
         type="text" inputMode={numericInputMode()} autoComplete="off" spellCheck={false}
         aria-invalid={bad ? true : undefined} title={bad ? check.reason : undefined}
         value={text} onChange={(e) => setF(i, side === 'low' ? { lowText: e.target.value } : { highText: e.target.value })}
-        style={{ ...inp, ...(bad ? { borderColor: '#c22f2f' } : {}) }} />
+        style={{ ...inp, ...(bad ? { border: '1px solid #c22f2f' } : {}) }} />
     );
   };
   return (
@@ -1217,7 +1217,7 @@ function CreateDesign() {
                     <input key={li} value={t} type="text" inputMode={numericInputMode()} autoComplete="off" spellCheck={false} aria-label={`一般全因子因子 ${i + 1} 水平 ${li + 1} 数值`}
                       aria-invalid={levelError != null} title={levelError ?? undefined}
                       onChange={(e) => setGLevelValue(i, li, e.target.value)}
-                      style={{ ...inp, width: 64, ...(levelError ? { borderColor: '#c22f2f' } : {}) }} />
+                      style={{ ...inp, width: 64, ...(levelError ? { border: '1px solid #c22f2f' } : {}) }} />
                   );
                 })}
                 {countBad && <span style={{ color: '#b0620f' }}>水平数须为 2–5</span>}
