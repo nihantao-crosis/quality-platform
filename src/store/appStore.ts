@@ -949,6 +949,14 @@ function requirePersistedAqlState(): void {
 let projectExportInFlight: symbol | null = null;
 let localDataClearActive = false;
 
+/**
+ * 导出期间拒绝清库的统一文案(UI 租约与直接调用共用)。导出租约在生成完备份内容后、
+ * 保存对话框出现前就已释放；用户取消保存或导出失败时也不会有「项目已保存」提示，
+ * 因此不能让用户去等那条提示。
+ */
+export const PROJECT_EXPORT_BLOCKS_CLEAR_MESSAGE =
+  '项目备份正在生成，本地数据未清除；请等待保存对话框出现或保存结束后再清除数据';
+
 /** 项目导出是否正在生成快照(导出租约持有中)。 */
 export function isProjectExportInFlight(): boolean {
   return projectExportInFlight !== null;
@@ -960,7 +968,7 @@ export function isProjectExportInFlight(): boolean {
  */
 export function beginLocalDataClear(): () => void {
   if (projectExportInFlight !== null) {
-    throw new Error('项目备份正在生成，本地数据未清除；请等待「项目已保存」提示出现后再清除数据');
+    throw new Error(PROJECT_EXPORT_BLOCKS_CLEAR_MESSAGE);
   }
   if (localDataClearActive) throw new Error('本地数据清除已在进行，请等待完成');
   localDataClearActive = true;

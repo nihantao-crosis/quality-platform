@@ -6,6 +6,7 @@ import {
   beginLocalDataClear,
   clearAqlBusinessState,
   isProjectExportInFlight,
+  PROJECT_EXPORT_BLOCKS_CLEAR_MESSAGE,
   resetUiPreferences,
   useApp,
 } from '../../store/appStore';
@@ -127,7 +128,7 @@ export async function clearDurableBusinessDataAtomically(
 ): Promise<void> {
   // GAP-7-16 纵深防御：UI 入口已持有清库租约；直接调用者也不得在导出快照期间清库。
   if (isProjectExportInFlight()) {
-    throw clearFailure('项目备份正在生成，本地数据未清除；请等待项目保存完成后再清除数据', null, 'not-committed');
+    throw clearFailure(PROJECT_EXPORT_BLOCKS_CLEAR_MESSAGE, null, 'not-committed');
   }
   try {
     // 项目导入 journal 与清库恢复记录共享同一批业务 stores。
@@ -264,6 +265,9 @@ export function OptionsModal({ onClose }: { onClose: () => void }) {
   const clearData = async () => {
     if (!clearArmed) {
       setClearArmed(true);
+      // 复审 P3:上一次被导出拒绝的原因只描述当时的状态；重新武装时清掉，
+      // 否则导出早已结束，弹窗仍常驻「项目备份正在生成」误导用户。
+      setClearBlocked(null);
       return;
     }
     if (clearing) return;
@@ -318,13 +322,23 @@ export function OptionsModal({ onClose }: { onClose: () => void }) {
         return;
       }
       // SQLite 与浏览器存储都已确认清空后，才提交销毁待写载荷/dirty/隔离保护。
-      cancelPendingDatasetWork();
-      useAnalyses.setState({ saved: [], lastError: null });
-      clearFishboneState();
-      clearAqlBusinessState();
-      try { localStorage.removeItem(AQL_STATE_STORAGE_KEY); } catch { /* 保持内存已清空 */ }
-      resetDemo();
-      useData.setState({ recents: [] });
+      try {
+        cancelPendingDatasetWork();
+        useAnalyses.setState({ saved: [], lastError: null });
+        clearFishboneState();
+        clearAqlBusinessState();
+        try { localStorage.removeItem(AQL_STATE_STORAGE_KEY); } catch { /* 保持内存已清空 */ }
+        resetDemo();
+        useData.setState({ recents: [] });
+      } catch (error) {
+        // 复审 P3:清库已提交，收尾(内存 store 复位)抛错时 rejection 会被 void clearData() 吞掉；
+        // 必须复位遮罩与 clearing，并如实说明数据已清除、只是界面未复位，否则界面永久卡在遮罩上。
+        setClearing(false);
+        setClearArmed(false);
+        useApp.getState().setBusyOverlay(null);
+        showToast(`数据已清除，但界面重置失败：${errText(error)}；请重启应用`);
+        return;
+      }
       closeModal();
       showToast('浏览器数据与本机数据集库已清除，已恢复演示数据集（界面偏好保留）');
       useApp.getState().setBusyOverlay(null);

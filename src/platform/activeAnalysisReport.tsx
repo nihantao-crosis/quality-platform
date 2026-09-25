@@ -351,6 +351,11 @@ function buildSummaryPayload(): AnalysisReportPayload {
 
 function buildAqlPayload(): AnalysisReportPayload {
   const app = useApp.getState();
+  // STORE-09/M5:账本损坏或被隔离时，内存里只有默认空账本(正常检验、0 条记录)。照常生成
+  // 会产出一份「看似正常的空追溯账本」，与拒绝 .qproj 导出同理，属于伪造可追溯证据 → 拒绝。
+  if (app.aqlLedgerFault !== null) {
+    throw new Error('AQL 责任账本已损坏/被隔离，本报表无法反映历史批次记录，已拒绝生成；请先按 AQL 页横幅恢复账本');
+  }
   const report = buildAqlReportData(app.aqlLot, app.aqlLevel, app.aqlAQL, app.aqlSwitch, app.aqlRegime);
   const p = report.plan;
   const latest = report.latestRecord;
