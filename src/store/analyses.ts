@@ -713,6 +713,37 @@ function pick(c: { color: string; bg: string }) {
   return { statusColor: c.color, statusBg: c.bg };
 }
 
+/**
+ * CORE-01 写读对称(第 2 批复审 P2):分析列表显示保存时冻结的 metric/status,回看按当前口径重算。
+ * v1.43 起堆叠子组改为「ID 值一变即开新子组」,旧版按值合并保存的 SPC/能力记录两者可能分裂。
+ * 回看参数与数据回放完成后调用:只有重算摘要与冻结摘要不同、且本次数据角色说明含「口径说明」
+ * (即数据确实命中口径变更形态)时,返回一条对照提示;其余差异不归因于口径变更。只读,不改记录。
+ */
+function subgroupRuleChangeRestoreNotice(a: SavedAnalysis): string | null {
+  if (a.kind !== 'spc' && a.kind !== 'capability') return null;
+  try {
+    const app = useApp.getState();
+    if (a.kind === 'spc' && (app.spcType === 'p' || app.spcType === 'c')) return null;
+    const { model, textCols, pendingCells } = useData.getState();
+    // 与 buildSummary 同一取数口径(SPC 页角色 / 能力子组口径)
+    const prepared = a.kind === 'spc'
+      ? prepareSpcData(model, textCols, {
+        layout: app.spcDataLayout, valueColumn: app.spcValueCol, subgroupColumn: app.spcSubgroupCol, pendingCells,
+      })
+      : resolveCapabilityMeasurementData(model, textCols);
+    const roleText = `${prepared.note ?? ''}${prepared.error ?? ''}`;
+    if (!roleText.includes('口径说明')) return null;
+    const now = buildSummary(a.kind);
+    if (!now || (now.metric === a.metric && now.status === a.status)) return null;
+    const column = /口径说明：「([^」]+)」/.exec(roleText)?.[1];
+    return `口径已更新：该记录保存时「${a.metric} · ${a.status}」，现按新口径重算为「${now.metric} · ${now.status}」。`
+      + `原因：${column ? `「${column}」中同一 ID 在不相邻的行再次出现，` : ''}`
+      + 'v1.43 起按 Minitab 口径「ID 值一变即开新子组」划分子组，不再合并不相邻的同名 ID；分析列表仍显示保存时的摘要';
+  } catch {
+    return null;
+  }
+}
+
 /** retainKeys:本次保存后仍被其他分析记录引用的去重键(见 storeAnalysisSourceData)。 */
 function snapshotOf(kind: AnalysisKind, retainKeys: ReadonlySet<string>): AnalysisSnapshot {
   const a = useApp.getState();
@@ -1306,6 +1337,7 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
     const s = a.snapshot;
     let restoredEmbeddedData = false;
     let stashedName: string | null = null; // 自审 P3:失败文案不能说「未作更改」——stash 已发生
+    let stashToast: string | null = null; // 回看完成后的提示会覆盖单槽 toast,须并入
     const usesWorksheet = analysisUsesWorksheet(a.kind, s);
     const source = usesWorksheet ? resolveSnapshotSourceData(s) : null;
     if (source) {
@@ -1394,7 +1426,10 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
           if (!(await stashActive(`最近数据集「${source.name}」`))) return false;
         }
       }
-      if (stashNotes.length) useApp.getState().showToast(`${stashNotes.join('；')}再回放`);
+      if (stashNotes.length) {
+        stashToast = `${stashNotes.join('；')}再回放`;
+        useApp.getState().showToast(stashToast);
+      }
       const restoredRows = source.rows.map((row) => [...row]);
       try {
         useData.getState().importMatrix(
@@ -1613,11 +1648,21 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
     if (s.doeView) useApp.getState().setDoeView(s.doeView);
     useApp.getState().goTo(a.kind);
     const legacySpcType = s.spcType ?? 'xbar-r';
+    // toast 是单槽:回看后的多条提示合并为一次显示,不互相覆盖(也保留回放前的另存副本说明)。
+    const restoreNotices: string[] = [];
     if (a.kind === 'spc' && (s.snapshotVersion == null || s.snapshotVersion < 6)
       && (legacySpcType === 'xbar-r' || legacySpcType === 'xbar-s' || legacySpcType === 'i-mr')) {
       const message = '该旧版 SPC 记录已按修正后的 Minitab 控制图常数（d₂/d₃/c₄）重新计算；控制限可能与旧版有轻微差异';
-      useApp.getState().showToast(message);
+      restoreNotices.push(message);
       sessionLog(`${message} · ${a.title}`);
+    }
+    const ruleChangeNotice = subgroupRuleChangeRestoreNotice(a);
+    if (ruleChangeNotice) {
+      restoreNotices.push(ruleChangeNotice);
+      sessionLog(`${ruleChangeNotice} · ${a.title}`);
+    }
+    if (restoreNotices.length) {
+      useApp.getState().showToast([...(stashToast ? [stashToast] : []), ...restoreNotices].join('；'));
     }
     if (a.kind === 'pareto' && s.paretoMergeOther === true) {
       const message = '旧版帕累托“合并其他”设置已停用；现按 Minitab 经典图展开全部类别';
