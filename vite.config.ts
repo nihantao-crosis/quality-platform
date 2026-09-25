@@ -1,5 +1,6 @@
 /// <reference types="vitest/config" />
 import { defineConfig, type Plugin } from 'vite';
+import { configDefaults } from 'vitest/config';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
 import pkg from './package.json';
@@ -37,6 +38,8 @@ export default defineConfig({
     // vitest 默认的 5s——本机全量跑已出现 6.5s 的假红,CI 共享 runner 更慢。放宽到 20s
     // 仍能拦住真正挂死的用例(正常用例与该上限相差一个数量级以上)。
     testTimeout: 20_000,
+    // 复审代理的临时 worktree 与复现目录都在工作树内,本机全量 vitest 不应跑到它们(fix2609n G24c 自报)
+    exclude: [...configDefaults.exclude, '**/.claude/**', 'src/__audit_scratch__/**'],
   },
   define: { __APP_VERSION__: JSON.stringify(pkg.version) },
   plugins: [
