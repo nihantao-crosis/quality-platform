@@ -324,6 +324,29 @@ function setRecentsUnpersisted(v: boolean): void {
     useApp.getState().showToast(`最近数据集列表未能保存（浏览器存储空间不足）；当前活动表仍为最新版本，请尽快${PROJECT_BACKUP_HINT}备份，腾出空间前将暂停切换其他数据集`);
   } catch { /* 非 UI 环境忽略 */ }
 }
+/**
+ * 跨窗口协调发现本窗口内存最近列表(含未落盘的活动表)与磁盘不一致(fix2609f G4d)：只置位闸门标志，
+ * 不弹提示、不写盘(写盘由闸门在用户下一次切换时重试，避免监听器内回写造成乒乓)。
+ */
+function markRecentsDivergedSilently(): void {
+  if (recentsUnpersistedFlag) return;
+  recentsUnpersistedFlag = true;
+  try { useData.setState({ recentsUnpersisted: true }); } catch { /* store 尚未就绪时忽略 */ }
+  syncActiveUnpersisted();
+  sessionLog('另一窗口更新了最近数据集列表，本窗口未落盘的活动表只在内存；切换数据集前将重试保存');
+}
+
+/**
+ * 最近列表刚落盘成功时，Web 端活动槽若仍未落盘则顺带重试一次(fix2609f G4d)：使共享 LS_DATASET 与
+ * 最近列表一致，另一窗口按 LS_DATASET 协调时得到相同内容，不会把本窗口的编辑回退。
+ * 桌面端活动槽有 SQLite 归档管线兜底，不在此重复入队。
+ */
+function retryUnpersistedActive(): void {
+  if (!currentActiveUnpersistedFlag || platform.datasetDb) return;
+  const activeData = inMemoryActiveDataset(useData.getState());
+  if (activeData) persistActive(activeData);
+}
+
 /** 项目导入成功后旧内存数据注定被替换——上遮罩重载前清除未持久化标记,避免 beforeunload 拦截自动重载。 */
 export function markActiveDataReplaced(): void {
   setRecentsUnpersisted(false);
@@ -603,6 +626,9 @@ function resolveDatasetWriteName(
     const occupied = occupiedBy(candidate);
     if (occupied === undefined) return { name: candidate, identical: false };
     if (occupied !== null && sameDatasetContent(occupied, incoming)) return { name: candidate, identical: true };
+    // fix2609f G4d：编号候选同样可能是同一源表(未变)的原样派生结果——先派生、再清洗源表、再换条件派生
+    // 的常见流程里，应替换「名 (2)」而不是续号 (3)(4)… 挤满最近列表。
+    if (isPristineDataset(candidate, st, derivedFrom)) return { name: candidate, identical: false, replacedPristine: true };
   }
 }
 
@@ -1009,28 +1035,35 @@ function trimRecents(nextList: RecentEntry[]): { recents: RecentEntry[]; evicted
 
 /**
  * Web 端挤出确认(与「再次点击确认删除」同一交互)：首次被拒后，同一操作标识(modelOptions.confirmKey，
- * 省略时为请求名) + 同一批将被移出的数据集在时限内再次执行即视为用户确认。确认只消费一次。
+ * 省略时为请求名) + 同一批将被移出的数据集 + 布防时的最近列表名称序列在时限内再次执行即视为用户确认。
+ * 确认只消费一次。fix2609f G4d：列表一变(× 移除、另一次写入置顶、编辑置顶、另一窗口同步)布防即作废；
+ * 任何无需挤出即通过的新建类写入、× 移除、库删除收口也显式作废——用户按提示走了另一条路后，
+ * 60 秒内的下一次同键写入必须重新拒绝，不能消费旧布防把用户想保住的数据集永久挤出。
  */
 const EVICTION_CONFIRM_SECONDS = 60;
 let evictionConfirmation: { key: string; expires: number } | null = null;
 
-function evictionConfirmationKey(operationKey: string, evicted: string[]): string {
-  return JSON.stringify([operationKey, evicted]);
+function evictionConfirmationKey(operationKey: string, evicted: string[], recents: RecentEntry[]): string {
+  return JSON.stringify([operationKey, evicted, recents.map((entry) => entry.name)]);
 }
 
-function armEvictionConfirmation(operationKey: string, evicted: string[]): void {
+function armEvictionConfirmation(operationKey: string, evicted: string[], recents: RecentEntry[]): void {
   evictionConfirmation = {
-    key: evictionConfirmationKey(operationKey, evicted),
+    key: evictionConfirmationKey(operationKey, evicted, recents),
     expires: Date.now() + EVICTION_CONFIRM_SECONDS * 1000,
   };
 }
 
-function consumeEvictionConfirmation(operationKey: string, evicted: string[]): boolean {
+function consumeEvictionConfirmation(operationKey: string, evicted: string[], recents: RecentEntry[]): boolean {
   const armed = evictionConfirmation;
   if (!armed || armed.expires < Date.now()
-    || armed.key !== evictionConfirmationKey(operationKey, evicted)) return false;
+    || armed.key !== evictionConfirmationKey(operationKey, evicted, recents)) return false;
   evictionConfirmation = null;
   return true;
+}
+
+function disarmEvictionConfirmation(): void {
+  evictionConfirmation = null;
 }
 
 /** 同名时活动表是用户刚刚看到并写入的版本，最近入口只能跟随，不能反向覆盖。 */
@@ -1271,7 +1304,7 @@ function beginDatasetReplacement(options: { equivalentRecoveryCopy?: boolean } =
     const coordinated = coordinateRecentsWithActive(st.recents, activeData);
     if (coordinated.changed) useData.setState({ recents: coordinated.recents });
     // 提示由闸门统一给出，重试失败不再先闪一条通用的「存储已满」。
-    persistRecents(coordinated.recents, activeData ?? undefined, { silent: true });
+    if (persistRecents(coordinated.recents, activeData ?? undefined, { silent: true })) retryUnpersistedActive();
     settleEvictedRecents(coordinated.evicted);
     detail = replacementBlockReason(options);
   }
@@ -1786,20 +1819,43 @@ export async function prepareVaultDatasetRemoval(name: string): Promise<void> {
   forgetFailedVaultArchive(name);
 }
 
+/** 库删除收口对同名最近条目的处置结果。 */
+export type VaultRemovalRecentOutcome = 'none' | 'removed' | 'kept-different';
+
 /**
  * 本机库删除成功后的收口(fix2609d G4c)：同名最近条目带着全量副本，若留在列表里，之后点 × 或被自然挤出时
  * settleEvictedRecents 会按只插入把它重新写回库，用户刚确认删除的内容随之复活。库删除是用户对该名称的
- * 明确删除意图，同步从最近列表移除，且不经过 settleEvictedRecents。返回最近列表里是否确有该条目。
+ * 明确删除意图，同步从最近列表移除，且不经过 settleEvictedRecents。
+ *
+ * fix2609f G4d:按内容核对，不按名称一刀切。removedJson 是删除前从库中取出的原文。
+ * - 最近条目(或其 light 模式保全载荷)与库内原文内容相同，或为既无矩阵也无保全载荷的轻量条目 → 一并移除；
+ * - 内容不同(如桌面端导入不带 vault 的项目，最近列表里的 X 从未入库) → 保留，它之后按只插入入库是合法保全；
+ *   无法取得库内原文(removedJson 为 null)时同样保守保留带矩阵的条目，绝不让唯一副本随删除消失。
+ * light 模式下同名的保全载荷(lightweightRecentDurability)与被删内容相同时一并收口，否则导出前的
+ * flushPendingVaultWrites 会用 put 把刚删的内容写回库。
  */
-export function completeVaultDatasetRemoval(name: string): boolean {
+export function completeVaultDatasetRemoval(name: string, removedJson: string | null): VaultRemovalRecentOutcome {
+  disarmEvictionConfirmation();
   const st = useData.getState();
-  if (!st.recents.some((entry) => entry.name === name)) return false;
-  const recents = st.recents.filter((entry) => entry.name !== name);
+  const entry = st.recents.find((candidate) => candidate.name === name);
+  const retained = lightweightRecentDurability.get(name);
+  const sameAsRemoved = (data: StoredDataset) => removedJson !== null && sameStoredContentJson(removedJson, data);
+  if (retained && sameAsRemoved(retained)) {
+    lightweightRecentDurability.delete(name);
+    syncActiveUnpersisted();
+  }
+  if (!entry) return 'none';
+  const exact = entry.data ?? lightweightRecentDurability.get(name);
+  if (exact && !sameAsRemoved(exact)) {
+    sessionLog(`数据集库删除「${name}」：最近列表中另有内容不同的同名数据集，未删除(之后按只插入入库)`);
+    return 'kept-different';
+  }
+  const recents = st.recents.filter((candidate) => candidate.name !== name);
   useData.setState({ recents });
   pristineDatasets.delete(name);
   persistRecents(recents);
   sessionLog(`数据集库删除「${name}」后同步移出最近列表`);
-  return true;
+  return 'removed';
 }
 
 /** 导出项目前把 400ms 防抖内容即时写入，并等待所有已经提交的 SQLite 写入。 */
@@ -2217,7 +2273,10 @@ watchExternalWrite(LS_RECENTS, () => {
   useData.setState({ recents: coordinated.recents });
   // fix2609d G4c:未落盘分支只在内存里保住活动表，不在监听器里回写——否则另一窗口按其 LS_DATASET
   // 协调同名条目后再写回，两窗口交替写 LS_RECENTS 无限乒乓。落盘交给闸门重试或下一次编辑。
+  // fix2609f G4d:但内存与磁盘此时已分叉，必须静默标记(不弹提示)，让闸门继续拦截切换并在下一次切换时
+  // 用内存列表重试写盘——每次用户操作最多写一次；否则切换数据集后本窗口的编辑从任何持久化位置消失。
   if (coordinated.changed && !unpersistedLocal) persistRecents(coordinated.recents, localActive ?? undefined);
+  else if (coordinated.changed) markRecentsDivergedSilently();
   if (coordinated.recents.length !== before) {
     try {
       useApp.getState().showToast(`另一窗口更新了最近数据集列表（${coordinated.recents.length} 项），已同步到本窗口`);
@@ -2451,28 +2510,41 @@ export const useData = create<DataState>((set, get) => ({
     });
     // fix2609b M1:Web 端(无本机库)新建类写入会把数据集挤出最近列表时，被挤出的数据再无任何
     // 落盘位置。必须在闸门(停 MES、推进意图)之前拒绝并说明，用户确认后才允许继续。
+    let replacedLostActive: string | null = null;
     if (modelOptions.onNameConflict === 'rename' && !platform.datasetDb) {
       const current = get();
-      const prospective = trimRecents([
+      const listEvicted = trimRecents([
         { name, savedAt: '' },
         ...current.recents.filter((r) => r.name !== name),
       ]).evicted.filter((entry) => entry.data).map((entry) => entry.name);
-      // 冲突方是不在最近列表里的活动表(如用户已用 × 移出当前表)时，改名写入会直接替换活动槽，
-      // 该表在浏览器端再无落盘位置——同样须经确认(fix2609d G4c)。
-      if (name !== requestedName && current.model.name === requestedName && !current.model.isDemo
-        && !current.recents.some((entry) => entry.name === requestedName)) {
-        prospective.push(requestedName);
-      }
+      // 活动表不在最近列表里(如用户已用 × 移出当前表)时，任何新建类写入都会替换活动槽，
+      // 该表在浏览器端再无落盘位置——同样须经确认(fix2609d G4c；fix2609f G4d 不再限于同名改名)。
+      // 例外：本次写入沿用它的名称(内容相同的同名重写)会把它重新写回最近列表，不丢。
+      const activeName = current.model.name;
+      const activeLost = !current.model.isDemo && name !== activeName
+        && !current.recents.some((entry) => entry.name === activeName);
+      const prospective = activeLost ? [...listEvicted, activeName] : listEvicted;
       const operationKey = modelOptions.confirmKey ?? requestedName;
-      if (prospective.length > 0 && !modelOptions.allowEviction
-        && !consumeEvictionConfirmation(operationKey, prospective)) {
-        armEvictionConfirmation(operationKey, prospective);
-        const detail = `最近列表已满（${MAX_RECENT_DATASETS} 个），继续会移除${prospective.map((n) => `「${n}」`).join('')}，浏览器端无法恢复；`
-          + `请先${PROJECT_BACKUP_HINT}备份，或移除不需要的最近数据集；`
-          + `确认移除请在 ${EVICTION_CONFIRM_SECONDS} 秒内再次执行同一操作`;
+      if (prospective.length === 0) {
+        disarmEvictionConfirmation();
+      } else if (!modelOptions.allowEviction
+        && !consumeEvictionConfirmation(operationKey, prospective, current.recents)) {
+        armEvictionConfirmation(operationKey, prospective, current.recents);
+        const reasons: string[] = [];
+        if (listEvicted.length > 0) {
+          reasons.push(`最近列表已满（${MAX_RECENT_DATASETS} 个），继续会移除${listEvicted.map((n) => `「${n}」`).join('')}，浏览器端无法恢复；`);
+        }
+        if (activeLost) {
+          reasons.push(`当前表「${activeName}」已不在最近列表，本次写入会替换它且浏览器端无法恢复；`);
+        }
+        const advice = listEvicted.length > 0
+          ? `请先${PROJECT_BACKUP_HINT}备份，或移除不需要的最近数据集；`
+          : `请先${PROJECT_BACKUP_HINT}备份或另存为副本；`;
+        const detail = `${reasons.join('')}${advice}确认${listEvicted.length > 0 ? '移除' : '替换'}请在 ${EVICTION_CONFIRM_SECONDS} 秒内再次执行同一操作`;
         sessionLog(`数据集写入已暂停 · ${detail}`);
         throw new DatasetEvictionError(detail, prospective);
       }
+      if (activeLost) replacedLostActive = activeName;
     }
     if (modelOptions.independentRecoveryCopy === true) {
       beginDatasetReplacement({ equivalentRecoveryCopy: true });
@@ -2515,6 +2587,10 @@ export const useData = create<DataState>((set, get) => ({
     settleEvictedRecents(evicted);
     const result: PersistOutcome = { ...outcome };
     if (evicted.length > 0) result.evicted = evicted.map((entry) => entry.name);
+    // 已按确认替换的、不在最近列表里的原活动表同样如实报告(浏览器端无法恢复)。
+    if (replacedLostActive !== null && replacedLostActive !== requestedName) {
+      result.evicted = [...(result.evicted ?? []), replacedLostActive];
+    }
     if (resolved.replacedPristine) {
       result.replacedPristine = true;
       sessionLog(`已按名替换本会话未编辑的同名派生数据集「${name}」(源表未变)`);
@@ -3015,7 +3091,11 @@ export const useData = create<DataState>((set, get) => ({
     const removed = get().recents.filter((r) => r.name === name);
     const recents = get().recents.filter((r) => r.name !== name);
     set({ recents });
-    persistRecents(recents);
+    // 列表已变：旧的挤出确认布防作废(fix2609f G4d)。
+    disarmEvictionConfirmation();
+    // × 常用于按闸门文案腾空间解锁：最近列表写成功后，未落盘的活动槽也要重试，
+    // 否则共享 LS_DATASET 仍是旧版，另一窗口会按它回退 LS_RECENTS(fix2609f G4d)。
+    if (persistRecents(recents)) retryUnpersistedActive();
     // 桌面端承诺「从最近列表移除的数据集仍可在库中找回」：从未入库的条目(如无 vault 的 .qproj 导入)补入本机库。
     if (platform.datasetDb) settleEvictedRecents(removed);
   },

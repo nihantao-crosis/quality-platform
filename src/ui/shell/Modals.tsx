@@ -994,13 +994,20 @@ function VaultModal() {
                         }
                         try {
                           await prepareVaultDatasetRemoval(d.name);
+                          // fix2609f G4d:删除前取库内原文，收口时按内容核对同名最近条目
+                          const removedJson = await db.get(d.name);
                           const removed = await db.remove(d.name);
                           if (!removed) throw new Error('数据集不存在或未能删除');
-                          // fix2609d G4c:同名最近条目一并移出，否则 × / 挤出会把已删内容补回库
-                          const alsoRecent = completeVaultDatasetRemoval(d.name);
+                          // fix2609d G4c:同内容的同名最近条目一并移出，否则 × / 挤出会把已删内容补回库
+                          const recent = completeVaultDatasetRemoval(d.name, removedJson);
                           setDeleteArmed(null);
                           refresh();
-                          showToast(`已从数据集库删除 ${d.name}${alsoRecent ? '（同名最近数据集已一并移出，不会再被补存回库）' : ''}`);
+                          const recentNote = recent === 'removed'
+                            ? '（同名最近数据集已一并移出，不会再被补存回库）'
+                            : recent === 'kept-different'
+                              ? `；最近列表中另有内容不同的同名数据集「${d.name}」，未删除`
+                              : '';
+                          showToast(`已从数据集库删除 ${d.name}${recentNote}`);
                         } catch (error) {
                           showToast(`删除失败：${errText(error)}`);
                         }
