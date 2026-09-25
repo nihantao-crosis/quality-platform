@@ -11,3 +11,5 @@ dist-portable/
 .claude/worktrees/
 # 审查/复审代理的临时复现目录,不入库
 src/__audit_scratch__/
+# Python 发布门禁脚本(.github/scripts)运行后的字节码缓存
+__pycache__/

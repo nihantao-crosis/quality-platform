@@ -1,7 +1,7 @@
 /** 应用外壳 — 菜单栏 → 工具栏 → (左导航 + 主内容) → 状态栏 + 弹窗/Toast + 全局快捷键。 */
 import { useEffect, useMemo, useState } from 'react';
 import { useApp, resolveGageTolerance } from './store/appStore';
-import { useData, isCapabilityWarningAcknowledged, datasetWriteNotes } from './store/dataStore';
+import { useData, isCapabilityWarningAcknowledged } from './store/dataStore';
 import {
   capabilityInputError, computeCapability, computeGageRR, gageStudyData, GAGE_TOLERANCE,
   peekResolvedGageStudy, resolveGageStudy, prepareSpcData, resolveNumericColumn,
@@ -14,7 +14,7 @@ import { chartTokens } from './ui/tokens';
 import { useCapabilityPrepared } from './ui/useCapabilityPrepared';
 import { specLimitText } from './platform/reportLabels';
 import { PAGES } from './ui/pagesMeta';
-import { MenuBar, undoRedoToast } from './ui/shell/MenuBar';
+import { MenuBar, runNewWorksheet, undoRedoToast } from './ui/shell/MenuBar';
 import { Toolbar } from './ui/shell/Toolbar';
 import { SideNav } from './ui/shell/SideNav';
 import { StatusBar } from './ui/shell/StatusBar';
@@ -239,9 +239,8 @@ function AppShell() {
         else setTimeout(() => window.print(), 80);
       } else if (k === 'n') {
         e.preventDefault();
-        const outcome = useData.getState().newWorksheet();
-        s.goTo('worksheet');
-        s.showToast(`已新建空白工作表（双击单元格录入数据）${datasetWriteNotes(outcome.name ?? '', outcome).map((text) => ` · ${text}`).join('')}`);
+        // fix2609n C2:与菜单同一入口；导出快照期间被替换闸门拒绝时提示原因，不抛未捕获异常
+        runNewWorksheet(s.goTo, s.showToast);
       } else if (k === 'z' && !e.shiftKey) {
         e.preventDefault();
         s.showToast(undoRedoToast('undo', useData.getState().undoEdit()));

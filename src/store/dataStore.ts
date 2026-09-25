@@ -2526,13 +2526,47 @@ watchExternalWrite(LS_RECENTS, () => {
 const OWNED_PROJECT_STORE_KEYS = [LS_DATASET, LS_RECENTS, LS_ATTR, LS_SPECS, LS_PARETO, LS_COPY_SEQUENCES] as const;
 
 /**
+ * 已登记写保护的键在导出前重试隔离(fix2609n C1)，与 saveJson/removeJson 同一口径：
+ * - live 已不存在(被清除)，或已被另一窗口改写为合法值 → 损坏原文已不在 live，保护解除；
+ * - live 仍损坏(同一原文或新的损坏原文)→ quarantineCorruptStore 复制进隔离区，成功即解除，失败保护保留(fail-closed)。
+ */
+function retryProtectedProjectStore(key: string, entry: { raw: string; detail: string }): void {
+  let live: string | null = entry.raw;
+  try { live = localStorage.getItem(key); } catch { /* 读不到 live 时按已捕获原文重试 */ }
+  if (live == null) {
+    protectedCorruptStores.delete(key);
+    return;
+  }
+  let detail: string | null = entry.detail;
+  if (live !== entry.raw) {
+    try {
+      detail = projectStoreValidationError(key, JSON.parse(live) as unknown);
+    } catch {
+      detail = 'JSON 解析失败或写入被截断';
+    }
+    if (detail === null) {
+      protectedCorruptStores.delete(key);
+      return;
+    }
+  }
+  quarantineCorruptStore(key, live, detail);
+}
+
+/**
  * 导出取快照前按读取侧同一函数(loadValidatedStoreJson)逐键校验 live 值：损坏的先复制进隔离区，
  * 导出再按降级视图省略该键；隔离失败则登记 protectedCorruptStores，由调用方 fail-closed。
  * 已有 dirty 覆盖载荷的键导出取内存最新值，live 旧值与导出无关，不在此强行隔离(存储已满时只会徒增拒绝)。
+ * fix2609n C1:但**已登记写保护**的键(不论有无 dirty)一律先重试隔离——否则用户按提示释放空间后重试仍被拒，
+ * live 被另一窗口修正/清除后也永远解不开。
  */
 function revalidateOwnedProjectStores(): void {
+  const retried = new Set<string>();
+  for (const [key, entry] of [...protectedCorruptStores]) {
+    retryProtectedProjectStore(key, entry);
+    retried.add(key);
+  }
   for (const key of OWNED_PROJECT_STORE_KEYS) {
-    if (dirtyProjectStores.has(key)) continue;
+    if (retried.has(key) || dirtyProjectStores.has(key)) continue;
     loadValidatedStoreJson<unknown>(key);
   }
 }

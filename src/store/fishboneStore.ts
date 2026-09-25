@@ -93,17 +93,48 @@ export function fishboneWriteValidationError(data: unknown, isDemo = false): str
   return projectStoreValidationError(FISHBONE_STORAGE_KEY, { data, isDemo });
 }
 
+/**
+ * 已登记写保护时重试隔离(fix2609n C1)，写入侧与导出侧共用同一口径：
+ * - live 已不存在(被清除)，或已被另一窗口改写为合法值 → 损坏原文已不在 live，保护解除；
+ * - live 仍损坏(同一原文或新的损坏原文)→ 复制进隔离区，成功才解除保护；失败则保护保留并跟随最新 live 原文。
+ * 返回 true 表示当前无写保护(可覆盖 live / 可导出)。
+ */
+function retryProtectedFishbone(): boolean {
+  const entry = protectedCorruptFishbone;
+  if (!entry) return true;
+  let live: string | null = entry.raw;
+  try { live = localStorage.getItem(FISHBONE_STORAGE_KEY); } catch { /* 读不到 live 时按已捕获原文重试 */ }
+  if (live === null) {
+    protectedCorruptFishbone = null;
+    return true;
+  }
+  let detail: string | null = entry.detail;
+  if (live !== entry.raw) {
+    try {
+      detail = projectStoreValidationError(FISHBONE_STORAGE_KEY, JSON.parse(live) as unknown);
+    } catch {
+      detail = 'JSON 解析失败或写入被截断';
+    }
+    if (detail === null) {
+      protectedCorruptFishbone = null;
+      return true;
+    }
+  }
+  if (preserveCorruptStore(FISHBONE_STORAGE_KEY, live, detail)) {
+    protectedCorruptFishbone = null;
+    return true;
+  }
+  protectedCorruptFishbone = { raw: live, detail };
+  return false;
+}
+
 export function saveFishboneState(data: FishboneData, isDemo = false): void {
   const detail = fishboneWriteValidationError(data, isDemo);
   if (detail) throw new Error(detail);
   const encoded = JSON.stringify({ data: cloneFishbone(data), isDemo });
-  if (protectedCorruptFishbone) {
-    const { raw, detail } = protectedCorruptFishbone;
-    if (!preserveCorruptStore(FISHBONE_STORAGE_KEY, raw, detail)) {
-      dirtyFishboneJson = encoded;
-      throw new Error('损坏的鱼骨图原文尚未成功隔离，已禁止覆盖；请先释放本地存储空间');
-    }
-    protectedCorruptFishbone = null;
+  if (!retryProtectedFishbone()) {
+    dirtyFishboneJson = encoded;
+    throw new Error('损坏的鱼骨图原文尚未成功隔离，已禁止覆盖；请先释放本地存储空间');
   }
   try {
     localStorage.setItem(FISHBONE_STORAGE_KEY, encoded);
@@ -125,7 +156,10 @@ registerProjectLifecycleHooks({
   beforeExport: () => {
     // fix2609m A3:鱼骨图只在进入鱼骨图页时读取；启动后直接保存项目时先按读取侧同一函数校验 live 值，
     // 损坏则先隔离(导出按降级视图省略该键)，隔离失败仍 fail-closed。内存有未落盘载荷时导出取它，无需校验 live。
-    if (dirtyFishboneJson === null) loadFishboneState();
+    // fix2609n C1:已登记写保护时不论有无未落盘载荷，都按写入侧同一口径重试隔离(用户释放空间后重试即放行；
+    // live 已被另一窗口修正/清除时保护解除)，否则「释放空间再重试」的出路在 dirty+保护并存时不成立。
+    if (protectedCorruptFishbone) retryProtectedFishbone();
+    else if (dirtyFishboneJson === null) loadFishboneState();
     if (protectedCorruptFishbone) {
       throw new Error(`损坏的鱼骨图原文尚未成功复制到隔离区，项目未导出；请先${STORAGE_SPACE_RELEASE_HINT}，再重试保存项目（损坏原文仍保留在本机，不会被覆盖）`);
     }

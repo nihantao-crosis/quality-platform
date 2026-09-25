@@ -16,5 +16,6 @@
     "noUnusedParameters": false,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["src", ".github/browser-harness"]
+  "include": ["src", ".github/browser-harness"],
+  "exclude": ["src/__audit_scratch__"]
 }

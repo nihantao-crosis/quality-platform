@@ -1,7 +1,7 @@
 /** 菜单栏 — 10 个菜单 + 下拉，行为（导航/弹窗/通知/图表风格）与原型一致。 */
 import { isProjectExportInFlight, useApp, type Page, type Modal, type ChartStyle } from '../../store/appStore';
 import { appVersionText, localDateStamp, sanitizeFileName } from '../../platform/reportLabels';
-import { PROJECT_BACKUP_HINT, datasetWriteNotes, useData } from '../../store/dataStore';
+import { PROJECT_BACKUP_HINT, datasetWriteNotes, useData, type PersistOutcome } from '../../store/dataStore';
 import { errText, platform } from '../../platform/adapter';
 import { recoverDemoDataset } from '../ErrorBoundary';
 
@@ -176,6 +176,23 @@ export function undoRedoToast(action: 'undo' | 'redo', ok: boolean): string {
   return action === 'undo' ? '已撤销上一次数据编辑' : '已重做数据编辑';
 }
 
+/**
+ * 菜单「文件 → 新建工作表」与 Ctrl+N 的共用入口(fix2609n C2)。newWorksheet 过数据集替换闸门，项目导出一致性快照
+ * 期间会抛「项目正在生成一致性快照…」；事件处理器里抛出会成为未捕获异常、界面毫无反应。这里接住并如实提示原因，
+ * 不跳页、不改表。
+ */
+export function runNewWorksheet(goTo: (page: Page) => void, toast: (message: string) => void): void {
+  let outcome: PersistOutcome;
+  try {
+    outcome = useData.getState().newWorksheet();
+  } catch (error) {
+    toast(`未能新建工作表：${errText(error)}`);
+    return;
+  }
+  goTo('worksheet');
+  toast(`已新建空白工作表（双击单元格录入数据）${datasetWriteNotes(outcome.name ?? '', outcome).map((text) => ` · ${text}`).join('')}`);
+}
+
 export function MenuBar({ wsName }: { wsName: string }) {
   const { openMenu, setOpenMenu, goTo, openModal, showToast, setChartStyle, toggleGrid } = useApp();
   // GAP-10-25:菜单如实反映可撤销/可重做层数；大表上撤销栈被字节预算压缩时标明原因。
@@ -204,9 +221,7 @@ export function MenuBar({ wsName }: { wsName: string }) {
       return;
     }
     if (act.newSheet) {
-      const outcome = useData.getState().newWorksheet();
-      goTo('worksheet');
-      showToast(`已新建空白工作表（双击单元格录入数据）${datasetWriteNotes(outcome.name ?? '', outcome).map((text) => ` · ${text}`).join('')}`);
+      runNewWorksheet(goTo, showToast);
       return;
     }
     if (act.summary) {
@@ -233,7 +248,14 @@ export function MenuBar({ wsName }: { wsName: string }) {
     }
     if (act.saveAs) {
       // 蜂群 P1-01:未落盘不得声称「已另存」
-      const copy = useData.getState().saveAsCopy();
+      // fix2609n C2:导出快照期间替换闸门会抛出，接住并如实提示，不成为未捕获异常
+      let copy: ReturnType<ReturnType<typeof useData.getState>['saveAsCopy']>;
+      try {
+        copy = useData.getState().saveAsCopy();
+      } catch (error) {
+        showToast(`另存失败：${errText(error)}`);
+        return;
+      }
       const { outcome } = copy;
       if (!outcome.persisted && !outcome.archiving) {
         showToast(`另存失败（${outcome.rejected ?? '存储空间不足'}）：副本未能保存，请先${PROJECT_BACKUP_HINT}备份或清理存储`);
