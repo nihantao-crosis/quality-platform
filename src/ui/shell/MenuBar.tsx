@@ -1,5 +1,5 @@
 /** 菜单栏 — 10 个菜单 + 下拉，行为（导航/弹窗/通知/图表风格）与原型一致。 */
-import { useApp, type Page, type Modal, type ChartStyle } from '../../store/appStore';
+import { isProjectExportInFlight, useApp, type Page, type Modal, type ChartStyle } from '../../store/appStore';
 import { appVersionText, localDateStamp, sanitizeFileName } from '../../platform/reportLabels';
 import { PROJECT_BACKUP_HINT, datasetWriteNotes, useData } from '../../store/dataStore';
 import { errText, platform } from '../../platform/adapter';
@@ -165,13 +165,33 @@ const MENUS: { name: string; items: Item[] }[] = [
 
 export function MenuBar({ wsName }: { wsName: string }) {
   const { openMenu, setOpenMenu, goTo, openModal, showToast, setChartStyle, toggleGrid } = useApp();
+  // GAP-10-25:菜单如实反映可撤销/可重做层数；大表上撤销栈被字节预算压缩时标明原因。
+  const undoDepth = useData((s) => s.undoStack.length);
+  const redoDepth = useData((s) => s.redoStack.length);
+  const undoBudgetLimited = useData((s) => s.undoBudgetLimited);
+  const historyItem = (it: { label?: string; act?: Act }): { label?: string; empty: boolean } => {
+    if (it.act?.undo) {
+      if (undoDepth === 0) return { label: `${it.label}（无可撤销）`, empty: true };
+      return { label: `${it.label}（可撤销 ${undoDepth} 步${undoBudgetLimited ? ' · 大表内存预算' : ''}）`, empty: false };
+    }
+    if (it.act?.redo) {
+      return redoDepth === 0
+        ? { label: `${it.label}（无可重做）`, empty: true }
+        : { label: `${it.label}（可重做 ${redoDepth} 步）`, empty: false };
+    }
+    return { label: it.label, empty: false };
+  };
 
   const runCmd = (act?: Act) => {
     if (!act) return setOpenMenu(null);
     if (act.hypo) useApp.getState().setHypoTab(act.hypo);
     if (act.undo || act.redo) {
       const ok = act.undo ? useData.getState().undoEdit() : useData.getState().redoEdit();
-      showToast(ok ? (act.undo ? '已撤销上一次数据编辑' : '已重做数据编辑') : (act.undo ? '没有可撤销的编辑' : '没有可重做的编辑'));
+      // GAP-7-15:项目快照期间撤销/重做被暂存，不能提示「已撤销」。
+      const deferred = ok && isProjectExportInFlight();
+      showToast(deferred
+        ? `${act.undo ? '撤销' : '重做'}已暂存，项目备份快照完成后自动应用`
+        : ok ? (act.undo ? '已撤销上一次数据编辑' : '已重做数据编辑') : (act.undo ? '没有可撤销的编辑' : '没有可重做的编辑'));
       return;
     }
     if (act.newSheet) {
@@ -322,10 +342,10 @@ export function MenuBar({ wsName }: { wsName: string }) {
                     boxShadow: '0 12px 32px rgba(20,30,50,0.17)', padding: 5, zIndex: 200,
                   }}
                 >
-                  {mu.items.map((it, i) =>
-                    it.sep ? (
-                      <div role="separator" key={i} style={{ height: 1, background: '#eef0f3', margin: '5px 8px' }} />
-                    ) : (
+                  {mu.items.map((it, i) => {
+                    if (it.sep) return <div role="separator" key={i} style={{ height: 1, background: '#eef0f3', margin: '5px 8px' }} />;
+                    const history = historyItem(it);
+                    return (
                       <button
                         type="button"
                         key={i}
@@ -336,15 +356,15 @@ export function MenuBar({ wsName }: { wsName: string }) {
                             showToast(it.unavailable);
                           } else runCmd(it.act);
                         }}
-                        aria-disabled={it.unavailable ? true : undefined}
+                        aria-disabled={it.unavailable || history.empty ? true : undefined}
                         title={it.unavailable}
-                        style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 20, padding: '7px 12px', border: 0, background: 'transparent', borderRadius: 4, cursor: it.unavailable ? 'not-allowed' : 'pointer', fontFamily: 'inherit', textAlign: 'left', fontSize: 12.5, color: it.unavailable ? '#a8afb8' : '#3a4350' }}
+                        style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 20, padding: '7px 12px', border: 0, background: 'transparent', borderRadius: 4, cursor: it.unavailable ? 'not-allowed' : 'pointer', fontFamily: 'inherit', textAlign: 'left', fontSize: 12.5, color: it.unavailable || history.empty ? '#a8afb8' : '#3a4350' }}
                       >
-                        <span style={{ flex: 1 }}>{it.label}</span>
+                        <span style={{ flex: 1 }}>{history.label}</span>
                         <span className="mono" style={{ fontSize: 11, color: '#a3abb5' }}>{it.unavailable ? '暂不可用' : it.kbd || ''}</span>
                       </button>
-                    ),
-                  )}
+                    );
+                  })}
                 </div>
               )}
             </div>

@@ -789,7 +789,7 @@ describe('完整项目导出的一致只读快照', () => {
     expect(db.get).not.toHaveBeenCalled();
   });
 
-  it('只读快照未完成时短暂阻止工作表写入，成功或失败后都释放锁', async () => {
+  it('只读快照未完成时工作表写入暂存(fix2609j GAP-7-15 不再抛未捕获异常)，成功或失败后都释放锁并应用', async () => {
     let resolveSnapshot!: (value: { revision: number; datasets: never[] }) => void;
     const db = baseDb();
     db.readSnapshot = vi.fn(() => new Promise<{ revision: number; datasets: never[] }>((resolve) => {
@@ -800,16 +800,19 @@ describe('完整项目导出的一致只读快照', () => {
     localStorage.setItem('qp-prefs-v1', '{}');
     const exporting = buildProjectJsonFull('1.43.0');
     for (let i = 0; i < 20 && !resolveSnapshot; i++) await Promise.resolve();
-    expect(() => useData.getState().updateCell(0, 0, 9)).toThrow('一致性快照');
+    const before = useData.getState().model.subs[0].vals[0];
+    expect(() => useData.getState().updateCell(0, 0, 9)).not.toThrow();
+    expect(useData.getState().model.subs[0].vals[0]).toBe(before); // 快照期间数据集不变
     // 第二个导出在中央互斥处快速拒绝；绝不能运行 cleanup 释放第一个 owner。
     await expect(buildProjectJsonFull('1.43.0')).rejects.toThrow('已有项目导出正在进行');
-    expect(() => useData.getState().updateCell(0, 0, 9)).toThrow('一致性快照');
+    expect(useData.getState().model.subs[0].vals[0]).toBe(before);
     expect(db.readSnapshot).toHaveBeenCalledTimes(1);
     resolveSnapshot({ revision: 7, datasets: [] });
     await expect(exporting).resolves.toContain('"vaultRevision": 7');
-    expect(() => useData.getState().updateCell(0, 0, 9)).not.toThrow();
+    expect(useData.getState().model.subs[0].vals[0]).toBe(9); // 租约释放后暂存编辑已应用
     db.readSnapshot = vi.fn(async () => { throw new Error('snapshot failed'); });
     await expect(buildProjectJsonFull('1.43.0')).rejects.toThrow('snapshot failed');
     expect(() => useData.getState().updateCell(0, 0, 8)).not.toThrow();
+    expect(useData.getState().model.subs[0].vals[0]).toBe(8);
   });
 });

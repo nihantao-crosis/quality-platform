@@ -8,7 +8,7 @@ import { MAX_IMPORT_DATA_ROWS, MAX_IMPORT_CELL_CHARS, MAX_COLUMN_NAME_CHARS, MAX
   buildData, computeVarModel, updateVarModelCell, computePChart, computeCChart, evalFormula, truthy, FormulaError, prepareSpcData, isDoeAnalysisColumn, worksheetDisplayOrder, worksheetNumericColumnCodes, mean, stdev, capabilityWarningFingerprint,
   type VarModel, type PChartModel, type CChartModel, type TextColumn, type SpcPreparedData, type SpecLimits,
 } from '../core';
-import { useApp } from './appStore';
+import { appUnpersistedStateLabels, useApp } from './appStore';
 import { sessionLog } from './sessionLog';
 import { errText, platform } from '../platform/adapter';
 import { reservedPrototypeNameError, hasPendingProjectImportJournal, projectStoreValidationError, recoverPendingProjectImport, registerProjectLifecycleHooks } from '../platform/project';
@@ -391,6 +391,50 @@ function dropStaleActiveSlot(activeData: StoredDataset): boolean {
 export function markActiveDataReplaced(): void {
   setRecentsUnpersisted(false);
   setActiveUnpersisted(false);
+  // fix2609j STORE-10:项目已整体写入并即将重载，旧会话写不下的计数/帕累托/规格载荷同样作废，
+  // 否则离开拦截会挡住自动重载。
+  dirtyProjectStores.clear();
+}
+
+/**
+ * 仅落在 localStorage、没有本机库兜底的业务键(fix2609j STORE-10)。写入失败后最新值只在内存
+ * (dirtyProjectStores)，离开页面即丢失。活动表/最近列表由 activeUnpersistedFlag 统一建模
+ * (桌面端 SQLite 兜底成功时 dirty 载荷仍保留供导出，但数据并未丢失)，不在此重复计入。
+ */
+const LOCAL_ONLY_STORE_LABELS: ReadonlyMap<string, string> = new Map([
+  [LS_ATTR, 'P/C 计数数据'],
+  [LS_PARETO, '帕累托数据'],
+  ['qp-specs-v1', '规格限记忆'],
+]);
+/** 其它 store(如鱼骨图)登记的「未持久化」探针：label → 是否仍只在内存。 */
+const unpersistedStateProbes = new Map<string, () => boolean>();
+
+/** 其它 store 把自己的「写入失败、仅在内存」状态纳入离开拦截(与 hasUnpersistedState 同一判定)。 */
+export function registerUnpersistedStateProbe(label: string, probe: () => boolean): void {
+  unpersistedStateProbes.set(label, probe);
+}
+
+/** 当前尚未写入本地存储(离开页面会丢失)的数据类别，供离开拦截与界面提示共用。 */
+export function unpersistedStateLabels(): string[] {
+  const labels: string[] = [];
+  if (activeUnpersistedFlag) labels.push('当前工作表/最近数据集');
+  for (const key of dirtyProjectStores.keys()) {
+    const label = LOCAL_ONLY_STORE_LABELS.get(key);
+    if (label && !labels.includes(label)) labels.push(label);
+  }
+  for (const label of appUnpersistedStateLabels()) if (!labels.includes(label)) labels.push(label);
+  for (const [label, probe] of unpersistedStateProbes) {
+    try { if (probe() && !labels.includes(label)) labels.push(label); } catch { /* 探针异常按已持久化处理 */ }
+  }
+  return labels;
+}
+
+/**
+ * 离开页面前是否仍有只在内存中的数据(fix2609j STORE-10)。Web beforeunload 与桌面关窗拦截共用：
+ * 活动表/最近列表/必保快照 + AQL 账本/界面参数/计数/帕累托/规格/已登记探针。
+ */
+export function hasUnpersistedState(): boolean {
+  return unpersistedStateLabels().length > 0;
 }
 
 if (typeof window !== 'undefined') {
@@ -398,9 +442,10 @@ if (typeof window !== 'undefined') {
     // 单格编辑为避免连续输入时重复序列化 20 万行，会极短合并。
     // 离开前先做一次同步落盘尝试；失败则下方未保存警告仍会阻止。
     flushPendingCellPersistence();
-    if (!activeUnpersistedFlag) return;
+    const labels = unpersistedStateLabels();
+    if (labels.length === 0) return;
     e.preventDefault();
-    e.returnValue = `当前数据尚未持久化，离开将丢失；请先${PROJECT_BACKUP_HINT}备份。`;
+    e.returnValue = `当前数据尚未持久化（${labels.join('、')}），离开将丢失；请先${PROJECT_BACKUP_HINT}备份。`;
   });
 }
 
@@ -467,6 +512,14 @@ function removeJson(key: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * 数据集名称的同一性口径(fix2609j STORE-15)：最近列表校验(recentsValidationError)按 trim 后判重，
+ * 写入侧的去重/占用判定必须同口径，否则只差首尾空格的两个名称会被写成两条、再被校验判为重名损坏。
+ */
+function sameDatasetName(a: string, b: string): boolean {
+  return a === b || a.trim() === b.trim();
 }
 
 type CopySequenceMap = Record<string, number>;
@@ -549,7 +602,7 @@ function sameDatasetContent(a: DatasetContent, b: DatasetContent): boolean {
  * 活动表以内存 model 为权威(含尚未落盘的编辑)，优先于同名最近条目。
  */
 function occupiedDatasetContent(name: string, st: DataState): DatasetContent | null | undefined {
-  if (st.model.name === name) {
+  if (sameDatasetName(st.model.name, name)) {
     return {
       colNames: st.model.colNames,
       rows: st.model.subs.map((subgroup) => subgroup.vals),
@@ -557,7 +610,7 @@ function occupiedDatasetContent(name: string, st: DataState): DatasetContent | n
       pendingCells: st.pendingCells,
     };
   }
-  const recent = st.recents.find((entry) => entry.name === name);
+  const recent = st.recents.find((entry) => sameDatasetName(entry.name, name));
   if (recent) {
     return recent.data
       ? { colNames: recent.data.colNames, rows: recent.data.rows, textCols: recent.data.textCols ?? [], pendingCells: recent.data.pendingCells ?? [] }
@@ -690,6 +743,8 @@ interface DataState {
   /** 编辑历史（撤销/重做,仅覆盖手工编辑） */
   undoStack: EditSnapshot[];
   redoStack: EditSnapshot[];
+  /** 最近一次入撤销栈时是否被字节预算(而非 20 层上限)裁剪；菜单据此标明可撤销层数受大表内存预算限制。 */
+  undoBudgetLimited: boolean;
   importMatrix(
     name: string,
     colNames: string[],
@@ -1112,7 +1167,7 @@ function coordinateRecentsWithActive(
   active: StoredDataset | null | undefined,
 ): { recents: RecentEntry[]; changed: boolean; evicted: RecentEntry[] } {
   if (!active) return { recents, changed: false, evicted: [] };
-  const index = recents.findIndex((entry) => entry.name === active.name);
+  const index = recents.findIndex((entry) => sameDatasetName(entry.name, active.name));
   const authoritative: RecentEntry = { name: active.name, savedAt: active.savedAt, data: active };
   if (index < 0) {
     return { ...trimRecents([authoritative, ...recents]), changed: true };
@@ -1132,6 +1187,39 @@ const storedAttr = loadValidatedStoreJson<{
   c?: { name: string; counts: number[] };
 }>(LS_ATTR);
 const stored = loadValidatedStoreJson<StoredDataset>(LS_DATASET);
+/**
+ * 旧版本按原始名称去重写下的最近列表(fix2609j STORE-15 迁移)：若唯一的问题是「只差首尾空格的重名」，
+ * 启动时先把原文完整复制到隔离区，再按列表顺序(新→旧)保留每个名称的第一条合并落盘，
+ * 而不是让整张列表(含无关条目)被判损坏隔离清空。隔离区写不下或还有其它损坏时不动，走原有隔离路径。
+ */
+function migrateTrimDuplicateRecents(): void {
+  let raw: string | null;
+  try { raw = localStorage.getItem(LS_RECENTS); } catch { return; }
+  if (!raw) return;
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); } catch { return; }
+  if (!Array.isArray(parsed)) return;
+  const detail = projectStoreValidationError(LS_RECENTS, parsed);
+  if (!detail || !detail.startsWith('最近数据集名称重复')) return;
+  const seen = new Set<string>();
+  const kept: unknown[] = [];
+  const merged: string[] = [];
+  for (const entry of parsed as unknown[]) {
+    const name = entry && typeof entry === 'object' ? (entry as { name?: unknown }).name : undefined;
+    if (typeof name !== 'string') return;
+    const key = name.trim();
+    if (seen.has(key)) merged.push(name);
+    else { seen.add(key); kept.push(entry); }
+  }
+  if (merged.length === 0 || projectStoreValidationError(LS_RECENTS, kept)) return;
+  if (!preserveCorruptStore(LS_RECENTS, raw, `${detail}（旧版本按原始名称去重，只差首尾空格；已合并较旧条目）`)) return;
+  if (!saveJson(LS_RECENTS, kept, true)) return;
+  const note = `最近数据集列表中有只差首尾空格的重名条目（${merged.map((name) => `「${name.trim()}」`).join('')}），`
+    + '已保留较新的一条；原列表已完整复制到隔离区，可在「工具 → 选项」找回';
+  sessionLog(note);
+  try { useApp.getState().showToast(note); } catch { /* 非 UI 环境忽略 */ }
+}
+migrateTrimDuplicateRecents();
 const loadedStoredRecents = loadValidatedStoreJson<RecentEntry[]>(LS_RECENTS) ?? [];
 const startupRecentCoordination = coordinateRecentsWithActive(loadedStoredRecents, stored);
 const storedRecents = startupRecentCoordination.recents;
@@ -1272,8 +1360,8 @@ function snapshotBytes(snap: EditSnapshot): number {
   return numeric + text + snap.pendingCells.length * 32 + snap.colNames.length * 48;
 }
 
-/** 按「层数 + 字节预算」双重裁剪撤销/重做栈,最旧的先丢;至少保留 1 层。 */
-function trimSnapshotStack(stack: EditSnapshot[]): EditSnapshot[] {
+/** 按「层数 + 字节预算」双重裁剪撤销/重做栈,最旧的先丢;至少保留 1 层。budgetLimited=字节预算实际裁掉了快照。 */
+function trimSnapshotStackWithInfo(stack: EditSnapshot[]): { stack: EditSnapshot[]; budgetLimited: boolean } {
   const capped = stack.slice(-MAX_UNDO);
   let total = capped.reduce((sum, snap) => sum + snapshotBytes(snap), 0);
   let start = 0;
@@ -1281,7 +1369,22 @@ function trimSnapshotStack(stack: EditSnapshot[]): EditSnapshot[] {
     total -= snapshotBytes(capped[start]);
     start += 1;
   }
-  return start > 0 ? capped.slice(start) : capped;
+  return { stack: start > 0 ? capped.slice(start) : capped, budgetLimited: start > 0 };
+}
+
+function trimSnapshotStack(stack: EditSnapshot[]): EditSnapshot[] {
+  return trimSnapshotStackWithInfo(stack).stack;
+}
+
+/** 每个数据集只提示一次(fix2609j GAP-10-25)：大表上撤销历史被字节预算压缩时，此前完全静默。 */
+const undoBudgetWarnedDatasets = new Set<string>();
+function warnUndoBudget(datasetName: string, depth: number): void {
+  if (undoBudgetWarnedDatasets.has(datasetName)) return;
+  undoBudgetWarnedDatasets.add(datasetName);
+  const detail = `「${datasetName}」数据量较大，撤销历史受内存预算限制：当前仅可撤销 ${depth} 步（小表最多 ${MAX_UNDO} 步）；`
+    + `大批修改前请先${PROJECT_BACKUP_HINT}备份或另存为副本`;
+  sessionLog(detail);
+  try { useApp.getState().showToast(detail); } catch { /* 非 UI 环境忽略 */ }
 }
 
 /** 每次用户主动切换/编辑活动数据集都推进版本，异步恢复只能提交同一版本的结果。 */
@@ -1293,6 +1396,60 @@ function beginDatasetIntent(): number {
   }
   datasetIntentRevision += 1;
   return datasetIntentRevision;
+}
+
+/**
+ * 项目导出一致性快照期间的手工编辑暂存队列(fix2609j GAP-7-15)。快照窗口(冲刷 vault + 读本机库)
+ * 不设遮罩，用户常在 Ctrl+S 后继续录数；此前编辑入口在 beginDatasetIntent 抛未捕获异常，
+ * 值被静默丢弃且单元格卡在编辑态。改为按调用顺序暂存动作本身，租约释放后依次重放——
+ * 快照仍只含导出开始时的数据，用户输入不丢。重放时按当时的工作表重新校验。
+ */
+const deferredExportEdits: Array<() => void> = [];
+const EXPORT_DEFERRED_EDIT_NOTICE = '项目备份正在生成一致性快照，本次编辑已暂存，将在快照完成后自动应用（通常数秒内）';
+
+/** 导出快照进行中则暂存 replay 并提示，返回 true；调用方随即返回，不触碰数据集。 */
+function deferEditDuringExport(replay: () => void): boolean {
+  if (projectExportOwner === null) return false;
+  deferredExportEdits.push(replay);
+  try { useApp.getState().showToast(EXPORT_DEFERRED_EDIT_NOTICE); } catch { /* 非 UI 环境忽略 */ }
+  return true;
+}
+
+function drainDeferredExportEdits(): void {
+  // 又开始了新的导出：留待它释放租约时再重放，保持顺序。
+  if (projectExportOwner !== null) return;
+  const edits = deferredExportEdits.splice(0);
+  if (edits.length === 0) return;
+  let failed = 0;
+  for (let i = 0; i < edits.length; i++) {
+    if (projectExportOwner !== null) {
+      deferredExportEdits.unshift(...edits.slice(i));
+      return;
+    }
+    try { edits[i](); } catch (error) {
+      failed += 1;
+      sessionLog(`导出期间暂存的工作表编辑未能应用：${errText(error)}`);
+    }
+  }
+  sessionLog(`已应用项目导出期间暂存的 ${edits.length - failed} 次工作表编辑`);
+  if (failed > 0) {
+    try { useApp.getState().showToast(`导出期间暂存的 ${failed} 次工作表编辑未能应用，请检查工作表后重新录入`); } catch { /* 非 UI 环境忽略 */ }
+  }
+}
+
+/** 释放导出租约；有暂存编辑时在当前调用栈结束后重放(不在 project.ts 的 finally 中重入写入)。 */
+function releaseProjectExportOwner(owner: symbol): void {
+  if (projectExportOwner !== owner) return;
+  projectExportOwner = null;
+  if (deferredExportEdits.length > 0) queueMicrotask(drainDeferredExportEdits);
+}
+
+/** 导出快照期间拒绝有返回值的编辑入口(公式列/排序/查找替换/写回分析列)的统一口径：提示并返回原因，不抛异常。 */
+function exportEditRefusal(): string | null {
+  if (projectExportOwner === null) return null;
+  const detail = '项目备份正在生成一致性快照，本次修改未应用；请在保存对话框出现后重试';
+  try { useApp.getState().showToast(detail); } catch { /* 非 UI 环境忽略 */ }
+  return detail;
 }
 
 /** 数据集替换统一闸门(第三轮 arch):任何替换活动数据集的入口必须经此——
@@ -1411,7 +1568,7 @@ function restoreSnapshot(set: SetFn, get: GetFn, snap: EditSnapshot) {
   pristineDatasets.delete(snap.name);
   const { recents, evicted } = trimRecents([
     { name: data.name, savedAt: data.savedAt, data },
-    ...get().recents.filter((r) => r.name !== data.name),
+    ...get().recents.filter((r) => !sameDatasetName(r.name, data.name)),
   ]);
   set({ model, textCols: snap.textCols, pendingCells: snap.pendingCells, recents });
   persistActive(data);
@@ -1962,6 +2119,8 @@ async function flushPendingVaultWrites(): Promise<void> {
 export function cancelPendingDatasetWork(): void {
   datasetClearQuiesced = false;
   cancelPendingCellPersistence();
+  // 清库/全量复位：导出期间暂存、尚未重放的编辑属于被清除的数据集(fix2609j GAP-7-15)。
+  deferredExportEdits.length = 0;
   beginDatasetIntent();
   vaultWorkGeneration += 1;
   vaultTimers.forEach(({ timer }) => { if (timer !== null) clearTimeout(timer); });
@@ -2112,8 +2271,10 @@ function datasetLocation(name: string, recents: RecentEntry[]): ConflictDatasetL
  * 按实际结果生成同名改名 / 挤出最近列表的提示(UI-04)：不写死「原数据集保留在最近列表」。
  * requestedName 为调用方请求的名称；无事可报时返回空数组。
  */
-export function datasetWriteNotes(requestedName: string, outcome: PersistOutcome): string[] {
+export function datasetWriteNotes(rawRequestedName: string, outcome: PersistOutcome): string[] {
   const notes: string[] = [];
+  // importMatrix 会去掉名称首尾空格(STORE-15)；仅此差异不是「同名冲突改名」。
+  const requestedName = rawRequestedName.trim();
   const renamed = outcome.name !== undefined && outcome.name !== requestedName;
   if (renamed) {
     const where = outcome.conflictLocation === 'vault'
@@ -2340,19 +2501,17 @@ registerProjectLifecycleHooks({
     if (projectExportOwner !== null) throw new Error('已有项目导出正在进行');
     projectExportOwner = owner;
     if (protectedCorruptStores.size > 0) {
-      if (projectExportOwner === owner) projectExportOwner = null;
+      releaseProjectExportOwner(owner);
       throw new Error(`损坏的本地数据尚未成功复制到隔离区（${[...protectedCorruptStores.keys()].join('、')}），项目未导出`);
     }
     try {
       flushPendingCellPersistence();
       await flushPendingVaultWrites();
     } catch (error) {
-      if (projectExportOwner === owner) projectExportOwner = null;
+      releaseProjectExportOwner(owner);
       throw error;
     }
-    return () => {
-      if (projectExportOwner === owner) projectExportOwner = null;
-    };
+    return () => releaseProjectExportOwner(owner);
   },
   projectStoreOverrides: () => Object.fromEntries(dirtyProjectStores),
 });
@@ -2417,12 +2576,16 @@ function applyEdit(
     try { useApp.getState().showToast(`工作表编辑已拒绝：${validationError}`); } catch { /* 非 UI 环境忽略 */ }
     return validationError;
   }
+  const exportRefusal = exportEditRefusal();
+  if (exportRefusal) return exportRefusal;
 
   beginDatasetIntent();
   // 编辑前快照入撤销栈,清空重做栈
+  const undo = trimSnapshotStackWithInfo([...st.undoStack, snapshotOf(st)]);
   set({
-    undoStack: trimSnapshotStack([...st.undoStack, snapshotOf(st)]),
+    undoStack: undo.stack,
     redoStack: [],
+    undoBudgetLimited: undo.budgetLimited,
   });
   // 双审 P1:副本名唯一化——固定「质检数据 (副本)」会在「恢复演示→再编辑」时
   // 静默覆盖旧副本中用户已录入的数据
@@ -2436,9 +2599,10 @@ function applyEdit(
   pristineDatasets.delete(name);
   const { recents, evicted } = trimRecents([
     { name, savedAt: data.savedAt, data },
-    ...get().recents.filter((r) => r.name !== name),
+    ...get().recents.filter((r) => !sameDatasetName(r.name, name)),
   ]);
   set({ model, textCols, pendingCells, recents });
+  if (undo.budgetLimited) warnUndoBudget(name, undo.stack.length);
   // 双审 P2:带占位的工作表(新建/DOE 设计)录满后必须重新建议规格限,
   // 否则能力页永远沿用上一份数据集的 LSL/USL(specForActiveMeasurement 有已存规格时优先返回已存,无副作用)
   if (st.pendingCells.length > 0 && pendingCells.length === 0) {
@@ -2470,8 +2634,12 @@ export const useData = create<DataState>((set, get) => ({
   mesRunning: false,
   undoStack: [],
   redoStack: [],
+  undoBudgetLimited: false,
 
-  importMatrix: (requestedName, colNames, rows, textCols = [], pendingCells = [], modelOptions = {}) => {
+  importMatrix: (rawRequestedName, colNames, rows, textCols = [], pendingCells = [], modelOptions = {}) => {
+    // fix2609j STORE-15:数据集名在唯一写入口规范化(与另存为/校验同口径)。文件名常带首尾空格，
+    // 原样写入会与去掉空格的同名数据集并存为两条，最近列表随即被校验判为重名损坏、导出被阻断。
+    const requestedName = typeof rawRequestedName === 'string' ? rawRequestedName.trim() : rawRequestedName;
     if (!Array.isArray(colNames) || !Array.isArray(rows) || !Array.isArray(textCols)) {
       throw new Error('数据集矩阵结构无效，已拒绝导入');
     }
@@ -2555,14 +2723,14 @@ export const useData = create<DataState>((set, get) => ({
       const current = get();
       const listEvicted = trimRecents([
         { name, savedAt: '' },
-        ...current.recents.filter((r) => r.name !== name),
+        ...current.recents.filter((r) => !sameDatasetName(r.name, name)),
       ]).evicted.filter((entry) => entry.data).map((entry) => entry.name);
       // 活动表不在最近列表里(如用户已用 × 移出当前表)时，任何新建类写入都会替换活动槽，
       // 该表在浏览器端再无落盘位置——同样须经确认(fix2609d G4c；fix2609f G4d 不再限于同名改名)。
       // 例外：本次写入沿用它的名称(内容相同的同名重写)会把它重新写回最近列表，不丢。
       const activeName = current.model.name;
       const activeLost = !current.model.isDemo && name !== activeName
-        && !current.recents.some((entry) => entry.name === activeName);
+        && !current.recents.some((entry) => sameDatasetName(entry.name, activeName));
       const prospective = activeLost ? [...listEvicted, activeName] : listEvicted;
       const operationKey = modelOptions.confirmKey ?? requestedName;
       if (prospective.length === 0) {
@@ -2601,7 +2769,7 @@ export const useData = create<DataState>((set, get) => ({
     };
     const { recents, evicted } = trimRecents([
       { name, savedAt: data.savedAt, data },
-      ...get().recents.filter((r) => r.name !== name),
+      ...get().recents.filter((r) => !sameDatasetName(r.name, name)),
     ]);
     // 确定性派生的原样结果：源表与本结果都未经编辑前，同一派生可按名替换它(不必改名多占最近列表位)。
     // 导入/粘贴/DOE/随机数据(无 derivedFrom)与桌面端一律不登记。
@@ -2872,12 +3040,16 @@ export const useData = create<DataState>((set, get) => ({
     useApp.setState({ paretoShowDemo: false, anovaShowDemo: false });
     // fix2609b M3:删除业务键同样维护 dirty/损坏保护/跨窗口簿记，旧载荷不得混入之后的导出。
     for (const key of [LS_DATASET, LS_ATTR, LS_PARETO, LS_ACTIVE_REF]) removeJson(key);
+    // fix2609j STORE-07:演示集无需持久化，旧活动表已被替换出内存(替换闸门先保证最近列表已落盘)；
+    // 残留此标志只会在演示集状态下误弹「尚未持久化」离开警告。其它数据集的必保快照仍独立维持警告。
+    setActiveUnpersisted(false);
     suggestSpec(d.model, []);
     sessionLog('恢复演示数据集 质检数据.mtw');
   },
 
   updateCell: (row, col, value) => {
     if (!Number.isFinite(value)) return;
+    if (deferEditDuringExport(() => get().updateCell(row, col, value))) return;
     const m = get().model;
     if (row < 0 || row >= m.subs.length || col < 0 || col >= m.n) return;
     // Copy-on-write：外层索引 + 被编辑的一行。其余行与撤销快照共享，
@@ -2900,6 +3072,7 @@ export const useData = create<DataState>((set, get) => ({
   },
 
   addSubgroupRow: () => {
+    if (deferEditDuringExport(() => { get().addSubgroupRow(); })) return false;
     const m = get().model;
     const currentTextCols = get().textCols;
     // 先按 k+1 做 O(1) 预算；20 万行边界不得先复制 20 万个子组与文本值。
@@ -2917,6 +3090,7 @@ export const useData = create<DataState>((set, get) => ({
   },
 
   deleteRow: (row) => {
+    if (deferEditDuringExport(() => get().deleteRow(row))) return;
     const m = get().model;
     if (m.k <= 2) return; // 模型至少 2 行
     const rows = m.subs.map((s) => [...s.vals]);
@@ -2936,6 +3110,10 @@ export const useData = create<DataState>((set, get) => ({
 
   undoEdit: () => {
     const st = get();
+    // 快照期间撤销同样暂存(先弹栈再抛错会让撤销/重做栈与工作表错位)；暂存队列里的编辑之后可撤销。
+    if (projectExportOwner !== null && (st.undoStack.length > 0 || deferredExportEdits.length > 0)) {
+      return deferEditDuringExport(() => { get().undoEdit(); });
+    }
     const snap = st.undoStack[st.undoStack.length - 1];
     if (!snap) return false;
     set({
@@ -2949,11 +3127,16 @@ export const useData = create<DataState>((set, get) => ({
 
   redoEdit: () => {
     const st = get();
+    if (projectExportOwner !== null && (st.redoStack.length > 0 || deferredExportEdits.length > 0)) {
+      return deferEditDuringExport(() => { get().redoEdit(); });
+    }
     const snap = st.redoStack[st.redoStack.length - 1];
     if (!snap) return false;
+    const undo = trimSnapshotStackWithInfo([...st.undoStack, snapshotOf(st)]);
     set({
       redoStack: st.redoStack.slice(0, -1),
-      undoStack: trimSnapshotStack([...st.undoStack, snapshotOf(st)]),
+      undoStack: undo.stack,
+      undoBudgetLimited: undo.budgetLimited,
     });
     restoreSnapshot(set, get, snap);
     sessionLog('重做编辑');
@@ -3111,6 +3294,7 @@ export const useData = create<DataState>((set, get) => ({
   },
 
   sortBy: (col, asc) => {
+    if (deferEditDuringExport(() => get().sortBy(col, asc))) return;
     const m = get().model;
     if (col < 0 || col >= m.n) return;
     const idx = m.subs.map((_, i) => i).sort((a, b) =>
@@ -3123,7 +3307,7 @@ export const useData = create<DataState>((set, get) => ({
     idx.forEach((oldRow, newRow) => {
       for (let col2 = 0; col2 < m.n; col2++) if (oldPending.has(`${oldRow}:${col2}`)) pendingCells.push({ row: newRow, col: col2 });
     });
-    applyEdit(set, get, rows, textCols, undefined, pendingCells);
+    if (applyEdit(set, get, rows, textCols, undefined, pendingCells)) return;
     sessionLog(`按「${m.colNames[col]}」${asc ? '升序' : '降序'}排序`);
   },
 
@@ -3141,6 +3325,7 @@ export const useData = create<DataState>((set, get) => ({
   },
 
   renameColumn: (col, name) => {
+    if (deferEditDuringExport(() => get().renameColumn(col, name))) return;
     const m = get().model;
     const clean = name.trim();
     if (col < 0 || col >= m.n || clean === m.colNames[col]) return;
@@ -3165,6 +3350,7 @@ export const useData = create<DataState>((set, get) => ({
   },
 
   deleteColumn: (col) => {
+    if (deferEditDuringExport(() => get().deleteColumn(col))) return;
     const m = get().model;
     if (m.n <= 1) return; // 至少保留 1 个测量列
     if (col < 0 || col >= m.n) return;
@@ -3186,6 +3372,7 @@ export const useData = create<DataState>((set, get) => ({
   },
 
   insertColumn: () => {
+    if (deferEditDuringExport(() => { get().insertColumn(); })) return false;
     const m = get().model;
     const currentTextCols = get().textCols;
     // 5,000 列或 200 万格边界先拒绝，不能先展开全部列名/行/待录入坐标。
@@ -3256,9 +3443,12 @@ export const useData = create<DataState>((set, get) => ({
       }),
     );
     if (replace == null || count === 0 || replace === find) return count;
+    // 导出快照期间暂存整次替换(重放时按当时工作表重新匹配)，不让「未找到」类提示盖掉暂存说明。
+    if (deferEditDuringExport(() => { get().findReplace(find, replace, col); })) return count;
     // 第三轮 P1:匹配阶段已跳过占位格,被替换的必是真实观测——不得再按占位内部值 0
     // 命中与否过滤 pendingCells(那正是把「待录入」标记静默清掉、占位 0 变真实观测的半边修)
-    applyEdit(set, get, rows, get().textCols, undefined, get().pendingCells);
+    // 被拒(如导出快照期间)时返回 0，调用方不得报告「已替换 N 处」。
+    if (applyEdit(set, get, rows, get().textCols, undefined, get().pendingCells)) return 0;
     sessionLog(`查找替换:${find} → ${replace} · ${count} 处${col >= 0 ? ` · 限「${m.colNames[col]}」列` : ''}`);
     return count;
   },
@@ -3367,7 +3557,7 @@ export const useData = create<DataState>((set, get) => ({
     pristineDatasets.delete(data.name);
     const { recents, evicted } = trimRecents([
       { name: data.name, savedAt: data.savedAt, data },
-      ...get().recents.filter((entry) => entry.name !== data.name),
+      ...get().recents.filter((entry) => !sameDatasetName(entry.name, data.name)),
     ]);
     set({ model, textCols: [], pendingCells: [], recents, undoStack: [], redoStack: [] });
     resetDatasetSpcRoles();
@@ -3399,7 +3589,7 @@ export const useData = create<DataState>((set, get) => ({
     pristineDatasets.delete(data.name);
     const { recents, evicted } = trimRecents([
       { name: data.name, savedAt: data.savedAt, data },
-      ...get().recents.filter((entry) => entry.name !== data.name),
+      ...get().recents.filter((entry) => !sameDatasetName(entry.name, data.name)),
     ]);
     set({ model, pendingCells: [], recents });
     persistActive(data);

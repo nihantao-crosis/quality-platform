@@ -908,6 +908,10 @@ function savePersistedAqlState(state: AppState): boolean {
   }
 }
 
+/** AQL 账本配额写入失败的统一提示(登记批次与启动迁移共用，fix2609j STORE-10)。 */
+const AQL_QUOTA_TOAST = 'AQL 责任账本尚未写入本地存储（存储空间不足）；请释放空间，项目备份导出会携带内存中的最新账本，'
+  + '导入其他项目会在落盘前被阻止，关闭页面前会提示';
+
 useApp.subscribe((state, previous) => {
   if (state.aqlLot !== previous.aqlLot || state.aqlLevel !== previous.aqlLevel
     || state.aqlAQL !== previous.aqlAQL || state.aqlRegime !== previous.aqlRegime
@@ -918,7 +922,7 @@ useApp.subscribe((state, previous) => {
       state.showToast(aqlStateCorrupt
         ? `${aqlStateQuarantined ? 'AQL 责任账本已损坏（原文已复制到隔离区）' : 'AQL 责任账本已损坏（隔离区写入失败）'}，本次改动只在当前窗口有效、不会保存；项目备份导出已阻止，请按 AQL 页提示恢复`
         // 配额分支 beforeExport 会以内存覆盖项导出最新账本，导入其他项目才会被阻止。
-        : 'AQL 责任账本尚未写入本地存储（存储空间不足）；请释放空间，项目备份导出会携带内存中的最新账本，导入其他项目会在落盘前被阻止');
+        : AQL_QUOTA_TOAST);
     }
   }
 });
@@ -927,8 +931,11 @@ useApp.subscribe((state, previous) => {
 watchExternalWrite(AQL_STATE_STORAGE_KEY, rehydrateAqlFromStorage);
 
 // 首次加载即把旧 qp-prefs-v1 中的 AQL 业务状态迁出；损坏的新账本必须原样保留以便恢复。
-if (!aqlStateCorrupt) savePersistedAqlState(useApp.getState());
-else useApp.getState().showToast(aqlStateQuarantined
+// fix2609j STORE-10:启动迁移写入失败(工作表已占满配额后刷新)时 aqlPersistenceDirty 已为真，
+// 之后登记批次的首次失败提示会被短路——必须在这里提示一次，否则全程零信号。
+if (!aqlStateCorrupt) {
+  if (!savePersistedAqlState(useApp.getState())) useApp.getState().showToast(AQL_QUOTA_TOAST);
+} else useApp.getState().showToast(aqlStateQuarantined
   ? '检测到损坏的 AQL 责任账本，原文已复制到隔离区且未被覆盖；请导入有效项目备份或清除业务数据'
   : '检测到损坏的 AQL 责任账本（隔离区写入失败，原文仍保留在原位置、未被覆盖）；请勿清除浏览器数据，可通过导入有效项目备份恢复');
 
@@ -1009,8 +1016,22 @@ registerProjectLifecycleHooks({
   afterSuccessfulMutation: () => {
     // applyProjectText 已写入新项目；刷新前任何 toast/modal set 都不能把旧内存偏好写回去。
     prefsPersistenceSuspended = true;
+    // 旧会话写不下的账本/参数已被新项目整体取代，不得再拦截随后的自动重载(fix2609j STORE-10)。
+    prefsPersistenceDirty = false;
+    aqlPersistenceDirty = false;
   },
 });
+
+/**
+ * 本 store 中写入 localStorage 失败、最新值只在内存的数据类别(fix2609j STORE-10)。
+ * dataStore.hasUnpersistedState 汇总它作离开拦截；账本损坏属独立故障态(AQL 页常驻提示、导出已阻断)，不计入。
+ */
+export function appUnpersistedStateLabels(): string[] {
+  const labels: string[] = [];
+  if (aqlPersistenceDirty && !aqlStateCorrupt) labels.push('AQL 责任账本');
+  if (prefsPersistenceDirty && !prefsPersistenceSuspended) labels.push('界面与分析参数');
+  return labels;
+}
 
 export function resetUiPreferences(): void {
   useApp.setState({
