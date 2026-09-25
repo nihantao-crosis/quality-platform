@@ -198,7 +198,11 @@ function recordTransitionIsPossible(record: AqlBatchRecord): boolean {
     : stateAfter === 'normal' && switchingScoreAfter === 0;
 }
 
-/** 外来项目/localStorage 的责任记录必须先通过完整字段与交叉字段校验。 */
+/**
+ * 外来项目/localStorage 的责任记录必须先通过完整字段与交叉字段校验。注意这只保证单条记录自洽；
+ * 记录链与状态字段的一致性由 auditAqlLedger 重放核对。二者都只是「可追溯」而非「防篡改」：
+ * 账本没有签名/完整性锚，取证级要求须另行对导出文件做签名归档。
+ */
 function normalizeAqlBatchRecord(value: unknown, fallbackSequenceId: string): AqlBatchRecord | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const x = value as Partial<AqlBatchRecord>;
@@ -341,12 +345,18 @@ function normalizeAqlLedgerRecord(value: unknown, fallbackSequenceId: string): A
   return normalizeAqlBatchRecord(value, fallbackSequenceId);
 }
 
+/**
+ * v1.34 之前的状态载荷没有检验序列号，归一化时统一迁入该序列。v1.32/v1.33 在改变检验水平/AQL
+ * 时只重置状态而不分序列，所以该序列内的记录链可能跨越多次不留痕的重置(见 auditAqlLedger)。
+ */
+export const AQL_LEGACY_SEQUENCE_ID = 'sequence-legacy-v2';
+
 /** 兼容旧项目/旧 localStorage 中只有 state/history/sinceSwitch/note 的记录。 */
 export function normalizeSwitchStatus(value?: Partial<SwitchStatus> | null): SwitchStatus {
   const sequenceId = typeof value?.sequenceId === 'string' && value.sequenceId.trim()
     && value.sequenceId.trim().length <= AQL_TRACE_LIMITS.sequenceId
     ? value.sequenceId.trim()
-    : 'sequence-legacy-v2';
+    : AQL_LEGACY_SEQUENCE_ID;
   const requestedState: InspState = value?.state === 'tightened' || value?.state === 'reduced' ? value.state : 'normal';
   const records = Array.isArray(value?.records)
     ? value.records
@@ -732,6 +742,431 @@ export function resumeTightenedInspection(status: SwitchStatus): SwitchStatus {
   };
 }
 
+/* ------------------------------------------------------------------------------------------
+ * CORE-06:责任账本记录链 ↔ 状态级字段的交叉核对(重放审计)
+ *
+ * 单条记录的自洽校验(normalizeAqlBatchRecord / normalizeAqlTransitionRecord)挡不住「记录原样
+ * 保留、只改 state/switchingScore/tightenedRejections/sinceSwitch」或「删掉中间拒收记录」这类
+ * 篡改。本审计从当前检验序列的初始态出发，用与录入完全相同的生产函数(recordInspection /
+ * setSwitchConditions / restoreNormalInspection / resumeTightenedInspection)逐条重放记录链，
+ * 要求每条记录的检验后状态/转移得分与重放一致，且顶层状态字段等于重放终态。
+ *
+ * 边界：这是「可追溯记录与摘要字段一致」的核对，不是防篡改签名——账本本身没有完整性锚，
+ * 整条伪造但自洽的记录链无法被识别；取证级要求需另行对导出的账本做签名/哈希归档。
+ *
+ * 旧账本兼容策略(明确、只放宽到 UI 本来就允许的范围)：
+ * · v1.43 之前人工转移(管理条件齐备转放宽 / 条件取消或其他条件恢复正常)从不写转移记录。账本中
+ *   第一条 kind:'transition' 记录之前(全账本没有转移记录时也包括终态)，按正式规则推定这类人工
+ *   转移：正常→放宽须重放得分 ≥30；放宽→正常得分清零。结果标记为 legacy「历史账本未含转移
+ *   记录」。出现第一条转移记录之后，任何未留痕的人工转移都按不一致拒绝。
+ * · 暂停后「确认纠正措施有效 → 恢复加严」从不写记录，重放时按正式规则推定(仍是加严)。
+ * · v1.34 之前建立的 legacy 序列(AQL_LEGACY_SEQUENCE_ID)：初始计数未知，且 v1.32/33 改检验水平/
+ *   AQL(哪怕随后改回)会在任何状态下不留痕地重置为初始正常检验，因此从第一个可确定的状态转移点
+ *   (换表记录/转移记录)起严格重放、之前只做状态连续与逐对得分核对，并在第一条转移记录之前按
+ *   「重置为初始正常检验」推定无法解释的断点——此类推定逐处计数写入 notes 供审核方复核。
+ *   没有任何记录的 legacy 状态只拒绝「凭空的正常检验转移得分」。
+ * ---------------------------------------------------------------------------------------- */
+
+export type AqlLedgerAuditStatus = 'verified' | 'legacy' | 'mismatch';
+
+export interface AqlLedgerAudit {
+  /** verified=记录链完整重放一致；legacy=按旧账本兼容规则接受(见 notes)；mismatch=不一致，须按损坏拒绝。 */
+  status: AqlLedgerAuditStatus;
+  /** mismatch 时第一处不一致的中文说明；其余为空串。 */
+  detail: string;
+  /** legacy 时的兼容标记(供专项报告/页面提示)。 */
+  notes: string[];
+}
+
+const STATE_LABEL: Record<InspState, string> = { normal: '正常', tightened: '加严', reduced: '放宽' };
+
+/** 重放用的状态：只承载转移规则需要的字段，records 恒为空，避免 O(n²) 归一化。 */
+function replaySeed(sequenceId: string, patch: Partial<SwitchStatus> = {}): SwitchStatus {
+  return { ...SWITCH_INIT, sequenceId, history: [], sinceSwitch: [], records: [], ...patch };
+}
+
+/** 状态值在管理条件下的重放种子：放宽态必须带齐条件，否则会被归一化降级。 */
+function replaySeedAt(sequenceId: string, state: InspState, switchingScore: number): SwitchStatus {
+  return replaySeed(sequenceId, {
+    state,
+    switchingScore: state === 'tightened' ? 0 : switchingScore,
+    productionSteady: state === 'reduced',
+    reducedApproved: state === 'reduced',
+  });
+}
+
+const withoutRecords = (status: SwitchStatus): SwitchStatus => ({ ...status, records: [] });
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function ledgerLabel(record: AqlLedgerRecord): string {
+  return isAqlTransitionRecord(record)
+    ? `状态转移记录「${aqlTransitionActionLabel(record.action)}」(${record.inspectedAt})`
+    : `批次「${record.batchId}」`;
+}
+
+/** 用 recordInspection 本身重放一条批次记录；返回重放后的状态或不一致说明。 */
+function replayBatchRecord(current: SwitchStatus, record: AqlBatchRecord): SwitchStatus | string {
+  // 放宽态必须带齐管理条件才不会被归一化降级；正常态只在记录声称自动转放宽时给出条件，
+  // 让「得分 ≥30 但未勾选条件而留在正常」与「条件齐备而转放宽」两种合法路径都按同一规则重放。
+  const conditions = current.state === 'reduced'
+    || (current.state === 'normal' && record.stateAfter === 'reduced');
+  let next: SwitchStatus;
+  try {
+    next = recordInspection({ ...current, productionSteady: conditions, reducedApproved: conditions, records: [] }, {
+      lot: record.lot,
+      level: record.level,
+      aql: record.aql,
+      regime: record.regime,
+      nonconforming: record.nonconforming,
+      batchId: record.batchId,
+      inspector: record.inspector,
+      inspectedAt: record.inspectedAt,
+      originalInspection: record.originalInspection,
+      nonconformingDisposition: record.nonconformingDisposition === 'none' || record.nonconformingDisposition === 'unrecorded'
+        ? undefined
+        : record.nonconformingDisposition,
+    });
+  } catch (error) {
+    return `${ledgerLabel(record)}无法按正式转移规则重放：${errorText(error)}`;
+  }
+  if (next.state !== record.stateAfter || next.switchingScore !== record.switchingScoreAfter) {
+    return `${ledgerLabel(record)}记录的检验后状态/转移得分为${STATE_LABEL[record.stateAfter]}/${record.switchingScoreAfter}，`
+      + `按记录链重放应为${STATE_LABEL[next.state]}/${next.switchingScore}`;
+  }
+  return withoutRecords(next);
+}
+
+/** 用 setSwitchConditions / restoreNormalInspection 本身重放一条人工状态转移记录。 */
+function replayTransitionRecord(current: SwitchStatus, record: AqlTransitionRecord): SwitchStatus | string {
+  if (current.state !== record.stateBefore || current.switchingScore !== record.switchingScoreBefore) {
+    return `${ledgerLabel(record)}的转移前状态/得分为${STATE_LABEL[record.stateBefore]}/${record.switchingScoreBefore}，`
+      + `按记录链重放应为${STATE_LABEL[current.state]}/${current.switchingScore}`;
+  }
+  let next: SwitchStatus;
+  try {
+    if (record.action === 'conditions-met') {
+      next = setSwitchConditions(
+        { ...current, productionSteady: false, reducedApproved: false },
+        { productionSteady: true, reducedApproved: true },
+      );
+    } else if (record.action === 'conditions-withdrawn') {
+      next = setSwitchConditions(
+        { ...current, productionSteady: true, reducedApproved: true },
+        { productionSteady: record.productionSteady, reducedApproved: record.reducedApproved },
+      );
+    } else {
+      next = restoreNormalInspection({ ...current, productionSteady: true, reducedApproved: true });
+    }
+  } catch (error) {
+    return `${ledgerLabel(record)}无法按正式转移规则重放：${errorText(error)}`;
+  }
+  if (next.state !== record.stateAfter || next.switchingScore !== record.switchingScoreAfter) {
+    return `${ledgerLabel(record)}记录的转移后状态/得分与按记录链重放结果不符`;
+  }
+  return withoutRecords(next);
+}
+
+/** 未留痕的人工转移(仅旧账本允许)：只接受 UI 本来就能做到的两类，且条件按正式规则核对。 */
+function implicitManualTransition(current: SwitchStatus, target: InspState): SwitchStatus | null {
+  if (current.suspended) return null;
+  if (current.state === 'normal' && target === 'reduced' && current.switchingScore >= 30) {
+    return withoutRecords(setSwitchConditions(
+      { ...current, productionSteady: false, reducedApproved: false },
+      { productionSteady: true, reducedApproved: true },
+    ));
+  }
+  if (current.state === 'reduced' && target === 'normal') {
+    return withoutRecords(setSwitchConditions(
+      { ...current, productionSteady: true, reducedApproved: true },
+      { productionSteady: false },
+    ));
+  }
+  return null;
+}
+
+/** 旧账本：正常(得分 ≥30)→ 放宽 → 正常 两次不留痕的人工转移，净效果为正常检验、得分与窗口清零。 */
+function implicitNormalRoundTrip(current: SwitchStatus): SwitchStatus | null {
+  if (current.state !== 'normal') return null;
+  const reduced = implicitManualTransition(current, 'reduced');
+  return reduced ? implicitManualTransition(reduced, 'normal') : null;
+}
+
+const sameResults = (a: readonly BatchResult[], b: readonly BatchResult[]) => (
+  a.length === b.length && a.every((item, index) => item === b[index])
+);
+
+interface ReplayCandidate {
+  status: SwitchStatus;
+  /** 推定的未留痕人工转移次数(旧账本)。 */
+  implicit: number;
+  /** 推定的 v1.32/33 参数变更重置次数(legacy 序列)。 */
+  resets: number;
+}
+
+const candidateCost = (candidate: ReplayCandidate) => candidate.implicit + candidate.resets;
+
+/**
+ * 一个已知状态在下一条记录(或终态)之前可能经历的不留痕变化：暂停后恢复加严(任何账本)；
+ * 旧账本的人工转移/正常→放宽→正常往返；legacy 序列的参数变更重置。重放按候选集合推进，
+ * 因为这类变化有时不改变状态外观(例如往返后仍是正常检验)，只能由后续记录判定是否发生过。
+ */
+function expandCandidates(
+  candidate: ReplayCandidate,
+  gapAllowed: boolean,
+  legacyReset: SwitchStatus | null,
+): ReplayCandidate[] {
+  const expanded = [candidate];
+  const s = candidate.status;
+  if (s.suspended) expanded.push({ ...candidate, status: withoutRecords(resumeTightenedInspection(s)) });
+  if (gapAllowed) {
+    const target: InspState | null = s.state === 'normal' ? 'reduced' : s.state === 'reduced' ? 'normal' : null;
+    const moved = target ? implicitManualTransition(s, target) : null;
+    if (moved) expanded.push({ ...candidate, status: moved, implicit: candidate.implicit + 1 });
+    const roundTrip = implicitNormalRoundTrip(s);
+    if (roundTrip) expanded.push({ ...candidate, status: roundTrip, implicit: candidate.implicit + 2 });
+  }
+  if (legacyReset) expanded.push({ ...candidate, status: legacyReset, resets: candidate.resets + 1 });
+  return expanded;
+}
+
+/** 按转移规则相关字段去重，同一状态保留推定次数最少的路径。 */
+function dedupeCandidates(candidates: ReplayCandidate[]): ReplayCandidate[] {
+  const byKey = new Map<string, ReplayCandidate>();
+  for (const candidate of candidates) {
+    const s = candidate.status;
+    const key = [s.state, s.suspended, s.switchingScore, s.tightenedRejections, s.sinceSwitch.slice(-5).join('')].join('|');
+    const existing = byKey.get(key);
+    if (!existing || candidateCost(candidate) < candidateCost(existing)) byKey.set(key, candidate);
+  }
+  return [...byKey.values()];
+}
+
+/** 顶层状态级字段与某个重放终态逐项比对；返回第一处差异说明，一致时返回 null。 */
+function statusFieldDifference(actual: SwitchStatus, expected: SwitchStatus, compareHistory: boolean): string | null {
+  if (actual.state !== expected.state) return `检验状态为${STATE_LABEL[actual.state]}，按记录链重放应为${STATE_LABEL[expected.state]}`;
+  if (actual.suspended !== expected.suspended) {
+    return `暂停标记为${actual.suspended ? '已暂停' : '未暂停'}，按记录链重放应为${expected.suspended ? '已暂停' : '未暂停'}`;
+  }
+  if (actual.switchingScore !== expected.switchingScore) {
+    return `转移得分为 ${actual.switchingScore}，按记录链重放应为 ${expected.switchingScore}`;
+  }
+  if (actual.tightenedRejections !== expected.tightenedRejections) {
+    return `加严累计不接收为 ${actual.tightenedRejections} 批，按记录链重放应为 ${expected.tightenedRejections} 批`;
+  }
+  const expectedWindow = expected.sinceSwitch.slice(-5);
+  if (!sameResults(actual.sinceSwitch, expectedWindow)) {
+    return `转移窗口为 [${actual.sinceSwitch.join('')}]，按记录链重放应为 [${expectedWindow.join('')}]`;
+  }
+  if (compareHistory && !sameResults(actual.history, expected.history.slice(-MAX_STATUS_HISTORY))) {
+    return '当前体系批结果时间线与记录链不一致';
+  }
+  return null;
+}
+
+/**
+ * 从当前检验序列的记录链重放状态，并与顶层 state/suspended/switchingScore/tightenedRejections/
+ * sinceSwitch(严格序列另含 history)交叉核对。project.ts 在所有外来入口(localStorage、.qproj、
+ * 跨窗口写入)对 mismatch fail-closed 拒绝并保留原文；专项报告据 status/notes 标记旧账本。
+ */
+export function auditAqlLedger(value: Partial<SwitchStatus> | null | undefined): AqlLedgerAudit {
+  const status = normalizeSwitchStatus(value);
+  const ledger = status.records;
+  const mismatch = (detail: string): AqlLedgerAudit => ({ status: 'mismatch', detail, notes: [] });
+  const notes: string[] = [];
+  let implicitCount = 0;
+  let legacyResetCount = 0;
+
+  // 人工转移留痕从第一条 transition 记录起生效；其之前(含紧邻它的那一处)的缺口属于 v1.43 之前。
+  const firstTransition = ledger.findIndex(isAqlTransitionRecord);
+  const gapAllowedBefore = (index: number) => firstTransition === -1 || index <= firstTransition;
+  const finalGapAllowed = firstTransition === -1;
+
+  // 1) 序列在账本中必须连续；legacy 序列只能最早出现；当前序列只能在末尾。
+  const order: string[] = [];
+  const lastIndexOf = new Map<string, number>();
+  ledger.forEach((record, index) => {
+    if (order[order.length - 1] !== record.sequenceId) order.push(record.sequenceId);
+    lastIndexOf.set(record.sequenceId, index);
+  });
+  if (new Set(order).size !== order.length) return mismatch('同一检验序列的记录在账本中不连续，记录顺序被改动');
+  if (order.includes(AQL_LEGACY_SEQUENCE_ID) && order[0] !== AQL_LEGACY_SEQUENCE_ID) {
+    return mismatch('旧版(无序列号)记录出现在新检验序列之后，记录顺序被改动');
+  }
+  if (order.includes(status.sequenceId) && order[order.length - 1] !== status.sequenceId) {
+    return mismatch('当前检验序列之后仍有其他序列的记录，记录顺序或序列号被改动');
+  }
+
+  // 2) v1.34 起只有正常检验(未暂停)才能更改检验水平/AQL 开启新序列：每个已结束序列的末条记录
+  //    必须停在正常检验(旧账本允许未留痕的放宽→正常)。legacy 序列末尾可能有 v1.32/33 的不留痕
+  //    参数重置，无法核对，只作标记。
+  for (const sequenceId of order) {
+    if (sequenceId === status.sequenceId) continue;
+    const endIndex = lastIndexOf.get(sequenceId)!;
+    const endState = ledger[endIndex].stateAfter;
+    if (endState === 'normal') continue;
+    if (sequenceId === AQL_LEGACY_SEQUENCE_ID) {
+      legacyResetCount += 1;
+      continue;
+    }
+    if (endState === 'reduced' && gapAllowedBefore(endIndex + 1)) {
+      implicitCount += 1;
+      continue;
+    }
+    return mismatch(`检验序列 ${sequenceId} 在${STATE_LABEL[endState]}检验中结束，正式流程只允许在正常检验时更改检验水平/AQL`);
+  }
+
+  const start = ledger.findIndex((record) => record.sequenceId === status.sequenceId);
+  const current = start === -1 ? [] : ledger.slice(start);
+  const legacySequence = status.sequenceId === AQL_LEGACY_SEQUENCE_ID;
+  const fresh = () => replaySeed(status.sequenceId);
+
+  // 3) 重放当前序列。known=null 表示 legacy 序列尚未到达第一个可确定的转移点(计数未知)。
+  const seed = (start: SwitchStatus): ReplayCandidate[] => [{ status: start, implicit: 0, resets: 0 }];
+  let known: ReplayCandidate[] | null = legacySequence ? null : seed(fresh());
+  let previousState: InspState | null = null;
+  let previousScore: number | null = null;
+  const unknownOriginalResults: BatchResult[] = [];
+
+  for (let offset = 0; offset < current.length; offset += 1) {
+    const record = current[offset];
+    const gapAllowed = gapAllowedBefore(start + offset);
+    // v1.32/33 的 legacy 序列：改检验水平/AQL(哪怕随后改回)会不留痕地重置为初始正常检验。
+    const legacyResetAllowed = legacySequence && gapAllowed && record.stateBefore === 'normal';
+
+    if (!known) {
+      // legacy 未知段：只核对状态连续与逐对得分，遇到第一个可确定的转移点后转入严格重放。
+      if (previousState !== null && record.stateBefore !== previousState) {
+        const moved = gapAllowed
+          ? implicitManualTransition(replaySeedAt(status.sequenceId, previousState, previousScore ?? 0), record.stateBefore)
+          : null;
+        if (moved) {
+          implicitCount += 1;
+          known = seed(moved);
+        } else if (legacyResetAllowed) {
+          legacyResetCount += 1;
+          known = seed(fresh());
+        } else {
+          return mismatch(`记录链在${STATE_LABEL[previousState]}→${STATE_LABEL[record.stateBefore]}之间断开，`
+            + '不是正式规则允许的人工转移或缺少状态转移记录');
+        }
+      } else if (isAqlTransitionRecord(record)) {
+        if (previousScore !== null && record.switchingScoreBefore !== previousScore) {
+          return mismatch(`${ledgerLabel(record)}的转移前得分 ${record.switchingScoreBefore} 与上一条记录的得分 ${previousScore} 不连续`);
+        }
+        known = seed(replaySeedAt(status.sequenceId, record.stateBefore, record.switchingScoreBefore));
+      } else {
+        // 逐对得分核对：以上一条记录的得分(或人工往返/参数重置清零后的 0)为起点单批重放。
+        // 换入/换出加严取决于跨批窗口(未知段无从得知)，其得分已由单条校验固定为 0。
+        const windowDependent = (record.stateBefore === 'normal' && record.stateAfter === 'tightened')
+          || (record.stateBefore === 'tightened' && record.stateAfter === 'normal');
+        const bases = previousScore === null || windowDependent ? [] : [...new Set([previousScore, 0])];
+        const replays = bases.map((base) => replayBatchRecord(replaySeedAt(status.sequenceId, record.stateBefore, base), record));
+        if (replays.length > 0 && replays.every((result) => typeof result === 'string')) {
+          return mismatch(`${replays[0] as string}(与上一条记录的得分不连续)`);
+        }
+        previousState = record.stateAfter;
+        previousScore = record.switchingScoreAfter;
+        if (record.stateBefore !== record.stateAfter) {
+          // 换表记录之后计数全部确定：得分取记录值(已逐对核对)，窗口与加严累计清零。
+          known = seed(replaySeedAt(status.sequenceId, record.stateAfter, record.switchingScoreAfter));
+        } else if (record.originalInspection) {
+          unknownOriginalResults.push(record.result);
+        }
+        continue;
+      }
+    }
+
+    // 严格重放(计数已知)：候选集合逐条推进，任何候选都无法解释该记录即不一致。
+    const expanded = known.flatMap((candidate) => expandCandidates(
+      candidate, gapAllowed, legacySequence && gapAllowed ? fresh() : null,
+    ));
+    const survivors: ReplayCandidate[] = [];
+    let failure: string | null = null;
+    for (const candidate of expanded) {
+      const base = candidate.status;
+      let next: SwitchStatus | string;
+      if (base.suspended) {
+        next = `${ledgerLabel(record)}发生在抽样检验暂停期间，正式流程不允许`;
+      } else if (base.state !== record.stateBefore) {
+        next = `${ledgerLabel(record)}的检验前状态为${STATE_LABEL[record.stateBefore]}，`
+          + `按记录链重放应为${STATE_LABEL[base.state]}${gapAllowed ? '' : '(缺少状态转移记录)'}`;
+      } else {
+        next = isAqlBatchRecord(record) ? replayBatchRecord(base, record) : replayTransitionRecord(base, record);
+      }
+      if (typeof next === 'string') failure ??= next;
+      else survivors.push({ ...candidate, status: next });
+    }
+    if (survivors.length === 0) return mismatch(failure ?? `${ledgerLabel(record)}无法按正式转移规则重放`);
+    known = dedupeCandidates(survivors);
+    previousState = record.stateAfter;
+    previousScore = record.switchingScoreAfter;
+  }
+
+  // 4) 顶层状态级字段与重放终态交叉核对。
+  if (known) {
+    const finals = known.flatMap((candidate) => expandCandidates(
+      candidate, finalGapAllowed, legacySequence && finalGapAllowed ? fresh() : null,
+    ));
+    const matches = finals
+      .filter((candidate) => statusFieldDifference(status, candidate.status, !legacySequence) === null)
+      .sort((x, y) => candidateCost(x) - candidateCost(y));
+    if (matches.length === 0) {
+      return mismatch(`AQL 状态字段与责任账本记录链不一致：${statusFieldDifference(status, finals[0].status, !legacySequence)}`);
+    }
+    implicitCount += matches[0].implicit;
+    legacyResetCount += matches[0].resets;
+  } else if (current.length === 0) {
+    // 没有任何当前序列记录的 legacy 状态(v1.31 近似版迁入)：状态本身无从重放，
+    // 但正常检验转移得分只能由批次记录累积，凭空的得分按不一致拒绝。
+    if (status.state === 'normal' && status.switchingScore > 0) {
+      return mismatch(`历史账本没有任何批次记录，却声称正常检验转移得分 ${status.switchingScore}`);
+    }
+    if (status.state !== 'normal' || status.suspended) notes.push('历史账本未含批次记录，当前检验状态无法由记录链重放核对');
+  } else {
+    // legacy 序列全程没有可确定的转移点：只能核对终态、得分与转移窗口末尾。
+    const endState = previousState!;
+    const endScore = previousScore!;
+    const options: Array<{ state: InspState; score: number; windowCleared: boolean; implicit: boolean }> = [
+      { state: endState, score: endScore, windowCleared: false, implicit: false },
+    ];
+    // 暂停后恢复加严不留痕(窗口清零)；人工转移与参数重置仅旧账本推定。
+    if (endState === 'tightened') options.push({ state: 'tightened', score: 0, windowCleared: true, implicit: false });
+    if (finalGapAllowed) {
+      if (endState === 'normal' && endScore >= 30) options.push({ state: 'reduced', score: endScore, windowCleared: true, implicit: true });
+      options.push({ state: 'normal', score: 0, windowCleared: true, implicit: true });
+    }
+    // 窗口前缀未知，且恢复加严/参数重置可在任意位置清空窗口：只要求两者重叠的末尾一致。
+    const observed = unknownOriginalResults.slice(-5);
+    const overlap = Math.min(status.sinceSwitch.length, observed.length);
+    const windowTailAgrees = sameResults(
+      status.sinceSwitch.slice(status.sinceSwitch.length - overlap), observed.slice(observed.length - overlap),
+    );
+    const match = options.find((option) => option.state === status.state && option.score === status.switchingScore
+      && (option.windowCleared ? status.sinceSwitch.length === 0 || windowTailAgrees : windowTailAgrees));
+    if (!match) {
+      return mismatch(`AQL 状态字段与责任账本记录链不一致：末条记录为${STATE_LABEL[endState]}检验/得分 ${endScore}，`
+        + `状态字段为${STATE_LABEL[status.state]}检验/得分 ${status.switchingScore}，转移窗口为 [${status.sinceSwitch.join('')}]`);
+    }
+    if (match.implicit) implicitCount += 1;
+  }
+
+  if (legacySequence) {
+    notes.push('历史账本(v1.34 之前建立的检验序列)没有序列号，只能从首个可确定的状态转移点起重放核对');
+  }
+  if (legacyResetCount > 0) {
+    notes.push(`历史账本含 ${legacyResetCount} 处按 v1.32/33「更改检验水平/AQL 即重置」推定的不留痕重置`);
+  }
+  if (implicitCount > 0) {
+    notes.push(`历史账本未含转移记录：${implicitCount} 处人工状态转移(管理条件/恢复正常)按正式规则推定`);
+  }
+  return notes.length > 0
+    ? { status: 'legacy', detail: '', notes }
+    : { status: 'verified', detail: '', notes: [] };
+}
+
 export interface AqlReportData {
   standard: 'GB/T 2828.1-2012 / ISO 2859-1:1999';
   samplingType: '一次抽样';
@@ -756,6 +1191,8 @@ export interface AqlReportData {
   suspended: boolean;
   latestRecord: AqlBatchRecord | null;
   records: AqlLedgerRecord[];
+  /** CORE-06:记录链重放审计结果；legacy 时 notes 须随报告提示「历史账本未含转移记录」等。 */
+  ledgerAudit: AqlLedgerAudit;
 }
 
 /** 专项报告/导出层可直接消费的结构化 AQL 数据，不依赖 React 或统一报告模块。 */
@@ -793,5 +1230,6 @@ export function buildAqlReportData(
     suspended: s.suspended,
     latestRecord: latestRecord ? { ...latestRecord } : null,
     records: s.records.map((x) => ({ ...x })),
+    ledgerAudit: auditAqlLedger(s),
   };
 }

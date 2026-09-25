@@ -176,6 +176,164 @@ class PortableVerifierTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
+class PortableNestedDocumentTests(unittest.TestCase):
+    """GAP-6-13:iframe srcdoc 承载整份嵌套文档,静态校验器必须解码后递归检查。"""
+
+    def verify_html(self, html: str) -> subprocess.CompletedProcess[str]:
+        with tempfile.TemporaryDirectory() as temp:
+            output = pathlib.Path(temp)
+            (output / "index.html").write_text(html, encoding="utf-8")
+            return subprocess.run(
+                [sys.executable, str(PORTABLE_VERIFIER), str(output)],
+                capture_output=True,
+                text=True,
+            )
+
+    def assert_rejected(self, html: str, fragment: str) -> None:
+        result = self.verify_html(html)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(fragment, result.stdout + result.stderr)
+
+    def test_srcdoc_external_script_fails(self) -> None:
+        self.assert_rejected(
+            "<main>offline</main><iframe srcdoc=\"<script src='https://evil.invalid/child.js'></script>\"></iframe>",
+            "iframe[srcdoc] > script[src] depends on external URL",
+        )
+
+    def test_srcdoc_external_img_fails(self) -> None:
+        self.assert_rejected(
+            "<iframe srcdoc='<img src=https://evil.invalid/beacon.png>'></iframe>",
+            "iframe[srcdoc] > img[src] depends on external URL",
+        )
+
+    def test_entity_encoded_srcdoc_is_decoded_before_checking(self) -> None:
+        self.assert_rejected(
+            "<iframe srcdoc=\"&lt;img src=&quot;https&#x3A;//evil.invalid/beacon.png&quot;&gt;\"></iframe>",
+            "iframe[srcdoc] > img[src]",
+        )
+
+    def test_srcdoc_external_stylesheet_and_css_url_fail(self) -> None:
+        self.assert_rejected(
+            "<iframe srcdoc=\"<link rel=stylesheet href='https://evil.invalid/x.css'>\"></iframe>",
+            "iframe[srcdoc] > link[href]",
+        )
+        self.assert_rejected(
+            "<iframe srcdoc=\"<style>body{background:url(https://evil.invalid/bg.png)}</style>\"></iframe>",
+            "iframe[srcdoc] > style block #1 contains non-inline CSS URL",
+        )
+
+    def test_srcdoc_inline_script_fetch_fails(self) -> None:
+        self.assert_rejected(
+            "<iframe srcdoc=\"<script>fetch('https://evil.invalid/collect',{method:'POST'})</script>\"></iframe>",
+            "iframe[srcdoc] > inline script references network URL",
+        )
+        self.assert_rejected(
+            "<iframe srcdoc=\"<script>new WebSocket('//evil.invalid/ws')</script>\"></iframe>",
+            "inline script references network URL",
+        )
+
+    def test_nested_srcdoc_inside_srcdoc_fails(self) -> None:
+        inner = "&lt;img src=&amp;quot;https://evil.invalid/deep.png&amp;quot;&gt;"
+        self.assert_rejected(
+            f"<iframe srcdoc=\"<iframe srcdoc='{inner}'></iframe>\"></iframe>",
+            "iframe[srcdoc] > iframe[srcdoc] > img[src]",
+        )
+
+    def test_self_contained_srcdoc_passes(self) -> None:
+        result = self.verify_html(
+            "<main>offline</main><iframe srcdoc=\"<p>本地预览</p><img src='data:image/png;base64,AA=='>"
+            "<script>document.title='ok'</script>\"></iframe>"
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_top_level_bundle_strings_are_not_treated_as_nested_scripts(self) -> None:
+        # 顶层内联 bundle 里的库字符串(文档链接、xmlns 等)不是网络依赖,不能误伤真实便携版。
+        result = self.verify_html(
+            "<svg xmlns='http://www.w3.org/2000/svg'><use href='#icon'></use></svg>"
+            "<script>const docs='https://example.invalid/help';</script>"
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_legacy_url_attributes_fail(self) -> None:
+        for html, fragment in [
+            ("<svg><image xlink:href='https://evil.invalid/p.png'></image></svg>", "image[xlink:href]"),
+            ("<svg><use xlink:href='https://evil.invalid/s.svg#i'></use></svg>", "use[xlink:href]"),
+            ("<body background='https://evil.invalid/bg.png'></body>", "body[background]"),
+            ("<link rel=preload as=image imagesrcset='https://evil.invalid/a.png 1x'>", "link[imagesrcset]"),
+            ("<svg><use href='sprite.svg#i'></use></svg>", "use[href] depends on local URL"),
+        ]:
+            with self.subTest(fragment=fragment):
+                self.assert_rejected(html, fragment)
+
+
+CHROME_CANDIDATES = [
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+]
+
+
+def browser_gate_available() -> bool:
+    import os
+    import shutil
+
+    configured = os.environ.get("CHROME_BIN", "").strip()
+    chrome = any(pathlib.Path(candidate).exists() for candidate in [configured, *CHROME_CANDIDATES] if candidate)
+    return chrome and shutil.which("node") is not None
+
+
+# 满足 run_browser_gate.mjs validatePortable 结构要求的最小外壳页。
+PORTABLE_SHELL = (
+    "<!doctype html><html><body style='margin:0'><div class='app-root' style='width:800px;height:600px'>"
+    "<div class='menu-bar'>" + "<button>m</button>" * 10 + "</div>"
+    "<div class='toolbar'>" + "<button>t</button>" * 6 + "</div>"
+    "<div class='side-nav'>" + "<button>s</button>" * 7 + "</div>"
+    "<main><div class='page-header'>质量分析平台</div><div class='page-content'>"
+    + "离线便携版主界面内容" * 8 + "</div></main></div>{extra}</body></html>"
+)
+
+
+@unittest.skipUnless(browser_gate_available(), "Chrome/Chromium 或 node 不可用,跳过真浏览器门禁用例")
+class PortableBrowserGateTests(unittest.TestCase):
+    """GAP-6-13:浏览器门禁必须看见子框架与探针通过之后才发出的外部请求。"""
+
+    GATE = ROOT / ".github/scripts/run_browser_gate.mjs"
+
+    def run_gate(self, extra: str) -> subprocess.CompletedProcess[str]:
+        with tempfile.TemporaryDirectory() as temp:
+            page = pathlib.Path(temp) / "index.html"
+            page.write_text(PORTABLE_SHELL.replace("{extra}", extra), encoding="utf-8")
+            return subprocess.run(
+                ["node", str(self.GATE), "portable", str(page)],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                env={**__import__("os").environ, "RELEASE_GATE_SETTLE_MS": "1500"},
+            )
+
+    def test_clean_shell_passes(self) -> None:
+        result = self.run_gate("<iframe srcdoc='<p>本地</p>'></iframe>")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_srcdoc_child_frame_request_fails(self) -> None:
+        result = self.run_gate(
+            "<iframe srcdoc=\"<img src='https://child.invalid/beacon.png'>"
+            "<script src='https://child.invalid/x.js'></script>\"></iframe>"
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("child.invalid", result.stderr)
+
+    def test_request_after_probe_passes_is_still_caught(self) -> None:
+        result = self.run_gate(
+            "<script>setTimeout(function(){new Image().src='https://late.invalid/beacon.png';},400)</script>"
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("late.invalid", result.stderr)
+
+
 class ReleaseAssetManifestTests(unittest.TestCase):
     """create -> verify 全链路:本地构建名与 GitHub 资产名不同(DESKTOP-01)。
 

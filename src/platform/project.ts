@@ -13,7 +13,7 @@ import {
   assertQprojExportText,
   qprojExportByteLength,
 } from './importLimits';
-import { worksheetResourceError, worksheetPendingCellsError, attributeChartResourceError, individualSeriesResourceError, fishboneResourceError, MAX_IMPORT_CELL_CHARS, MAX_DATASET_NAME_CHARS, MAX_RECENT_DATASETS, MAX_VAULT_DATASETS, MAX_SAVED_AT_CHARS, MAX_PARETO_CATEGORIES, MAX_SAVED_ANALYSES, MAX_ANALYSIS_DATA_ENTRIES, MAX_ANALYSIS_ID_CHARS, MAX_ANALYSIS_DATA_KEY_CHARS, MAX_ANALYSIS_LABEL_CHARS, AQL_COLS, MAX_AQL_RECORDS, MAX_LOT_SIZE, aqlRegimeAllows, isAqlTransitionRecord, normalizeSwitchStatus, ruleKValueError, type AqlRegime, type NelsonRuleK, type SwitchStatus } from '../core';
+import { worksheetResourceError, worksheetPendingCellsError, attributeChartResourceError, individualSeriesResourceError, fishboneResourceError, MAX_IMPORT_CELL_CHARS, MAX_DATASET_NAME_CHARS, MAX_RECENT_DATASETS, MAX_VAULT_DATASETS, MAX_SAVED_AT_CHARS, MAX_PARETO_CATEGORIES, MAX_SAVED_ANALYSES, MAX_ANALYSIS_DATA_ENTRIES, MAX_ANALYSIS_ID_CHARS, MAX_ANALYSIS_DATA_KEY_CHARS, MAX_ANALYSIS_LABEL_CHARS, AQL_COLS, MAX_AQL_RECORDS, MAX_LOT_SIZE, aqlRegimeAllows, auditAqlLedger, isAqlTransitionRecord, normalizeSwitchStatus, ruleKValueError, type AqlRegime, type NelsonRuleK, type SwitchStatus } from '../core';
 
 /** 共享键放在无业务 store 副作用的项目层，启动预恢复不得反向加载 store。 */
 export const QUARANTINE_STORAGE_KEY = 'qp-quarantine-v1';
@@ -498,7 +498,12 @@ function spcRuleKValidationError(raw: unknown, label: string): string | null {
   return null;
 }
 
-function aqlSwitchValidationError(rawSwitch: unknown): string | null {
+/**
+ * liveLedger:该载荷会成为当前活跃的 AQL 状态(独立账本 qp-aql-state-v1、旧 prefs 内嵌账本),
+ * 须额外做 CORE-06 记录链重放交叉核对;历史分析卡里的旧快照只读且会被剥离,不做链审计,
+ * 以免旧卡把整个分析库拖进隔离区。
+ */
+function aqlSwitchValidationError(rawSwitch: unknown, liveLedger = false): string | null {
   if (!isObject(rawSwitch)) return 'AQL 转移状态无效';
   const candidate = rawSwitch as Partial<SwitchStatus>;
   if (candidate.state !== undefined
@@ -546,6 +551,11 @@ function aqlSwitchValidationError(rawSwitch: unknown): string | null {
   if (candidate.suspended !== true && candidate.state !== 'tightened'
     && (candidate.tightenedRejections ?? 0) > 0) return 'AQL 非加严状态含有加严拒收累计';
   if (candidate.state === 'tightened' && (candidate.switchingScore ?? 0) > 0) return 'AQL 加严状态含有正常检验转移得分';
+  if (liveLedger) {
+    // CORE-06:状态级字段必须等于从记录链重放得到的状态;不一致按损坏 fail-closed(调用方保留原文)。
+    const audit = auditAqlLedger(candidate);
+    if (audit.status === 'mismatch') return `AQL 责任账本记录链与状态字段不一致：${audit.detail}`;
+  }
   return null;
 }
 
@@ -570,7 +580,7 @@ function aqlStateValidationError(raw: unknown): string | null {
   }
   if (raw.aqlMethod !== 'gb' || raw.aqlAcMethod !== 'gb') return 'AQL 正式产品路径必须使用国标方案';
   if (!('aqlSwitch' in raw)) return 'AQL 业务状态缺少责任账本';
-  return aqlSwitchValidationError(raw.aqlSwitch);
+  return aqlSwitchValidationError(raw.aqlSwitch, true);
 }
 
 /** 批次720-B:逐列公差记忆的结构校验(偏好与分析快照共用)。 */
@@ -734,7 +744,7 @@ function prefsValidationError(raw: unknown): string | null {
     return '百分不合格品体系的 AQL 不能超过 10';
   }
   if (!('aqlSwitch' in state)) return null;
-  return aqlSwitchValidationError(state.aqlSwitch);
+  return aqlSwitchValidationError(state.aqlSwitch, true);
 }
 
 function recentsValidationError(raw: unknown): string | null {

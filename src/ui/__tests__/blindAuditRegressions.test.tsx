@@ -5,7 +5,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { evalFormula, parseMatrix, MAX_COLUMN_NAME_CHARS, MAX_RECENT_DATASETS } from '../../core';
+import { evalFormula, parseMatrix, MAX_COLUMN_NAME_CHARS, MAX_RECENT_DATASETS, normalizeSwitchStatus, recordInspection, type SwitchStatus } from '../../core';
 import { sanitizeFileName } from '../../platform/reportLabels';
 import { toLookupMap } from '../../store/dataStore';
 import { useApp, AQL_STATE_STORAGE_KEY } from '../../store/appStore';
@@ -134,12 +134,18 @@ describe('盲审:多标签页写冲突', () => {
     const base = JSON.parse(localStorage.getItem(AQL_STATE_STORAGE_KEY) ?? '{}');
     expect(base.aqlSwitch, '夹具无效:本窗口尚未写出账本').toBeTruthy();
 
-    // 模拟另一窗口:在同一份合法账本上把 switchingScore 推进(等价于登记了批次)
+    // 模拟另一窗口:在同一份合法账本上真实登记 2 个接收批推进 switchingScore。
+    // CORE-06 起状态字段必须与记录链重放一致,只改得分而不留批次记录会被当作篡改拒绝。
+    const inspect = (status: SwitchStatus, batchId: string) => recordInspection(status, {
+      lot: 500, level: 'II', aql: 1.0, regime: 'percent', nonconforming: 0,
+      batchId, inspector: '另一窗口', inspectedAt: '2026-09-26T08:00:00.000Z',
+    });
     const theirs = {
       ...base,
       aqlLot: 500,
-      aqlSwitch: { ...base.aqlSwitch, switchingScore: (base.aqlSwitch.switchingScore ?? 0) + 4 },
+      aqlSwitch: inspect(inspect(normalizeSwitchStatus(base.aqlSwitch), 'TAB-B-1'), 'TAB-B-2'),
     };
+    expect(theirs.aqlSwitch.switchingScore, '夹具无效:另一窗口的登记没有推进得分').toBeGreaterThan(0);
     otherTabWrite(AQL_STATE_STORAGE_KEY, JSON.stringify(theirs));
 
     // 本窗口必须已水合对方的账本进展

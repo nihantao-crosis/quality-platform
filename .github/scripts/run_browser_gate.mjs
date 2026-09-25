@@ -9,6 +9,17 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const POLL_INTERVAL_MS = 100;
+// 探针通过后继续监听网络的驻留窗口:子框架(iframe srcdoc)与延时发出的请求往往晚于首屏挂载,
+// 探针一返回就判定会漏掉它们(GAP-6-13)。可用 RELEASE_GATE_SETTLE_MS 调整,下限 500ms。
+const SETTLE_MS = Math.max(500, Number(process.env.RELEASE_GATE_SETTLE_MS) || 3_000);
+const AUTO_ATTACH = { autoAttach: true, waitForDebuggerOnStart: true, flatten: true };
+const OFFLINE_CONDITIONS = {
+  offline: true,
+  latency: 0,
+  downloadThroughput: 0,
+  uploadThroughput: 0,
+  connectionType: 'none',
+};
 
 function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -100,7 +111,8 @@ class CdpClient {
     this.eventListeners.add(listener);
   }
 
-  send(method, params = {}) {
+  /** sessionId:flatten 模式下发给自动附加的子 target(子框架/worker)。 */
+  send(method, params = {}, sessionId = undefined) {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
@@ -108,7 +120,7 @@ class CdpClient {
         reject(new Error(`Chrome DevTools 命令超时：${method}`));
       }, 10_000);
       this.pending.set(id, { method, resolve, reject, timeout });
-      this.socket.send(JSON.stringify({ id, method, params }));
+      this.socket.send(JSON.stringify(sessionId ? { id, method, params, sessionId } : { id, method, params }));
     });
   }
 
@@ -243,7 +255,38 @@ async function run() {
     client = await CdpClient.connect(await pageTarget(port));
     const browserErrors = [];
     const externalRequests = [];
+    const recordRequest = (url) => {
+      if (/^(?:https?|wss?|ftp):/i.test(url)) externalRequests.push(url);
+    };
+    // 子 target(跨进程子框架、worker 等)自动附加:同样离线、同样上报网络请求,再放行执行。
+    const attachChild = async (sessionId) => {
+      const steps = [
+        ['Network.enable', {}],
+        ['Network.setCacheDisabled', { cacheDisabled: true }],
+        ['Network.emulateNetworkConditions', OFFLINE_CONDITIONS],
+        ['Target.setAutoAttach', AUTO_ATTACH],
+      ];
+      for (const [method, params] of steps) {
+        // 部分 target 类型不支持某些域(例如 service worker 不支持缓存开关),不支持即跳过。
+        await client.send(method, params, sessionId).catch(() => {});
+      }
+      await client.send('Runtime.runIfWaitingForDebugger', {}, sessionId).catch(() => {});
+    };
     client.onEvent((event) => {
+      if (event.method === 'Target.attachedToTarget') {
+        attachChild(event.params.sessionId).catch((error) => browserErrors.push(`子 target 附加失败：${error.message}`));
+        return;
+      }
+      if (event.method === 'Network.requestWillBeSent') {
+        recordRequest(event.params.request.url);
+        return;
+      }
+      if (event.method === 'Network.webSocketCreated') {
+        recordRequest(event.params.url);
+        return;
+      }
+      // 子 target 的控制台/异常不属于便携版主界面的启动错误口径,只收集网络证据。
+      if (event.sessionId) return;
       if (event.method === 'Runtime.exceptionThrown') {
         browserErrors.push(event.params.exceptionDetails.exception?.description
           ?? event.params.exceptionDetails.text ?? '未捕获浏览器异常');
@@ -251,9 +294,6 @@ async function run() {
         browserErrors.push(event.params.args.map((arg) => arg.value ?? arg.description ?? '').join(' '));
       } else if (event.method === 'Log.entryAdded' && event.params.entry.level === 'error') {
         browserErrors.push(event.params.entry.text);
-      } else if (event.method === 'Network.requestWillBeSent') {
-        const url = event.params.request.url;
-        if (/^(?:https?|wss?):/i.test(url)) externalRequests.push(url);
       }
     });
     await Promise.all([
@@ -264,18 +304,16 @@ async function run() {
     ]);
     await client.send('Network.setCacheDisabled', { cacheDisabled: true });
     // 真正把页面置于离线网络栈；file:// 本体仍可加载，任何 HTTP(S) 依赖都会失败并被记录。
-    await client.send('Network.emulateNetworkConditions', {
-      offline: true,
-      latency: 0,
-      downloadThroughput: 0,
-      uploadThroughput: 0,
-      connectionType: 'none',
-    });
+    await client.send('Network.emulateNetworkConditions', OFFLINE_CONDITIONS);
+    // 同进程的 srcdoc 子框架请求经本页会话上报;跨进程子框架/worker 需自动附加才能看见。
+    await client.send('Target.setAutoAttach', AUTO_ATTACH);
     const navigation = await client.send('Page.navigate', { url: pathToFileURL(artifact).href });
     if (navigation.errorText) throw new Error(`Chrome 无法打开 ${artifact}: ${navigation.errorText}`);
     const result = await waitForResult(client, mode, mode === 'office' ? 60_000 : 30_000);
     if (mode === 'portable') validatePortable(result);
     else if (result.status !== 'passed') throw new Error(`Office 浏览器门禁失败：${result.message ?? JSON.stringify(result)}`);
+    // 驻留观察窗:探针通过后仍持续收集子框架与延时请求,再做「零外部请求」判定。
+    await delay(SETTLE_MS);
     if (externalRequests.length > 0) {
       throw new Error(`离线门禁发现外部网络请求：${[...new Set(externalRequests)].join(', ')}`);
     }
