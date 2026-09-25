@@ -74,14 +74,18 @@ function EditableCell({ value, dp, pending = false, label, gridRow, gridCol, ari
     setDraft(pending ? '' : String(value));
     setEditing(true);
   };
-  const finishEditing = (save: boolean, refocus: boolean, badInput = false) => {
+  const finishEditing = (save: boolean, refocus: boolean) => {
     if (save) {
       // GAP-8-4 同族:严格解析,不再用 parseFloat 前缀截断(「12.5mm」→12.5)。拒绝时明确提示,
-      // 不静默丢弃;type=number 被浏览器净化为空串的非法输入(badInput)同样提示。
+      // 不静默丢弃。编辑器是 type=text:type=number 在 Chromium(WebView2/PWA)里插入时就把非法
+      // 字符滤掉(「3,5」→35、「12.5mm」→12.5)且 badInput=false,解析拿到的已是被改写的串。
       const parsed = parseStrictNumber(draft);
-      if (parsed.ok) onCommit(parsed.value);
-      else if (!parsed.empty || badInput) {
-        useApp.getState().showToast(`未修改${label}：${parsed.empty ? '输入的内容不是有效数值' : parsed.reason}`);
+      if (parsed.ok) {
+        // 千分位读法先告知;写入时若有存储告警等 toast,由其后发覆盖,不被说明挤掉。
+        if (parsed.note) useApp.getState().showToast(`${label}：${parsed.note}`);
+        onCommit(parsed.value);
+      } else if (!parsed.empty) {
+        useApp.getState().showToast(`未修改${label}：${parsed.reason}`);
       }
     }
     restoreFocus.current = refocus;
@@ -121,6 +125,8 @@ function EditableCell({ value, dp, pending = false, label, gridRow, gridCol, ari
       </td>
     );
   }
+  // 编辑中逐字校验原始 draft:非法即标红并在 title 给出原因,提交时 toast 同一原因。
+  const draftCheck = parseStrictNumber(draft);
   return (
     <td
       ref={cellRef}
@@ -134,17 +140,21 @@ function EditableCell({ value, dp, pending = false, label, gridRow, gridCol, ari
       <input
         autoFocus
         aria-label={`编辑${label}`}
-        type="number"
-        step="any"
+        type="text"
+        inputMode="decimal"
+        autoComplete="off"
+        spellCheck={false}
         value={draft}
+        aria-invalid={draftCheck.ok || draftCheck.empty ? undefined : true}
+        title={draftCheck.ok || draftCheck.empty ? undefined : draftCheck.reason}
         onChange={(e) => setDraft(e.target.value)}
-        onBlur={(e) => finishEditing(true, false, e.currentTarget.validity?.badInput === true)}
+        onBlur={() => finishEditing(true, false)}
         onKeyDown={(e) => {
           if (isImeComposing(e)) return;
           if (e.key === 'Enter') {
             e.preventDefault();
             e.stopPropagation();
-            finishEditing(true, true, e.currentTarget.validity?.badInput === true);
+            finishEditing(true, true);
           }
           if (e.key === 'Escape') {
             e.preventDefault();
@@ -153,7 +163,7 @@ function EditableCell({ value, dp, pending = false, label, gridRow, gridCol, ari
           }
         }}
         className="mono"
-        style={{ width: 78, border: '2px solid #1f6fb2', borderRadius: 2, padding: '3px 8px', fontSize: 12.5, textAlign: 'right', outline: 'none', boxSizing: 'border-box' }}
+        style={{ width: 78, border: `2px solid ${draftCheck.ok || draftCheck.empty ? '#1f6fb2' : '#c22f2f'}`, borderRadius: 2, padding: '3px 8px', fontSize: 12.5, textAlign: 'right', outline: 'none', boxSizing: 'border-box' }}
       />
     </td>
   );

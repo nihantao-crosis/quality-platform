@@ -90,6 +90,11 @@ const WORKSHEET_CONTENT_TYPE =
   'application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml';
 const WORKBOOK_CONTENT_TYPE =
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml';
+/**
+ * 结构性拒绝的统一处置指引:这类包 SheetJS 本身能读,只是本守卫为堵住「预扫描与 SheetJS
+ * 读到不同部件」而更严;Excel/WPS 另存会重写成规范形制(相对 Target、显式 Override)。
+ */
+const RESAVE_HINT = '可用 Excel/WPS 打开后另存再导入';
 const SHEETJS_WORKBOOK_CONTENT_TYPES = new Set([
   WORKBOOK_CONTENT_TYPE,
   'application/vnd.ms-excel.sheet.macroEnabled.main+xml',
@@ -526,9 +531,12 @@ function decodePackagePathSegment(segment: string, label: string): string {
 
 /**
  * PLATFORM-09:OPC 允许 relationship 使用包内**绝对**部件名。openpyxl(pandas 默认引擎)、
- * .NET Open XML SDK 等导出器统一写 `Target="/xl/worksheets/sheetN.xml"`。SheetJS 对它先剥
- * 前导 '/'(resolve_path),再 'xl/' + 剥掉**第一个** `xl/` 得到读取的 ZIP 条目名——当且仅当
- * 全串只含一个 `xl/` 且就在开头时,两套算法落到同一个条目 `xl/<余下部分>`。
+ * .NET Open XML SDK 等导出器统一写 `Target="/xl/worksheets/sheetN.xml"`。SheetJS 的首表路径
+ * 直接取**原始** rel.Target:`'xl/' + Target.replace(/[\/]?xl\//, '')`(xlsx.mjs:26729,
+ * parse_rels 里的 resolve_path 只用于生成 rels 的 key,不参与这里),前导 '/' 是被该正则里
+ * 可选的 `[\/]?` 吃掉的;找不到该条目时才依次回退原始 Target、wbrels 目录 + Target。本守卫
+ * 要求精确条目存在,因此回退分支不会触发。当且仅当全串只含一个 `xl/` 且就在开头时,两套
+ * 算法落到同一个条目 `xl/<余下部分>`。
  * 只有这种无歧义形态才剥前导 `/xl/` 后交给逐段校验;`//…`、`/foo/xl/…`、`/xl/a/xl/b.xml`、
  * 含 `..`/`.`/`%`/`?`/`#`/`\\`/空段等畸形绝对形态一律 fail-closed。
  */
@@ -557,7 +565,7 @@ function normalizeRelationshipTarget(target: string): string {
     // substring before prepending `xl/`; reject that ambiguous non-standard form.
     target.includes('xl/')
   ) {
-    throw new Error('Excel 首表 relationship target 不是可识别的包内相对路径或 /xl/ 绝对部件名，已拒绝导入；可用 Excel/WPS 打开后另存再导入');
+    throw new Error(`Excel 首表 relationship target 不是可识别的包内相对路径或 /xl/ 绝对部件名，已拒绝导入；${RESAVE_HINT}`);
   }
   const normalized = ['xl'];
   for (const rawSegment of target.split('/')) {
@@ -778,14 +786,19 @@ function firstWorksheetTarget(
     };
   });
   const first = selectedRelationships[0];
+  if (first && /\/chartsheet$/.test(first.type))
+    throw new Error(
+      '首张工作表是图表页(chartsheet)，没有单元格数据；请在 Excel/WPS 中把数据表移到第一张后另存再导入',
+    );
   if (!first || !WORKSHEET_RELATIONSHIP_TYPES.has(first.type))
-    throw new Error('Excel 首表 relationship Type 不是 worksheet');
+    throw new Error(`Excel 首表 relationship Type 不是 worksheet；${RESAVE_HINT}`);
   return first.target;
 }
 
 function assertWorksheetContentType(
   contentTypesXml: string,
   worksheetEntryName: string,
+  hasExactWorkbookEntry: boolean,
 ): void {
   const types = parseXmlDocument(contentTypesXml, '[Content_Types].xml');
   if (
@@ -852,13 +865,24 @@ function assertWorksheetContentType(
       defaults.set(extension, contentType);
     }
   }
+  // PLATFORM-09(复审):.NET Open XML SDK / 部分 MES 导出器不写 /xl/workbook.xml 的 Override,
+  // 只靠 `Default Extension="xml"` 给出 main+xml。SheetJS 在 parse_ct 没收集到任何 workbook 类
+  // Override 时回退读 `xl/workbook.xml`(xlsx.mjs:26630-26633),与本守卫预扫描的恰是同一条目。
+  // 因此:零个 workbook 类 Override + 包内确有精确条目 xl/workbook.xml + 该路径也没有被别的
+  // Override 声明成非工作簿类型 → 视同唯一工作簿部件。多于 1 个、不是 xl/workbook.xml、
+  // 缺条目(SheetJS 会改读 xl/workbook.bin)一律仍拒绝。
+  const implicitWorkbook =
+    workbookParts.length === 0 &&
+    hasExactWorkbookEntry &&
+    !overrides.has('xl/workbook.xml');
   if (
-    workbookParts.length !== 1 ||
-    workbookParts[0] !== 'xl/workbook.xml' ||
-    overrides.get('xl/workbook.xml') !== WORKBOOK_CONTENT_TYPE
+    !implicitWorkbook &&
+    (workbookParts.length !== 1 ||
+      workbookParts[0] !== 'xl/workbook.xml' ||
+      overrides.get('xl/workbook.xml') !== WORKBOOK_CONTENT_TYPE)
   ) {
     throw new Error(
-      'Excel [Content_Types].xml 必须唯一指定标准 /xl/workbook.xml 工作簿部件',
+      `Excel [Content_Types].xml 必须唯一指定标准 /xl/workbook.xml 工作簿部件；${RESAVE_HINT}`,
     );
   }
   const filename = worksheetEntryName.slice(
@@ -904,7 +928,12 @@ async function resolveFirstWorksheetEntry(
       `Excel 首表 relationship 指向缺失部件「${worksheetEntryName}」`,
     );
   }
-  assertWorksheetContentType(contentTypesXml, worksheetEntryName);
+  const workbookEntry = zip.files['xl/workbook.xml'];
+  assertWorksheetContentType(
+    contentTypesXml,
+    worksheetEntryName,
+    entriesByName.has('xl/workbook.xml') && !!workbookEntry && !workbookEntry.dir,
+  );
   return worksheetEntryName;
 }
 

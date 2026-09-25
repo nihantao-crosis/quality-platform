@@ -220,7 +220,7 @@ describe('UI-05 工作表列虚拟化', () => {
 
     // 编辑:窗口内第 201 个测量列 → store 第 200 列(0 基)
     fireEvent.doubleClick(cell);
-    const input = within(grid).getByRole('spinbutton', { name: '编辑P201，第 3 行' });
+    const input = within(grid).getByRole('textbox', { name: '编辑P201，第 3 行' });
     fireEvent.change(input, { target: { value: '42.5' } });
     fireEvent.keyDown(input, { key: 'Enter' });
     expect(useData.getState().model.subs[2].vals[200]).toBe(42.5);

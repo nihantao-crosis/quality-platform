@@ -53,7 +53,7 @@ export interface ParsedMatrix {
   colNames: string[]; // 数值列名
   rows: number[][];
   textCols: TextColumn[];
-  /** 原始数据区的最大列数；用于专用格式拒绝未识别/被忽略的额外列。 */
+  /** 原始数据区的最大列数(不含表头与数据全空的整列)；用于专用格式拒绝未识别/被忽略的额外列。 */
   sourceColumnCount: number;
   totalLines: number; // 数据行总数（不含表头）
   skippedRows: number; // 数值列含缺失/非法值被跳过的行
@@ -291,7 +291,13 @@ function quoteOpensAt(src: string, i: number, delimiter: string): boolean {
   return true;
 }
 
-/** 用候选分隔符集合切出首条非空逻辑记录再判分隔符;后续按该分隔符做真正的记录拆分。 */
+/**
+ * 用候选分隔符集合切出首条非空逻辑记录再判分隔符;后续按该分隔符做真正的记录拆分。
+ * CORE-05 复审:切首条记录(splitQuotedRecords)、分隔符计数(detectDelimiter)与帕累托预检
+ * (inspectParetoText)三处在分隔符未定时**同一口径**——三种候选都视为字段边界(ANY_DELIMITER)。
+ * 若计数时只把「当前候选」当边界,`"Nr";"Wert, mm"` 里跟在分号后的引号字段会在数逗号时被当成
+ * 字面量,引号内的逗号被计入,分号 CSV 被误判为逗号分隔(静默错列)。
+ */
 function sniffDelimiter(text: string): string {
   const first = splitQuotedRecords(text, 0, ANY_DELIMITER);
   const line = first.records[0];
@@ -301,9 +307,9 @@ function sniffDelimiter(text: string): string {
 function detectDelimiter(line: string): string {
   // 只统计引号外的分隔符:RFC-4180 引号字段内的逗号不是分隔符(Excel→SheetJS 的主要形态)
   const counts: Array<[string, number]> = [
-    ['\t', delimiterCountOutsideQuotes(line, '\t')],
-    [',', delimiterCountOutsideQuotes(line, ',')],
-    [';', delimiterCountOutsideQuotes(line, ';')],
+    ['\t', delimiterCountOutsideQuotes(line, '\t', ANY_DELIMITER)],
+    [',', delimiterCountOutsideQuotes(line, ',', ANY_DELIMITER)],
+    [';', delimiterCountOutsideQuotes(line, ';', ANY_DELIMITER)],
   ];
   counts.sort((a, b) => b[1] - a[1]);
   return counts[0][1] > 0 ? counts[0][0] : ',';
@@ -405,6 +411,8 @@ export function detectCsvBlocks(text: string): CsvBlock[] {
     const omittedRows = sourceRows.length - dataRows.length;
     // 重组用原分隔符 + RFC-4180 引号转义:引号感知拆分后单元格可能含分隔符/引号/换行,
     // 必须规范转义;消费方 parseMatrix 已支持解引号,往返无损(Codex 复审 P1 闭环)。
+    // CORE-05 复审:block.csv 会被 parseMatrix **重新嗅探**分隔符,含任一候选分隔符(Tab/逗号/分号)
+    // 的单元格都要加引号——否则分号块里的「Wert, mm」裸写会让逗号与分号打平,被误判为逗号分隔。
     const headerless = headers.every((cell) => isNum(cell));
     blocks.push({
       name: headerless ? `第${c0 + 1}列起` : headers[headers.length - 1] || `第${c0 + 1}列起`,
@@ -417,7 +425,7 @@ export function detectCsvBlocks(text: string): CsvBlock[] {
       rows: headerless ? dataRows.length + 1 : dataRows.length,
       omittedRows,
       csv: [headers, ...dataRows].map((row) => row.map((cell) =>
-        cell.includes(delim) || cell.includes('"') || cell.includes('\n')
+        /[\t,;"\r\n]/.test(cell) || cell.includes(delim)
           ? '"' + cell.replace(/"/g, '""') + '"'
           : cell).join(delim)).join('\n'),
     });
@@ -503,7 +511,13 @@ export function parseMatrix(text: string): ParsedMatrix | { error: string } {
   // sourceIndex = 在「保留列」(数值∪文本,按原表列位升序)中的位置,供工作表交错还原原列序
   const keptOrder = [...numericCols, ...textColIdx].sort((a, b) => a - b);
   const textCols: TextColumn[] = textColIdx.map((j, t) => ({ name: textNames[t], values: textVals[t], sourceIndex: keptOrder.indexOf(j) }));
-  return { colNames, rows, textCols, sourceColumnCount: nCols, totalLines: body.length, skippedRows: skipped, droppedCols: textCols.length };
+  // CORE-04 复审:表头与数据全空的整列(Excel 选区含空白 A 列、Tab 行首不再被 trim 吞掉)不计入
+  // 原始列数,与帕累托自动路径的整列空白剥离同口径;专用格式(P 图)只按有内容的列判定。
+  let sourceColumnCount = 0;
+  for (let j = 0; j < nCols; j++) {
+    if ((header?.[j] ?? '').trim() !== '' || body.some((r) => (r[j] ?? '').trim() !== '')) sourceColumnCount++;
+  }
+  return { colNames, rows, textCols, sourceColumnCount, totalLines: body.length, skippedRows: skipped, droppedCols: textCols.length };
 }
 
 /** 单列计数解析：整数列（供 P/C 图导入） */
@@ -585,11 +599,12 @@ const MAX_PARETO_FIELDS = MAX_IMPORT_DATA_CELLS;
  *  3. 单列文本标签 → 按出现次数 tally 聚合;
  *  4. ≥1 个类别即可;频数须为非负数;同名类别自动合并求和。 */
 /** 分隔符探测(帕累托专用):Tab/逗号/分号之外,额外支持「文本 + 空白 + 数字」的空格分隔。 */
-function delimiterCountOutsideQuotes(line: string, delimiter: string): number {
+/** `boundary` 决定引号是否位于字段起始;分隔符未定(嗅探)时必须传 ANY_DELIMITER,见 sniffDelimiter。 */
+function delimiterCountOutsideQuotes(line: string, delimiter: string, boundary: string): number {
   let quoted = false;
   let count = 0;
   for (let i = 0; i < line.length; i++) {
-    if (line[i] === '"' && (quoted || quoteOpensAt(line, i, delimiter))) {
+    if (line[i] === '"' && (quoted || quoteOpensAt(line, i, boundary))) {
       if (quoted && line[i + 1] === '"') i++;
       else quoted = !quoted;
     } else if (!quoted && line[i] === delimiter) count++;
@@ -604,7 +619,6 @@ function delimiterCountOutsideQuotes(line: string, delimiter: string): number {
 function inspectParetoText(text: string): {
   delimiter: string;
   records: number;
-  unclosedQuote: boolean;
   error?: string;
 } {
   let quoted = false;
@@ -656,7 +670,7 @@ function inspectParetoText(text: string): {
     } else if (!quoted && (ch === '\n' || ch === '\r')) {
       if (ch === '\r' && text[i + 1] === '\n') i++;
       const error = finishRecord();
-      if (error) return { delimiter: ',', records, unclosedQuote: false, error };
+      if (error) return { delimiter: ',', records, error };
     } else {
       observe(ch);
       if (!quoted) {
@@ -667,7 +681,7 @@ function inspectParetoText(text: string): {
     }
   }
   const error = finishRecord();
-  if (error) return { delimiter: ',', records, unclosedQuote: quoted, error };
+  if (error) return { delimiter: ',', records, error };
 
   const counts = firstCounts ?? { tab: 0, comma: 0, semicolon: 0 };
   const ranked: Array<[string, number]> = [
@@ -679,7 +693,9 @@ function inspectParetoText(text: string): {
   const delimiter = ranked[0][1] > 0
     ? ranked[0][0]
     : spaceLikeRecords >= Math.ceil(records * 0.6) ? ' ' : ',';
-  return { delimiter, records, unclosedQuote: quoted };
+  // records/引号状态按 ANY_DELIMITER 口径统计,只用于选分隔符(空格分隔判定)与早期行数闸;
+  // 未闭合判定与资源预算用的记录数由 quotedRecordStats 按**最终分隔符**重算(CORE-05 复审 P3)。
+  return { delimiter, records };
 }
 
 /**
@@ -984,6 +1000,31 @@ function splitQuotedRecords(
   return { records, unclosedQuote: quoted, tooManyRecords: false, recordTooLong };
 }
 
+/**
+ * 与 splitQuotedRecords 同一套字段边界/引号/换行判定的常数空间计数:只数非空白逻辑记录与
+ * 结尾是否仍在引号内,不构造任何字符串。帕累托在选定分隔符后用它做未闭合判定与资源预算,
+ * 保证预检与实际拆分对同一文本给出相同记录数(CORE-05 复审 P3)。
+ */
+function quotedRecordStats(text: string, delimiter: string): { records: number; unclosedQuote: boolean } {
+  let records = 0;
+  let quoted = false;
+  let hasContent = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '"' && (quoted || quoteOpensAt(text, i, delimiter))) {
+      hasContent = true;
+      if (quoted && text[i + 1] === '"') i++;
+      else quoted = !quoted;
+    } else if (!quoted && (ch === '\n' || ch === '\r')) {
+      if (ch === '\r' && text[i + 1] === '\n') i++;
+      if (hasContent) records++;
+      hasContent = false;
+    } else if (!hasContent && ch.trim() !== '') hasContent = true;
+  }
+  if (hasContent) records++;
+  return { records, unclosedQuote: quoted };
+}
+
 /** 一列是否为「序号列」:从 0 或 1 起、步长 1 的连续整数(如 1,2,3,…N)。
  *  仅"递增整数"不够——10,20,30 也递增但那是频数;须为真正的连续序号才剔除。 */
 function isIndexColumn(vals: string[]): boolean {
@@ -1004,8 +1045,9 @@ export function parseCategoryCounts(text: string, columns?: CategoryCountColumns
   const cleanText = text.replace(/^\uFEFF/, '');
   const inspection = inspectParetoText(cleanText);
   if (inspection.error) return { error: inspection.error };
-  if (inspection.unclosedQuote) return { error: 'CSV 引号未闭合，请检查含逗号或换行的类别字段。' };
-  const resourceError = paretoResourceError(cleanText, inspection.delimiter, inspection.records);
+  const recordStats = quotedRecordStats(cleanText, inspection.delimiter);
+  if (recordStats.unclosedQuote) return { error: 'CSV 引号未闭合，请检查含逗号或换行的类别字段。' };
+  const resourceError = paretoResourceError(cleanText, inspection.delimiter, recordStats.records);
   if (resourceError) return { error: resourceError };
 
   const logical = splitQuotedRecords(cleanText, MAX_PARETO_RAW_RECORDS, inspection.delimiter);
@@ -1018,10 +1060,18 @@ export function parseCategoryCounts(text: string, columns?: CategoryCountColumns
   let cells = lines.map((line) => splitDelimitedLine(line, delim));
   // CORE-04:记录不再整行 trim 后,Excel 选区左侧整列空白会以前导空单元格出现。自动识别
   // 路径按「所有行都为空」的整列剥离(列对齐不变);显式选列路径保留原列号,与源表一致。
-  if (!columns) {
-    while (cells.length > 0 && cells.every((row) => row.length > 1 && row[0] === '')) {
-      cells = cells.map((row) => row.slice(1));
+  // 复审 P2:单遍求出可剥离的前导空列数 k 再切一次,O(单元格总数);逐列整表 slice 是
+  // O(行数×k²),2 行 × 5 万前导 Tab 即在主线程同步卡数秒。
+  if (!columns && cells.length > 0) {
+    let strip = Number.POSITIVE_INFINITY;
+    for (const row of cells) {
+      let lead = 0;
+      // 每行至少保留 1 个单元格(与原 while 的 row.length > 1 同口径)
+      while (lead < row.length - 1 && lead < strip && row[lead] === '') lead++;
+      if (lead < strip) strip = lead;
+      if (strip === 0) break;
     }
+    if (strip > 0) cells = cells.map((row) => row.slice(strip));
   }
   const notes: string[] = [];
   let transposedHorizontal = false;

@@ -107,7 +107,7 @@ describe('工作表键盘可达编辑与删除', () => {
     await waitFor(() => expect(document.activeElement).toBe(widthCell));
     expect([...grid.querySelectorAll<HTMLElement>('[tabindex="0"]')]).toEqual([widthCell]);
     fireEvent.keyDown(widthCell, { key: 'Enter' });
-    const widthInput = screen.getByRole('spinbutton', { name: '编辑宽度，第 1 行' });
+    const widthInput = screen.getByRole('textbox', { name: '编辑宽度，第 1 行' });
     expect(document.activeElement).toBe(widthInput);
     fireEvent.change(widthInput, { target: { value: '42' } });
     fireEvent.keyDown(widthInput, { key: 'Enter' });
@@ -119,7 +119,7 @@ describe('工作表键盘可达编辑与删除', () => {
     const heightCell = within(grid).getByRole('gridcell', { name: /高度，第 1 行，当前值 2/ });
     heightCell.focus();
     fireEvent.keyDown(heightCell, { key: 'F2' });
-    const heightInput = screen.getByRole('spinbutton', { name: '编辑高度，第 1 行' });
+    const heightInput = screen.getByRole('textbox', { name: '编辑高度，第 1 行' });
     fireEvent.change(heightInput, { target: { value: '99' } });
     fireEvent.keyDown(heightInput, { key: 'Escape' });
 
@@ -127,7 +127,7 @@ describe('工作表键盘可达编辑与删除', () => {
     await waitFor(() => expect(document.activeElement).toBe(heightCell));
 
     fireEvent.doubleClick(heightCell);
-    expect(screen.getByRole('spinbutton', { name: '编辑高度，第 1 行' })).toBeTruthy();
+    expect(screen.getByRole('textbox', { name: '编辑高度，第 1 行' })).toBeTruthy();
   });
 
   it('列头支持键盘重命名；行号/列头用 Delete 删除且隐藏按钮不污染 Tab 顺序', async () => {
