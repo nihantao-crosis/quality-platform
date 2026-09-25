@@ -670,7 +670,11 @@ function ImportModal() {
               ) : (
                 <>
                   <button type="button"
-                    onClick={() => { mesStart(); goTo('spc'); showToast('MES 模拟采集已启动 · 控制图实时更新'); closeModal(); }}
+                    onClick={() => {
+                      // fix2609n G24e(第 8 批复审 P3):导出快照期间 startMesDataset 经替换闸门抛错,不能变成未捕获异常
+                      try { mesStart(); } catch (error) { showToast('未能启动模拟采集：' + errText(error)); return; }
+                      goTo('spc'); showToast('MES 模拟采集已启动 · 控制图实时更新'); closeModal();
+                    }}
                     style={{ padding: '8px 18px', border: '1px solid #1f6fb2', background: '#1f6fb2', color: '#fff', borderRadius: 5, fontFamily: 'inherit', fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}
                   >
                     ▶ 开始模拟采集
@@ -1077,12 +1081,13 @@ function FindReplaceModal() {
 
   const apply = () => {
     if (!canApply) return;
+    const toastBefore = useApp.getState().toast;
     const n = findReplace(findV, replV, col);
     if (n === 0) {
       // fix2609m G23a A2 尾巴:项目导出快照期间替换被 store 拒绝(已提示「请稍后重试」),不关闭、不报成功。
       // fix2609n G24b B3(第 7 批复审 P3):applyEdit 被拒(「工作表编辑已拒绝：…」)同样返回 0;store 已给出
-      // 原因时不得用「未找到」覆盖——只在当前没有任何提示时才补这句。
-      if (!isProjectExportInFlight() && !useApp.getState().toast) showToast('未找到可替换的值');
+      // 原因时不得用「未找到」覆盖——只有 store 没有更新提示(旧的无关提示仍在也算没有)时才补这句(G24e)。
+      if (!isProjectExportInFlight() && useApp.getState().toast === toastBefore) showToast('未找到可替换的值');
       return;
     }
     closeModal();

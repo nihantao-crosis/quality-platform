@@ -1406,7 +1406,14 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
         const current = dataState.model;
         // 蜂群 P1-01:副本必须**确认落盘**才能覆盖当前编辑。此前只取名字、丢弃
         // PersistOutcome,配额满时照样提示「已另存」并回放，用户的后续编辑静默丢失。
-        const stash = dataState.saveAsCopy();
+        let stash: ReturnType<typeof dataState.saveAsCopy>;
+        try {
+          stash = dataState.saveAsCopy();
+        } catch (error) {
+          // fix2609n G24e(第 8 批复审 P3):项目导出快照期间替换闸门抛错,此前成为未处理的 Promise rejection
+          useApp.getState().showToast(`${label}与快照内容不同，但副本未能保存（${errText(error)}）；为避免丢失当前编辑，已取消回看${stashedSuffix()}，请稍后重试`);
+          return false;
+        }
         if (!stash.outcome.persisted && (!stash.outcome.archiving || !stash.outcome.durability)) {
           useApp.getState().showToast(
             `${label}与快照内容不同，但副本未能保存（${stash.outcome.rejected ?? '存储空间不足'}）；`

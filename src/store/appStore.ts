@@ -326,8 +326,10 @@ const safePrefsStorage = {
       }
       // 内嵌 AQL 子集校验不过时由上面的结论(merge 决定是否隔离)负责；其余偏好仍按原口径核对，
       // 避免同一 AQL 子集经整份 prefs 校验在这里提前写隔离区。
-      const detail = projectStoreValidationError(name, prefsEmbeddedAqlFault ? withoutEmbeddedAql(parsed) : parsed);
-      if (!detail) return raw;
+      const genericDetail = projectStoreValidationError(name, prefsEmbeddedAqlFault ? withoutEmbeddedAql(parsed) : parsed);
+      if (!genericDetail) return raw;
+      // 其余字段与内嵌账本同时损坏时,隔离区「首份证据优先」会让 merge 稍后写入的账本原因落空——把两者拼成一条(fix2609n G24e)
+      const detail = prefsEmbeddedAqlFault ? `${genericDetail}；旧偏好内嵌的 AQL 责任账本未通过校验：${prefsEmbeddedAqlFault.detail}` : genericDetail;
       if (!preserveCorruptStore(name, raw, detail)) protectedCorruptPrefs = { raw, detail };
       else protectedCorruptPrefs = null;
       // 语义污染交给下方白名单 merge 逐字段回退；结构损坏才整体拒绝。

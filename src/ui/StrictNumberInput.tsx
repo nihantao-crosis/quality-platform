@@ -185,7 +185,9 @@ export function StrictNumberInput({
         className={className}
         disabled={disabled}
         value={text}
-        style={{ ...style, ...(problem ? { borderColor: INVALID_BORDER } : {}) }}
+        // 调用方的 style 用 border 简写;出错时同样覆盖简写而不是追加 borderColor 长写,否则恢复合法后 React 删掉长写会
+        // 连带清掉简写里的颜色,边框回落为 currentColor(fix2609n G24e,第 8 批复审 P3)。
+        style={{ ...style, ...(problem ? { border: `1px solid ${INVALID_BORDER}` } : {}) }}
         onChange={(e) => handleChange(e.target.value)}
         onBlur={finish}
         onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}

@@ -2526,7 +2526,8 @@ watchExternalWrite(LS_RECENTS, () => {
 const OWNED_PROJECT_STORE_KEYS = [LS_DATASET, LS_RECENTS, LS_ATTR, LS_SPECS, LS_PARETO, LS_COPY_SEQUENCES] as const;
 
 /**
- * 已登记写保护的键在导出前重试隔离(fix2609n C1)，与 saveJson/removeJson 同一口径：
+ * 已登记写保护的键在导出前重试隔离(fix2609n C1)。在 saveJson 口径(live 为 null 即解除、否则隔离)之上，
+ * 另按 C1 决定：live 已被改写为合法值时直接解除：
  * - live 已不存在(被清除)，或已被另一窗口改写为合法值 → 损坏原文已不在 live，保护解除；
  * - live 仍损坏(同一原文或新的损坏原文)→ quarantineCorruptStore 复制进隔离区，成功即解除，失败保护保留(fail-closed)。
  */
@@ -3240,6 +3241,9 @@ export const useData = create<DataState>((set, get) => ({
   },
 
   saveAsCopy: () => {
+    // fix2609n G24e(第 8 批复审 P3):副本名分配会写 LS_COPY_SEQUENCES 并登记 knownDatasetNames,必须在替换闸门之前就拒绝,
+    // 否则导出快照期间「另存为副本」虽被闸门挡下,副本序号已被白白消耗(快照后首次另存得到「(副本2)」)。
+    if (projectExportOwner !== null) throw new Error('项目正在生成一致性快照，请稍后再修改或切换数据集');
     const m = get().model;
     const names = [m.name, ...get().recents.map((entry) => entry.name)];
     const name = allocateCopyName(m.name, names);
