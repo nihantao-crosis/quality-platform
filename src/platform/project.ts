@@ -1753,6 +1753,9 @@ function removeJournalMarker(): void {
   }
 }
 
+/** stageProjectImportJournal 失败且完整 IDB journal 未能撤销时的标记。 */
+const STAGED_JOURNAL_RESIDUAL = 'projectImportJournalResidual';
+
 async function stageProjectImportJournal(
   stores: Record<string, string>,
   backup: ProjectStoreBackup,
@@ -1773,12 +1776,37 @@ async function stageProjectImportJournal(
     await replaceIndexedDbJournalReservation(reservation, journal);
     writeJournalMarker(indexedDbMarker(journal));
   } catch (error) {
-    // 这里的 record 可能已是完整 journal。即使当场清理失败，
-    // 启动也会在无 marker 时直接探测 IDB 并安全收口。
-    try { await writeIndexedDbJournal(null); } catch { /* 启动恢复接管 */ }
+    // 这里的 record 可能已是完整 journal。无 marker 的完整 IDB journal 是启动恢复
+    // 事实（裁决规则不变），所以清理后必须读回确认：确认已删除（或仅剩不含业务镜像的
+    // reserved 占位）才可对调用方宣称「项目未改写」并放行编辑；否则失败之后的编辑会在
+    // 下次启动被这份 journal 静默覆盖（fix2609j PLATFORM-08），调用方必须锁定并要求重启。
+    try { await writeIndexedDbJournal(null); } catch { /* 下方读回裁决 */ }
+    let cleanupConfirmed = false;
+    try {
+      const residual = await readIndexedDbJournal();
+      cleanupConfirmed = residual === null || isProjectImportJournalReservation(residual);
+    } catch { /* 无法读回按未清理处理 */ }
+    if (!cleanupConfirmed) {
+      throw Object.assign(new Error(errorMessage(error)), {
+        cause: error,
+        [STAGED_JOURNAL_RESIDUAL]: true,
+      });
+    }
     throw error;
   }
   return { journal, backend: 'indexeddb' };
+}
+
+function stageJournalFailure(error: unknown): ProjectApplyResult {
+  if (typeof error === 'object' && error !== null
+    && (error as Record<string, unknown>)[STAGED_JOURNAL_RESIDUAL] === true) {
+    return projectApplyFailure(
+      `无法建立项目导入 journal：${errorMessage(error)}；已写入 IndexedDB 的导入 journal 未能撤销，`
+      + '下次启动会按该 journal 收口本次导入。为防止之后的编辑被启动恢复覆盖，页面已锁定，请立即重新启动应用',
+      true,
+    );
+  }
+  return projectApplyFailure(`无法建立项目导入 journal，项目未改写：${errorMessage(error)}`);
 }
 
 function stageProjectImportJournalSync(
@@ -2267,6 +2295,52 @@ export async function recoverPendingProjectImport(): Promise<PendingProjectRecov
     : { recovered: true, error: null, reloadRequired: true };
 }
 
+/**
+ * 读取侧（store 启动校验）隔离损坏键时，只把原文复制进隔离区、内存降级为空，live 键原样保留。
+ * 导出侧须与读取侧同口径（fix2609j PLATFORM-05）：live 值与隔离区中该键的 raw/latestRaw
+ * 逐字相同，说明损坏原文已随 qp-quarantine-v1 附件带出，此时按降级视图（该键缺省）导出，
+ * 不再整份拒绝。原文未进隔离区时仍 fail-closed——降级会让备份里再也找不回它。
+ * AQL 责任账本损坏是显式 fail-closed 设计（appStore requirePersistedAqlState），不在此放行。
+ */
+const QUARANTINE_DEGRADE_EXCLUDED_KEYS: ReadonlySet<string> = new Set([
+  'qp-aql-state-v1',
+  QUARANTINE_STORAGE_KEY,
+  'qp-active-ref-v1',
+]);
+
+function quarantinedRawTextsByKey(
+  storeOverrides: Partial<Record<(typeof PROJECT_KEYS)[number], string>>,
+): Map<string, Set<string>> {
+  const byKey = new Map<string, Set<string>>();
+  let encoded: string | null | undefined;
+  try {
+    encoded = Object.prototype.hasOwnProperty.call(storeOverrides, QUARANTINE_STORAGE_KEY)
+      ? storeOverrides[QUARANTINE_STORAGE_KEY]
+      : localStorage.getItem(QUARANTINE_STORAGE_KEY);
+  } catch {
+    return byKey;
+  }
+  if (encoded == null) return byKey;
+  let parsed: unknown;
+  try { parsed = JSON.parse(encoded); } catch { return byKey; }
+  if (quarantineValidationError(parsed) !== null || !isObject(parsed)) return byKey;
+  for (const [key, entry] of Object.entries(parsed)) {
+    if (!isObject(entry)) continue;
+    const texts = new Set<string>();
+    if (typeof entry.raw === 'string') texts.add(entry.raw);
+    if (typeof entry.latestRaw === 'string') texts.add(entry.latestRaw);
+    byKey.set(key, texts);
+  }
+  return byKey;
+}
+
+let lastProjectExportDegradedStores: string[] = [];
+
+/** 最近一次 buildProjectJson 因「已隔离」而按降级视图省略的业务键（供导出成功提示明示）。 */
+export function getLastProjectExportDegradedStores(): string[] {
+  return [...lastProjectExportDegradedStores];
+}
+
 export function buildProjectJson(
   appVersion: string,
   allowEmpty = false,
@@ -2274,6 +2348,12 @@ export function buildProjectJson(
 ): string {
   const stores: Record<string, string> = {};
   let knownStoreCount = 0;
+  lastProjectExportDegradedStores = [];
+  const quarantinedTexts = quarantinedRawTextsByKey(storeOverrides);
+  const degradedStores: string[] = [];
+  const quarantinedCorrupt = (key: string, value: string): boolean => (
+    !QUARANTINE_DEGRADE_EXCLUDED_KEYS.has(key) && quarantinedTexts.get(key)?.has(value) === true
+  );
   // 分析数据快照库损坏时先记下而不立即抛：是否阻断取决于是否仍有卡片引用它（见循环后）。
   let corruptAnalysisDataDetail: string | null = null;
   // 逐键校验的解析结果留给下方跨键预检/裁剪复用：快照库最多 40 份工作表，不再整库重复解析。
@@ -2301,6 +2381,10 @@ export function buildProjectJson(
       try {
         parsed = JSON.parse(v);
       } catch {
+        if (quarantinedCorrupt(k, v)) {
+          degradedStores.push(k);
+          continue;
+        }
         if (k === 'qp-analysis-data-v1') {
           corruptAnalysisDataDetail = 'JSON 损坏';
           continue;
@@ -2308,6 +2392,11 @@ export function buildProjectJson(
         throw new Error(`项目数据「${k}」JSON 损坏，项目未导出`);
       }
       const detail = projectStoreValidationError(k, parsed);
+      if (detail && quarantinedCorrupt(k, v)) {
+        // 与读取侧降级视图一致：该键按缺省导出，损坏原文随隔离区附件带出。
+        degradedStores.push(k);
+        continue;
+      }
       if (detail && k === 'qp-analysis-data-v1') {
         corruptAnalysisDataDetail = `损坏：${detail}`;
         continue;
@@ -2389,6 +2478,7 @@ export function buildProjectJson(
     const checked = validateProjectFile(encoded);
     if (checked.file === null) throw new Error(`生成的项目文件未通过自校验：${checked.error}`);
   }
+  lastProjectExportDegradedStores = degradedStores;
   return encoded;
 }
 
@@ -2694,7 +2784,7 @@ export async function applyProjectText(text: string): Promise<ProjectApplyResult
     try {
       staged = await stageProjectImportJournal(validated.file.stores, storeBackup, 'before-vault');
     } catch (error) {
-      return projectApplyFailure(`无法建立项目导入 journal，项目未改写：${errorMessage(error)}`);
+      return stageJournalFailure(error);
     }
     const previous = staged.journal.previous;
     let beginError: unknown = null;
@@ -2764,7 +2854,7 @@ export async function applyProjectText(text: string): Promise<ProjectApplyResult
   try {
     staged = await stageProjectImportJournal(validated.file.stores, storeBackup, 'stores-only');
   } catch (error) {
-    return projectApplyFailure(`无法建立项目导入 journal，项目未改写：${errorMessage(error)}`);
+    return stageJournalFailure(error);
   }
   const storeError = applyProjectStoreImage(staged.journal.target);
   if (storeError) {

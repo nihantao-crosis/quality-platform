@@ -23,9 +23,10 @@ import {
   deleteBrowserSnapshot,
   discardClearRecoveryMarker,
   isCommittedClearReceipt,
-  persistClearRecoveryIntent,
+  persistClearRecoveryIntentBounded,
   recoverPendingClearOperation,
   restoreBrowserSnapshot,
+  sweepOrphanClearRecoverySnapshot,
   updateClearRecoveryPhase,
   type BrowserDataSnapshot,
 } from '../../platform/clearRecovery';
@@ -107,6 +108,11 @@ function clearFailureOutcome(error: unknown): ClearFailureOutcome | null {
     : null;
 }
 
+function isRecoveryPointUnavailable(error: unknown): boolean {
+  return typeof error === 'object' && error !== null
+    && (error as { recoveryPointUnavailable?: unknown }).recoveryPointUnavailable === true;
+}
+
 /** 未决清库必须在 reload 调用前先建立全局交互屏障；宿主拒绝 reload 时屏障仍保留。 */
 export function blockUiForUnresolvedClear(
   error: unknown,
@@ -149,7 +155,22 @@ export async function clearDurableBusinessDataAtomically(
   }
   const snapshot = snapshotBrowserBusinessData();
   const opId = newClearOperationId();
-  persistClearRecoveryIntent(opId, snapshot);
+  // 存储接近配额时内联 marker 写不下，自动改用 IndexedDB 快照 + 小 marker（fix2609j PLATFORM-02）。
+  const marker = await persistClearRecoveryIntentBounded(opId, snapshot);
+  try {
+    await commitBrowserAndVaultClear(db, opId, snapshot);
+  } finally {
+    // IndexedDB 快照是用户要求清除的数据：marker 已移除后立即清扫；未决（marker 仍在）时保留作恢复依据。
+    if (marker.version !== 1) await sweepOrphanClearRecoverySnapshot();
+  }
+}
+
+/** 恢复意图已持久化之后的删除 + SQLite 原子清库 + 裁决。 */
+async function commitBrowserAndVaultClear(
+  db: typeof platform.datasetDb,
+  opId: string,
+  snapshot: BrowserDataSnapshot,
+): Promise<void> {
   try {
     deleteBrowserSnapshot(snapshot);
     updateClearRecoveryPhase(opId, 'browser-cleared');
@@ -318,7 +339,11 @@ export function OptionsModal({ onClose }: { onClose: () => void }) {
         }
         resumePendingDatasetWorkAfterClearFailure();
         setClearing(false);
-        showToast(`本地数据清除未提交：${errText(error)}；当前工作表已标记为未保存，请先${PROJECT_BACKUP_HINT}备份再重试`);
+        // 恢复点因空间不足无法建立时，配额不变重试必然同样失败：错误本身已给出释放空间的出路，
+        // 不再提示「再重试」（fix2609j PLATFORM-02）。
+        showToast(isRecoveryPointUnavailable(error)
+          ? `本地数据清除未提交：${errText(error)}；当前工作表已标记为未保存，建议先${PROJECT_BACKUP_HINT}备份`
+          : `本地数据清除未提交：${errText(error)}；当前工作表已标记为未保存，请先${PROJECT_BACKUP_HINT}备份再重试`);
         useApp.getState().setBusyOverlay(null);
         return;
       }

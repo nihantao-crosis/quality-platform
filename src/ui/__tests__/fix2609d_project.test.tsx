@@ -231,12 +231,15 @@ describe('M4 P3：隔离失败（配额满）时导出文案给出卡片标签�
     expect(blocked).toContain('项目未导出');
 
     spy.mockRestore();
-    const retried = await buildProjectJsonFull('1.43.0').then(() => '', (error: Error) => error.message);
-    // 钩子重试隔离成功，落到快照库损坏的导出文案：条件化「空间充足时」并指向一键删除入口。
-    expect(retried).not.toContain('尚未成功复制到隔离区');
-    expect(retried).toContain(`「${a.title}」（数据集 批次A.csv`);
-    expect(retried).toContain('空间充足时');
-    expect(retried).toContain('删除全部快照缺失记录');
+    // 钩子重试隔离成功后，损坏原文已随隔离区附件带出：导出侧与读取侧同口径（fix2609j PLATFORM-05），
+    // 按降级视图导出——快照库缺省、引用它的卡片标记为「快照缺失」，不再要求先保存一条新分析。
+    const retried = JSON.parse(await buildProjectJsonFull('1.43.0')) as { stores: Record<string, string> };
+    expect(retried.stores[LS_ANALYSIS_DATA]).toBeUndefined();
+    const exportedA = (JSON.parse(retried.stores[LS_ANALYSES]) as Array<{ id: string; snapshot: Record<string, unknown> }>)
+      .find((entry) => entry.id === a.id)!;
+    expect(exportedA.snapshot.sourceMissing).toBe(true);
+    expect(exportedA.snapshot.sourceDataKey).toBeUndefined();
+    expect(JSON.parse(retried.stores[LS_QUARANTINE])[LS_ANALYSIS_DATA].raw).toBe('{"被截断');
     expect(JSON.parse(localStorage.getItem(LS_QUARANTINE)!)[LS_ANALYSIS_DATA].raw).toBe('{"被截断');
   });
 });
