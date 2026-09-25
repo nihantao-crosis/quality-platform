@@ -66,10 +66,12 @@ export interface AqlBatchRecord {
  * 人工管理条件引起的正式检验状态转移(S-2):
  * · conditions-met:正常 → 放宽(得分≥30 且「生产稳定」「负责部门同意」同时勾选);
  * · conditions-withdrawn:放宽 → 正常(任一管理条件被取消);
- * · restore-normal:放宽 → 正常(负责部门因其他条件决定恢复)。
+ * · restore-normal:放宽 → 正常(负责部门因其他条件决定恢复);
+ * · resume-tightened:加严检验暂停 → 以加严检验重新开始(第 9.4 条,供方纠正且负责部门确认有效;
+ *   前后状态都是加严,记录的是「解除暂停」这一人工决定)。
  * 批次登记引起的转移已由批次记录的 stateBefore/stateAfter 留痕,不重复写转移记录。
  */
-export type AqlTransitionAction = 'conditions-met' | 'conditions-withdrawn' | 'restore-normal';
+export type AqlTransitionAction = 'conditions-met' | 'conditions-withdrawn' | 'restore-normal' | 'resume-tightened';
 
 interface AqlTransitionFields {
   kind: 'transition';
@@ -112,6 +114,7 @@ const TRANSITION_ACTION_LABEL: Record<AqlTransitionAction, string> = {
   'conditions-met': '管理条件齐备 → 转放宽检验',
   'conditions-withdrawn': '管理条件取消 → 恢复正常检验',
   'restore-normal': '因其他条件恢复正常检验',
+  'resume-tightened': '纠正措施确认有效 → 解除暂停，恢复加严检验',
 };
 
 /** 转移动作的中文说明(AQL 页与专项报告共用)。 */
@@ -298,6 +301,10 @@ function transitionIsPossible(x: AqlTransitionFields): boolean {
     case 'restore-normal':
       return x.stateBefore === 'reduced' && x.stateAfter === 'normal' && bothMet
         && x.switchingScoreBefore >= 30 && x.switchingScoreAfter === 0;
+    case 'resume-tightened':
+      // 暂停只发生在加严检验中,加严期间转移得分恒为 0;解除暂停后仍是加严检验。
+      return x.stateBefore === 'tightened' && x.stateAfter === 'tightened'
+        && x.switchingScoreBefore === 0 && x.switchingScoreAfter === 0;
     default:
       return false;
   }
@@ -312,7 +319,8 @@ function normalizeAqlTransitionRecord(value: unknown): AqlTransitionRecord | nul
   if (x.kind !== 'transition'
     || !text(x.id, AQL_TRACE_LIMITS.inspectedAt + AQL_TRACE_LIMITS.batchId)
     || !text(x.sequenceId, AQL_TRACE_LIMITS.sequenceId) || x.sequenceId !== x.sequenceId.trim()
-    || (x.action !== 'conditions-met' && x.action !== 'conditions-withdrawn' && x.action !== 'restore-normal')
+    || (x.action !== 'conditions-met' && x.action !== 'conditions-withdrawn' && x.action !== 'restore-normal'
+      && x.action !== 'resume-tightened')
     || !text(x.inspector, AQL_TRACE_LIMITS.inspector)
     || !text(x.inspectedAt, AQL_TRACE_LIMITS.inspectedAt)
     || typeof x.note !== 'string' || x.note.length > AQL_TRACE_LIMITS.note
@@ -728,18 +736,24 @@ export function restoreNormalInspection(
   return { ...moved, records: [...s.records, transitionRecord(s, moved, 'restore-normal', meta)] };
 }
 
-/** 9.4：供方完成纠正且负责部门确认有效后，以加严检验重新开始。 */
-export function resumeTightenedInspection(status: SwitchStatus): SwitchStatus {
+/**
+ * 9.4：供方完成纠正且负责部门确认有效后，以加严检验重新开始。解除暂停是人工责任决定，
+ * 与其他人工转移一样向责任账本追加一条 kind:'transition'(action='resume-tightened')记录
+ * (账本满则 fail-closed 拒绝，不裁剪旧记录)。未暂停时原样返回，不写记录。
+ */
+export function resumeTightenedInspection(status: SwitchStatus, meta?: AqlTransitionMeta): SwitchStatus {
   const s = normalizeSwitchStatus(status);
   if (!s.suspended) return s;
-  return {
+  assertLedgerHasRoom(s);
+  const moved = {
     ...s,
-    state: 'tightened',
+    state: 'tightened' as const,
     suspended: false,
     tightenedRejections: 0,
     sinceSwitch: [],
     note: '纠正措施已确认有效 → 恢复加严检验（表 2-B）',
   };
+  return { ...moved, records: [...s.records, transitionRecord(s, moved, 'resume-tightened', meta)] };
 }
 
 /* ------------------------------------------------------------------------------------------
@@ -759,7 +773,8 @@ export function resumeTightenedInspection(status: SwitchStatus): SwitchStatus {
  *   第一条 kind:'transition' 记录之前(全账本没有转移记录时也包括终态)，按正式规则推定这类人工
  *   转移：正常→放宽须重放得分 ≥30；放宽→正常得分清零。结果标记为 legacy「历史账本未含转移
  *   记录」。出现第一条转移记录之后，任何未留痕的人工转移都按不一致拒绝。
- * · 暂停后「确认纠正措施有效 → 恢复加严」从不写记录，重放时按正式规则推定(仍是加严)。
+ * · 暂停后「确认纠正措施有效 → 恢复加严」:本版起写 resume-tightened 转移记录并按记录重放；
+ *   更早的账本从不写这条记录，重放时仍按正式规则推定(仍是加严，任何账本都允许)。
  * · v1.34 之前建立的 legacy 序列(AQL_LEGACY_SEQUENCE_ID)：初始计数未知，且 v1.32/33 改检验水平/
  *   AQL(哪怕随后改回)会在任何状态下不留痕地重置为初始正常检验，因此从第一个可确定的状态转移点
  *   (换表记录/转移记录)起严格重放、之前只做状态连续与逐对得分核对，并在第一条转移记录之前按
@@ -839,15 +854,21 @@ function replayBatchRecord(current: SwitchStatus, record: AqlBatchRecord): Switc
   return withoutRecords(next);
 }
 
-/** 用 setSwitchConditions / restoreNormalInspection 本身重放一条人工状态转移记录。 */
+/** 用 setSwitchConditions / restoreNormalInspection / resumeTightenedInspection 本身重放一条人工状态转移记录。 */
 function replayTransitionRecord(current: SwitchStatus, record: AqlTransitionRecord): SwitchStatus | string {
   if (current.state !== record.stateBefore || current.switchingScore !== record.switchingScoreBefore) {
     return `${ledgerLabel(record)}的转移前状态/得分为${STATE_LABEL[record.stateBefore]}/${record.switchingScoreBefore}，`
       + `按记录链重放应为${STATE_LABEL[current.state]}/${current.switchingScore}`;
   }
+  // 解除暂停只能发生在暂停期间；未暂停时 resumeTightenedInspection 是无操作，不能让它「重放一致」。
+  if (record.action === 'resume-tightened' && !current.suspended) {
+    return `${ledgerLabel(record)}发生在抽样检验未暂停时，按记录链重放不应存在`;
+  }
   let next: SwitchStatus;
   try {
-    if (record.action === 'conditions-met') {
+    if (record.action === 'resume-tightened') {
+      next = resumeTightenedInspection(current);
+    } else if (record.action === 'conditions-met') {
       next = setSwitchConditions(
         { ...current, productionSteady: false, reducedApproved: false },
         { productionSteady: true, reducedApproved: true },
@@ -1056,7 +1077,10 @@ export function auditAqlLedger(value: Partial<SwitchStatus> | null | undefined):
         if (previousScore !== null && record.switchingScoreBefore !== previousScore) {
           return mismatch(`${ledgerLabel(record)}的转移前得分 ${record.switchingScoreBefore} 与上一条记录的得分 ${previousScore} 不连续`);
         }
-        known = seed(replaySeedAt(status.sequenceId, record.stateBefore, record.switchingScoreBefore));
+        known = seed(record.action === 'resume-tightened'
+          // 解除暂停记录本身说明此前处于加严暂停态(暂停门槛为累计 5 批不接收)。
+          ? replaySeed(status.sequenceId, { state: 'tightened', suspended: true, tightenedRejections: 5 })
+          : replaySeedAt(status.sequenceId, record.stateBefore, record.switchingScoreBefore));
       } else {
         // 逐对得分核对：以上一条记录的得分(或人工往返/参数重置清零后的 0)为起点单批重放。
         // 换入/换出加严取决于跨批窗口(未知段无从得知)，其得分已由单条校验固定为 0。
@@ -1088,7 +1112,7 @@ export function auditAqlLedger(value: Partial<SwitchStatus> | null | undefined):
     for (const candidate of expanded) {
       const base = candidate.status;
       let next: SwitchStatus | string;
-      if (base.suspended) {
+      if (base.suspended && !(isAqlTransitionRecord(record) && record.action === 'resume-tightened')) {
         next = `${ledgerLabel(record)}发生在抽样检验暂停期间，正式流程不允许`;
       } else if (base.state !== record.stateBefore) {
         next = `${ledgerLabel(record)}的检验前状态为${STATE_LABEL[record.stateBefore]}，`

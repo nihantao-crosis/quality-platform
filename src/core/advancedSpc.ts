@@ -2,6 +2,7 @@
  * 进阶控制图 — EWMA（指数加权移动平均）与 CUSUM（累积和，表格法）。
  * 对小幅过程漂移比 Shewhart 图更敏感。
  */
+import { EWMA_LAMBDA, EWMA_L } from './advancedSpcParams';
 
 /**
  * σ̂ 相对中心线的数值分辨率下限(单位:中心线的 ulp 量级,EPSILON·|μ|)。
@@ -54,7 +55,7 @@ export interface EwmaResult {
  * 控制限 μ0 ± L·σ·√(λ/(2−λ)·(1−(1−λ)^{2i}))。
  * @param sigma 单点标准差（子组均值序列传 σ/√n）
  */
-export function ewmaSeries(data: number[], mu0: number, sigma: number, lambda = 0.2, L = 2.7): EwmaResult {
+export function ewmaSeries(data: number[], mu0: number, sigma: number, lambda = EWMA_LAMBDA, L = EWMA_L): EwmaResult {
   const unavailableReason = advancedSpcSigmaIssue(sigma, mu0);
   const z: number[] = [];
   const ucl: number[] = [];

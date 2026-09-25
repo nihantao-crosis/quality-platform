@@ -10,7 +10,7 @@ import {
 import type { ReportSpec } from './report';
 import { analysisTableTotalRows, safeSheetName, type AnalysisReportPayload } from './analysisReportModel';
 import {
-  timestampText, appVersionText, reportSpecText, withinSigmaLabel,
+  timestampText, appVersionText, reportSpecText, withinSigmaLabel, reportNum,
   MAX_XLSX_SHEET_ROWS, MAX_XLSX_VIOLATION_ROWS, tableTruncationNote, violationTruncationNote,
   capabilityCaliberLine, type ReportCapabilityOptions,
 } from './reportLabels';
@@ -42,6 +42,19 @@ export function xlsxTableCell(value: string | number): XlsxCell {
   const decimals = (fixed ?? exp)![1]?.length ?? 0;
   if (exp) return { t: 'n', v, z: `0${decimals > 0 ? `.${'0'.repeat(decimals)}` : ''}E+00` };
   return decimals > 0 ? { t: 'n', v, z: `0.${'0'.repeat(decimals)}` } : { t: 'n', v };
+}
+
+/**
+ * 统计量数值单元格(3b G21 尾巴):值写原始 double(不预先四舍五入),显示格式按报告层
+ * reportNum 同一派生规则取得——常规量级为 0.0000 定点，小量级(4.703e-9)自动为 0.000E+00,
+ * 与 HTML/Word/PPT 同一格显示一致，Excel 里也不会把小量级均值显示成 0 或 15 位原始长串。
+ * 非有限值交 aoa_to_sheet 原生分支(与旧行为一致)。
+ */
+export function xlsxStatCell(value: number, digits: number): XlsxCell {
+  if (!Number.isFinite(value)) return value;
+  const formatted = xlsxTableCell(reportNum(value, digits));
+  if (typeof formatted === 'object' && formatted.t === 'n') return { ...formatted, v: value };
+  return { t: 'n', v: value };
 }
 
 /**
@@ -126,7 +139,11 @@ export function buildXlsx(
       s.i,
       ...s.vals,
       // PLATFORM-14:写原始 double,不得 Number(nf(·,4)) 预先四舍五入(小量级数据会被写成数值 0)
-      ...(showDerived ? [s.mean, assessment?.family === 'xbar-s' ? M.svals[s.i - 1] : s.range] : []),
+      // 3b G21 尾巴:子组均值/极差(标准差)带数字格式(旧版 Number(nf(·,4)) 的 4 位小数形制)
+      ...(showDerived ? [
+        xlsxStatCell(s.mean, 4),
+        xlsxStatCell(assessment?.family === 'xbar-s' ? M.svals[s.i - 1] : s.range, 4),
+      ] : []),
     ]);
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([head, ...dataRows]), '数据');
   };
@@ -207,9 +224,10 @@ export function buildXlsx(
     ] : []),
     [C !== M ? '能力观测数 N' : '观测数 N', C.all.length],
     // PLATFORM-14:原始 double(小量级数据不再被 Number(nf(·,5)) 写成数值 0)
-    ['能力口径均值', C.oMean],
-    [withinSigmaLabel(C), C.sigmaWithin],
-    ['σ 整体', C.oSd],
+    // 3b G21 尾巴:数字格式沿用旧 nf(·,5) 的 5 位小数形制，小量级自动转指数格式
+    ['能力口径均值', xlsxStatCell(C.oMean, 5)],
+    [withinSigmaLabel(C), xlsxStatCell(C.sigmaWithin, 5)],
+    ['σ 整体', xlsxStatCell(C.oSd, 5)],
     ['', ''],
     ['规格 LSL / 目标 / USL', reportSpecText(spec)],
     ['正态性 (Anderson-Darling)', adRow],

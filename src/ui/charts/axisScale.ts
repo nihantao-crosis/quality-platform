@@ -87,7 +87,10 @@ export function coordinateDomain(
   }
   if (!Number.isFinite(lo) || !Number.isFinite(hi)) return [-1, 1];
 
-  if (hi > lo) {
+  // 与 tokens.niceTicks 的亚分辨率守卫同口径:跨度只有数个 ulp(如 0.1 与 0.10000000000000002)
+  // 时按常数序列处理并展开到可读宽度，不再输出只有 1 ulp 宽、刻度只剩两端点的坐标轴。
+  const subUlpSpan = hi - lo <= Number.EPSILON * Math.max(Math.abs(lo), Math.abs(hi)) * 8;
+  if (hi > lo && !subUlpSpan) {
     const padding = (hi - lo) * options.padding;
     const domainLo = lo - padding;
     const domainHi = hi + padding;

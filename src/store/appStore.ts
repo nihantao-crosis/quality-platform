@@ -7,10 +7,10 @@ import { createJSONStorage, persist } from 'zustand/middleware';
 import type { NelsonRules, NelsonRuleK, InspectionLevel, CalcState, AnovaMode, AqlMethod, AqlAcMethod, AqlRegime, SwitchStatus, SpcDataLayout, SpcSigmaMethod, GageStandard, GageToleranceSpec } from '../core';
 import {
   AQL_COLS, MAX_LOT_SIZE, aqlRegime, aqlRegimeAllows, calcKey as coreCalcKey, CALC_INIT,
-  freshSwitchStatus, normalizeSwitchStatus, DEFAULT_RULE_K, normalizeRuleK,
+  freshSwitchStatus, normalizeSwitchStatus, DEFAULT_RULE_K, normalizeRuleK, isAqlBatchRecord,
 } from '../core';
 import { isIsoCalendarDate } from '../platform/calendarDate';
-import { projectStoreValidationError, registerProjectLifecycleHooks } from '../platform/project';
+import { clampProjectName, projectStoreValidationError, registerProjectLifecycleHooks } from '../platform/project';
 import { preserveCorruptStore } from './quarantine';
 
 export type Page =
@@ -541,7 +541,8 @@ export const useApp = create<AppState>()(persist((set, get) => ({
     const safe = Object.fromEntries(Object.entries(patch).filter(([, v]) => Number.isFinite(v)));
     if (Object.keys(safe).length) set({ ...(safe as Partial<AppState>), capabilityWarningAcknowledgement: null });
   },
-  setProjectName: (projectName) => set({ projectName: projectName.trim() || '未命名项目' }),
+  // PLATFORM-06:项目名截到 MAX_PROJECT_NAME_CHARS(写读对称:merge 同样截断)。
+  setProjectName: (projectName) => set({ projectName: clampProjectName(projectName.trim()).trim() || '未命名项目' }),
   toggleSide: (side) => set((s) => {
     const next = { ...s, [side]: !s[side] };
     // 至少保留一侧
@@ -721,7 +722,9 @@ export const useApp = create<AppState>()(persist((set, get) => ({
       typeof value === 'number' && Number.isFinite(value) ? value : fallback;
     merged.chartStyle = STYLE_ORDER.includes(p.chartStyle as ChartStyle) ? p.chartStyle as ChartStyle : current.chartStyle;
     merged.showGrid = typeof p.showGrid === 'boolean' ? p.showGrid : current.showGrid;
-    merged.projectName = typeof p.projectName === 'string' && p.projectName.trim() ? p.projectName : current.projectName;
+    // 旧版无长度上限:超长项目名按 setProjectName 同一规则截断后接受(硬上限外的载荷已在校验层拒绝)。
+    const storedProjectName = typeof p.projectName === 'string' ? clampProjectName(p.projectName) : '';
+    merged.projectName = storedProjectName.trim() ? storedProjectName : current.projectName;
     merged.lsl = finiteOr(p.lsl, current.lsl);
     merged.usl = finiteOr(p.usl, current.usl);
     merged.tgt = finiteOr(p.tgt, current.tgt);
@@ -877,6 +880,10 @@ function rehydrateAqlFromStorage(): void {
   const app = useApp.getState();
   const incomingRecords = fresh.aqlSwitch?.records?.length ?? 0;
   const localRecords = app.aqlSwitch?.records?.length ?? 0;
+  // 账本含批次记录与人工状态转移记录(S-2);提示里的「批次记录」只数批次，转移条目单独说明。
+  const incomingLedger = fresh.aqlSwitch?.records ?? [];
+  const incomingBatches = incomingLedger.filter(isAqlBatchRecord).length;
+  const incomingTransitions = incomingLedger.length - incomingBatches;
   useApp.setState({
     aqlLot: fresh.aqlLot ?? app.aqlLot,
     aqlLevel: fresh.aqlLevel ?? app.aqlLevel,
@@ -885,7 +892,7 @@ function rehydrateAqlFromStorage(): void {
     aqlSwitch: fresh.aqlSwitch ?? app.aqlSwitch,
   });
   if (incomingRecords !== localRecords) {
-    app.showToast(`另一窗口更新了 AQL 责任账本（${incomingRecords} 条批次记录），已同步到本窗口`);
+    app.showToast(`另一窗口更新了 AQL 责任账本（${incomingBatches} 条批次记录${incomingTransitions > 0 ? `、${incomingTransitions} 条状态转移记录` : ''}），已同步到本窗口`);
   }
 }
 

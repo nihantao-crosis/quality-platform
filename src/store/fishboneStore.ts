@@ -1,6 +1,8 @@
 /** 鱼骨图数据与演示标记的单一持久化入口。 */
 import { projectStoreValidationError, registerProjectLifecycleHooks } from '../platform/project';
 import { preserveCorruptStore } from './quarantine';
+// dataStore 不(直接或间接)导入本模块,单向依赖无循环;探针让离开拦截/桌面关窗确认覆盖鱼骨图(STORE-10)。
+import { registerUnpersistedStateProbe } from './dataStore';
 
 export interface FishboneData {
   problem: string;
@@ -127,3 +129,7 @@ registerProjectLifecycleHooks({
     ? { [FISHBONE_STORAGE_KEY]: dirtyFishboneJson }
     : {},
 });
+
+// STORE-10:鱼骨图写入 localStorage 失败、仅在内存(dirtyFishboneJson)时,与活动表同一判定纳入
+// beforeunload / 桌面关窗确认,不再静默丢失。
+registerUnpersistedStateProbe('鱼骨图', () => dirtyFishboneJson !== null);

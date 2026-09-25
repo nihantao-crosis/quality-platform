@@ -3,6 +3,7 @@
  * Web 与桌面（Tauri）各自实现导入/导出，UI 与 core 不感知运行端。
  */
 import { assertQprojExportByteLength, assertQprojExportText, assertTextImportSize } from './importLimits';
+import { sessionLog } from '../store/sessionLog';
 
 export interface ExportJob {
   defaultName: string; // 不含扩展名
@@ -88,7 +89,11 @@ export interface DatasetDb {
 export interface PlatformAdapter {
   /** 是否为桌面端（Tauri 壳） */
   isDesktop: boolean;
-  /** 导出文件。返回落盘路径（桌面）或下载文件名（Web）；用户取消返回 null。 */
+  /**
+   * 导出文件。返回落盘路径（桌面）或下载文件名（Web）；用户取消返回 null。
+   * 桌面端文件已写入但目录同步未确认时，返回值在路径后附 {@link exportDirSyncWarningText} 后缀，
+   * 各调用方的「已保存: …」提示与会话日志因此原样带出警告(返回值只用于显示)。
+   */
   exportFile(job: ExportJob): Promise<string | null>;
   /** 打开数据文件选择对话框（csv/txt 读文本,xlsx/xls 读二进制）；取消返回 null。 */
   pickImportFile(): Promise<PickedFile | null>;
@@ -630,6 +635,16 @@ const desktopDatasetDb: DatasetDb = {
   },
 };
 
+/**
+ * 5a G16 尾巴:save_text_file / save_binary_file 返回 Option<String>——非 null 表示「文件已原子写入，
+ * 但父目录 fsync 未确认」(断电后目录项可能丢失)。这是警告不是失败:照常返回路径，并附后缀。
+ */
+export function exportDirSyncWarningText(detail: string): string {
+  const compact = detail.replace(/\s+/g, ' ').trim();
+  const shown = compact.length > 160 ? `${compact.slice(0, 159)}…` : compact;
+  return `（文件已保存，但未能确认目录同步${shown ? `：${shown}` : ''}；建议确认文件存在后再关闭电源）`;
+}
+
 const desktopAdapter: PlatformAdapter = {
   isDesktop: true,
   datasetDb: desktopDatasetDb,
@@ -643,8 +658,13 @@ const desktopAdapter: PlatformAdapter = {
       filters: [{ name: job.filterLabel, extensions: [job.ext] }],
     });
     if (!path) return null;
-    if (job.bytes) await invoke('save_binary_file', { path, dataB64: toBase64(job.bytes) });
-    else await invoke('save_text_file', { path, contents: '﻿' + (job.text ?? '') });
+    const warning = job.bytes
+      ? await invoke<string | null>('save_binary_file', { path, dataB64: toBase64(job.bytes) })
+      : await invoke<string | null>('save_text_file', { path, contents: '﻿' + (job.text ?? '') });
+    if (typeof warning === 'string') {
+      sessionLog(`导出警告 · 文件已保存，但未能确认目录同步 · ${path} · ${warning}`);
+      return `${path}${exportDirSyncWarningText(warning)}`;
+    }
     return path;
   },
   async pickImportFile() {

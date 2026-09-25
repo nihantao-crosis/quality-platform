@@ -402,6 +402,13 @@ function buildAqlPayload(): AnalysisReportPayload {
     report.state === 'normal' && report.switchingScore >= 30 && (!report.productionSteady || !report.reducedApproved)
       ? '转移得分已达到 30，但生产稳定/负责部门批准条件未同时满足，不能转放宽检验。'
       : '',
+    // G19 尾巴(CORE-06):记录链审计的 legacy 标记必须随报告披露，不能只停在数据层。
+    ...(report.ledgerAudit.status === 'legacy'
+      ? report.ledgerAudit.notes.map((note) => `责任账本记录链核对（旧账本兼容）：${note}。`)
+      : []),
+    report.ledgerAudit.status === 'mismatch'
+      ? `责任账本记录链核对未通过：${report.ledgerAudit.detail}。`
+      : '',
   ].filter(Boolean);
   const charts = p.fullInspect || report.suspended ? [] : report.regime === 'per100'
     ? [svgChart(
@@ -448,7 +455,7 @@ function buildAqlPayload(): AnalysisReportPayload {
           record.nonconforming, dispositionLabel(record.nonconformingDisposition),
           record.decision === 'accepted' ? '接收' : '不接收', record.stateAfter, record.switchingScoreAfter, record.note,
         ]),
-        note: '复验批保留追溯记录，但不计入 GB/T 2828.1 第 9.3 条转移规则。「（状态转移）」行为管理条件勾选/取消或因其他条件恢复正常检验引起的人工状态转移，检验人列为操作人。',
+        note: '复验批保留追溯记录，但不计入 GB/T 2828.1 第 9.3 条转移规则。「（状态转移）」行为管理条件勾选/取消、因其他条件恢复正常检验或暂停后确认纠正有效恢复加严检验引起的人工状态转移，检验人列为操作人。',
       },
     ],
     charts,
@@ -814,6 +821,9 @@ function buildDoePayload(): AnalysisReportPayload {
         '残差',
       );
       const fmtP = (value: number | null) => value == null ? '—' : value < 0.001 ? '<0.001' : fmt(value, 3);
+      // 3b G21 尾巴:平方和/均方以总平方和为尺度、F 为无量纲比值(尺度 1)判浮点噪声——完全可加的
+      // 数据里 A×B 的 Adj SS 不再印成 1.388e-17、F 不再印成 3.47e-16(与定点 0.0000 同义)。
+      const ssScale = Math.abs(gr.total.adjSS);
       return {
         kind: 'doe',
         title: '因子试验设计（DOE）专项报告 · 一般全因子',
@@ -831,8 +841,8 @@ function buildDoePayload(): AnalysisReportPayload {
           title: '方差分析(Adj SS,与 Minitab GLM 默认口径一致)',
           headers: ['来源', 'DF', 'Adj SS', 'Adj MS', 'F', 'P'],
           rows: [
-            ...gr.rows.map((row) => [row.name, row.df, fmt(row.adjSS, 4), row.adjMS == null ? '—' : fmt(row.adjMS, 4), row.f == null ? '—' : fmt(row.f, 2), fmtP(row.p)]),
-            ['误差', gr.error.df, fmt(gr.error.adjSS, 4), gr.error.adjMS == null ? '—' : fmt(gr.error.adjMS, 4), '', ''],
+            ...gr.rows.map((row) => [row.name, row.df, fmt(row.adjSS, 4, ssScale), row.adjMS == null ? '—' : fmt(row.adjMS, 4, ssScale), row.f == null ? '—' : fmt(row.f, 2, 1), fmtP(row.p)]),
+            ['误差', gr.error.df, fmt(gr.error.adjSS, 4, ssScale), gr.error.adjMS == null ? '—' : fmt(gr.error.adjMS, 4, ssScale), '', ''],
             ['合计', gr.total.df, fmt(gr.total.adjSS, 4), '', '', ''],
           ],
           note: '残差诊断已随本专项报告导出；概率图与直方图共享残差横轴。',
@@ -944,14 +954,15 @@ function buildDoePayload(): AnalysisReportPayload {
       {
         title: '效应与系数',
         headers: ['项', '效应', '系数', 't', 'P', '显著'],
-        rows: report.coefficients.map((term) => [term.term, fmt(term.effect, 4, responseScale), fmt(term.coefficient, 4, responseScale), fmt(term.t), fmt(term.p, 6), term.significant ? '是' : '否']),
+        // t 与标准化残差是无量纲统计量:以尺度 1 判浮点噪声(零效应的 t 不再印成 3.277e-15)
+        rows: report.coefficients.map((term) => [term.term, fmt(term.effect, 4, responseScale), fmt(term.coefficient, 4, responseScale), fmt(term.t, 4, 1), fmt(term.p, 6), term.significant ? '是' : '否']),
       },
       {
         title: '设计矩阵、拟合与残差',
         headers: ['行', '标准序', '运行序', '区组', '点类型', ...report.factors.map((factor) => factor.name), '观测', '拟合', '残差', '标准化残差'],
         rows: report.runs.slice(0, MAX_SPC_REPORT_DETAIL_ROWS).map((run) => [
           run.row, run.standardOrder ?? '—', run.runOrder, run.block ?? '—', run.pointType,
-          ...run.factorValues.map((value) => fmt(value, 6)), fmt(run.observed), fmt(run.fitted, 4, responseScale), fmt(run.residual, 4, responseScale), fmt(run.standardizedResidual),
+          ...run.factorValues.map((value) => fmt(value, 6)), fmt(run.observed), fmt(run.fitted, 4, responseScale), fmt(run.residual, 4, responseScale), fmt(run.standardizedResidual, 4, 1),
         ]),
         totalRows: report.runs.length,
       },

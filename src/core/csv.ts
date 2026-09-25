@@ -304,15 +304,53 @@ function sniffDelimiter(text: string): string {
   return line === undefined ? ',' : detectDelimiter(line);
 }
 
+interface DelimiterCounts {
+  tab: number;
+  comma: number;
+  semicolon: number;
+  /** 行首连续空白(Tab/空格)中的 Tab 个数——缩进，而非字段分隔。 */
+  leadingTab: number;
+}
+
+/** 行首连续空白段里的 Tab 个数(引号只可能出现在内容开始之后，不影响此计数)。 */
+function leadingTabCount(line: string): number {
+  let tabs = 0;
+  for (const ch of line) {
+    if (ch === '\t') tabs++;
+    else if (ch !== ' ') break;
+  }
+  return tabs;
+}
+
+/**
+ * 按首条记录的引号外计数选分隔符(parseMatrix/detectCsvBlocks 与帕累托预检共用)。
+ * 2b G6b 遗留:从 Excel/网页复制的逗号/分号文本常带行首 Tab 缩进(「\t划伤,3」)。Tab 计数与
+ * 逗号/分号打平、且全部 Tab 都来自行首连续位置时，Tab 只是缩进，优先逗号/分号;其余情况(含
+ * Tab 严格多于逗号)维持原口径。无任何分隔符时返回 null,由调用方决定默认值。
+ */
+function rankDelimiter(counts: DelimiterCounts): string | null {
+  const ranked: Array<[string, number]> = [
+    ['\t', counts.tab],
+    [',', counts.comma],
+    [';', counts.semicolon],
+  ];
+  ranked.sort((a, b) => b[1] - a[1]);
+  if (ranked[0][1] <= 0) return null;
+  if (ranked[0][0] === '\t' && counts.leadingTab === counts.tab) {
+    const text = counts.comma >= counts.semicolon ? ',' : ';';
+    if (Math.max(counts.comma, counts.semicolon) === counts.tab) return text;
+  }
+  return ranked[0][0];
+}
+
 function detectDelimiter(line: string): string {
   // 只统计引号外的分隔符:RFC-4180 引号字段内的逗号不是分隔符(Excel→SheetJS 的主要形态)
-  const counts: Array<[string, number]> = [
-    ['\t', delimiterCountOutsideQuotes(line, '\t', ANY_DELIMITER)],
-    [',', delimiterCountOutsideQuotes(line, ',', ANY_DELIMITER)],
-    [';', delimiterCountOutsideQuotes(line, ';', ANY_DELIMITER)],
-  ];
-  counts.sort((a, b) => b[1] - a[1]);
-  return counts[0][1] > 0 ? counts[0][0] : ',';
+  return rankDelimiter({
+    tab: delimiterCountOutsideQuotes(line, '\t', ANY_DELIMITER),
+    comma: delimiterCountOutsideQuotes(line, ',', ANY_DELIMITER),
+    semicolon: delimiterCountOutsideQuotes(line, ';', ANY_DELIMITER),
+    leadingTab: leadingTabCount(line),
+  }) ?? ',';
 }
 
 export interface CsvBlock {
@@ -633,8 +671,8 @@ function inspectParetoText(text: string): {
   let sawWhitespaceAfterContent = false;
   let recordIsSpaceLike = false;
   let spaceLikeRecords = 0;
-  let recordCounts = { tab: 0, comma: 0, semicolon: 0 };
-  let firstCounts: typeof recordCounts | null = null;
+  let recordCounts: DelimiterCounts = { tab: 0, comma: 0, semicolon: 0, leadingTab: 0 };
+  let firstCounts: DelimiterCounts | null = null;
 
   const observe = (ch: string) => {
     if (/\s/.test(ch)) {
@@ -660,7 +698,7 @@ function inspectParetoText(text: string): {
     sawNonWhitespace = false;
     sawWhitespaceAfterContent = false;
     recordIsSpaceLike = false;
-    recordCounts = { tab: 0, comma: 0, semicolon: 0 };
+    recordCounts = { tab: 0, comma: 0, semicolon: 0, leadingTab: 0 };
     return null;
   };
 
@@ -677,9 +715,14 @@ function inspectParetoText(text: string): {
       const error = finishRecord();
       if (error) return { delimiter: ',', records, error };
     } else {
+      // 行首缩进判定须在 observe 之前:Tab 是空白，observe 不会改变 sawNonWhitespace。
+      const leading = !sawNonWhitespace;
       observe(ch);
       if (!quoted) {
-        if (ch === '\t') recordCounts.tab++;
+        if (ch === '\t') {
+          recordCounts.tab++;
+          if (leading) recordCounts.leadingTab++;
+        }
         else if (ch === ',') recordCounts.comma++;
         else if (ch === ';') recordCounts.semicolon++;
       }
@@ -688,16 +731,10 @@ function inspectParetoText(text: string): {
   const error = finishRecord();
   if (error) return { delimiter: ',', records, error };
 
-  const counts = firstCounts ?? { tab: 0, comma: 0, semicolon: 0 };
-  const ranked: Array<[string, number]> = [
-    ['\t', counts.tab],
-    [',', counts.comma],
-    [';', counts.semicolon],
-  ];
-  ranked.sort((a, b) => b[1] - a[1]);
-  const delimiter = ranked[0][1] > 0
-    ? ranked[0][0]
-    : spaceLikeRecords >= Math.ceil(records * 0.6) ? ' ' : ',';
+  const counts: DelimiterCounts = firstCounts ?? { tab: 0, comma: 0, semicolon: 0, leadingTab: 0 };
+  // 与 parseMatrix 的 detectDelimiter 同一排名规则(含行首 Tab 缩进打平时优先逗号/分号)。
+  const delimiter = rankDelimiter(counts)
+    ?? (spaceLikeRecords >= Math.ceil(records * 0.6) ? ' ' : ',');
   // records/引号状态按 ANY_DELIMITER 口径统计,只用于选分隔符(空格分隔判定)与早期行数闸;
   // 未闭合判定与资源预算用的记录数由 quotedRecordStats 按**最终分隔符**重算(CORE-05 复审 P3)。
   return { delimiter, records };

@@ -1,5 +1,5 @@
 /** 抽样检验 AQL—正式主表、实际批判定、责任追溯与第 9.3/9.4 条转移规则。 */
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useApp } from '../../store/appStore';
 import {
   rqlForResult, producerRiskPct, masterPlanByState, CODE_LETTER_TABLE, MAX_LOT_SIZE, TABLE_BY_STATE,
@@ -7,9 +7,10 @@ import {
   decideLot, recordInspection, plansByState, normalizeSwitchStatus,
   AQL_TRACE_LIMITS,
   restoreNormalInspection, resumeTightenedInspection, setSwitchConditions, switchConditionsTransition,
-  isAqlTransitionRecord, aqlTransitionActionLabel, aqlTransitionConditionText,
+  isAqlTransitionRecord, aqlTransitionActionLabel, aqlTransitionConditionText, auditAqlLedger,
   type InspectionLevel, type InspState, type NonconformingDisposition, type SwitchStatus,
 } from '../../core';
+import { parseStrictInteger } from '../../core/numberInput';
 import type { ChartTokens } from '../tokens';
 import { Card, CardHeader, KvRows, tabStyle } from '../common';
 import { OcCurveChart } from '../charts/OcCurveChart';
@@ -47,6 +48,8 @@ export function Aql({ T }: { T: ChartTokens }) {
   // STORE-09:账本损坏期间登记/转移只能进内存且无法导出，整页停写并常驻恢复指引。
   const ledgerLocked = aqlLedgerFault !== null;
   const sw = normalizeSwitchStatus(storedSwitch);
+  // G19 尾巴:记录链审计为 legacy(旧账本按兼容规则推定)时，页面与专项报告同样提示 notes。
+  const ledgerAudit = useMemo(() => auditAqlLedger(storedSwitch), [storedSwitch]);
   const [lotDraft, setLotDraft] = useState<string | null>(null);
   const [lotError, setLotError] = useState<string | null>(null);
   const [nonconformingDraft, setNonconformingDraft] = useState('0');
@@ -67,12 +70,13 @@ export function Aql({ T }: { T: ChartTokens }) {
   const rqlP = rql.status === 'found' ? rql.p : undefined;
   const prodRisk = producerRiskPct(plan, aqlAQL, regime);
   const meta = STATE_META[sw.state];
-  const nonconforming = Number(nonconformingDraft);
-  const hasNonconforming = nonconformingDraft.trim() !== '';
   // per100 体系录入上限放宽到 n×100(计点,d 可大于样本量);percent 仍以 n 为上限
   const dMax = maxNonconforming(plan, regime);
-  const batchValid = hasNonconforming
-    && Number.isSafeInteger(nonconforming) && nonconforming >= 0 && nonconforming <= dMax;
+  // 手工数值统一严格解析(type=text):「1,000」「3件」「0x1」给出可见原因，不再被 type=number 静默清空/截断。
+  const nonconformingParsed = parseStrictInteger(nonconformingDraft, { min: 0, max: dMax });
+  const batchValid = nonconformingParsed.ok;
+  const nonconforming = nonconformingParsed.ok ? nonconformingParsed.value : Number.NaN;
+  const nonconformingReason = !nonconformingParsed.ok && !nonconformingParsed.empty ? nonconformingParsed.reason : null;
   const decision = batchValid ? decideLot(plan, nonconforming, regime) : null;
   const dispositionRequired = plan.fullInspect && batchValid && nonconforming > 0;
   const batchReady = batchValid && batchId.trim().length > 0 && inspector.trim().length > 0
@@ -182,23 +186,25 @@ export function Aql({ T }: { T: ChartTokens }) {
           <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 12.5, color: '#5b6472' }}>
             批量 N
             <input
-              type="number"
-              min={2}
-              max={MAX_LOT_SIZE}
-              step={1}
-              value={lotDraft ?? aqlLot}
+              type="text"
+              inputMode="numeric"
+              autoComplete="off"
+              spellCheck={false}
+              aria-label="批量 N"
+              value={lotDraft ?? String(aqlLot)}
               onFocus={() => { setLotDraft(String(aqlLot)); setLotError(null); }}
               onBlur={() => { if (!lotError) setLotDraft(null); }}
               onChange={(e) => {
                 const raw = e.target.value;
                 setLotDraft(raw);
-                const v = Number(raw);
-                if (raw.trim() === '' || !Number.isSafeInteger(v) || v < 2 || v > MAX_LOT_SIZE) {
-                  setLotError(`请输入 2–${MAX_LOT_SIZE.toLocaleString()} 的整数（当前仍使用 ${aqlLot.toLocaleString()}）`);
+                const parsed = parseStrictInteger(raw, { min: 2, max: MAX_LOT_SIZE });
+                if (!parsed.ok) {
+                  const range = `请输入 2–${MAX_LOT_SIZE.toLocaleString()} 的整数（当前仍使用 ${aqlLot.toLocaleString()}）`;
+                  setLotError(parsed.empty ? range : `${parsed.reason}；${range}`);
                   return;
                 }
                 setLotError(null);
-                setAql({ aqlLot: v });
+                setAql({ aqlLot: parsed.value });
               }}
               aria-invalid={lotError != null}
               className="mono"
@@ -355,7 +361,12 @@ export function Aql({ T }: { T: ChartTokens }) {
             {sw.suspended ? (
               <div role="alert" style={{ padding: 12, background: '#fff6e6', border: '1px solid #f0d69a', borderRadius: 5, fontSize: 12.5, color: '#8a6414', lineHeight: 1.65 }}>
                 加严检验已累计 5 批不接收。按 GB/T 2828.1 第 9.4 条，只有供方完成纠正且负责部门确认有效后，才能以加严检验重新开始。
-                <button type="button" disabled={ledgerLocked} onClick={() => setSw(resumeTightenedInspection(sw))} style={{ display: 'block', marginTop: 10, padding: '6px 12px', border: 0, borderRadius: 4, background: '#8a6414', color: '#fff', cursor: ledgerLocked ? 'not-allowed' : 'pointer', opacity: ledgerLocked ? 0.55 : 1 }}>
+                <label style={{ display: 'block', marginTop: 10, fontSize: 11.5, color: '#6b7480' }}>
+                  确认人（检验人）
+                  <input aria-label="恢复加严确认人" maxLength={AQL_TRACE_LIMITS.inspector} value={inspector} onChange={(e) => { setInspector(e.target.value); setSwitchError(null); }} placeholder="姓名 / 工号，写入责任账本" style={{ display: 'block', width: '100%', maxWidth: 260, boxSizing: 'border-box', marginTop: 4, padding: '6px 8px', border: '1px solid #cfd5dd', borderRadius: 4 }} />
+                </label>
+                {/* 解除暂停是人工责任决定：与其他人工转移一样写入 resume-tightened 转移记录(操作人未填写时如实记「未填写」)。 */}
+                <button type="button" disabled={ledgerLocked} onClick={() => applySwitch(() => resumeTightenedInspection(sw, { operator }))} style={{ display: 'block', marginTop: 10, padding: '6px 12px', border: 0, borderRadius: 4, background: '#8a6414', color: '#fff', cursor: ledgerLocked ? 'not-allowed' : 'pointer', opacity: ledgerLocked ? 0.55 : 1 }}>
                   已确认纠正有效，恢复加严检验
                 </button>
               </div>
@@ -373,7 +384,8 @@ export function Aql({ T }: { T: ChartTokens }) {
                   <label style={{ fontSize: 11.5, color: '#6b7480' }}>
                     {/* per100 体系录入的是「不合格数」(计点),可大于样本量;max 相应放宽到 dMax */}
                     {plan.fullInspect ? (per100 ? '全检不合格数(计点)' : '全检不合格品数') : per100 ? '样本中不合格数(计点,可大于 n)' : '样本中不合格品数'} *
-                    <input aria-label="实际不合格品数" type="number" min={0} max={dMax} step={1} value={nonconformingDraft} onChange={(e) => { setNonconformingDraft(e.target.value); setNonconformingDisposition(''); setBatchError(null); }} className="mono" style={{ display: 'block', width: '100%', boxSizing: 'border-box', marginTop: 4, padding: '6px 8px', border: `1px solid ${batchValid ? '#cfd5dd' : '#c22f2f'}`, borderRadius: 4 }} />
+                    <input aria-label="实际不合格品数" type="text" inputMode="numeric" autoComplete="off" spellCheck={false} aria-invalid={!batchValid} aria-describedby={nonconformingReason ? 'aql-nonconforming-reason' : undefined} value={nonconformingDraft} onChange={(e) => { setNonconformingDraft(e.target.value); setNonconformingDisposition(''); setBatchError(null); }} className="mono" style={{ display: 'block', width: '100%', boxSizing: 'border-box', marginTop: 4, padding: '6px 8px', border: `1px solid ${batchValid ? '#cfd5dd' : '#c22f2f'}`, borderRadius: 4 }} />
+                    {nonconformingReason && <span id="aql-nonconforming-reason" role="alert" style={{ display: 'block', marginTop: 3, fontSize: 11, color: '#c22f2f' }}>{nonconformingReason}</span>}
                   </label>
                   <div style={{ padding: '7px 10px', alignSelf: 'end', borderRadius: 4, background: decision === 'accepted' ? '#e8f4ea' : decision === 'rejected' ? '#fdecec' : '#f7f9fb', color: decision === 'accepted' ? '#2c8a45' : decision === 'rejected' ? '#c22f2f' : '#8a929d', fontWeight: 700, fontSize: 12.5 }}>
                     自动判定：{decision === 'accepted' ? `接收（d=${nonconforming} ≤ Ac=${plan.ac}）` : decision === 'rejected' ? `不接收（d=${nonconforming} ≥ Re=${plan.re}）` : '请输入有效整数'}
@@ -455,6 +467,12 @@ export function Aql({ T }: { T: ChartTokens }) {
               放宽→正常：任一批不接收、生产不稳定/延误，或其他条件需要。复验批只留痕，不计入以上转移计数。
             </div>
 
+            {ledgerAudit.status === 'legacy' && ledgerAudit.notes.length > 0 && (
+              <div role="note" aria-label="责任账本记录链核对" style={{ marginTop: 14, padding: '7px 10px', background: '#fff6e6', border: '1px solid #f0d69a', borderRadius: 4, fontSize: 11.5, color: '#8a6414', lineHeight: 1.6 }}>
+                <b>记录链核对：旧账本按兼容规则接受（一致性核对，不是防篡改签名）。</b>
+                {ledgerAudit.notes.map((note) => <div key={note}>· {note}</div>)}
+              </div>
+            )}
             {sw.records.length > 0 && (
               <div style={{ marginTop: 14, overflowX: 'auto' }}>
                 <div style={{ marginBottom: 6, fontSize: 12, fontWeight: 600, color: '#33404f' }}>最近批次与状态转移追溯记录</div>

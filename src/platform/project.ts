@@ -604,6 +604,27 @@ function gageTolByColValidationError(raw: unknown, where: string): string | null
 }
 
 /**
+ * 项目名长度上限(PLATFORM-06 复核):界面输入框、setProjectName 与偏好水合都截到此长度，
+ * 避免超长项目名拖累侧栏渲染、偏好持久化与导出文件名。按 UTF-16 码元计(与 input maxLength 同口径)。
+ */
+export const MAX_PROJECT_NAME_CHARS = 120;
+/**
+ * 已持久化/项目文件中 projectName 的硬上限。v1.43 之前界面没有长度限制，120 字以内原样读回；
+ * 121–4096 字的旧项目名按 {@link clampProjectName} 截断后接受(不因项目名整份拒绝旧 .qproj/偏好)；
+ * 超过此值只可能是异常/构造载荷，按损坏拒绝。
+ */
+export const MAX_STORED_PROJECT_NAME_CHARS = 4096;
+
+/** 项目名截到 {@link MAX_PROJECT_NAME_CHARS} 个 UTF-16 码元，且不留下半个代理对。 */
+export function clampProjectName(name: string): string {
+  if (name.length <= MAX_PROJECT_NAME_CHARS) return name;
+  let cut = name.slice(0, MAX_PROJECT_NAME_CHARS);
+  const last = cut.charCodeAt(cut.length - 1);
+  if (last >= 0xd800 && last <= 0xdbff) cut = cut.slice(0, -1);
+  return cut;
+}
+
+/**
  * 偏好 state 白名单。旧读取器会把白名单外字段判为“损坏”，所以这里新增键
  * 必须同步提升 FORMAT_VERSION（v5 新增 capabilityWarningAcknowledgement）。
  */
@@ -713,6 +734,9 @@ function prefsValidationError(raw: unknown): string | null {
     if (state[key] !== undefined && state[key] !== null && typeof state[key] !== 'string') {
       return `偏好设置 ${key} 类型无效`;
     }
+  }
+  if (typeof state.projectName === 'string' && state.projectName.length > MAX_STORED_PROJECT_NAME_CHARS) {
+    return `偏好设置 projectName 过长（${state.projectName.length.toLocaleString()} 字符，上限 ${MAX_STORED_PROJECT_NAME_CHARS.toLocaleString()}）`;
   }
   for (const [key, maxLength] of [
     ['gageGaugeName', 80], ['gageReportBy', 80], ['gageNotes', 200],
