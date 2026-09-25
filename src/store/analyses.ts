@@ -5,7 +5,7 @@
  */
 import { create } from 'zustand';
 import { markLocalWrite, watchExternalWrite } from './crossTab';
-import { errText } from '../platform/adapter';
+import { errText, platform } from '../platform/adapter';
 import {
   nf, capabilityInputError, computeCapability, evalRules, evalLimitedRules, prepareSpcData, computeGageRR, gageStudyData, GAGE_TOLERANCE,
   andersonDarling, assessCapability, countCapabilityViolations,
@@ -153,7 +153,12 @@ function sourceDataKey(data: AnalysisSourceData): string {
   return `d${(hash >>> 0).toString(36)}-${text.length.toString(36)}`;
 }
 
-function loadAnalysisDataLibrary(): AnalysisDataLibrary {
+/**
+ * 读取去重工作表库。返回 null 表示库存在但读回失败(已隔离)——调用方必须把它与
+ * 「库为空」区分开：STORE-01 中 prune 把隔离后的 {} 当作空库 removeItem,
+ * 一次普通保存就删光了 40 条分析的全部快照。
+ */
+function readAnalysisDataLibrary(): AnalysisDataLibrary | null {
   let raw: string | null = null;
   try {
     raw = localStorage.getItem(LS_ANALYSIS_DATA);
@@ -162,16 +167,25 @@ function loadAnalysisDataLibrary(): AnalysisDataLibrary {
     const detail = projectStoreValidationError(LS_ANALYSIS_DATA, parsed);
     if (detail) {
       quarantineAnalysisStore(LS_ANALYSIS_DATA, raw, detail);
-      return {};
+      return null;
     }
     return parsed as AnalysisDataLibrary;
   } catch {
     if (raw) quarantineAnalysisStore(LS_ANALYSIS_DATA, raw, 'JSON 解析失败或写入被截断');
-    return {};
+    return null;
   }
 }
 
-function storeAnalysisSourceData(data: AnalysisSourceData): string | null {
+function loadAnalysisDataLibrary(): AnalysisDataLibrary {
+  return readAnalysisDataLibrary() ?? {};
+}
+
+/**
+ * 写入一份工作表快照并返回去重键。retainKeys 是本次保存裁剪后仍被分析记录引用的旧键：
+ * 新条目与这些旧条目一次落库，库在任何时刻都不超过 MAX_ANALYSIS_DATA_ENTRIES
+ * (= MAX_SAVED_ANALYSES)。此前先写入第 41 条再 prune,读回校验判超限 → 整库隔离删除(STORE-01)。
+ */
+function storeAnalysisSourceData(data: AnalysisSourceData, retainKeys: ReadonlySet<string>): string | null {
   const baseKey = sourceDataKey(data);
   const library = loadAnalysisDataLibrary();
   const serialized = JSON.stringify(data);
@@ -182,8 +196,13 @@ function storeAnalysisSourceData(data: AnalysisSourceData): string | null {
   }
   if (library[key]) return key;
   if (!canReplaceAnalysisStore(LS_ANALYSIS_DATA)) return null;
+  const next: AnalysisDataLibrary = {};
+  for (const [existingKey, existing] of Object.entries(library)) {
+    if (retainKeys.has(existingKey)) next[existingKey] = existing;
+  }
+  next[key] = data;
   try {
-    localStorage.setItem(LS_ANALYSIS_DATA, JSON.stringify({ ...library, [key]: data }));
+    localStorage.setItem(LS_ANALYSIS_DATA, JSON.stringify(next));
     return key;
   } catch {
     return null;
@@ -196,9 +215,15 @@ function resolveSnapshotSourceData(snapshot: AnalysisSnapshot): AnalysisSourceDa
   return loadAnalysisDataLibrary()[snapshot.sourceDataKey] ?? null;
 }
 
+function referencedSourceDataKeys(saved: ReadonlyArray<SavedAnalysis>): Set<string> {
+  return new Set(saved.map((analysis) => analysis.snapshot.sourceDataKey).filter((key): key is string => !!key));
+}
+
 function pruneAnalysisDataLibrary(saved: SavedAnalysis[]) {
-  const keep = new Set(saved.map((analysis) => analysis.snapshot.sourceDataKey).filter((key): key is string => !!key));
-  const library = loadAnalysisDataLibrary();
+  const keep = referencedSourceDataKeys(saved);
+  const library = readAnalysisDataLibrary();
+  // 读回失败(已隔离或隔离失败)时绝不能把 live 库当空表删掉；清理只是尽力而为。
+  if (library === null) return;
   const next = Object.fromEntries(Object.entries(library).filter(([key]) => keep.has(key)));
   if (!canReplaceAnalysisStore(LS_ANALYSIS_DATA)) return;
   try {
@@ -227,7 +252,7 @@ function currentGageStudy() {
   return { requestedReal: !data.model.isDemo && app.gageUseReal, prepared, effective };
 }
 
-function attachWorksheetSnapshot(snapshot: AnalysisSnapshot) {
+function attachWorksheetSnapshot(snapshot: AnalysisSnapshot, retainKeys: ReadonlySet<string>) {
   const data = useData.getState();
   const rows = data.model.subs.map((subgroup) => [...subgroup.vals]);
   const flattened = rows.flat();
@@ -242,7 +267,7 @@ function attachWorksheetSnapshot(snapshot: AnalysisSnapshot) {
     isDemo: data.model.isDemo || undefined,
     indivSeries: hasDistinctIndiv ? [...data.model.indiv] : undefined,
   };
-  const key = storeAnalysisSourceData(sourceData);
+  const key = storeAnalysisSourceData(sourceData, retainKeys);
   if (key) snapshot.sourceDataKey = key;
   else snapshot.sourceData = sourceData;
 }
@@ -644,7 +669,8 @@ function pick(c: { color: string; bg: string }) {
   return { statusColor: c.color, statusBg: c.bg };
 }
 
-function snapshotOf(kind: AnalysisKind): AnalysisSnapshot {
+/** retainKeys:本次保存后仍被其他分析记录引用的去重键(见 storeAnalysisSourceData)。 */
+function snapshotOf(kind: AnalysisKind, retainKeys: ReadonlySet<string>): AnalysisSnapshot {
   const a = useApp.getState();
   const snap: AnalysisSnapshot = { snapshotVersion: 7 };
   if (kind === 'spc') {
@@ -850,7 +876,7 @@ function snapshotOf(kind: AnalysisKind): AnalysisSnapshot {
   if (kind === 'summary') {
     snap.activeVar = resolveNumericColumn(useData.getState().model, a.activeVar).name;
   }
-  if (analysisUsesWorksheet(kind, snap)) attachWorksheetSnapshot(snap);
+  if (analysisUsesWorksheet(kind, snap)) attachWorksheetSnapshot(snap, retainKeys);
   return snap;
 }
 
@@ -943,6 +969,226 @@ function nextAnalysisId(existing: ReadonlyArray<{ id: string }>): string {
   return `a${Date.now().toString(36)}-${seq}`;
 }
 
+function worksheetSignature(
+  rows: number[][], cols: string[], text: { name: string; values: string[] }[], pending: { row: number; col: number }[],
+): string {
+  return JSON.stringify({ rows, cols, text: text.map((tc) => ({ n: tc.name, v: tc.values })), pending });
+}
+
+type InactiveDatasetProbe =
+  | { status: 'absent' }
+  | { status: 'found'; sig: string }
+  | { status: 'error'; message: string };
+
+/**
+ * STORE-02:读取非活动的同名数据集(最近列表完整条目优先；轻量条目或已挤出最近列表时读本机库)。
+ * 读取失败必须如实返回 error,由调用方 fail-closed——无法确认内容就不能按名覆盖。
+ * 不需要读本机库时同步返回：无需保全的回看保持同步完成(既有调用方/测试依赖这一点)。
+ */
+function probeInactiveDataset(name: string): InactiveDatasetProbe | Promise<InactiveDatasetProbe> {
+  const recent = useData.getState().recents.find((entry) => entry.name === name);
+  if (recent?.data) {
+    const data = recent.data;
+    return { status: 'found', sig: worksheetSignature(data.rows, data.colNames, data.textCols ?? [], data.pendingCells ?? []) };
+  }
+  const db = platform.datasetDb;
+  if (!db) return { status: 'absent' };
+  return readVaultDatasetSignature(db, name);
+}
+
+async function readVaultDatasetSignature(
+  db: NonNullable<typeof platform.datasetDb>, name: string,
+): Promise<InactiveDatasetProbe> {
+  try {
+    const json = await db.get(name);
+    if (!json) return { status: 'absent' };
+    const data = JSON.parse(json) as Partial<{
+      name: string; rows: number[][]; colNames: string[];
+      textCols: { name: string; values: string[] }[]; pendingCells: { row: number; col: number }[];
+    }>;
+    if (!data || data.name !== name || !Array.isArray(data.rows) || !Array.isArray(data.colNames)) {
+      return { status: 'error', message: '本机库记录结构无效' };
+    }
+    return {
+      status: 'found',
+      sig: worksheetSignature(data.rows, data.colNames, Array.isArray(data.textCols) ? data.textCols : [], Array.isArray(data.pendingCells) ? data.pendingCells : []),
+    };
+  } catch (error) {
+    return { status: 'error', message: errText(error) };
+  }
+}
+
+type SingleSlot = 'p' | 'c' | 'pareto' | 'fishbone';
+
+const SINGLE_SLOT_LABEL: Record<SingleSlot, string> = {
+  p: 'P 图计数数据', c: 'C 图计数数据', pareto: '帕累托数据', fishbone: '鱼骨图',
+};
+
+/** P/C 计数、帕累托、鱼骨图各只有一个存储槽(不进最近列表/本机库)，回看会直接覆盖。 */
+function singleSlotOfRecord(a: SavedAnalysis): SingleSlot | null {
+  if (a.kind === 'spc' && a.snapshot.spcType === 'p') return 'p';
+  if (a.kind === 'spc' && a.snapshot.spcType === 'c') return 'c';
+  if (a.kind === 'pareto') return a.snapshot.paretoView === 'fishbone' ? 'fishbone' : 'pareto';
+  return null;
+}
+
+/** 当前单槽内容签名；null = 内置示例/空态，没有需要保全的用户数据。 */
+function currentSingleSlot(slot: SingleSlot): { sig: string; name: string } | null {
+  const data = useData.getState();
+  if (slot === 'p') {
+    const m = data.pModel;
+    return m.isDemo ? null : { sig: JSON.stringify(['p', m.name, m.pdef, m.pNs]), name: m.name };
+  }
+  if (slot === 'c') {
+    const m = data.cModel;
+    return m.isDemo ? null : { sig: JSON.stringify(['c', m.name, m.cdata]), name: m.name };
+  }
+  if (slot === 'pareto') {
+    const m = data.paretoModel;
+    return m ? { sig: JSON.stringify(['pareto', m.name, m.rows.map((row) => [row.name, row.count])]), name: m.name } : null;
+  }
+  const fishbone = loadFishboneState();
+  if (fishbone.isDemo) return null;
+  return {
+    sig: JSON.stringify(['fishbone', fishbone.data.problem, fishbone.data.categories.map((category) => [category.name, category.causes])]),
+    name: fishbone.data.problem || '未命名问题',
+  };
+}
+
+/** 分析记录中该单槽数据的签名，口径与 currentSingleSlot 一致(演示记录不算用户数据的保存)。 */
+function recordSingleSlotSignature(a: SavedAnalysis, slot: SingleSlot): string | null {
+  if (singleSlotOfRecord(a) !== slot) return null;
+  const s = a.snapshot;
+  if (slot === 'p') {
+    const p = s.pChartData;
+    return p ? JSON.stringify(['p', p.name, p.counts, p.sampleSizes ?? p.counts.map(() => p.sampleSize)]) : null;
+  }
+  if (slot === 'c') return s.cChartData ? JSON.stringify(['c', s.cChartData.name, s.cChartData.counts]) : null;
+  if (slot === 'pareto') {
+    return s.paretoData ? JSON.stringify(['pareto', s.paretoData.name, s.paretoData.rows.map((row) => [row.name, row.count])]) : null;
+  }
+  if (!s.fishboneData || s.fishboneIsDemo === true) return null;
+  return JSON.stringify(['fishbone', s.fishboneData.problem, s.fishboneData.categories.map((category) => [category.name, category.causes])]);
+}
+
+/**
+ * STORE-03:回看单槽记录前，若当前内容是用户数据且未被任何分析记录保存(含本条)，
+ * 先按对应视图自动存为一条分析记录——之后可随时回看恢复。记录已满时不挤掉旧记录，
+ * 而是 fail-closed 取消回看；备份失败同样取消。返回 false 时当前数据未作任何更改。
+ */
+function preserveSingleSlotBeforeRestore(a: SavedAnalysis, slot: SingleSlot): boolean {
+  const current = currentSingleSlot(slot);
+  if (!current) return true;
+  const saved = useAnalyses.getState().saved;
+  if (saved.some((record) => recordSingleSlotSignature(record, slot) === current.sig)) return true;
+  const label = `当前${SINGLE_SLOT_LABEL[slot]}「${current.name}」`;
+  if (saved.length >= MAX_SAVED_ANALYSES) {
+    const message = `${label}尚未保存到项目，且分析记录已达 ${MAX_SAVED_ANALYSES} 条上限，无法先自动备份；`
+      + '为避免覆盖，已取消回看。请先删除不需要的旧记录后重试';
+    useApp.getState().showToast(message);
+    sessionLog(`无法回看分析 ${a.title} · ${message}`);
+    return false;
+  }
+  const kind: AnalysisKind = slot === 'p' || slot === 'c' ? 'spc' : 'pareto';
+  const app = useApp.getState();
+  const previous = { spcType: app.spcType, paretoView: app.paretoView };
+  // 备份按该槽对应的视图生成(与用户在该页点「保存到项目」同一路径)，生成后立即还原视图状态。
+  useApp.setState(slot === 'p' || slot === 'c' ? { spcType: slot } : { paretoView: slot === 'fishbone' ? 'fishbone' : 'pareto' });
+  let backup: SavedAnalysis | null;
+  try {
+    backup = saveAnalysisOfKind(kind);
+  } catch {
+    backup = null;
+  } finally {
+    useApp.setState(previous);
+  }
+  if (!backup) {
+    const reason = useAnalyses.getState().lastError ?? '未能生成分析记录';
+    const message = `${label}未能自动备份（${reason}）；为避免覆盖，已取消回看`;
+    useApp.getState().showToast(message);
+    sessionLog(`无法回看分析 ${a.title} · ${message}`);
+    return false;
+  }
+  useApp.getState().showToast(`${label}尚未保存到项目，已先自动存为分析记录「${backup.title}」再回放；可随时回看恢复`);
+  return true;
+}
+
+/**
+ * 按指定分析类型保存一条记录(saveCurrent 与回看前自动备份共用)。
+ * 去重工作表库与主索引的写入顺序见 STORE-01:库只保留裁剪后仍被引用的旧条目 + 新条目，
+ * 主索引写失败时把库原样回滚，被挤出的最旧记录快照不会因一次失败保存而丢失。
+ */
+function saveAnalysisOfKind(kind: AnalysisKind): SavedAnalysis | null {
+  useAnalyses.setState({ lastError: null });
+  const previousSaved = useAnalyses.getState().saved;
+  // 新记录插在最前，裁剪后最多保留 MAX_SAVED_ANALYSES - 1 条旧记录。
+  const retainKeys = referencedSourceDataKeys(previousSaved.slice(0, MAX_SAVED_ANALYSES - 1));
+  let previousLibraryRaw: string | null = null;
+  try { previousLibraryRaw = localStorage.getItem(LS_ANALYSIS_DATA); } catch { /* 无法读取时按不存在处理 */ }
+  const data = useData.getState();
+  const app = useApp.getState();
+  if (kind === 'summary') {
+    const column = resolveNumericColumn(data.model, app.activeVar);
+    const pending = data.pendingCells.filter((cell) => cell.col === column.index).length;
+    if (pending > 0) {
+      const lastError = `「${column.name}」仍有 ${pending} 个待录入单元格，描述性统计未运行，分析未保存`;
+      useAnalyses.setState({ lastError });
+      sessionLog(`保存分析失败 描述性统计 · ${lastError}`);
+      return null;
+    }
+  }
+  if (kind === 'anova' && app.hypoTab === 't2' && !data.model.isDemo && data.model.n < 2) {
+    const lastError = '双样本 t 检验需要两个不同的数值列；当前真实工作表只有一列，分析未保存';
+    useAnalyses.setState({ lastError });
+    sessionLog(`保存分析失败 双样本 t 检验 · ${lastError}`);
+    return null;
+  }
+  const summary = buildSummary(kind);
+  if (!summary) return null;
+  const datasetName = kind === 'pareto'
+    ? app.paretoView === 'fishbone'
+      ? `鱼骨图 · ${loadFishboneState().data.problem || '未命名问题'}`
+      : (data.paretoModel?.name ?? (app.paretoShowDemo ? '内置示例' : '未导入数据'))
+    : kind === 'gagerr' && !currentGageStudy().requestedReal
+      ? '内置交叉 Gage R&R 研究'
+    : kind === 'spc' && app.spcType === 'p'
+      ? data.pModel.name
+      : kind === 'spc' && app.spcType === 'c'
+        ? data.cModel.name
+        : data.model.name;
+  const entry: SavedAnalysis = {
+    ...summary,
+    id: nextAnalysisId(useAnalyses.getState().saved),
+    createdAt: Date.now(),
+    datasetName,
+    snapshot: snapshotOf(kind, retainKeys),
+  };
+  const saved = [entry, ...previousSaved].slice(0, MAX_SAVED_ANALYSES);
+  if (!persist(saved)) {
+    // snapshotOf 可能已改写去重库；主索引写入失败时整库回滚，回滚失败再退回按旧记录清理孤儿载荷。
+    if (!rollbackAnalysisDataLibrary(previousLibraryRaw)) pruneAnalysisDataLibrary(previousSaved);
+    const lastError = '本地存储空间不足，分析未保存；请先导出项目或删除旧记录后重试';
+    useAnalyses.setState({ lastError });
+    sessionLog(`保存分析失败 ${entry.title} · ${lastError}`);
+    return null;
+  }
+  useAnalyses.setState({ saved, lastError: null });
+  pruneAnalysisDataLibrary(saved);
+  sessionLog(`保存分析 ${entry.title} · ${entry.metric} · 数据集 ${entry.datasetName}`);
+  return entry;
+}
+
+function rollbackAnalysisDataLibrary(previousRaw: string | null): boolean {
+  try {
+    if (localStorage.getItem(LS_ANALYSIS_DATA) === previousRaw) return true;
+    if (previousRaw == null) localStorage.removeItem(LS_ANALYSIS_DATA);
+    else localStorage.setItem(LS_ANALYSIS_DATA, previousRaw);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export const useAnalyses = create<AnalysesState>((set, get) => ({
   saved: load(),
   lastError: null,
@@ -951,58 +1197,7 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
     set({ lastError: null });
     const page = useApp.getState().page;
     if (!ANALYSIS_PAGES.includes(page as AnalysisKind)) return null;
-    const kind = page as AnalysisKind;
-    const data = useData.getState();
-    const app = useApp.getState();
-    if (kind === 'summary') {
-      const column = resolveNumericColumn(data.model, app.activeVar);
-      const pending = data.pendingCells.filter((cell) => cell.col === column.index).length;
-      if (pending > 0) {
-        const lastError = `「${column.name}」仍有 ${pending} 个待录入单元格，描述性统计未运行，分析未保存`;
-        set({ lastError });
-        sessionLog(`保存分析失败 描述性统计 · ${lastError}`);
-        return null;
-      }
-    }
-    if (kind === 'anova' && app.hypoTab === 't2' && !data.model.isDemo && data.model.n < 2) {
-      const lastError = '双样本 t 检验需要两个不同的数值列；当前真实工作表只有一列，分析未保存';
-      set({ lastError });
-      sessionLog(`保存分析失败 双样本 t 检验 · ${lastError}`);
-      return null;
-    }
-    const summary = buildSummary(kind);
-    if (!summary) return null;
-    const datasetName = kind === 'pareto'
-      ? app.paretoView === 'fishbone'
-        ? `鱼骨图 · ${loadFishboneState().data.problem || '未命名问题'}`
-        : (data.paretoModel?.name ?? (app.paretoShowDemo ? '内置示例' : '未导入数据'))
-      : kind === 'gagerr' && !currentGageStudy().requestedReal
-        ? '内置交叉 Gage R&R 研究'
-      : kind === 'spc' && app.spcType === 'p'
-        ? data.pModel.name
-        : kind === 'spc' && app.spcType === 'c'
-          ? data.cModel.name
-          : data.model.name;
-    const entry: SavedAnalysis = {
-      ...summary,
-      id: nextAnalysisId(get().saved),
-      createdAt: Date.now(),
-      datasetName,
-      snapshot: snapshotOf(kind),
-    };
-    const saved = [entry, ...get().saved].slice(0, MAX_SAVED_ANALYSES);
-    if (!persist(saved)) {
-      // snapshotOf 可能已先写入去重数据；主索引写入失败时必须移除这份孤儿载荷。
-      pruneAnalysisDataLibrary(get().saved);
-      const lastError = '本地存储空间不足，分析未保存；请先导出项目或删除旧记录后重试';
-      set({ lastError });
-      sessionLog(`保存分析失败 ${entry.title} · ${lastError}`);
-      return null;
-    }
-    set({ saved, lastError: null });
-    pruneAnalysisDataLibrary(saved);
-    sessionLog(`保存分析 ${entry.title} · ${entry.metric} · 数据集 ${entry.datasetName}`);
-    return entry;
+    return saveAnalysisOfKind(page as AnalysisKind);
   },
 
   remove: (id) => {
@@ -1040,26 +1235,22 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
     const usesWorksheet = analysisUsesWorksheet(a.kind, s);
     const source = usesWorksheet ? resolveSnapshotSourceData(s) : null;
     if (source) {
-      // 双审 P1:回看快照会覆盖同名活动工作表的全部持久副本(qp-dataset-v1/recents)并清空撤销栈。
-      // 若当前同名工作表已有后续编辑,先自动另存为副本再回放,否则用户数据不可恢复地丢失。
-      const dataState = useData.getState();
-      const current = dataState.model;
-      const sig = (rows: number[][], cols: string[], text: { name: string; values: string[] }[], pending: { row: number; col: number }[]) =>
-        JSON.stringify({ rows, cols, text: text.map((tc) => ({ n: tc.name, v: tc.values })), pending });
-      const currentSig = sig(current.subs.map((x) => x.vals), current.colNames, dataState.textCols, dataState.pendingCells);
-      const sourceSig = sig(source.rows, source.colNames, source.textCols, source.pendingCells ?? []);
-      // 上一次副本写库失败后，活动表已是异名内存副本。再次点击回看时
-      // 也必须继续 fail-closed，不能因「已异名」绕过安全副本闸门。
-      const mustStash = dataState.activeUnpersisted
-        || (current.name === source.name && currentSig !== sourceSig);
-      if (mustStash) {
+      // 双审 P1:回看快照会覆盖同名工作表的全部持久副本(qp-dataset-v1/recents/本机库)并清空撤销栈。
+      // 若同名工作表已有后续编辑，先自动另存为副本再回放，否则用户数据不可恢复地丢失。
+      const sourceSig = worksheetSignature(source.rows, source.colNames, source.textCols, source.pendingCells ?? []);
+      const stashNotes: string[] = [];
+      const stashedSuffix = () => (stashNotes.length ? `（此前已另存「${stashedName}」）` : '');
+      /** 把当前活动表另存为副本；只有副本确认落盘/落库才返回 true,失败已提示并 fail-closed。 */
+      const stashActive = async (label: string): Promise<boolean> => {
+        const dataState = useData.getState();
+        const current = dataState.model;
         // 蜂群 P1-01:副本必须**确认落盘**才能覆盖当前编辑。此前只取名字、丢弃
-        // PersistOutcome,配额满时照样提示「已另存」并回放,用户的后续编辑静默丢失。
+        // PersistOutcome,配额满时照样提示「已另存」并回放，用户的后续编辑静默丢失。
         const stash = dataState.saveAsCopy();
         if (!stash.outcome.persisted && (!stash.outcome.archiving || !stash.outcome.durability)) {
           useApp.getState().showToast(
-            `当前「${current.name}」与快照内容不同，但副本未能保存（${stash.outcome.rejected ?? '存储空间不足'}）；`
-            + '为避免丢失当前编辑，已取消回看。请先导出项目或清理存储后重试',
+            `${label}与快照内容不同，但副本未能保存（${stash.outcome.rejected ?? '存储空间不足'}）；`
+            + `为避免丢失当前编辑，已取消回看${stashedSuffix()}。请先导出项目或清理存储后重试`,
           );
           return false;
         }
@@ -1070,19 +1261,19 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
             await stash.outcome.durability!;
           } catch (error) {
             useApp.getState().showToast(
-              `当前「${current.name}」与快照内容不同，但副本「${stash.name}」未能写入本机数据库（${errText(error)}）；`
-              + '为避免丢失当前编辑，已取消回看。当前编辑仍保留在内存中，请先导出项目或清理存储后重试',
+              `${label}与快照内容不同，但副本「${stash.name}」未能写入本机数据库（${errText(error)}）；`
+              + `为避免丢失当前编辑，已取消回看${stashedSuffix()}。当前编辑仍保留在内存中，请先导出项目或清理存储后重试`,
             );
             return false;
           }
           // 用户可能在等待大副本落库时又做了新操作。不得用旧 restore 请求
           // 覆盖这个更新的意图。
           const afterArchive = useData.getState();
-          const archivedSig = sig(
+          const archivedSig = worksheetSignature(
             afterArchive.model.subs.map((x) => x.vals), afterArchive.model.colNames,
             afterArchive.textCols, afterArchive.pendingCells,
           );
-          const expectedCopySig = sig(
+          const expectedCopySig = worksheetSignature(
             current.subs.map((x) => x.vals), current.colNames, dataState.textCols, dataState.pendingCells,
           );
           if (afterArchive.model.name !== stash.name || archivedSig !== expectedCopySig) {
@@ -1091,10 +1282,43 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
           }
         }
         stashedName = stash.name;
-        useApp.getState().showToast(
-          `当前「${current.name}」与快照内容不同，已先安全另存为「${stashedName}」再回放`,
-        );
+        stashNotes.push(`${label}与快照内容不同，已先安全另存为「${stash.name}」`);
+        return true;
+      };
+      const initial = useData.getState();
+      const initialSig = worksheetSignature(
+        initial.model.subs.map((x) => x.vals), initial.model.colNames, initial.textCols, initial.pendingCells,
+      );
+      // 上一次副本写库失败后，活动表已是异名内存副本。再次点击回看时
+      // 也必须继续 fail-closed，不能因「已异名」绕过安全副本闸门。
+      const mustStash = initial.activeUnpersisted
+        || (initial.model.name === source.name && initialSig !== sourceSig);
+      if (mustStash && !(await stashActive(`当前「${initial.model.name}」`))) return false;
+      // STORE-02:快照按名称回放会整条替换最近列表中的同名条目，并按名 upsert 本机库。
+      // 同名数据集不是活动表(编辑后切到了别的表)时同样要保全：先载入它，再走同一副本闸门。
+      if (initial.model.name !== source.name) {
+        const probe = probeInactiveDataset(source.name);
+        const target = probe instanceof Promise ? await probe : probe;
+        if (target.status === 'error') {
+          useApp.getState().showToast(
+            `无法读取本机数据集库中的同名数据集「${source.name}」（${target.message}），不能确认其是否含有快照之后的编辑；`
+            + `为避免覆盖，已取消回看${stashedSuffix()}`,
+          );
+          sessionLog(`无法回看分析 ${a.title} · 同名数据集 ${source.name} 读取失败`);
+          return false;
+        }
+        if (target.status === 'found' && target.sig !== sourceSig) {
+          const loaded = await useData.getState().loadRecent(source.name);
+          if (!loaded || useData.getState().model.name !== source.name) {
+            useApp.getState().showToast(
+              `最近数据集「${source.name}」与快照内容不同，但未能载入以先行另存副本；为避免覆盖，已取消回看${stashedSuffix()}`,
+            );
+            return false;
+          }
+          if (!(await stashActive(`最近数据集「${source.name}」`))) return false;
+        }
       }
+      if (stashNotes.length) useApp.getState().showToast(`${stashNotes.join('；')}再回放`);
       const restoredRows = source.rows.map((row) => [...row]);
       try {
         useData.getState().importMatrix(
@@ -1117,6 +1341,7 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
       }
       restoredEmbeddedData = true;
     } else if (a.kind === 'spc' && s.spcType === 'p' && s.pChartData !== undefined) {
+      if (!preserveSingleSlotBeforeRestore(a, 'p')) return false;
       // 自审 P3:此前只给 importMatrix 包了 try/catch,computePChart/computeCChart
       // 同样会抛(计数非法),而调用方 onClick 不接 promise → 未捕获 rejection
       try {
@@ -1130,6 +1355,7 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
       }
       restoredEmbeddedData = true;
     } else if (a.kind === 'spc' && s.spcType === 'c' && s.cChartData !== undefined) {
+      if (!preserveSingleSlotBeforeRestore(a, 'c')) return false;
       try {
         useData.getState().importCounts('c', s.cChartData.name, [...s.cChartData.counts]);
       } catch (error) {
@@ -1187,6 +1413,7 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
       return false;
     }
     if (a.kind === 'pareto') {
+      if (!preserveSingleSlotBeforeRestore(a, s.paretoView === 'fishbone' ? 'fishbone' : 'pareto')) return false;
       if (s.paretoView === 'fishbone' && s.fishboneData) {
         try {
           saveFishboneState(s.fishboneData, s.fishboneIsDemo ?? false);
