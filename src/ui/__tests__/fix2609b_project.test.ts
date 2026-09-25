@@ -95,7 +95,7 @@ describe('M4(b) 分析快照库损坏/悬空引用：导出文案可定位、可
     expect(message).toContain('保存一条新的工作表型分析即可替换损坏的快照库');
   });
 
-  it('损坏库被新保存覆盖后，悬空引用文案给卡片标题与删除指引；按指引删除后可导出并再导入', () => {
+  it('损坏库被新保存覆盖后，悬空卡随导出降级为快照缺失形态（1c 批 M4 取代原「先删除再导出」），再导入后可删除', () => {
     const a = saveSummaryOf('批次A.csv', [[1], [2.5], [3.25], [4.75], [6]]);
     const b = saveSummaryOf('批次B.csv', [[11], [12.5], [13.25], [14.75], [16]]);
     localStorage.setItem(LS_ANALYSIS_DATA, '{"被截断');
@@ -103,21 +103,19 @@ describe('M4(b) 分析快照库损坏/悬空引用：导出文案可定位、可
     // 按上一条文案的指引：保存一条新分析后，库被替换为只含新快照。
     expect(libraryKeys()).toEqual([c.snapshot.sourceDataKey]);
 
-    const message = exportError();
-    expect(message).toContain(`「${a.title}」（数据集 批次A.csv`);
-    expect(message).toContain(`「${b.title}」（数据集 批次B.csv`);
-    expect(message).not.toContain('数据集 批次C.csv');
-    expect(message).toContain('2 条已保存分析');
-    expect(message).toContain('请在左侧「已保存分析」中删除');
-    expect(message).toContain('项目未导出');
-
-    expect(useAnalyses.getState().remove(a.id)).toBe(true);
-    expect(useAnalyses.getState().remove(b.id)).toBe(true);
     const text = buildProjectJson('1.43.0');
+    const exported = JSON.parse((JSON.parse(text) as { stores: Record<string, string> }).stores[LS_ANALYSES]) as SavedAnalysis[];
+    for (const dangling of [a, b]) {
+      const snapshot = exported.find((entry) => entry.id === dangling.id)!.snapshot;
+      expect(snapshot.sourceDataKey).toBeUndefined();
+      expect(snapshot.sourceMissing).toBe(true);
+    }
+    expect(exported.find((entry) => entry.id === c.id)!.snapshot.sourceDataKey).toBe(c.snapshot.sourceDataKey);
+
     localStorage.clear();
     expect(applyProjectJson(text)).toBeNull();
     const restored = JSON.parse(localStorage.getItem(LS_ANALYSES)!) as SavedAnalysis[];
-    expect(restored.map((entry) => entry.id)).toEqual([c.id]);
+    expect(restored.map((entry) => entry.id)).toEqual([c.id, b.id, a.id]);
   });
 
   it('损坏库已无任何卡片引用时（删光引用记录）不再永久阻断导出', () => {

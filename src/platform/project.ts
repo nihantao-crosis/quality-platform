@@ -889,6 +889,13 @@ function snapshotValidationError(raw: unknown): string | null {
   if (typeof raw.sourceDataKey === 'string' && raw.sourceDataKey.length > MAX_ANALYSIS_DATA_KEY_CHARS) {
     return `分析 sourceDataKey 超过 ${MAX_ANALYSIS_DATA_KEY_CHARS} 字符上限`;
   }
+  // 快照缺失标记（fix2609 M4）：导出侧把悬空卡降级为此形态，读取侧必须同口径接受（写读对称）。
+  if (raw.sourceMissing !== undefined) {
+    if (raw.sourceMissing !== true) return '分析 snapshot.sourceMissing 只能为 true';
+    if (raw.sourceData !== undefined || raw.sourceDataKey !== undefined) {
+      return '分析 snapshot 标记为快照缺失（sourceMissing）时不能同时包含 sourceData 或 sourceDataKey';
+    }
+  }
   if (raw.pChartData !== undefined) {
     const detail = pChartValidationError(raw.pChartData);
     if (detail) return `分析 P 图快照损坏：${detail}`;
@@ -1020,6 +1027,8 @@ function analysisUsesWorksheetSnapshot(analysis: JsonObject, snapshot: JsonObjec
  * 因此带版本号却缺来源才是损坏；无 snapshotVersion 的 v1.29/v1.30 旧卡片从未保存来源，
  * store 启动照常接受，回看时由恢复器 fail-closed 提示“数据快照缺失”。这类卡片必须
  * 可随项目导出/导入，否则一张旧卡就会阻断整份备份与恢复（fix2609 PLATFORM-04）。
+ * 快照库被隔离/替换后悬空的卡片由导出侧降级为 snapshot.sourceMissing=true（去掉 sourceDataKey），
+ * 与上述旧卡同口径：读取侧放行、回看 fail-closed（fix2609 M4）。
  */
 function analysisRequiresExactWorksheetSource(analysis: JsonObject, snapshot: JsonObject): boolean {
   if (!analysisUsesWorksheetSnapshot(analysis, snapshot)) return false;
@@ -1124,6 +1133,28 @@ function analysesReferencingMissingData(analyses: unknown, analysisData: unknown
 function analysisLabelList(analyses: JsonObject[]): string {
   const shown = analyses.slice(0, 3).map(analysisLabel).join('、');
   return analyses.length > 3 ? `${shown}等` : shown;
+}
+
+/** 供 store 侧导出钩子复用同一卡片标签口径（标题/数据集/保存时间/id，至多 3 条）。 */
+export function analysisLabelListText(analyses: ReadonlyArray<object>): string {
+  return analysisLabelList(analyses.filter(isObject) as JsonObject[]);
+}
+
+/** 一键删除入口的文案；侧栏按钮与导出提示共用，避免两处说法漂移。 */
+export const REMOVE_SNAPSHOT_MISSING_LABEL = '删除全部快照缺失记录';
+
+/**
+ * 导出侧把悬空卡片降级为「快照缺失」形态：去掉 sourceDataKey、加 sourceMissing:true。
+ * 与 PLATFORM-04 旧卡同口径（读取侧放行、回看 fail-closed），悬空旧卡不再阻断整份备份；
+ * 只改导出件，本机 live 记录不动（fix2609 M4）。
+ */
+function markAnalysesSnapshotMissing(analyses: unknown[], dangling: ReadonlySet<JsonObject>): unknown[] {
+  return analyses.map((analysis) => {
+    if (!isObject(analysis) || !dangling.has(analysis) || !isObject(analysis.snapshot)) return analysis;
+    const snapshot: JsonObject = { ...analysis.snapshot, sourceMissing: true };
+    delete snapshot.sourceDataKey;
+    return { ...analysis, snapshot };
+  });
 }
 
 /**
@@ -1317,7 +1348,8 @@ function validateProjectFile(text: string): ValidatedProjectFile {
     for (const analysis of analyses as JsonObject[]) {
       const snapshot = analysis.snapshot as JsonObject;
       if (analysisRequiresExactWorksheetSource(analysis, snapshot)
-        && snapshot.sourceData === undefined && snapshot.sourceDataKey === undefined) {
+        && snapshot.sourceData === undefined && snapshot.sourceDataKey === undefined
+        && snapshot.sourceMissing !== true) {
         return {
           file: null,
           error: `分析历史${analysisLabel(analysis)}是工作表型分析，但没有 sourceData 或 sourceDataKey`,
@@ -2227,6 +2259,8 @@ export function buildProjectJson(
   let knownStoreCount = 0;
   // 分析数据快照库损坏时先记下而不立即抛：是否阻断取决于是否仍有卡片引用它（见循环后）。
   let corruptAnalysisDataDetail: string | null = null;
+  // 逐键校验的解析结果留给下方跨键预检/裁剪复用：快照库最多 40 份工作表，不再整库重复解析。
+  const parsedStores = new Map<string, unknown>();
   for (const k of PROJECT_KEYS) {
     let v: string | null;
     if (Object.prototype.hasOwnProperty.call(storeOverrides, k)) {
@@ -2262,41 +2296,41 @@ export function buildProjectJson(
         continue;
       }
       if (detail) throw new Error(`项目数据「${k}」损坏，项目未导出：${detail}`);
+      parsedStores.set(k, parsed);
     }
     stores[k] = v;
     knownStoreCount += 1;
   }
   // 分析快照库与卡片的跨键一致性在这里用本机可执行的指引拦截（fix2609 M4(b)）：否则要么只报
   // 「JSON 损坏」不给出路，要么落到下方自校验只给内部去重键，用户在「最需要备份时」无从下手。
-  const exportedAnalyses = stores['qp-analyses-v1'] === undefined ? undefined : JSON.parse(stores['qp-analyses-v1']);
+  let exportedAnalyses = parsedStores.get('qp-analyses-v1');
   if (corruptAnalysisDataDetail !== null) {
     const referencing = analysesReferencingMissingData(exportedAnalyses, undefined);
     // 无卡片引用的损坏库与孤儿同属残留（没有任何入口能再读到它）：不写入导出件，也不阻断备份；
     // 本机 live 键不动，已隔离的原文随 qp-quarantine-v1 / 墓地键照常导出。
+    // 仍有卡片引用时不降级：损坏原文此刻未必已进隔离区，降级后备份里就再也找不回它。
     if (referencing.length > 0) {
       throw new Error(
         `项目数据「qp-analysis-data-v1」（分析数据快照库）${corruptAnalysisDataDetail}，项目未导出。`
         + `有 ${referencing.length} 条已保存分析引用该库：${analysisLabelList(referencing)}。`
-        + '处理办法：保存一条新的工作表型分析即可替换损坏的快照库，之后按导出提示在左侧「已保存分析」中'
-        + '删除仍引用旧快照的记录；或直接删除上述记录后重试',
+        + '处理办法：本地存储空间充足时，保存一条新的工作表型分析即可替换损坏的快照库（损坏原文会先复制到隔离区），'
+        + '之后这些记录会在导出件中标记为「快照缺失」；'
+        + `或在左侧「已保存分析」中点击「${REMOVE_SNAPSHOT_MISSING_LABEL}」后重试`,
       );
     }
   } else {
-    const dangling = analysesReferencingMissingData(
-      exportedAnalyses,
-      stores['qp-analysis-data-v1'] === undefined ? undefined : JSON.parse(stores['qp-analysis-data-v1']),
-    );
-    if (dangling.length > 0) {
-      throw new Error(
-        `有 ${dangling.length} 条已保存分析引用的数据快照已缺失（分析数据快照库可能曾被隔离或替换）：`
-        + `${analysisLabelList(dangling)}。这些记录已无法回看，请在左侧「已保存分析」中删除后重新导出，项目未导出`,
-      );
+    const dangling = analysesReferencingMissingData(exportedAnalyses, parsedStores.get('qp-analysis-data-v1'));
+    if (dangling.length > 0 && Array.isArray(exportedAnalyses)) {
+      // 快照库曾被隔离/替换：这些卡片已无法回看，降级为「快照缺失」形态随备份导出（fix2609 M4），
+      // 不再要求用户先在侧栏找出并删掉它们（侧栏只列前 6 条，旧卡可能根本看不到）。
+      exportedAnalyses = markAnalysesSnapshotMissing(exportedAnalyses, new Set(dangling));
+      stores['qp-analyses-v1'] = JSON.stringify(exportedAnalyses);
     }
   }
   // 孤儿分析数据是尽力而为 prune 失败后的残留：导出前丢弃，而不是让自校验把整份备份阻断
   // （本机最需要备份时反而导不出）。两键都已通过上方逐键校验，这里只做子集裁剪。
   if (stores['qp-analysis-data-v1'] !== undefined) {
-    const pruned = pruneUnreferencedAnalysisData(exportedAnalyses, JSON.parse(stores['qp-analysis-data-v1']));
+    const pruned = pruneUnreferencedAnalysisData(exportedAnalyses, parsedStores.get('qp-analysis-data-v1'));
     if (pruned) {
       if (Object.keys(pruned.kept).length > 0) stores['qp-analysis-data-v1'] = JSON.stringify(pruned.kept);
       else {

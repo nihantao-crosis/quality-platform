@@ -1,8 +1,10 @@
 /** 左侧导航 — 分组导航 + 徽标 + 项目管理器（可命名项目 + 最近数据集 + 已保存分析）。 */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useApp } from '../../store/appStore';
 import { datasetReplacementBlockReason, useData } from '../../store/dataStore';
-import { useAnalyses } from '../../store/analyses';
+import { snapshotMissingAnalysisIds, useAnalyses } from '../../store/analyses';
+import { REMOVE_SNAPSHOT_MISSING_LABEL } from '../../platform/project';
+import { timestampTextOf } from '../../platform/reportLabels';
 import { PAGES } from '../pagesMeta';
 import { Icon } from '../icons';
 import { isImeComposing } from '../imeGuard';
@@ -15,6 +17,12 @@ export function SideNav() {
   const saved = useAnalyses((s) => s.saved);
   const restore = useAnalyses((s) => s.restore);
   const removeAnalysis = useAnalyses((s) => s.remove);
+  const removeSnapshotMissing = useAnalyses((s) => s.removeSnapshotMissing);
+  // 侧栏只列前 6 条；快照缺失的旧卡可能不可见，需单独给出数量与一键删除入口（fix2609 M4）。
+  const missingIds = useMemo(() => snapshotMissingAnalysisIds(saved), [saved]);
+  // 二次点击确认：记录首次点击时的条数，条数变化（另一窗口同步/新导入）后须重新确认。
+  const [removeMissingArmedFor, setRemoveMissingArmedFor] = useState<number | null>(null);
+  const removeMissingArmed = removeMissingArmedFor === missingIds.size;
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState('');
   const [focusedRow, setFocusedRow] = useState<string | null>(null);
@@ -204,6 +212,27 @@ export function SideNav() {
           <div style={{ paddingLeft: 16, color: '#98a1ac', fontSize: 11, marginTop: 6 }}>
             分析 · {saved.length} 项已保存
           </div>
+          {missingIds.size > 0 && (
+            <div role="status" style={{ margin: '2px 0 4px 16px', padding: '4px 8px', background: '#fff6e6', border: '1px solid #f0d69a', borderRadius: 4, fontSize: 11, color: '#8a6414', lineHeight: 1.5, whiteSpace: 'normal' }}>
+              {missingIds.size} 条已保存分析的数据快照缺失，无法回看{saved.slice(0, 6).every((a) => !missingIds.has(a.id)) ? '（不在下方前 6 条中）' : ''}。
+              <button
+                type="button"
+                onClick={() => {
+                  if (!removeMissingArmed) {
+                    setRemoveMissingArmedFor(missingIds.size);
+                    return;
+                  }
+                  setRemoveMissingArmedFor(null);
+                  const removed = removeSnapshotMissing();
+                  if (removed !== null && removed > 0) showToast(`已删除 ${removed} 条快照缺失的分析记录`);
+                }}
+                onBlur={() => setRemoveMissingArmedFor(null)}
+                style={{ display: 'block', marginTop: 3, border: 0, padding: 0, background: 'transparent', color: '#c22f2f', fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit', fontSize: 11, textAlign: 'left' }}
+              >
+                {removeMissingArmed ? `再次点击确认删除 ${missingIds.size} 条` : REMOVE_SNAPSHOT_MISSING_LABEL}
+              </button>
+            </div>
+          )}
           {saved.slice(0, 6).map((a) => (
             <div
               key={a.id}
@@ -216,12 +245,17 @@ export function SideNav() {
             >
               <button
                 type="button"
-                title={`${a.title} · ${a.metric} · ${a.datasetName}\n${a.kind === 'aql' ? `保存于 ${new Date(a.createdAt).toLocaleString('zh-CN')}；点击返回当前 AQL，不回滚连续检验流` : '点击恢复此分析的数据集与参数'}`}
+                title={`${a.title} · ${a.metric} · ${a.datasetName}\n保存于 ${timestampTextOf(a.createdAt)}\n${missingIds.has(a.id) ? '数据快照缺失，无法回看；可用上方「' + REMOVE_SNAPSHOT_MISSING_LABEL + '」清理' : a.kind === 'aql' ? '点击返回当前 AQL，不回滚连续检验流' : '点击恢复此分析的数据集与参数'}`}
                 onClick={() => { void restore(a.id); closeMobileNav(); }}
                 style={{ minWidth: 0, flex: 1, display: 'flex', alignItems: 'center', overflow: 'hidden', border: 0, padding: 0, background: 'transparent', color: 'inherit', cursor: 'pointer', fontFamily: 'inherit', fontSize: 'inherit', lineHeight: 'inherit', textAlign: 'left' }}
               >
                 <span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: '50%', background: a.statusColor, flex: 'none', marginRight: 6 }} />
                 <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis' }}>{a.title}</span>
+                {missingIds.has(a.id) && (
+                  <span style={{ flex: 'none', marginLeft: 6, padding: '0 4px', borderRadius: 3, background: '#fdecec', color: '#c22f2f', fontSize: 10 }}>
+                    快照缺失
+                  </span>
+                )}
                 {a.kind === 'aql' && (
                   <span className="mono" style={{ flex: 'none', marginLeft: 6, color: '#a0a7b0', fontSize: 10 }}>
                     {new Date(a.createdAt).toLocaleDateString('zh-CN')}

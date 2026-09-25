@@ -19,7 +19,7 @@ import { useApp, resolveGageTolerance, DEFAULT_SPC_RULES, GAGE_TOL_MEMORY_CAP, n
 import { PROJECT_BACKUP_HINT, syncSpecForActiveMeasurement, useData, resolveCapabilityMeasurementData, isCapabilityWarningAcknowledged, type ParetoModel } from './dataStore';
 import { loadFishboneState, saveFishboneState, type FishboneData } from './fishboneStore';
 import { sessionLog } from './sessionLog';
-import { projectStoreValidationError, registerProjectLifecycleHooks, spcPayloadContractError } from '../platform/project';
+import { analysisLabelListText, projectStoreValidationError, registerProjectLifecycleHooks, spcPayloadContractError } from '../platform/project';
 import { preserveCorruptStore } from './quarantine';
 
 export type AnalysisKind = 'spc' | 'capability' | 'gagerr' | 'anova' | 'pareto' | 'doe' | 'aql' | 'summary';
@@ -94,6 +94,9 @@ export interface AnalysisSnapshot {
   /** v4/v5 兼容内嵌载荷；新记录优先用 sourceDataKey 去重存储。 */
   sourceData?: AnalysisSourceData;
   sourceDataKey?: string;
+  /** 快照缺失标记：快照库被隔离/替换后悬空的卡片在导出件中降级为此形态（无 sourceData/sourceDataKey），
+   * 再导入后保留；回看 fail-closed 提示「数据快照缺失」（fix2609 M4）。 */
+  sourceMissing?: true;
   pChartData?: { name: string; counts: number[]; sampleSize: number; sampleSizes?: number[] };
   cChartData?: { name: string; counts: number[] };
   // 列选择随分析记录一起快照,保证回看时"页面所见 = 保存时"(否则重算会用当前选择)
@@ -236,6 +239,47 @@ function analysisUsesWorksheet(kind: AnalysisKind, snapshot: AnalysisSnapshot): 
   if (kind === 'spc') return snapshot.spcType !== 'p' && snapshot.spcType !== 'c';
   return kind === 'capability' || kind === 'anova' || kind === 'doe' || kind === 'summary'
     || (kind === 'gagerr' && (snapshot.gageRequestedReal === true || snapshot.gageSourceReal === true));
+}
+
+/** 回看找不到工作表来源时必须 fail-closed（不回落同名最近数据集）的记录；与 restore 同一口径。 */
+function worksheetSourceRequired(a: SavedAnalysis): boolean {
+  const s = a.snapshot;
+  return s.sourceMissing === true || a.kind === 'anova' || a.kind === 'doe' || a.kind === 'summary'
+    || (s.snapshotVersion ?? 0) >= 4;
+}
+
+/** 快照库现有键的只读探测：不触发隔离写入（供渲染期调用）；库损坏/结构无效返回 null。 */
+function analysisDataLibraryKeys(): Set<string> | null {
+  try {
+    const raw = localStorage.getItem(LS_ANALYSIS_DATA);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw) as unknown;
+    if (projectStoreValidationError(LS_ANALYSIS_DATA, parsed)) return null;
+    return new Set(Object.keys(parsed as AnalysisDataLibrary));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 「快照缺失」记录：工作表型分析既无内嵌来源，引用的快照也不在（或无法读出）快照库中，且回看会
+ * fail-closed——含导入的 sourceMissing 降级卡、本机悬空引用卡与 PLATFORM-04 无来源旧卡。
+ * 与 restore 的「数据快照缺失」判定同口径，侧栏入口与一键删除共用（fix2609 M4）。
+ */
+export function snapshotMissingAnalysisIds(saved: ReadonlyArray<SavedAnalysis>): Set<string> {
+  const missing = new Set<string>();
+  let keys: Set<string> | null | undefined;
+  for (const a of saved) {
+    const s = a.snapshot;
+    if (!analysisUsesWorksheet(a.kind, s) || s.sourceData) continue;
+    if (s.sourceDataKey) {
+      if (keys === undefined) keys = analysisDataLibraryKeys();
+      if (keys === null || !keys.has(s.sourceDataKey)) missing.add(a.id);
+    } else if (worksheetSourceRequired(a)) {
+      missing.add(a.id);
+    }
+  }
+  return missing;
 }
 
 function currentGageStudy() {
@@ -935,9 +979,21 @@ function persist(saved: SavedAnalysis[]): boolean {
 
 registerProjectLifecycleHooks({
   beforeExport: () => {
-    if (protectedCorruptAnalysisStores.size > 0) {
-      throw new Error(`损坏的分析存储尚未成功复制到隔离区（${[...protectedCorruptAnalysisStores.keys()].join('、')}），项目未导出`);
+    // 先重试隔离：用户按提示释放空间后，重新导出即可放行，不必再做一次保存/删除来触发重试。
+    for (const key of [...protectedCorruptAnalysisStores.keys()]) canReplaceAnalysisStore(key);
+    if (protectedCorruptAnalysisStores.size === 0) return;
+    const parts: string[] = [];
+    if (protectedCorruptAnalysisStores.has(LS_KEY)) parts.push('已保存分析列表');
+    if (protectedCorruptAnalysisStores.has(LS_ANALYSIS_DATA)) {
+      const referencing = useAnalyses.getState().saved.filter((analysis) => !!analysis.snapshot.sourceDataKey);
+      parts.push(referencing.length > 0
+        ? `分析数据快照库（${referencing.length} 条已保存分析引用：${analysisLabelListText(referencing)}）`
+        : '分析数据快照库');
     }
+    throw new Error(
+      `本地存储空间不足，损坏的${parts.join('与')}无法备份到隔离区，项目未导出；`
+      + '请在左侧移除不需要的最近数据集（或删除不需要的分析记录）释放空间后重试导出',
+    );
   },
 });
 
@@ -950,6 +1006,8 @@ interface AnalysesState {
   /** 保存当前页的分析为一条记录;非分析页返回 null */
   saveCurrent(): SavedAnalysis | null;
   remove(id: string): boolean;
+  /** 一次删除全部「快照缺失」记录（见 snapshotMissingAnalysisIds）；返回删除条数，写入失败返回 null。 */
+  removeSnapshotMissing(): number | null;
   /** 精确恢复历史分析；异步数据集读取失败时返回 false，且不回放参数或跳页。 */
   restore(id: string): Promise<boolean>;
 }
@@ -1214,6 +1272,22 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
     return true;
   },
 
+  removeSnapshotMissing: () => {
+    const missing = snapshotMissingAnalysisIds(get().saved);
+    if (missing.size === 0) return 0;
+    const saved = get().saved.filter((a) => !missing.has(a.id));
+    if (!persist(saved)) {
+      const lastError = `本地存储空间不足，无法更新分析记录；请先${PROJECT_BACKUP_HINT}备份后重试`;
+      set({ lastError });
+      useApp.getState().showToast(lastError);
+      return null;
+    }
+    set({ saved, lastError: null });
+    pruneAnalysisDataLibrary(saved);
+    sessionLog(`删除 ${missing.size} 条快照缺失的分析记录`);
+    return missing.size;
+  },
+
   restore: async (id) => {
     const a = get().saved.find((x) => x.id === id);
     if (!a) return false;
@@ -1369,10 +1443,7 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
       sessionLog(`无法回看旧版 ${s.spcType.toUpperCase()} 记录 ${a.title} · 快照不含计数数据`);
       return false;
     }
-    const missingWorksheetSnapshotMustBlock = usesWorksheet && !restoredEmbeddedData && (
-      a.kind === 'anova' || a.kind === 'doe' || a.kind === 'summary'
-      || (s.snapshotVersion ?? 0) >= 4
-    );
+    const missingWorksheetSnapshotMustBlock = usesWorksheet && !restoredEmbeddedData && worksheetSourceRequired(a);
     if (missingWorksheetSnapshotMustBlock) {
       useApp.getState().showToast('该分析的数据快照缺失，无法准确重建；当前数据未作更改');
       sessionLog(`无法回看分析 ${a.title} · 数据快照缺失`);
