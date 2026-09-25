@@ -1079,8 +1079,10 @@ function FindReplaceModal() {
     if (!canApply) return;
     const n = findReplace(findV, replV, col);
     if (n === 0) {
-      // fix2609m G23a A2 尾巴:项目导出快照期间替换被 store 拒绝(已提示「请稍后重试」),不关闭、不报成功
-      if (!isProjectExportInFlight()) showToast('未找到可替换的值');
+      // fix2609m G23a A2 尾巴:项目导出快照期间替换被 store 拒绝(已提示「请稍后重试」),不关闭、不报成功。
+      // fix2609n G24b B3(第 7 批复审 P3):applyEdit 被拒(「工作表编辑已拒绝：…」)同样返回 0;store 已给出
+      // 原因时不得用「未找到」覆盖——只在当前没有任何提示时才补这句。
+      if (!isProjectExportInFlight() && !useApp.getState().toast) showToast('未找到可替换的值');
       return;
     }
     closeModal();

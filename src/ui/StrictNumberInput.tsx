@@ -5,7 +5,8 @@
  * Chromium 下「12.5mm」被过滤成空串或截断,受控 number 框清空时回弹旧值,子组大小「3.6」被
  * Math.round 静默改成 4,K 值越界被 normalizeRuleK 静默回落标准值——用户看不到任何原因。
  * 这里统一:type=text + numericInputMode(iOS 用全键盘)+ parseStrictNumber/parseStrictInteger
- * 严格解析原始串;非法时保留原串、标红并就地显示中文原因,store 仍按上一次有效值,并如实告知。
+ * 严格解析原始串;非法时保留原串、标红并就地显示中文原因;commitOn='change' 下终串非法回退到编辑前的值
+ * (fix2609m C1,见下),'blur' 下 store 本就未动,两者都如实告知「未修改」。
  *
  * 草稿以「编辑时的 store 值」为基准:store 值被其它入口改变(复位、换列、回看)时草稿自动作废,
  * 输入框回到 store 的真实值,不会出现框内旧草稿与实际生效值不一致。
@@ -16,6 +17,11 @@
  * 合法整串仍实时生效,当前串一旦非法(且不是 allowEmpty 的空),立即把 store 回退到快照,告警写明
  * 「未修改,仍按编辑前的值」。store 因此任何时刻都只会是「编辑前的值」或「框内完整合法串的值」,
  * 失焦、回车、切页签/卸载都不会残留前缀,卸载时无需再补写 store(也就不会误伤卸载期间别处写入的新值)。
+ *
+ * fix2609n G24b B3(第 7 批复审 P3):回退前先经 readValue 读 store 实时值,核对它仍是本会话最后一次提交的值;
+ * 不相等(外部写入已落地、本组件尚未重渲染)就放弃回退并结束会话,不用会话起点的旧快照覆盖别处的写入。
+ * 注意:外部写入「恰好等于」已提交前缀的值时仍无法区分(需要 store 侧修订号),回退照常发生。
+ * 调用方快照不止一个字段时(如能力规格限连同 1000σ 强警告确认)用 captureRevert 一并恢复。
  */
 import { useState, type CSSProperties } from 'react';
 import { numericInputMode, parseStrictInteger, parseStrictNumber, type StrictNumberResult } from '../core/numberInput';
@@ -35,6 +41,13 @@ export interface StrictNumberInputProps {
    * 调用方应快照原始字段,避免回退把「跟随」语义(null)钉成固定数。
    */
   captureRevert?: () => () => void;
+  /**
+   * 读 store 实时值(不经 React 渲染)。commitOn='change' 回退前据此核对 store 仍是本会话最后一次提交的值,
+   * 不是则放弃回退、结束会话(fix2609n G24b B3)。缺省按最近一次渲染的 value 核对。
+   */
+  readValue?: () => number | null;
+  /** 自定义非法/未填写时的就地说明(沿用各入口既有提示口径);current=当前生效值。缺省为统一口径。 */
+  formatProblem?: (problem: { reason: string; empty: boolean; current: number | null }) => string;
   /** 允许清空(写入 null)。 */
   allowEmpty?: boolean;
   /** 整数参数:按 parseStrictInteger 解析并校验闭区间;inputMode 用数字键盘。 */
@@ -52,14 +65,21 @@ export interface StrictNumberInputProps {
 
 const INVALID_BORDER = '#c22f2f';
 
-/** 编辑草稿:text=框内原串;base=草稿对应的 store 值(不一致即作废);origin/revert=本次编辑会话开始时的
- * store 值与回退函数;dirty=本会话是否已把某个合法串写进 store(串变非法时据此回退)。 */
+/** commitOn='change' 的编辑会话:origin/revert=会话开始时的 store 值与回退函数;dirty=本会话是否已把某个
+ * 合法串写进 store(串变非法时据此回退);committed=本会话最后一次写入 store 的值(回退前核对用)。 */
+interface Session {
+  origin: number | null;
+  revert: () => void;
+  dirty: boolean;
+  committed: number | null;
+}
+
+/** 编辑草稿:text=框内原串;base=草稿对应的 store 值(不一致即作废);session=进行中的编辑会话
+ * (null=无会话:'blur' 模式,或会话因外部写入被放弃,下一键重新开始)。 */
 interface Draft {
   text: string;
   base: number | null;
-  origin: number | null;
-  revert: (() => void) | null;
-  dirty: boolean;
+  session: Session | null;
 }
 
 function shownValue(value: number | null): string {
@@ -78,7 +98,7 @@ export function checkStrictNumber(
 }
 
 export function StrictNumberInput({
-  value, onCommit, label, commitOn = 'change', captureRevert, allowEmpty = false, integer, validate,
+  value, onCommit, label, commitOn = 'change', captureRevert, readValue, formatProblem, allowEmpty = false, integer, validate,
   disabled, placeholder, title, className, style, messageWidth = 260,
 }: StrictNumberInputProps) {
   const [draft, setDraft] = useState<Draft | null>(null);
@@ -88,7 +108,9 @@ export function StrictNumberInput({
   const emptyAccepted = check != null && !check.ok && check.empty && allowEmpty;
   // commitOn='change' 下串非法时 store 已回退到编辑前的值;'blur' 下 store 本就未动——两者都是「未修改」
   const problem = check && !check.ok && !emptyAccepted
-    ? `${label}${check.empty ? '未填写' : `无效：${check.reason}`}；未修改，${value == null ? '当前未生效' : `仍按编辑前的值 ${shownValue(value)}`}`
+    ? formatProblem
+      ? formatProblem({ reason: check.reason, empty: check.empty, current: value })
+      : `${label}${check.empty ? '未填写' : `无效：${check.reason}`}；未修改，${value == null ? '当前未生效' : `仍按编辑前的值 ${shownValue(value)}`}`
     : null;
   const note = check?.ok ? check.note ?? null : null;
 
@@ -107,24 +129,35 @@ export function StrictNumberInput({
 
   const handleChange = (next: string) => {
     if (commitOn === 'blur') {
-      setDraft({ text: next, base: value, origin: value, revert: null, dirty: false });
+      setDraft({ text: next, base: value, session: null });
       return;
     }
-    // 新会话:记下编辑开始时的 store 快照(草稿因外部改值作废后重新开始,也以当时的真实值为准)
-    const session = active ?? {
+    // 新会话:记下编辑开始时的 store 快照(草稿因外部改值作废或会话被放弃后重新开始,也以当时的真实值为准)
+    const session: Session = active?.session ?? {
       origin: value,
       revert: captureRevert ? captureRevert() : () => onCommit(value),
       dirty: false,
+      committed: value,
     };
     const committed = commitText(next);
     if (committed !== undefined) {
       // 生效后以新值为基准保留原串(继续编辑不跳字);store 规范化成别的值时草稿自动作废
-      setDraft({ text: next, base: committed, origin: session.origin, revert: session.revert, dirty: true });
+      setDraft({ text: next, base: committed, session: { ...session, dirty: true, committed } });
       return;
     }
-    // 当前串非法:本会话写入过前缀就回退到编辑前的值,不让前缀留在 store 里
-    if (session.dirty) session.revert?.();
-    setDraft({ text: next, base: session.dirty ? session.origin : value, origin: session.origin, revert: session.revert, dirty: false });
+    if (!session.dirty) {
+      setDraft({ text: next, base: value, session });
+      return;
+    }
+    // 当前串非法且本会话写入过前缀:回退到编辑前的值,不让前缀留在 store 里。
+    // 回退前核对 store 实时值仍是本会话最后一次提交的值——外部写入已落地时放弃回退、结束会话。
+    const live = readValue ? readValue() : value;
+    if (!Object.is(live, session.committed)) {
+      setDraft({ text: next, base: live, session: null });
+      return;
+    }
+    session.revert();
+    setDraft({ text: next, base: session.origin, session: { ...session, dirty: false, committed: session.origin } });
   };
 
   const finish = () => {

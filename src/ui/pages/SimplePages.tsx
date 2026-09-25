@@ -453,7 +453,7 @@ function GageRRInner({ T }: { T: ChartTokens }) {
               {tolModeOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
             </select>
             {(gageTolMode === 'width' || gageTolMode === 'upper' || gageTolMode === 'lower') && (
-              // fix2609l G22a:type=text + 严格解析(GAP-8-4 同族);非法原串保留并就地说明,仍按上一次有效值
+              // fix2609l G22a:type=text + 严格解析(GAP-8-4 同族);非法时保留原串并就地说明;commitOn=change 下终串非法回退到编辑前的值(fix2609m C1)
               <StrictNumberInput
                 label="过程公差数值" value={gageTolValue} allowEmpty placeholder={gageTolMode === 'width' ? '宽度' : '限值'}
                 onCommit={(v) => setGageOptions({ gageTolValue: v })}

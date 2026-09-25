@@ -13,6 +13,7 @@ import {
 import { parseStrictInteger } from '../../core/numberInput';
 import type { ChartTokens } from '../tokens';
 import { Card, CardHeader, KvRows, tabStyle } from '../common';
+import { StrictNumberInput } from '../StrictNumberInput';
 import { OcCurveChart } from '../charts/OcCurveChart';
 import { OcCurvePer100 } from '../charts/OcCurvePer100';
 
@@ -30,6 +31,15 @@ const DISPOSITION_LABEL: Record<NonconformingDisposition, string> = {
 };
 type PositiveDisposition = Exclude<NonconformingDisposition, 'none' | 'unrecorded'>;
 type SwitchConditions = Pick<SwitchStatus, 'productionSteady' | 'reducedApproved'>;
+/**
+ * fix2609n G24b B2(第 7 批复审 P2):本版记录链核对已知会隔离的三类真实历史账本。是否按 legacy 兼容由负责人
+ * 拍板,本批只把形态、后果与不丢账本的做法写清楚;README「AQL 责任账本记录链核对」小节原样引用同一段文字。
+ */
+export const AQL_LEDGER_KNOWN_LEGACY_LOCKS = '已知会被本版隔离的旧版本账本（兼容口径待定，暂按损坏处理）：'
+  + '① v1.32/v1.33 时期在放宽检验下、落在旧表 2-C 后来按国标更正的 42 格上登记的批次（如放宽检验 F 字码 / AQL 6.5，旧表为 n=8、Ac=1，国标为 Ac=2）；'
+  + '② 同一时期 100% 全检批发现不合格品却未记录处置状态的批次；'
+  + '③ v1.36–v1.42.4 在 AQL 0.025 档、批量大到方案用到样本字码 S 时，旧版会自行丢掉这类批次记录，留下的账本与检验状态对不上。'
+  + '含这类账本的项目备份（包括升级前留的 .qproj）在本版导入时同样会被拒绝，但备份里的账本原文完整，请妥善保留，待兼容口径确定后再导入。';
 const fmtLot = (lo: number, hi: number) => (hi === Infinity ? `${lo.toLocaleString()}+` : `${lo.toLocaleString()}–${hi.toLocaleString()}`);
 
 /** 按表 1 + 选定的正式主表生成批量范围 → 最终执行方案。 */
@@ -50,8 +60,6 @@ export function Aql({ T }: { T: ChartTokens }) {
   const sw = normalizeSwitchStatus(storedSwitch);
   // G19 尾巴:记录链审计为 legacy(旧账本按兼容规则推定)时，页面与专项报告同样提示 notes。
   const ledgerAudit = useMemo(() => auditAqlLedger(storedSwitch), [storedSwitch]);
-  const [lotDraft, setLotDraft] = useState<string | null>(null);
-  const [lotError, setLotError] = useState<string | null>(null);
   const [nonconformingDraft, setNonconformingDraft] = useState('0');
   const [batchId, setBatchId] = useState('');
   const [inspector, setInspector] = useState('');
@@ -174,8 +182,11 @@ export function Aql({ T }: { T: ChartTokens }) {
             : '本机的连续检验账本未通过校验，且隔离区写入失败，原文只保留在原位置。'}
           此期间登记的批次、检验状态转移都无法落盘，刷新即丢失，也无法随项目备份导出，因此已停止记录；方案参数可临时查表，但同样不会保存。
           <br />
+          {/* fix2609n G24b B2:点名已知会被隔离的旧版本形态,与 README 同源 */}
+          {AQL_LEDGER_KNOWN_LEGACY_LOCKS}
+          <br />
           {aqlLedgerFault === 'quarantined'
-            ? <>恢复方法：①「文件 → 打开…」导入一份有效的项目备份（.qproj，会覆盖当前本地数据）；②或「工具 → 选项 / 本地数据 → 清除数据并恢复演示」清除全部业务数据后重新开始（隔离区原文会一并清除）。在恢复前，工作表与分析结论可先用「导出报表」留底。</>
+            ? <>恢复方法：①「文件 → 打开…」导入一份有效的项目备份（.qproj，会覆盖当前本地数据）；②或「工具 → 选项 / 本地数据 → 清除数据并恢复演示」清除全部业务数据后，按纸质记录重新登记批次、重建账本（隔离区原文会一并清除；属于上述已知形态时，请先确认升级前的备份或纸质记录在手）。在恢复前，工作表与分析结论可先用「导出报表」留底。</>
             : <>恢复方法：「文件 → 打开…」导入一份有效的项目备份（.qproj）。请勿清除数据——那会销毁账本仅存的原文。在恢复前，工作表与分析结论可先用「导出报表」留底。</>}
           {/* M5:AQL 专项报表在账本损坏期间会被拒绝生成(否则是一份伪造的空追溯账本);受限状态按隔离语义不原地解除。 */}
           AQL 报表不在留底范围内：账本损坏期间它无法反映历史批次记录，导出会被拒绝。若已在其他窗口完成恢复，请刷新本窗口。
@@ -193,33 +204,21 @@ export function Aql({ T }: { T: ChartTokens }) {
         <div>
           <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 12.5, color: '#5b6472' }}>
             批量 N
-            <input
-              type="text"
-              inputMode="numeric"
-              autoComplete="off"
-              spellCheck={false}
-              aria-label="批量 N"
-              value={lotDraft ?? String(aqlLot)}
-              onFocus={() => { setLotDraft(String(aqlLot)); setLotError(null); }}
-              onBlur={() => { if (!lotError) setLotDraft(null); }}
-              onChange={(e) => {
-                const raw = e.target.value;
-                setLotDraft(raw);
-                const parsed = parseStrictInteger(raw, { min: 2, max: MAX_LOT_SIZE });
-                if (!parsed.ok) {
-                  const range = `请输入 2–${MAX_LOT_SIZE.toLocaleString()} 的整数（当前仍使用 ${aqlLot.toLocaleString()}）`;
-                  setLotError(parsed.empty ? range : `${parsed.reason}；${range}`);
-                  return;
-                }
-                setLotError(null);
-                setAql({ aqlLot: parsed.value });
-              }}
-              aria-invalid={lotError != null}
+            {/* fix2609n G24b B1(第 7 批复审 P2):此前自写输入框逐键合法即 setAql,打「12,000」「250件」「3,5」
+                途经的前缀 12/250/3 会留在 store、持久化并被下一批登记写进责任账本。改用 StrictNumberInput:
+                合法整串实时重查方案,当前串一旦非法立即回退到编辑前的批量,框内保留原串并沿用既有提示口径。 */}
+            <StrictNumberInput
+              label="批量 N"
+              value={aqlLot}
+              integer={{ min: 2, max: MAX_LOT_SIZE }}
+              onCommit={(v) => { if (v != null) setAql({ aqlLot: v }); }}
+              readValue={() => useApp.getState().aqlLot}
+              formatProblem={({ reason, empty, current }) => `批量 N ${empty ? '未填写' : `无效：${reason}`}；请输入 2–${MAX_LOT_SIZE.toLocaleString()} 的整数（未修改，当前仍使用 ${current == null ? '—' : current.toLocaleString()}）`}
               className="mono"
-              style={{ width: 132, padding: '6px 9px', border: `1px solid ${lotError ? '#c22f2f' : '#cfd5dd'}`, borderRadius: 4, fontSize: 12.5, color: '#2a333f' }}
+              messageWidth={360}
+              style={{ width: 132, padding: '6px 9px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12.5, color: '#2a333f' }}
             />
           </label>
-          {lotError && <div role="alert" style={{ maxWidth: 360, marginTop: 4, fontSize: 11, color: '#c22f2f' }}>{lotError}</div>}
         </div>
         <span style={{ width: 1, height: 22, background: '#e5e9ee' }} />
         <span style={{ fontSize: 12, color: '#8a929d', fontWeight: 600 }}>质量表示</span>

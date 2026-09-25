@@ -239,12 +239,26 @@ function CapabilityView({ T }: { T: ChartTokens }) {
           {i.label}
           {/* fix2609l G22a:type=text + 严格解析(GAP-8-4 同族)。parseFloat 会把「24.9mm」截成 24.9;
               严格解析同样拒绝 1e999(超出双精度范围 → Infinity 落盘会让 prefs 被判「损坏」,双审 P2)。
-              非法时保留原串、就地显示原因;终串非法则回退到编辑前的值(fix2609m G23c C1)。 */}
+              非法时保留原串、就地显示原因;终串非法则回退到编辑前的值(fix2609m G23c C1)。
+              fix2609n G24b B3(第 7 批复审 P3):setSpec 每次写入都清空 1000σ 强警告确认,回退若只写回规格,
+              用户已作出的确认会随一次打错字丢失、页面重新要求确认,与「未修改」不符。会话快照连同确认一起取,
+              回退时写回本框的规格(只写本框:其余两框本会话未动,不去覆盖别处可能的写入)并恢复确认——确认串
+              绑定数据/角色/规格指纹,恢复后只在规格与数据都回到快照时才生效。readValue 供回退前核对 store 实时值。 */}
           <StrictNumberInput
             label={i.label}
             value={i.value}
             disabled={!i.on}
             onCommit={(v) => { if (v != null) setSpec({ [i.key]: v }); }}
+            captureRevert={() => {
+              const snapshot = useApp.getState();
+              const origin = snapshot[i.key];
+              const acknowledgement = snapshot.capabilityWarningAcknowledgement;
+              return () => {
+                setSpec({ [i.key]: origin });
+                acknowledgeCapabilityWarning(acknowledgement);
+              };
+            }}
+            readValue={() => useApp.getState()[i.key]}
             messageWidth={220}
             style={{ ...numInput, ...(i.on ? {} : { background: '#f4f6f8', color: '#b6bdc6' }) }}
           />

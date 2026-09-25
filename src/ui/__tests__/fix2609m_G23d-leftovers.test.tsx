@@ -103,9 +103,12 @@ describe('(1) 排序 / 查找替换对话框在导出快照期间被拒绝', () 
     fireEvent.change(screen.getByLabelText('查找数值'), { target: { value: '30' } });
     fireEvent.change(screen.getByLabelText('替换为'), { target: { value: '33' } });
     const btn = screen.getByRole('button', { name: '全部替换' }) as HTMLButtonElement;
-    if (!btn.disabled) fireEvent.click(btn);
+    // fix2609n G24b B3(第 7 批复审 P3):按钮必须可点,否则本用例空转通过、测不到「快照期间被拒不报成功」
+    expect(btn.disabled).toBe(false);
+    fireEvent.click(btn);
     expect(useApp.getState().modal).toBe('findreplace');
     expect(useApp.getState().toast ?? '').not.toContain('已替换');
+    expect(useApp.getState().toast ?? '').toContain('请稍后重试');
     expect(rowsNow()).toEqual(ROWS);
     await finish();
     fireEvent.click(screen.getByRole('button', { name: '全部替换' }));
