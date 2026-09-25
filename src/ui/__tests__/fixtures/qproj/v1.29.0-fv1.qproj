@@ -1,0 +1,13 @@
+{
+  "format": "quality-platform-project",
+  "formatVersion": 1,
+  "appVersion": "1.29.0",
+  "exportedAt": "2026-09-25T10:42:39.085Z",
+  "stores": {
+    "qp-dataset-v1": "{\"name\":\"批次A.mtw\",\"colNames\":[\"甲\",\"乙\",\"丙\"],\"rows\":[[10.1,10.4,9.8],[10.3,10.6,9.9],[10.2,10.5,10],[10,10.7,9.7]],\"textCols\":[],\"savedAt\":\"2026-09-25T10:42:39.084Z\"}",
+    "qp-recents-v1": "[{\"name\":\"批次A.mtw\",\"savedAt\":\"2026-09-25T10:42:39.084Z\",\"data\":{\"name\":\"批次A.mtw\",\"colNames\":[\"甲\",\"乙\",\"丙\"],\"rows\":[[99,10.4,9.8],[10.3,10.6,9.9],[10.2,10.5,10],[10,10.7,9.7]],\"textCols\":[],\"savedAt\":\"2026-09-25T10:42:39.084Z\"}}]",
+    "qp-specs-v1": "{\"批次A.mtw\":{\"lsl\":9,\"tgt\":10,\"usl\":11}}",
+    "qp-analyses-v1": "[{\"kind\":\"summary\",\"title\":\"描述性统计 · 图形化摘要\",\"metric\":\"x̄ 10.183 · s 0.321\",\"status\":\"正态\",\"statusColor\":\"#2c8a45\",\"statusBg\":\"#e8f4ea\",\"id\":\"amugu0odpfz9u\",\"createdAt\":1790332959085,\"datasetName\":\"批次A.mtw\",\"snapshot\":{}},{\"kind\":\"anova\",\"title\":\"单因子 ANOVA\",\"metric\":\"P 0.000\",\"status\":\"显著\",\"statusColor\":\"#1f6fb2\",\"statusBg\":\"#e7f0f9\",\"id\":\"amugu0odoykj9\",\"createdAt\":1790332959085,\"datasetName\":\"批次A.mtw\",\"snapshot\":{\"hypoTab\":\"anova\",\"anovaMode\":\"wide\",\"anovaRespName\":null,\"anovaFactorName\":null}}]",
+    "qp-prefs-v1": "{\"state\":{\"chartStyle\":\"经典\",\"showGrid\":true,\"projectName\":\"质检项目 2026-Q2\",\"lsl\":8.898,\"usl\":11.469,\"tgt\":10.183,\"lslOn\":true,\"uslOn\":true,\"aqlLot\":120,\"aqlLevel\":\"II\",\"aqlAQL\":1,\"aqlMethod\":\"gb\",\"aqlAcMethod\":\"gb\",\"spcRules\":{\"r1\":true,\"r2\":true,\"r3\":true,\"r4\":false,\"r5\":true,\"r6\":false,\"r7\":false,\"r8\":false}},\"version\":1}"
+  }
+}

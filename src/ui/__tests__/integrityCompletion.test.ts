@@ -43,9 +43,9 @@ function analysis(datasetName: string, snapshot: Record<string, unknown>) {
   };
 }
 
-function project(stores: Record<string, string>, vault?: Record<string, string>) {
+function project(stores: Record<string, string>, vault?: Record<string, string>, formatVersion = 1) {
   return JSON.stringify({
-    format: 'quality-platform-project', formatVersion: 1, appVersion: 'legacy', exportedAt: 't',
+    format: 'quality-platform-project', formatVersion, appVersion: 'legacy', exportedAt: 't',
     stores, ...(vault ? { vault } : {}),
   });
 }
@@ -285,7 +285,8 @@ describe('active 与 recent 的 latest-wins 不变量', () => {
       .toEqual([[99], [11]]);
   });
 
-  it('项目导入在任何写入前拒绝 active 与同名 recent 的不同矩阵', () => {
+  it('v5 项目导入在任何写入前拒绝 active 与同名 recent 的不同矩阵', () => {
+    // v5 起写出侧保证该不变量；旧版（≤v4）文件的迁移降级见 fix2609_qproj.test.ts。
     const marker = JSON.stringify({ keep: { lsl: 0, tgt: 1, usl: 2 } });
     localStorage.setItem('qp-specs-v1', marker);
     const active = worksheet('A', 100, '2026-08-13T02:00:00Z');
@@ -293,7 +294,7 @@ describe('active 与 recent 的 latest-wins 不变量', () => {
     const error = applyProjectJson(project({
       'qp-dataset-v1': JSON.stringify(active),
       'qp-recents-v1': JSON.stringify([{ name: 'A', savedAt: stale.savedAt, data: stale }]),
-    }));
+    }, undefined, 5));
     expect(error).toContain('回退旧矩阵');
     expect(localStorage.getItem('qp-specs-v1')).toBe(marker);
   });

@@ -33,9 +33,9 @@ import { Fishbone } from '../pages/Fishbone';
 import { Modals } from '../shell/Modals';
 import { chartTokens } from '../tokens';
 
-const projectText = (stores: Record<string, string>) => JSON.stringify({
+const projectText = (stores: Record<string, string>, formatVersion = 4) => JSON.stringify({
   format: 'quality-platform-project',
-  formatVersion: 4,
+  formatVersion,
   appVersion: 'test',
   exportedAt: '2026-08-12T00:00:00.000Z',
   stores,
@@ -274,10 +274,11 @@ describe('分析历史与去重工作表资源边界', () => {
     expect(applyProjectJson(duplicate)).toContain('重复 id');
     expect(localStorage.getItem('qp-pareto-v1')).toBe(marker);
 
+    // v5 起导出侧先丢弃残留孤儿，v5 文件仍带孤儿即拒绝；≤v4 旧文件的丢弃迁移见 fix2609_qproj.test.ts。
     const orphan = projectText({
       'qp-analyses-v1': JSON.stringify([savedAnalysis('a1')]),
       'qp-analysis-data-v1': JSON.stringify({ orphan: analysisSource('孤儿') }),
-    });
+    }, 5);
     expect(applyProjectJson(orphan)).toContain('没有对应的分析历史引用');
     expect(localStorage.getItem('qp-pareto-v1')).toBe(marker);
 

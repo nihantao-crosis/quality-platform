@@ -4,7 +4,7 @@
  * 导入:白名单校验后写回并重载,另一台机器打开即完整恢复。
  */
 import { errText, platform } from './adapter';
-import { localDateStamp, sanitizeFileName } from './reportLabels';
+import { localDateStamp, sanitizeFileName, timestampTextOf } from './reportLabels';
 import { isIsoCalendarDate } from './calendarDate';
 import {
   MAX_QPROJ_IMPORT_BYTES,
@@ -38,8 +38,15 @@ export const PROJECT_KEYS = [
 const FORMAT = 'quality-platform-project';
 // v2 把 SQLite vault/active-ref 与独立 AQL 责任账本定义为不可忽略的项目语义。
 // v3 引入 snapshotVersion=6；v4 引入 snapshotVersion=7（MSA 真实追溯字段）。
+// v5（v1.43）引入偏好键 capabilityWarningAcknowledgement，并由导出侧保证跨键不变量
+// （活动表与同名最近条目一致、分析数据仓库无孤儿条目）。
 // 旧读取器必须在项目格式层明确提示升级，不能接受后再把新快照误报成“损坏”。
-const FORMAT_VERSION = 4;
+// 因此：任何新增偏好键/存储键/快照语义都必须同步提升本版本号（见 PREFS_STATE_KEYS 守卫测试）。
+const FORMAT_VERSION = 5;
+/** 跨键不变量从该格式版本起由写出侧保证；更早的历史文件走迁移降级而非整份拒绝。 */
+const CROSS_KEY_INVARIANT_FORMAT_VERSION = 5;
+/** 供跨版本兼容测试断言当前写出的格式版本。 */
+export const PROJECT_FORMAT_VERSION = FORMAT_VERSION;
 
 interface ProjectFile {
   format: typeof FORMAT;
@@ -333,6 +340,8 @@ function worksheetValidationError(raw: unknown, requireSavedAt: boolean): string
 /**
  * 同名活动表与最近条目必须描述同一版本。对旧项目中可选字段缺失做稳定归一，
  * 既保留合法旧格式，又不会把字段顺序差异误判成矩阵冲突。
+ * savedAt 只是写盘时间戳，不属于矩阵内容：内容逐位相同而时间不同并不代表回退旧矩阵，
+ * 不参与比较（fix2609 GAP-4-11）。
  */
 function sameWorksheetVersion(left: unknown, right: unknown): boolean {
   if (!isObject(left) || !isObject(right)) return false;
@@ -344,7 +353,6 @@ function sameWorksheetVersion(left: unknown, right: unknown): boolean {
     pendingCells: value.pendingCells ?? [],
     isDemo: value.isDemo === true,
     indivSeries: value.indivSeries ?? null,
-    savedAt: value.savedAt ?? null,
   });
   return JSON.stringify(normalized(left)) === JSON.stringify(normalized(right));
 }
@@ -578,6 +586,24 @@ function gageTolByColValidationError(raw: unknown, where: string): string | null
   return null;
 }
 
+/**
+ * 偏好 state 白名单。旧读取器会把白名单外字段判为“损坏”，所以这里新增键
+ * 必须同步提升 FORMAT_VERSION（v5 新增 capabilityWarningAcknowledgement）。
+ */
+export const PREFS_STATE_KEYS: ReadonlySet<string> = new Set([
+  'chartStyle', 'showGrid', 'projectName', 'lsl', 'usl', 'tgt', 'lslOn', 'uslOn', 'capabilityBins',
+  'capSubgroupMode', 'capSubgroupSize', 'capValueCol', 'capSubgroupIdCol', 'capabilityWarningAcknowledgement',
+  'gageUseReal', 'gageValueName', 'gagePartName', 'gageOperatorName',
+  'gageGaugeName', 'gageReportBy', 'gageStudyDate', 'gageNotes',
+  'gageTolMode', 'gageTolValue', 'gageStandard', 'gageBatchCols', 'gageTolByCol',
+  'aqlLot', 'aqlLevel', 'aqlAQL', 'aqlRegime', 'aqlMethod', 'aqlAcMethod', 'aqlSwitch',
+  'spcRules', 'spcRuleK', 'spcDataLayout', 'spcValueCol', 'spcSubgroupCol', 'spcStageCol',
+  'spcSigmaMethod', 'spcShowZones',
+  'doeView', 'doeTab', 'doeFactorCols', 'doeRespCol', 'doeModelTerms', 'doeIncludeCurvature',
+  't1ColName', 't1Mu0', 't2ColAName', 't2ColBName', 'regXName', 'regYName',
+  'paretoView', 'paretoMergeOther', 'paretoThreshold',
+]);
+
 function prefsValidationError(raw: unknown): string | null {
   if (!isObject(raw)) return '偏好设置不是有效对象';
   const envelope = raw as { state?: unknown };
@@ -585,20 +611,7 @@ function prefsValidationError(raw: unknown): string | null {
     return '偏好设置缺少有效 state';
   }
   const state = envelope.state;
-  const allowedStateKeys = new Set([
-    'chartStyle', 'showGrid', 'projectName', 'lsl', 'usl', 'tgt', 'lslOn', 'uslOn', 'capabilityBins',
-    'capSubgroupMode', 'capSubgroupSize', 'capValueCol', 'capSubgroupIdCol', 'capabilityWarningAcknowledgement',
-    'gageUseReal', 'gageValueName', 'gagePartName', 'gageOperatorName',
-    'gageGaugeName', 'gageReportBy', 'gageStudyDate', 'gageNotes',
-    'gageTolMode', 'gageTolValue', 'gageStandard', 'gageBatchCols', 'gageTolByCol',
-    'aqlLot', 'aqlLevel', 'aqlAQL', 'aqlRegime', 'aqlMethod', 'aqlAcMethod', 'aqlSwitch',
-    'spcRules', 'spcRuleK', 'spcDataLayout', 'spcValueCol', 'spcSubgroupCol', 'spcStageCol',
-    'spcSigmaMethod', 'spcShowZones',
-    'doeView', 'doeTab', 'doeFactorCols', 'doeRespCol', 'doeModelTerms', 'doeIncludeCurvature',
-    't1ColName', 't1Mu0', 't2ColAName', 't2ColBName', 'regXName', 'regYName',
-    'paretoView', 'paretoMergeOther', 'paretoThreshold',
-  ]);
-  const extraStateKey = Object.keys(state).find((key) => !allowedStateKeys.has(key));
+  const extraStateKey = Object.keys(state).find((key) => !PREFS_STATE_KEYS.has(key));
   if (extraStateKey) return `偏好设置含有非白名单字段 ${extraStateKey}`;
   const extraEnvelopeKey = Object.keys(raw).find((key) => key !== 'state' && key !== 'version');
   if (extraEnvelopeKey) return `偏好设置 envelope 含有非白名单字段 ${extraEnvelopeKey}`;
@@ -1002,13 +1015,26 @@ function analysisUsesWorksheetSnapshot(analysis: JsonObject, snapshot: JsonObjec
 
 /**
  * v4+ 工作表快照已承诺精确回放，因此必须恰有一个来源。无 snapshotVersion 的旧
- * SPC/能力/真实 MSA 仍可通过同名 recent 回看；旧 ANOVA/DOE/摘要的恢复器本就
- * fail-closed，导入时直接拒绝这类无法使用的卡片。
+ * SPC/能力/真实 MSA 仍可通过同名 recent 回看。
+ * ANOVA/DOE/摘要自带 snapshotVersion 的写出侧（v1.32 起，snapshotVersion≥5）总会附带来源，
+ * 因此带版本号却缺来源才是损坏；无 snapshotVersion 的 v1.29/v1.30 旧卡片从未保存来源，
+ * store 启动照常接受，回看时由恢复器 fail-closed 提示“数据快照缺失”。这类卡片必须
+ * 可随项目导出/导入，否则一张旧卡就会阻断整份备份与恢复（fix2609 PLATFORM-04）。
  */
 function analysisRequiresExactWorksheetSource(analysis: JsonObject, snapshot: JsonObject): boolean {
   if (!analysisUsesWorksheetSnapshot(analysis, snapshot)) return false;
-  if (analysis.kind === 'anova' || analysis.kind === 'doe' || analysis.kind === 'summary') return true;
+  if (analysis.kind === 'anova' || analysis.kind === 'doe' || analysis.kind === 'summary') {
+    return typeof snapshot.snapshotVersion === 'number';
+  }
   return typeof snapshot.snapshotVersion === 'number' && snapshot.snapshotVersion >= 4;
+}
+
+/** 错误文案给出用户在“已保存分析”里能看到的标题与保存时间，而不只是内部 id。 */
+function analysisLabel(analysis: JsonObject): string {
+  const when = typeof analysis.createdAt === 'number' && Number.isFinite(new Date(analysis.createdAt).getTime())
+    ? `，保存于 ${timestampTextOf(analysis.createdAt)}`
+    : '';
+  return `「${String(analysis.title)}」（数据集 ${String(analysis.datasetName)}${when}，id ${String(analysis.id)}）`;
 }
 
 function analysisDataValidationError(raw: unknown): string | null {
@@ -1068,7 +1094,96 @@ export function projectStoreValidationError(key: string, raw: unknown): string |
   }
 }
 
-function validateProjectFile(text: string): { file: ProjectFile; error: null } | { file: null; error: string } {
+/** 分析数据仓库里真正被分析卡片 snapshot.sourceDataKey 引用的键。 */
+function referencedAnalysisDataKeys(analyses: unknown): Set<string> {
+  const referenced = new Set<string>();
+  if (!Array.isArray(analyses)) return referenced;
+  for (const analysis of analyses) {
+    if (!isObject(analysis) || !isObject(analysis.snapshot)) continue;
+    const key = analysis.snapshot.sourceDataKey;
+    if (typeof key === 'string') referenced.add(key);
+  }
+  return referenced;
+}
+
+/**
+ * 孤儿分析数据是残留而非损坏（卡片被删/启动归一化丢弃后尽力而为的 prune 可能失败），
+ * 没有任何入口能再读到它。导出前与旧版文件导入时共用本原语丢弃残留（fix2609 GAP-4-12）。
+ * 返回 null 表示没有孤儿；kept 为空对象时调用方应整键省略。
+ */
+function pruneUnreferencedAnalysisData(
+  analyses: unknown,
+  analysisData: unknown,
+): { kept: JsonObject; dropped: string[] } | null {
+  if (!isObject(analysisData)) return null;
+  const referenced = referencedAnalysisDataKeys(analyses);
+  const dropped = Object.keys(analysisData).filter((key) => !referenced.has(key));
+  if (dropped.length === 0) return null;
+  const kept = Object.fromEntries(Object.entries(analysisData).filter(([key]) => referenced.has(key)));
+  return { kept, dropped };
+}
+
+/**
+ * 旧版（formatVersion < 5）项目的跨键残留迁移。v1.43 之前的写出侧从不保证这两条不变量：
+ * - v1.29/v1.30 撤销/重做只写活动表、Web 端最近列表写盘失败被静默放弃，
+ *   会让同名最近条目的内嵌副本落后于活动表；
+ * - 分析数据仓库的 prune 是尽力而为，可能留下没有卡片引用的残留条目。
+ * 与 dataStore 启动时 coordinateRecentsWithActive 同一口径：活动表是用户最后看到并写入的
+ * 版本，最近条目只能跟随；残留分析数据直接丢弃。直接就地修复 parsedStores，返回改动的键。
+ * v5 起写出侧自校验保证这两条不变量，因此 v5 文件仍按原规则严格拒绝（疑似篡改/回退）。
+ */
+function migrateLegacyCrossKeyResidue(
+  formatVersion: number,
+  parsedStores: Map<string, unknown>,
+  vaultEntries: ReadonlyArray<[string, string]>,
+  activeRef: string | undefined,
+): { changed: Set<string>; notes: string[] } {
+  const changed = new Set<string>();
+  const notes: string[] = [];
+  const prefix = `旧版项目（格式 v${formatVersion}）`;
+  const recents = parsedStores.get('qp-recents-v1');
+  if (Array.isArray(recents)) {
+    const storedActive = parsedStores.get('qp-dataset-v1');
+    const actives: JsonObject[] = [];
+    if (isObject(storedActive)) actives.push(storedActive);
+    if (activeRef !== undefined && !(isObject(storedActive) && storedActive.name === activeRef)) {
+      const entry = vaultEntries.find(([name]) => name === activeRef);
+      // localStorage 与 vault 同名活动表互相不一致时不在此裁决，交给下方严格校验拒绝。
+      if (entry) actives.push(JSON.parse(entry[1]) as JsonObject);
+    }
+    let next: unknown[] = recents;
+    for (const active of actives) {
+      const index = next.findIndex((entry) => isObject(entry) && entry.name === active.name);
+      if (index < 0) continue;
+      const recent = next[index];
+      if (!isObject(recent) || recent.data === undefined || sameWorksheetVersion(active, recent.data)) continue;
+      if (next === recents) next = [...recents];
+      next[index] = { name: recent.name, savedAt: active.savedAt, data: active };
+      notes.push(`${prefix}最近列表中「${String(active.name)}」的内嵌副本与活动数据集不一致（旧版撤销/写盘失败残留），已按活动数据集更新`);
+    }
+    if (next !== recents) {
+      parsedStores.set('qp-recents-v1', next);
+      changed.add('qp-recents-v1');
+    }
+  }
+  const pruned = pruneUnreferencedAnalysisData(
+    parsedStores.get('qp-analyses-v1'),
+    parsedStores.get('qp-analysis-data-v1'),
+  );
+  if (pruned) {
+    if (Object.keys(pruned.kept).length > 0) parsedStores.set('qp-analysis-data-v1', pruned.kept);
+    else parsedStores.delete('qp-analysis-data-v1');
+    changed.add('qp-analysis-data-v1');
+    notes.push(`${prefix}含 ${pruned.dropped.length} 条没有分析卡片引用的残留分析数据，已丢弃（不影响任何已保存分析）`);
+  }
+  return { changed, notes };
+}
+
+type ValidatedProjectFile =
+  | { file: ProjectFile; error: null; notes: string[] }
+  | { file: null; error: string };
+
+function validateProjectFile(text: string): ValidatedProjectFile {
   let raw: unknown;
   try {
     raw = JSON.parse(text.replace(/^\uFEFF/, '')); // 去 BOM（导出文本统一带 BOM）
@@ -1124,6 +1239,30 @@ function validateProjectFile(text: string): { file: ProjectFile; error: null } |
   if (knownStoreCount === 0 && vault.entries.length === 0) {
     return { file: null, error: '项目文件没有可识别的 stores 数据，已拒绝空项目替换' };
   }
+  // 跨键不变量的格式版本门：v5 起由写出侧保证并严格校验；更早的历史文件先迁移降级，
+  // 迁移结果仍要通过下方同一组严格校验（不是删掉校验）。
+  const notes: string[] = [];
+  let stores = file.stores;
+  if (file.formatVersion < CROSS_KEY_INVARIANT_FORMAT_VERSION) {
+    const migrated = migrateLegacyCrossKeyResidue(file.formatVersion, parsedStores, vault.entries, activeRef);
+    if (migrated.changed.size > 0) {
+      stores = { ...file.stores };
+      for (const key of migrated.changed) {
+        if (!parsedStores.has(key)) {
+          delete stores[key];
+          continue;
+        }
+        const value = parsedStores.get(key);
+        const detail = projectStoreValidationError(key, value);
+        if (detail) return { file: null, error: `项目数据「${key}」迁移后仍无效：${detail}` };
+        stores[key] = JSON.stringify(value);
+      }
+      if (!PROJECT_KEYS.some((key) => typeof stores[key] === 'string') && vault.entries.length === 0) {
+        return { file: null, error: '项目文件没有可识别的 stores 数据，已拒绝空项目替换' };
+      }
+    }
+    notes.push(...migrated.notes);
+  }
   const recents = parsedStores.get('qp-recents-v1');
   const ensureActiveRecentAgreement = (active: unknown, label: string): string | null => {
     if (!isObject(active) || !Array.isArray(recents) || typeof active.name !== 'string') return null;
@@ -1161,14 +1300,14 @@ function validateProjectFile(text: string): { file: ProjectFile; error: null } |
         && snapshot.sourceData === undefined && snapshot.sourceDataKey === undefined) {
         return {
           file: null,
-          error: `分析历史「${analysis.id}」是工作表型分析，但没有 sourceData 或 sourceDataKey`,
+          error: `分析历史${analysisLabel(analysis)}是工作表型分析，但没有 sourceData 或 sourceDataKey`,
         };
       }
       if (isObject(snapshot.sourceData)
         && (snapshot.sourceData as JsonObject).name !== analysis.datasetName) {
         return {
           file: null,
-          error: `分析历史「${analysis.id}」的 datasetName 与内嵌工作表 name 不一致`,
+          error: `分析历史${analysisLabel(analysis)}的 datasetName 与内嵌工作表 name 不一致`,
         };
       }
       if (typeof snapshot.sourceDataKey === 'string') referencedAnalysisData.add(snapshot.sourceDataKey);
@@ -1184,7 +1323,7 @@ function validateProjectFile(text: string): { file: ProjectFile; error: null } |
         if (isObject(source) && source.name !== analysis.datasetName) {
           return {
             file: null,
-            error: `分析历史「${analysis.id}」的 datasetName 与引用工作表 name 不一致`,
+            error: `分析历史${analysisLabel(analysis)}的 datasetName 与引用工作表 name 不一致`,
           };
         }
       }
@@ -1199,7 +1338,7 @@ function validateProjectFile(text: string): { file: ProjectFile; error: null } |
   if (activeRef !== undefined && !vault.entries.some(([name]) => name === activeRef)) {
     return { file: null, error: `项目活动数据集引用「${activeRef}」在 vault 中没有对应数据集` };
   }
-  return { file, error: null };
+  return { file: stores === file.stores ? file : { ...file, stores }, error: null, notes };
 }
 
 function validateVault(raw: unknown): { entries: Array<[string, string]>; error: null } | { entries: []; error: string } {
@@ -2089,6 +2228,21 @@ export function buildProjectJson(
     stores[k] = v;
     knownStoreCount += 1;
   }
+  // 孤儿分析数据是尽力而为 prune 失败后的残留：导出前丢弃，而不是让自校验把整份备份阻断
+  // （本机最需要备份时反而导不出）。两键都已通过上方逐键校验，这里只做子集裁剪。
+  if (stores['qp-analysis-data-v1'] !== undefined) {
+    const pruned = pruneUnreferencedAnalysisData(
+      stores['qp-analyses-v1'] === undefined ? undefined : JSON.parse(stores['qp-analyses-v1']),
+      JSON.parse(stores['qp-analysis-data-v1']),
+    );
+    if (pruned) {
+      if (Object.keys(pruned.kept).length > 0) stores['qp-analysis-data-v1'] = JSON.stringify(pruned.kept);
+      else {
+        delete stores['qp-analysis-data-v1'];
+        knownStoreCount -= 1;
+      }
+    }
+  }
   // 自审:隔离区墓地键(qp-quarantine-v1.corrupt-*)不在 PROJECT_KEYS 里,此前导出时被
   // 静默丢弃——恰恰是「数据已损坏、最需要备份」的场景。按前缀扫描附加进去(原样透传,
   // 不参与 projectStoreValidationError:墓地里存的本来就是损坏原文)。
@@ -2305,6 +2459,54 @@ function projectApplyFailure(error: string | null, lockRequired = false): Projec
   return { error, lockRequired };
 }
 
+/**
+ * 导入后的本机库快照 = vault ∪ 最近列表中带全量数据的条目。
+ * 桌面完整导出为避免双份，把最近列表已内嵌全量数据的数据集从 vault 中省略；而导入对本机库
+ * 是精确替换（SQLite 先清空再只插入快照）。若只按 vault 替换，这些数据集恢复后只剩
+ * 最近列表里的副本，被新数据集挤出最近列表即永久丢失（fix2609 PLATFORM-01）。
+ * 同名以 vault 为准；保留原型名跳过；超出库上限的最近条目不入库（仍留在最近列表）并计数。
+ */
+function projectLibraryEntries(
+  stores: Record<string, string>,
+  vaultEntries: ReadonlyArray<[string, string]>,
+): { entries: Array<[string, string]>; fromRecents: number; skipped: number } {
+  const entries: Array<[string, string]> = [...vaultEntries];
+  const names = new Set(vaultEntries.map(([name]) => name));
+  let fromRecents = 0;
+  let skipped = 0;
+  let recents: unknown;
+  try {
+    recents = stores['qp-recents-v1'] === undefined ? [] : JSON.parse(stores['qp-recents-v1']);
+  } catch {
+    recents = []; // validateProjectFile 已校验；这里不会失败
+  }
+  if (!Array.isArray(recents)) return { entries, fromRecents, skipped };
+  for (const recent of recents) {
+    if (!isObject(recent) || typeof recent.name !== 'string' || !isObject(recent.data)) continue;
+    if (names.has(recent.name) || vaultDatasetNameError(recent.name)) continue;
+    if (entries.length >= MAX_VAULT_DATASETS) {
+      skipped += 1;
+      continue;
+    }
+    names.add(recent.name);
+    entries.push([recent.name, JSON.stringify(recent.data)]);
+    fromRecents += 1;
+  }
+  return { entries, fromRecents, skipped };
+}
+
+function libraryRestoreDetail(library: { fromRecents: number; skipped: number }): string {
+  const parts: string[] = [];
+  if (library.fromRecents > 0) parts.push(`其中 ${library.fromRecents} 个来自最近列表内嵌的完整数据`);
+  if (library.skipped > 0) parts.push(`${library.skipped} 个最近数据集因库容量上限仅保留在最近列表`);
+  return parts.length > 0 ? `（${parts.join('；')}）` : '';
+}
+
+function joinNotes(...parts: Array<string | null | undefined>): string | undefined {
+  const kept = parts.filter((part): part is string => typeof part === 'string' && part.length > 0);
+  return kept.length > 0 ? kept.join('；') : undefined;
+}
+
 /** 完整导入:stores 写回 localStorage;文件带 vault 且本端为桌面时,把库数据集恢复进 SQLite。
  * error 非空即失败;lockRequired=true 时必须保持全局锁定直到重启恢复。 */
 export async function applyProjectText(text: string): Promise<ProjectApplyResult> {
@@ -2314,6 +2516,8 @@ export async function applyProjectText(text: string): Promise<ProjectApplyResult
   if (vault.error) return projectApplyFailure(vault.error);
   // 旧版文件没有 vault 字段时不应擦除本机库；新版显式 vault:{} 则表示快照就是空集。
   const hasVaultSnapshot = Object.prototype.hasOwnProperty.call(validated.file, 'vault');
+  const library = projectLibraryEntries(validated.file.stores, vault.entries);
+  const migrationNote = joinNotes(...validated.notes);
 
   const db = platform.datasetDb;
   const activeRef = validated.file.stores['qp-active-ref-v1'];
@@ -2344,7 +2548,7 @@ export async function applyProjectText(text: string): Promise<ProjectApplyResult
         if (typeof meta?.name !== 'string' || !meta.name) throw new Error('数据集库返回了无效名称');
         existingVaultNames.add(meta.name);
       }
-      const affectedNames = new Set([...existingVaultNames, ...vault.entries.map(([name]) => name)]);
+      const affectedNames = new Set([...existingVaultNames, ...library.entries.map(([name]) => name)]);
       for (const name of affectedNames) {
         const original = await db.get(name);
         if (existingVaultNames.has(name) && original == null) {
@@ -2365,7 +2569,7 @@ export async function applyProjectText(text: string): Promise<ProjectApplyResult
   }
 
   if (db && hasVaultSnapshot && atomicImport) {
-    const entries = vault.entries.map(([name, json]) => {
+    const entries = library.entries.map(([name, json]) => {
       let savedAt = new Date(0).toISOString();
       try {
         const parsed = JSON.parse(json) as { savedAt?: unknown };
@@ -2436,7 +2640,10 @@ export async function applyProjectText(text: string): Promise<ProjectApplyResult
     finishProjectMutation();
     return {
       error: null,
-      note: `已在单一 SQLite 事务中恢复 ${vault.entries.length} 个数据集到本机数据集库${beginError ? '（IPC 回复丢失已根据 journal 确认）' : ''}`,
+      note: joinNotes(
+        `已在单一 SQLite 事务中恢复 ${library.entries.length} 个数据集到本机数据集库${libraryRestoreDetail(library)}${beginError ? '（IPC 回复丢失已根据 journal 确认）' : ''}`,
+        migrationNote,
+      ),
       lockRequired: false,
     };
   }
@@ -2462,13 +2669,17 @@ export async function applyProjectText(text: string): Promise<ProjectApplyResult
 
   if (!hasVaultSnapshot) {
     finishProjectMutation();
-    return { error: null, lockRequired: false };
+    return { error: null, note: migrationNote, lockRequired: false };
   }
   if (!db) {
     finishProjectMutation();
     return vault.entries.length === 0
-      ? { error: null, lockRequired: false }
-      : { error: null, note: `项目内含 ${vault.entries.length} 个库数据集,仅桌面版可恢复,本次已跳过`, lockRequired: false };
+      ? { error: null, note: migrationNote, lockRequired: false }
+      : {
+        error: null,
+        note: joinNotes(`项目内含 ${vault.entries.length} 个库数据集,仅桌面版可恢复,本次已跳过`, migrationNote),
+        lockRequired: false,
+      };
   }
 
   const attempted: string[] = [];
@@ -2477,12 +2688,12 @@ export async function applyProjectText(text: string): Promise<ProjectApplyResult
     if (!attemptedSet.has(name)) { attemptedSet.add(name); attempted.push(name); }
   };
   try {
-    for (const [name, json] of vault.entries) {
+    for (const [name, json] of library.entries) {
       // 先记录再写：即使底层在部分写入后抛错，也会尝试恢复当前条目。
       markAttempted(name);
       await db.put(name, json);
     }
-    const importedNames = new Set(vault.entries.map(([name]) => name));
+    const importedNames = new Set(library.entries.map(([name]) => name));
     for (const name of existingVaultNames) {
       if (importedNames.has(name)) continue;
       markAttempted(name);
@@ -2514,5 +2725,9 @@ export async function applyProjectText(text: string): Promise<ProjectApplyResult
   }
 
   finishProjectMutation();
-  return { error: null, note: `已恢复 ${vault.entries.length} 个数据集到本机数据集库`, lockRequired: false };
+  return {
+    error: null,
+    note: joinNotes(`已恢复 ${library.entries.length} 个数据集到本机数据集库${libraryRestoreDetail(library)}`, migrationNote),
+    lockRequired: false,
+  };
 }

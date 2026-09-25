@@ -44,7 +44,7 @@ describe('项目文件', () => {
     const json = buildProjectJson('9.9.9');
     const file = JSON.parse(json);
     expect(file.format).toBe('quality-platform-project');
-    expect(file.formatVersion).toBe(4);
+    expect(file.formatVersion).toBe(5);
     expect(file.appVersion).toBe('9.9.9');
     expect(Object.keys(file.stores)).toContain('qp-dataset-v1');
 
@@ -102,7 +102,7 @@ describe('项目文件', () => {
     localStorage.setItem('qp-prefs-v1', JSON.stringify(prefs));
     localStorage.setItem('qp-analyses-v1', JSON.stringify([analysis]));
     const project = buildProjectJson('1.41.0');
-    expect(JSON.parse(project).formatVersion).toBe(4);
+    expect(JSON.parse(project).formatVersion).toBe(5);
 
     localStorage.clear();
     expect(applyProjectJson(project)).toBeNull();
