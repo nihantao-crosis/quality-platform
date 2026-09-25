@@ -6,3 +6,6 @@ src-tauri/gen/schemas/
 tsconfig.tsbuildinfo
 Windows安装包/
 dist-portable/
+
+# Claude Code workflow worktrees(审查/修复代理的临时检出,不入库)
+.claude/worktrees/
