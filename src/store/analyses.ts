@@ -721,9 +721,9 @@ function pick(c: { color: string; bg: string }) {
 }
 
 /**
- * CORE-01 写读对称(第 2 批复审 P2):分析列表显示保存时冻结的 metric/status,回看按当前口径重算。
+ * CORE-01 写读对称(第 2 批复审 P2):分析列表显示保存时冻结的 title/metric/status,回看按当前口径重算。
  * v1.43 起堆叠子组改为「ID 值一变即开新子组」,旧版按值合并保存的 SPC/能力记录两者可能分裂。
- * 回看参数与数据回放完成后调用:只有重算摘要与冻结摘要不同、且本次数据角色说明含「口径说明」
+ * 回看参数与数据回放完成后调用:只有重算摘要(含图型 title)与冻结摘要不同、且本次数据角色说明含「口径说明」
  * (即数据确实命中口径变更形态)时,返回一条对照提示;其余差异不归因于口径变更。只读,不改记录。
  */
 function subgroupRuleChangeRestoreNotice(a: SavedAnalysis): string | null {
@@ -741,11 +741,17 @@ function subgroupRuleChangeRestoreNotice(a: SavedAnalysis): string | null {
     const roleText = `${prepared.note ?? ''}${prepared.error ?? ''}`;
     if (!roleText.includes('口径说明')) return null;
     const now = buildSummary(a.kind);
-    if (!now || (now.metric === a.metric && now.status === a.status)) return null;
+    // fix2609i G14:图型(title)也属于列表冻结的摘要。v1.42 auto 下 X̄-R、现按新口径回落 I-MR 的记录,
+    // metric/status 常同为「过程受控 · 受控」,只比较这两项会漏提示,列表写 X̄-R、点开却是 I-MR。
+    if (!now || (now.metric === a.metric && now.status === a.status && now.title === a.title)) return null;
     const column = /口径说明：「([^」]+)」/.exec(roleText)?.[1];
-    return `口径已更新：该记录保存时「${a.metric} · ${a.status}」，现按新口径重算为「${now.metric} · ${now.status}」。`
+    const titleChanged = now.title !== a.title;
+    return `口径已更新：该记录保存时「${a.metric} · ${a.status}」，现按新口径重算为「${now.metric} · ${now.status}」`
+      + `${titleChanged ? `，图型「${a.title} → ${now.title}」` : ''}。`
       + `原因：${column ? `「${column}」中同一 ID 在不相邻的行再次出现，` : ''}`
-      + 'v1.43 起按 Minitab 口径「ID 值一变即开新子组」划分子组，不再合并不相邻的同名 ID；分析列表仍显示保存时的摘要';
+      + 'v1.43 起按 Minitab 口径「ID 值一变即开新子组」划分子组，不再合并不相邻的同名 ID'
+      + `${titleChanged ? '（该列按新口径不能组成等大小子组时，自动识别改按单值分析）' : ''}`
+      + `；分析列表仍显示保存时的${titleChanged ? '图型与' : ''}摘要`;
   } catch {
     return null;
   }

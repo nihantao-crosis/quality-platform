@@ -144,12 +144,19 @@ function repeatedGroupShape(role: RoleColumn): { valid: boolean; repeated: boole
       : { valid: false, repeated: false };
   }
   if (g.segments.length < 2) return { valid: false, repeated: true, reason: `子组列「${role.name}」只有 1 个子组` };
+  // fix2609i G14:段长不等/n 越界时给出可操作的处理办法。同一 ID 不相邻再现(每天重新编号、
+  // 行序被打乱、轮换的操作员/班次)是 v1.43 口径变更后最常见的成因,单独给排序/唯一 ID 建议。
+  const recurringRemedy = g.recurring
+    ? `。该列中同一 ID 在不相邻的行再次出现，被切成了多个子组：若同一 ID 确属同一子组，请先按采集时间/子组排序，让同一子组的测量排在相邻行；若是每天/每班重新编号的子组号，请改用全表唯一的子组 ID（如「日期-子组」）；若该列不是子组 ID（如操作员、班次），请改选「单值列：I-MR」布局或指定真正的子组列`
+    : null;
   if (new Set(g.sizes).size !== 1) {
-    return { valid: false, repeated: true, reason: `子组列「${role.name}」的组内样本量不一致（${sizeList(g.sizes)}）；X̄-R/X̄-S 需等大小子组（按 Minitab 口径，ID 值一变即开新子组）` };
+    const remedy = recurringRemedy ?? '。请核对各子组的测量个数是否漏测/多测，或改选「单值列：I-MR」布局';
+    return { valid: false, repeated: true, reason: `子组列「${role.name}」的组内样本量不一致（${sizeList(g.sizes)}）；X̄-R/X̄-S 需等大小子组（按 Minitab 口径，ID 值一变即开新子组）${remedy}` };
   }
   const n = g.sizes[0];
   if (n < 2 || n > 10) {
-    return { valid: false, repeated: true, reason: `子组列「${role.name}」对应的子组大小 n=${n}，X̄-R/X̄-S 支持 2–10` };
+    const remedy = recurringRemedy ?? '。请改选「单值列：I-MR」布局，或改用每 2–10 个测量一个子组的 ID 列';
+    return { valid: false, repeated: true, reason: `子组列「${role.name}」对应的子组大小 n=${n}，X̄-R/X̄-S 支持 2–10${remedy}` };
   }
   return { valid: true, repeated: true };
 }

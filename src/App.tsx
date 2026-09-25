@@ -1,7 +1,7 @@
 /** 应用外壳 — 菜单栏 → 工具栏 → (左导航 + 主内容) → 状态栏 + 弹窗/Toast + 全局快捷键。 */
 import { useEffect, useMemo, useState } from 'react';
 import { useApp, resolveGageTolerance } from './store/appStore';
-import { useData, resolveCapabilityMeasurementData, isCapabilityWarningAcknowledged, datasetWriteNotes } from './store/dataStore';
+import { useData, isCapabilityWarningAcknowledged, datasetWriteNotes } from './store/dataStore';
 import {
   capabilityInputError, computeCapability, computeGageRR, gageStudyData, GAGE_TOLERANCE, nf,
   peekResolvedGageStudy, resolveGageStudy, prepareSpcData, resolveNumericColumn,
@@ -11,6 +11,7 @@ import { errText, platform } from './platform/adapter';
 import { exportProject } from './platform/project';
 import { useAnalyses } from './store/analyses';
 import { chartTokens } from './ui/tokens';
+import { useCapabilityPrepared } from './ui/useCapabilityPrepared';
 import { PAGES } from './ui/pagesMeta';
 import { MenuBar } from './ui/shell/MenuBar';
 import { Toolbar } from './ui/shell/Toolbar';
@@ -132,7 +133,7 @@ function AppShell() {
     page, modal, openMenu, varOpen, setOpenMenu, setVarOpen, openModal, showToast, chartStyle, showGrid, lsl, usl, tgt, lslOn, busyOverlay, uslOn,
     spcType, spcDataLayout, spcValueCol, spcSubgroupCol, hypoTab, aqlLevel, aqlAQL, aqlRegime,
     gageUseReal, gageValueName, gagePartName, gageOperatorName, gageTolMode, gageTolValue, activeVar,
-    capSubgroupMode, capSubgroupSize, capValueCol, capSubgroupIdCol, capabilityWarningAcknowledgement,
+    capabilityWarningAcknowledgement,
   } = useApp();
   const { model: M, textCols, pendingCells } = useData();
   const T = chartTokens(chartStyle, showGrid);
@@ -150,10 +151,8 @@ function AppShell() {
   // 保存记录/专项报告完全同源;SPC 副标题与工作表列数仍使用上面的 preparedSpc,互不串扰。
   // resolver 内部含 prepareSpcData 成本,按口径输入记忆化,避免每次渲染重复解析;
   // resolver 从 store 内部读取以下口径/角色字段,依赖需手工列全以便口径变化时失效。
-  const preparedCap = useMemo(
-    () => resolveCapabilityMeasurementData(M, textCols),
-    [M, textCols, pendingCells, capSubgroupMode, capSubgroupSize, capValueCol, capSubgroupIdCol, spcDataLayout, spcValueCol, spcSubgroupCol], // eslint-disable-line react-hooks/exhaustive-deps
-  );
+  // fix2609i G14:依赖清单统一由 useCapabilityPrepared 维护(与能力页/总览共用),不再各处手抄。
+  const { prepared: preparedCap } = useCapabilityPrepared();
   // GAP-10-22 复审 P2:AppShell 全量订阅 store,toast/菜单等任意变化都会重渲染壳层。确认指纹
   // (内部再解析能力口径 + 全量指纹)与能力计算都是 O(N),与 Dashboard 同写法一并记忆化;
   // preparedCap 已随全部能力口径字段失效,依赖它即覆盖 resolver 从 store 读取的字段。

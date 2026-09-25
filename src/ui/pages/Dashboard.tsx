@@ -2,7 +2,7 @@
 import { memo, useMemo } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { useApp } from '../../store/appStore';
-import { useData, resolveCapabilityMeasurementData, isCapabilityWarningAcknowledged } from '../../store/dataStore';
+import { useData, isCapabilityWarningAcknowledged } from '../../store/dataStore';
 import {
   nf, DEFECTS, capabilityInputError, computeCapability, oneWayAnova, anovaGroups, andersonDarling,
   prepareSpcData, countCapabilityViolations, withSigmaMethod, spcChartFamilyFor, spcViewFamilyFor, SPC_FAMILY_LABEL,
@@ -15,6 +15,7 @@ import { ControlChart } from '../charts/ControlChart';
 import { ParetoChart } from '../charts/misc';
 import { useAnalyses } from '../../store/analyses';
 import { paretoReport } from '../reportData';
+import { useCapabilityPrepared } from '../useCapabilityPrepared';
 
 /** 告警区只渲染前 N 条；总数仍按完整判异明细计。 */
 const DASHBOARD_ALERT_ROWS = 8;
@@ -24,14 +25,13 @@ function DashboardView({ T }: { T: ChartTokens }) {
   // 与文件末尾的 React.memo 一起挡住 App 父级因这些字段重渲染时的连带重算。
   const {
     goTo, lsl, usl, tgt, lslOn, uslOn, spcType, spcRules, spcRuleK, spcDataLayout, spcValueCol, spcSubgroupCol, spcSigmaMethod, spcStageCol,
-    paretoThreshold, capSubgroupMode, capSubgroupSize, capValueCol, capSubgroupIdCol, capabilityWarningAcknowledgement,
+    paretoThreshold, capSubgroupMode, capSubgroupSize, capabilityWarningAcknowledgement,
   } = useApp(useShallow((s) => ({
     goTo: s.goTo, lsl: s.lsl, usl: s.usl, tgt: s.tgt, lslOn: s.lslOn, uslOn: s.uslOn,
     spcType: s.spcType, spcRules: s.spcRules, spcRuleK: s.spcRuleK,
     spcDataLayout: s.spcDataLayout, spcValueCol: s.spcValueCol, spcSubgroupCol: s.spcSubgroupCol, spcSigmaMethod: s.spcSigmaMethod,
     spcStageCol: s.spcStageCol,
     paretoThreshold: s.paretoThreshold, capSubgroupMode: s.capSubgroupMode, capSubgroupSize: s.capSubgroupSize,
-    capValueCol: s.capValueCol, capSubgroupIdCol: s.capSubgroupIdCol,
     capabilityWarningAcknowledgement: s.capabilityWarningAcknowledgement,
   })));
   const { model: M, textCols, pendingCells } = useData(useShallow((s) => ({
@@ -53,10 +53,8 @@ function DashboardView({ T }: { T: ChartTokens }) {
   // 批次716-R3:Cpk/PPM 卡改走能力口径解析(resolveCapabilityMeasurementData),与能力页/
   // 保存记录/专项报告同源;趋势图与 SPC 告警仍属 SPC 口径,继续使用上面的 prepared/SM。
   // resolver 从 store 内部读取以下口径/角色字段,依赖需手工列全以便口径变化时失效。
-  const capPrepared = useMemo(
-    () => resolveCapabilityMeasurementData(M, textCols),
-    [M, textCols, pendingCells, capSubgroupMode, capSubgroupSize, capValueCol, capSubgroupIdCol, spcDataLayout, spcValueCol, spcSubgroupCol], // eslint-disable-line react-hooks/exhaustive-deps
-  );
+  // fix2609i G14:依赖清单统一由 useCapabilityPrepared 维护(与壳层/能力页共用),不再各处手抄。
+  const { prepared: capPrepared } = useCapabilityPrepared();
   const CM = capPrepared.model;
   // GAP-10-22:确认指纹(内部再解析能力口径 + 全量指纹)与能力计算都是 O(N),一并记忆化;
   // capPrepared 已随全部能力口径字段失效,依赖它即覆盖 resolver 从 store 读取的字段。

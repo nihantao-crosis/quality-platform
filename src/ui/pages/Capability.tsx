@@ -1,8 +1,9 @@
 /** 过程能力分析 ★深度实现 — 可编辑规格限实时重算 + 直方图 + PPM 性能表。 */
 import type React from 'react';
-import { useMemo, useState } from 'react';
+import { memo, useMemo, useState } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { useApp } from '../../store/appStore';
-import { useData, suggestedSpec, rememberSpecForCapabilityMeasurement, resolveCapabilityMeasurementData, syncSpecForCapabilityMeasurement, capabilitySpecKey, capabilitySubgroupSemantics } from '../../store/dataStore';
+import { suggestedSpec, rememberSpecForCapabilityMeasurement, syncSpecForCapabilityMeasurement, capabilitySpecKey, capabilitySubgroupSemantics } from '../../store/dataStore';
 import {
   nf, fmtCap, capabilityInputError, capabilitySpecDistanceWarning, capabilityWarningFingerprint,
   computeCapability, andersonDarling, bestLambda, transformWithSpec, stdev, countCapabilityViolations, withSigmaMethod,
@@ -10,7 +11,8 @@ import {
 } from '../../core';
 import { ReportCard } from '../ReportCard';
 import { capabilityReport } from '../reportData';
-import type { ChartTokens } from '../tokens';
+import { sameChartTokens, type ChartTokens } from '../tokens';
+import { useCapabilityPrepared } from '../useCapabilityPrepared';
 import { Card, CardHeader, KvRows, numInput, Badge } from '../common';
 import { Histogram } from '../charts/Histogram';
 import { NormalProbPlot } from '../charts/NormalProbPlot';
@@ -32,20 +34,82 @@ function SubgroupSizeInput({ value, onCommit }: { value: number; onCommit: (z: n
   );
 }
 
-export function Capability({ T }: { T: ChartTokens }) {
-  const { lsl, usl, tgt, lslOn, uslOn, toggleSide, setSpec: setSpecRaw, spcRules, spcRuleK, spcType, spcSigmaMethod, goTo, capabilityBins: bins, setCapabilityBins: setBins,
-    capSubgroupMode, capSubgroupSize, capValueCol, capSubgroupIdCol, setCapabilitySubgroup, showToast } = useApp();
-  const capabilityWarningAcknowledgement = useApp((state) => state.capabilityWarningAcknowledgement);
-  const spcStageCol = useApp((state) => state.spcStageCol);
-  const acknowledgeCapabilityWarning = useApp((state) => state.acknowledgeCapabilityWarning);
-  const rawModel = useData((s) => s.model);
-  const textCols = useData((s) => s.textCols);
-  // 记忆化(闭环审核 P2:与 App/Worksheet/SPC/Dashboard 同一约定)
-  const prepared = useMemo(
-    () => resolveCapabilityMeasurementData(rawModel, textCols),
-    [rawModel, textCols, capSubgroupMode, capSubgroupSize, capValueCol, capSubgroupIdCol], // eslint-disable-line react-hooks/exhaustive-deps
-  );
+function CapabilityView({ T }: { T: ChartTokens }) {
+  // fix2609i G14:按字段订阅(useShallow),toast/openMenu/varOpen 等纯 UI 字段不触发本页重渲染;
+  // 文件末尾 React.memo 再挡住 App 父级因这些字段重渲染时的连带重算(与 Dashboard/Spc 同法)。
+  // 这里逐一列出本页实际读取的 store 字段;resolver 读取的角色字段由 useCapabilityPrepared 订阅。
+  const {
+    lsl, usl, tgt, lslOn, uslOn, toggleSide, setSpec: setSpecRaw, spcRules, spcRuleK, spcType, spcSigmaMethod, spcStageCol, goTo,
+    capabilityBins: bins, setCapabilityBins: setBins, capSubgroupMode, capSubgroupSize, capValueCol, capSubgroupIdCol,
+    setCapabilitySubgroup, showToast, capabilityWarningAcknowledgement, acknowledgeCapabilityWarning,
+  } = useApp(useShallow((s) => ({
+    lsl: s.lsl, usl: s.usl, tgt: s.tgt, lslOn: s.lslOn, uslOn: s.uslOn, toggleSide: s.toggleSide, setSpec: s.setSpec,
+    spcRules: s.spcRules, spcRuleK: s.spcRuleK, spcType: s.spcType, spcSigmaMethod: s.spcSigmaMethod, spcStageCol: s.spcStageCol,
+    goTo: s.goTo, capabilityBins: s.capabilityBins, setCapabilityBins: s.setCapabilityBins,
+    capSubgroupMode: s.capSubgroupMode, capSubgroupSize: s.capSubgroupSize, capValueCol: s.capValueCol, capSubgroupIdCol: s.capSubgroupIdCol,
+    setCapabilitySubgroup: s.setCapabilitySubgroup, showToast: s.showToast,
+    capabilityWarningAcknowledgement: s.capabilityWarningAcknowledgement, acknowledgeCapabilityWarning: s.acknowledgeCapabilityWarning,
+  })));
+  // fix2609i G14:prepared 与壳层/总览共用 useCapabilityPrepared(依赖清单唯一:能力子组口径 +
+  // SPC 数据角色 + pendingCells)。此前本页漏了 spcDataLayout/spcValueCol/spcSubgroupCol/pendingCells,
+  // 「重置界面偏好」等不经 SPC 页的角色写入后页面沿用旧测量列,与状态栏不同源。
+  const { prepared, model: rawModel, textCols } = useCapabilityPrepared();
   const M = prepared.model;
+  // fix2609i G14:O(N) 的输入闸门、确认指纹、能力计算、AD 检验与 Box-Cox 链路整体记忆化,
+  // 只随数据/口径(prepared 已随全部口径字段失效)、规格与确认值变化重算;toast/菜单/组数滑块不触发。
+  // Hooks 必须在下方各提前 return 之前调用,因此按页面状态分支返回结果对象。
+  const analysis = useMemo(() => {
+    if (!M) return null;
+    // 单侧规格：关闭的一侧传 null
+    const spec = { lsl: lslOn ? lsl : null, tgt, usl: uslOn ? usl : null };
+    // 1000σ 是可确认的强警告，不与真正的数学非法输入混在一起。确认字串绑定
+    // 数据集+测量/子组角色+规格+有序观测 hash；任一项变化后旧确认自动失效。
+    const inputError = capabilityInputError(M.all, M.sigmaWithin, spec, { allowDistantSpec: true });
+    if (inputError) return { kind: 'input-error', inputError } as const;
+    const specWarning = capabilitySpecDistanceWarning(M.all, M.sigmaWithin, spec);
+    const warningFingerprint = capabilityWarningFingerprint(
+      capabilitySpecKey(rawModel, textCols) ?? `${rawModel.name}:${prepared.variableName}`,
+      M.all,
+      M.sigmaWithin,
+      spec,
+      capabilitySubgroupSemantics(rawModel, textCols) ?? '',
+    );
+    const warningAcknowledged = specWarning != null && warningFingerprint != null
+      && capabilityWarningAcknowledgement === warningFingerprint;
+    if (specWarning && !warningAcknowledged) return { kind: 'awaiting-ack', specWarning, warningFingerprint } as const;
+    const cap = computeCapability(M.all, M.sigmaWithin, spec, { allowDistantSpec: warningAcknowledged });
+    // 正态性检验 + 非正态时的 Box-Cox 备选（需双侧规格）
+    const ad = M.all.length >= 8 ? andersonDarling(M.all) : null;
+    let boxcox: { lambda: number; ppk: number; adAfter: number } | null = null;
+    if (ad && !ad.normal && lslOn && uslOn) {
+      const bl = bestLambda(M.all);
+      if (!('error' in bl)) {
+        const tr = transformWithSpec(M.all, lsl, usl, bl.lambda);
+        if (!('error' in tr)) {
+          const tSd = stdev(tr.data, true);
+          const tSpec = { lsl: tr.lsl, usl: tr.usl, tgt: (tr.lsl + tr.usl) / 2 };
+          // 变换域也要先过输入闸门:负 λ 会把近零规格映射成巨值,量纲哨兵在变换域触发时
+          // 只应跳过 Box-Cox 补充卡,不能让 computeCapability 抛异常炸掉整页(含规格编辑器)。
+          if (capabilityInputError(tr.data, tSd, tSpec, { allowDistantSpec: warningAcknowledged }) === null) {
+            const tCap = computeCapability(tr.data, tSd, tSpec, { allowDistantSpec: warningAcknowledged });
+            boxcox = { lambda: bl.lambda, ppk: tCap.ppk, adAfter: andersonDarling(tr.data).p };
+          }
+        }
+      }
+    }
+    return { kind: 'ok', specWarning, warningAcknowledged, cap, ad, boxcox } as const;
+  }, [M, rawModel, textCols, prepared, lsl, usl, tgt, lslOn, uslOn, capabilityWarningAcknowledgement]);
+  // 能力结论必须先同时检查位置图与离散图;计数逻辑收敛在 countCapabilityViolations(与保存记录/专项报告共用)。
+  // 能力指标仍使用 M.sigmaWithin（classic R̄/d₂）；只有控制图稳定性跟随用户选定 σ̂。
+  const stability = useMemo(() => {
+    if (!M || analysis?.kind !== 'ok') return null;
+    const capSpcModel = withSigmaMethod(M, spcSigmaMethod);
+    const capabilityFamily = spcChartFamilyFor(capSpcModel, spcType);
+    const spcViol = countCapabilityViolations(capSpcModel, spcRules, spcRuleK, capabilityFamily);
+    // CORE-09/UI-12:能力稳定性有意不分阶段、按子组图评估;SPC 页视图不同(分阶段/I-MR 等)时写明口径。
+    const stabilityCaliber = capabilityStabilityCaliber({ capabilityFamily, spcType, spcStageCol });
+    return { spcViol, stabilityCaliber };
+  }, [M, analysis, spcSigmaMethod, spcType, spcRules, spcRuleK, spcStageCol]);
   // 批次716-R2 P0:子组口径(模式/测量列/ID 列)变化 = 测量特性可能变化,规格必须跟随切换,
   // 否则沿用旧量纲规格会产出虚假 Cpk。有该特性的记忆规格用记忆,否则按新口径 μ±4σ 重建议。
   const updateSubgroup = (patch: Parameters<typeof setCapabilitySubgroup>[0]) => {
@@ -197,11 +261,7 @@ export function Capability({ T }: { T: ChartTokens }) {
       </button>
     </Card>
   );
-  const spec = { lsl: effLsl, tgt, usl: effUsl };
-  // 1000σ 是可确认的强警告，不与真正的数学非法输入混在一起。确认字串绑定
-  // 数据集+测量/子组角色+规格+有序观测 hash；任一项变化后旧确认自动失效。
-  const inputError = capabilityInputError(M.all, M.sigmaWithin, spec, { allowDistantSpec: true });
-  if (inputError) {
+  if (analysis?.kind === 'input-error') {
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
         {subgroupEditor}
@@ -210,22 +270,13 @@ export function Capability({ T }: { T: ChartTokens }) {
         </Card>
         {specEditor}
         <Card style={{ padding: '18px 20px', color: '#a62b2b', background: '#fff5f5', borderColor: '#f0caca', lineHeight: 1.7 }}>
-          <b>过程能力分析未运行：</b>{inputError}。请修正规格限或补充有变异的实测数据；系统不会输出负能力指数、无穷 Cpk 或超过 100% 的预测缺陷率。
+          <b>过程能力分析未运行：</b>{analysis.inputError}。请修正规格限或补充有变异的实测数据；系统不会输出负能力指数、无穷 Cpk 或超过 100% 的预测缺陷率。
         </Card>
       </div>
     );
   }
-  const specWarning = capabilitySpecDistanceWarning(M.all, M.sigmaWithin, spec);
-  const warningFingerprint = capabilityWarningFingerprint(
-    capabilitySpecKey(rawModel, textCols) ?? `${rawModel.name}:${prepared.variableName}`,
-    M.all,
-    M.sigmaWithin,
-    spec,
-    capabilitySubgroupSemantics(rawModel, textCols) ?? '',
-  );
-  const warningAcknowledged = specWarning != null && warningFingerprint != null
-    && capabilityWarningAcknowledgement === warningFingerprint;
-  if (specWarning && !warningAcknowledged) {
+  if (analysis?.kind === 'awaiting-ack') {
+    const { specWarning, warningFingerprint } = analysis;
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
         {subgroupEditor}
@@ -253,7 +304,9 @@ export function Capability({ T }: { T: ChartTokens }) {
       </div>
     );
   }
-  const cap = computeCapability(M.all, M.sigmaWithin, spec, { allowDistantSpec: warningAcknowledged });
+  if (analysis?.kind !== 'ok' || !stability) return null; // 不可达:M 存在时 analysis 必为上述三态之一
+  const { specWarning, warningAcknowledged, cap, ad, boxcox } = analysis;
+  const { spcViol, stabilityCaliber } = stability;
   const good = cap.verdict === 'sufficient';
   const marginal = cap.verdict === 'marginal';
 
@@ -277,38 +330,12 @@ export function Capability({ T }: { T: ChartTokens }) {
     { k: '西格玛水平', v: nf(cap.sigmaLevel, 2) + 'σ' },
   ];
 
-  // 正态性检验 + 非正态时的 Box-Cox 备选（需双侧规格）
-  const ad = M.all.length >= 8 ? andersonDarling(M.all) : null;
-  let boxcox: { lambda: number; ppk: number; adAfter: number } | null = null;
-  if (ad && !ad.normal && lslOn && uslOn) {
-    const bl = bestLambda(M.all);
-    if (!('error' in bl)) {
-      const tr = transformWithSpec(M.all, lsl, usl, bl.lambda);
-      if (!('error' in tr)) {
-        const tSd = stdev(tr.data, true);
-        const tSpec = { lsl: tr.lsl, usl: tr.usl, tgt: (tr.lsl + tr.usl) / 2 };
-        // 变换域也要先过输入闸门:负 λ 会把近零规格映射成巨值,量纲哨兵在变换域触发时
-        // 只应跳过 Box-Cox 补充卡,不能让 computeCapability 抛异常炸掉整页(含规格编辑器)。
-        if (capabilityInputError(tr.data, tSd, tSpec, { allowDistantSpec: warningAcknowledged }) === null) {
-          const tCap = computeCapability(tr.data, tSd, tSpec, { allowDistantSpec: warningAcknowledged });
-          boxcox = { lambda: bl.lambda, ppk: tCap.ppk, adAfter: andersonDarling(tr.data).p };
-        }
-      }
-    }
-  }
   const perf = [
     { k: '实测 (观测)', lsl: '—', usl: '—', ppm: Math.round(cap.ppm.observed).toLocaleString() },
     { k: '组内 (潜在)', lsl: cap.ppm.within.belowLsl == null ? '—' : Math.round(cap.ppm.within.belowLsl).toLocaleString(), usl: cap.ppm.within.aboveUsl == null ? '—' : Math.round(cap.ppm.within.aboveUsl).toLocaleString(), ppm: Math.round(cap.ppm.within.total).toLocaleString() },
     { k: '整体 (实际)', lsl: cap.ppm.overall.belowLsl == null ? '—' : Math.round(cap.ppm.overall.belowLsl).toLocaleString(), usl: cap.ppm.overall.aboveUsl == null ? '—' : Math.round(cap.ppm.overall.aboveUsl).toLocaleString(), ppm: Math.round(cap.ppm.overall.total).toLocaleString() },
   ];
 
-  // 能力结论必须先同时检查位置图与离散图;计数逻辑收敛在 countCapabilityViolations(与保存记录/专项报告共用)。
-  // 能力指标仍使用 M.sigmaWithin（classic R̄/d₂）；只有控制图稳定性跟随用户选定 σ̂。
-  const capSpcModel = withSigmaMethod(M, spcSigmaMethod);
-  const capabilityFamily = spcChartFamilyFor(capSpcModel, spcType);
-  const spcViol = countCapabilityViolations(capSpcModel, spcRules, spcRuleK, capabilityFamily);
-  // CORE-09/UI-12:能力稳定性有意不分阶段、按子组图评估;SPC 页视图不同(分阶段/I-MR 等)时写明口径。
-  const stabilityCaliber = capabilityStabilityCaliber({ capabilityFamily, spcType, spcStageCol });
   const report = capabilityReport({
     cpk: cap.cpk, verdict: cap.verdict,
     adP: ad ? ad.p : null, n: M.all.length, spcViolations: spcViol,
@@ -486,3 +513,6 @@ export function Capability({ T }: { T: ChartTokens }) {
     </div>
   );
 }
+
+/** fix2609i G14:与 Dashboard/Spc 同法,主题 tokens 按值比较,挡住 toast/菜单开合引起的父级重渲染。 */
+export const Capability = memo(CapabilityView, (previous, next) => sameChartTokens(previous.T, next.T));
