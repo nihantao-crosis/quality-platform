@@ -181,6 +181,14 @@ export function Aql({ T }: { T: ChartTokens }) {
           AQL 报表不在留底范围内：账本损坏期间它无法反映历史批次记录，导出会被拒绝。若已在其他窗口完成恢复，请刷新本窗口。
         </div>
       )}
+      {/* fix2609m B3:legacy 推定把加严/暂停重置为正常检验——旧版本确会如此，但也可能是篡改，必须醒目、独立于兼容说明。 */}
+      {!ledgerLocked && ledgerAudit.alerts.length > 0 && (
+        <div role="alert" aria-label="责任账本警示" style={{ padding: '11px 14px', background: '#fdecec', border: '1px solid #f1b8b8', borderRadius: 6, fontSize: 12.5, color: '#8f2323', lineHeight: 1.7 }}>
+          <b>责任账本警示：当前检验状态无法由记录链核对。</b>
+          {ledgerAudit.alerts.map((alert) => <div key={alert}>{alert}。</div>)}
+          专项报告与四种导出格式会在警示首行带上同一提示。
+        </div>
+      )}
       <Card style={{ padding: '11px 16px', display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
         <div>
           <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 12.5, color: '#5b6472' }}>

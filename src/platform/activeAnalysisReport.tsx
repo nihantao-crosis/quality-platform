@@ -395,6 +395,9 @@ function buildAqlPayload(): AnalysisReportPayload {
       : '尚未记录实际批次检验结果；当前仅为方案设计结果。',
   ];
   const warnings = [
+    // fix2609m B3:legacy 推定把加严/暂停重置为正常检验时无法核对、也可能是篡改——置于警示首位，
+    // 四种导出(docx/pptx/xlsx/html)都消费同一 warnings。
+    ...report.ledgerAudit.alerts.map((alert) => `【责任账本警示】${alert}。`),
     report.suspended ? '加严检验累计 5 批不接收，抽样检验已暂停；须确认纠正措施有效后才能恢复。' : '',
     p.fullInspect
       ? '本批执行 100% 全检；批接收仍按当前 Ac/Re 判定。发现的不合格品须逐件隔离并按负责部门要求返工、替换、报废或批准处置，批接收不等于放行不合格品。'

@@ -191,11 +191,16 @@ describe('CORE-06 兼容：旧账本按明确策略接受并标记', () => {
     for (let i = 1; i <= 5; i += 1) status = batch(status, 0, `LG${i}`);
     expect(status.state).toBe('normal');
     status = batch(status, 0, 'LG6');
-    // v1.32/33 的载荷与记录都没有 sequenceId 字段
+    // v1.32 的载荷与记录都没有 sequenceId,记录也没有 v1.34+ 才有的 regime / nonconformingDisposition
+    // (fix2609m B3:只删序列号、留着新字段的半截形态按损坏拒绝;真实 v1.32 账本见 core fix2609m 夹具)。
     const stripIds = (value: SwitchStatus) => {
       const raw = JSON.parse(JSON.stringify(value)) as Record<string, unknown> & { records: Array<Record<string, unknown>> };
       delete raw.sequenceId;
-      raw.records.forEach((record) => { delete record.sequenceId; });
+      raw.records.forEach((record) => {
+        delete record.sequenceId;
+        delete record.regime;
+        delete record.nonconformingDisposition;
+      });
       return raw;
     };
     const legacy = stripIds(status);
@@ -309,12 +314,14 @@ describe('CORE-06 无误报：真实操作序列在每一步都能通过重放�
     expect([...states]).toEqual(expect.arrayContaining(['normal', 'reduced', 'tightened', 'suspended']));
   });
 
-  it('v1.32/33 形态随机历史(无序列号、原地重置):每一步都被接受并标记为 legacy', () => {
+  it('v1.32/33 形态随机历史(legacy 序列、原地重置):每一步都被接受并标记为 legacy', () => {
     for (const seed of [3, 11, 58, 777]) {
       simulate(seed, 120, 'v132').forEach(({ status }, index) => {
+        // fix2609m B3:本夹具的记录由现行 recordInspection 生成(带 regime/处置)，对应的真实形态是
+        // 「v1.34+ 载入旧账本后回写」——保留 sequence-legacy-v2 序列号;删光序列号的半截形态按损坏拒绝。
+        // 纯 v1.32 原文(无序列号)由 core/__tests__/fix2609m_G23b-aql 的 fa4b539 真实夹具覆盖。
         const raw = JSON.parse(JSON.stringify(status));
-        delete raw.sequenceId;
-        raw.records.forEach((record: Record<string, unknown>) => { delete record.sequenceId; });
+        expect(raw.sequenceId).toBe(AQL_LEGACY_SEQUENCE_ID);
         const audit = auditAqlLedger(raw);
         expect(audit.status, `seed ${seed} step ${index}: ${audit.detail}`).toBe('legacy');
       });

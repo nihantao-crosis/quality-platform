@@ -498,6 +498,19 @@ function assertLedgerHasRoom(s: SwitchStatus): void {
 }
 
 export function recordInspection(status: SwitchStatus, input: RecordInspectionInput): SwitchStatus {
+  return recordInspectionWithScoring(status, input, 'current');
+}
+
+/**
+ * 转移得分口径。'current':严一档样本量与本批不同 → 不可比、清零(v1.34 起)。
+ * 'v1.32':v1.32 只比较 d 与严一档 Ac、不比样本量(d≤严一档 Ac 即 +3)——仅供链审计重放
+ * legacy 序列里 v1.32 写出的批次记录，录入路径永远使用 'current'。
+ */
+type SwitchingScoreRule = 'current' | 'v1.32';
+
+function recordInspectionWithScoring(
+  status: SwitchStatus, input: RecordInspectionInput, scoring: SwitchingScoreRule,
+): SwitchStatus {
   const s = normalizeSwitchStatus(status);
   if (s.suspended) throw new Error('抽样检验已暂停；须确认纠正措施有效后恢复加严检验');
   assertLedgerHasRoom(s);
@@ -546,6 +559,9 @@ export function recordInspection(status: SwitchStatus, input: RecordInspectionIn
       } else if (tighter.assessment === 'rejected') {
         switchingScore = 0;
         note = '本批按当前 AQL 接收，但严一档 AQL 下不能接收，转移得分清零';
+      } else if (scoring === 'v1.32' && input.nonconforming <= tighter.plan.ac) {
+        switchingScore += 3;
+        note = `本批在严一档 AQL 下仍可接收(按 v1.32 规则未比较严一档样本量)，转移得分 +3 = ${switchingScore}`;
       } else {
         switchingScore = 0;
         note = `严一档 AQL 所需样本量 n=${tighter.plan.n}，与本批样本量 n=${plan.n} 不同，不能用本批不合格数证明仍可接收；按保守原则转移得分清零`;
@@ -780,6 +796,19 @@ export function resumeTightenedInspection(status: SwitchStatus, meta?: AqlTransi
  *   (换表记录/转移记录)起严格重放、之前只做状态连续与逐对得分核对，并在第一条转移记录之前按
  *   「重置为初始正常检验」推定无法解释的断点——此类推定逐处计数写入 notes 供审核方复核。
  *   没有任何记录的 legacy 状态只拒绝「凭空的正常检验转移得分」。
+ * · v1.32 的转移得分规则(G23b B1):Ac≥2 时只比较 d 与严一档 Ac、不比较严一档样本量；v1.34 起
+ *   样本量不同即「不可比、清零」。legacy 序列里的批次记录两种规则都是合法候选(逐处计数写入 notes);
+ *   带序列号的现行序列只按现行规则重放。
+ * · 载荷形态(G23b B3,按提交历史核实:v1.32.0=fa4b539 的记录没有 sequenceId / nonconformingDisposition /
+ *   regime;v1.34.0 起顶层与每条记录都写 sequenceId 与 nonconformingDisposition,v1.39 起写 regime;
+ *   v1.33 未单独发布)。正式版本只可能写出两种形态：纯 v1.32 形态(顶层与记录都没有序列号、记录也
+ *   没有处置/质量表示)，或 v1.34+ 形态(顶层与每条记录都有序列号——v1.34+ 载入旧账本后回写，旧记录
+ *   也会被补齐序列号 sequence-legacy-v2 与处置/质量表示)。缺序列号却带新字段、或顶层与记录的序列号
+ *   有无不一致，都不是任何版本写得出的形态，按损坏拒绝，不享受 legacy 推定。
+ *   边界(必须如实说明):这只挡住「删掉序列号冒充旧版」这类半截伪造；按纯 v1.32 形态整体重写、或
+ *   统一改标成 sequence-legacy-v2 的账本仍会被当作旧账本接受，legacy 推定本身可以被伪造。因此
+ *   legacy 推定把加严/暂停「重置」为正常检验时，审计结果另给 alerts,页面与专项报告(含四种导出)
+ *   必须醒目展示「由旧版本推定重置，无法核对」——展示与人工核对纸质记录是最后的兜底。
  * ---------------------------------------------------------------------------------------- */
 
 export type AqlLedgerAuditStatus = 'verified' | 'legacy' | 'mismatch';
@@ -791,6 +820,11 @@ export interface AqlLedgerAudit {
   detail: string;
   /** legacy 时的兼容标记(供专项报告/页面提示)。 */
   notes: string[];
+  /**
+   * 必须醒目展示的独立警示(页面 role=alert、专项报告警示首行):legacy 推定把加严检验(含暂停)
+   * 不留痕地重置为正常检验——旧版本改检验水平/AQL 确会如此，但同样的形态也可能是篡改，无法由记录链核对。
+   */
+  alerts: string[];
 }
 
 const STATE_LABEL: Record<InspState, string> = { normal: '正常', tightened: '加严', reduced: '放宽' };
@@ -822,15 +856,35 @@ function ledgerLabel(record: AqlLedgerRecord): string {
     : `批次「${record.batchId}」`;
 }
 
-/** 用 recordInspection 本身重放一条批次记录；返回重放后的状态或不一致说明。 */
-function replayBatchRecord(current: SwitchStatus, record: AqlBatchRecord): SwitchStatus | string {
+interface BatchReplay {
+  status: SwitchStatus;
+  /** 该记录只能按 v1.32 严一档计分规则解释(仅 legacy 序列允许)。 */
+  v132Scoring: boolean;
+}
+
+/**
+ * 用 recordInspection 本身重放一条批次记录；返回重放后的状态或不一致说明。
+ * allowV132Scoring(仅 legacy 序列):现行规则解释不了时，再按 v1.32「严一档不比样本量」计分重放
+ * 作为另一合法候选——两种规则只在「正常检验、接收、Ac≥2、严一档 n≠本批 n、d≤严一档 Ac」时
+ * 分歧(现行清零、v1.32 +3),记录中的得分本身决定是哪一种，不会同时成立。
+ */
+function replayBatchRecord(current: SwitchStatus, record: AqlBatchRecord, allowV132Scoring = false): BatchReplay | string {
+  const replayed = replayBatchRecordWith(current, record, 'current');
+  if (typeof replayed !== 'string' || !allowV132Scoring) {
+    return typeof replayed === 'string' ? replayed : { status: replayed, v132Scoring: false };
+  }
+  const legacy = replayBatchRecordWith(current, record, 'v1.32');
+  return typeof legacy === 'string' ? replayed : { status: legacy, v132Scoring: true };
+}
+
+function replayBatchRecordWith(current: SwitchStatus, record: AqlBatchRecord, scoring: SwitchingScoreRule): SwitchStatus | string {
   // 放宽态必须带齐管理条件才不会被归一化降级；正常态只在记录声称自动转放宽时给出条件，
   // 让「得分 ≥30 但未勾选条件而留在正常」与「条件齐备而转放宽」两种合法路径都按同一规则重放。
   const conditions = current.state === 'reduced'
     || (current.state === 'normal' && record.stateAfter === 'reduced');
   let next: SwitchStatus;
   try {
-    next = recordInspection({ ...current, productionSteady: conditions, reducedApproved: conditions, records: [] }, {
+    next = recordInspectionWithScoring({ ...current, productionSteady: conditions, reducedApproved: conditions, records: [] }, {
       lot: record.lot,
       level: record.level,
       aql: record.aql,
@@ -843,7 +897,7 @@ function replayBatchRecord(current: SwitchStatus, record: AqlBatchRecord): Switc
       nonconformingDisposition: record.nonconformingDisposition === 'none' || record.nonconformingDisposition === 'unrecorded'
         ? undefined
         : record.nonconformingDisposition,
-    });
+    }, scoring);
   } catch (error) {
     return `${ledgerLabel(record)}无法按正式转移规则重放：${errorText(error)}`;
   }
@@ -925,9 +979,15 @@ interface ReplayCandidate {
   implicit: number;
   /** 推定的 v1.32/33 参数变更重置次数(legacy 序列)。 */
   resets: number;
+  /** 其中从加严检验(含暂停)重置为正常检验的次数——须醒目警示。 */
+  tightenedResets: number;
+  /** 按 v1.32 严一档计分规则解释的批次数(legacy 序列)。 */
+  v132Scores: number;
 }
 
-const candidateCost = (candidate: ReplayCandidate) => candidate.implicit + candidate.resets;
+/** 推定越少越好；「把加严/暂停推定重置为正常」只有别无解释时才采用。 */
+const candidateCost = (candidate: ReplayCandidate) => candidate.implicit + candidate.resets + candidate.v132Scores
+  + candidate.tightenedResets * 1000;
 
 /**
  * 一个已知状态在下一条记录(或终态)之前可能经历的不留痕变化：暂停后恢复加严(任何账本)；
@@ -949,7 +1009,12 @@ function expandCandidates(
     const roundTrip = implicitNormalRoundTrip(s);
     if (roundTrip) expanded.push({ ...candidate, status: roundTrip, implicit: candidate.implicit + 2 });
   }
-  if (legacyReset) expanded.push({ ...candidate, status: legacyReset, resets: candidate.resets + 1 });
+  if (legacyReset) {
+    expanded.push({
+      ...candidate, status: legacyReset, resets: candidate.resets + 1,
+      tightenedResets: candidate.tightenedResets + (s.state === 'tightened' ? 1 : 0),
+    });
+  }
   return expanded;
 }
 
@@ -987,18 +1052,56 @@ function statusFieldDifference(actual: SwitchStatus, expected: SwitchStatus, com
   return null;
 }
 
+const hasField = (value: object, key: string) => (value as Record<string, unknown>)[key] !== undefined;
+
+/**
+ * B3:原始载荷形态核对(见上方「载荷形态」)。只看字段有无，取值由单条记录校验负责；
+ * 必须在 normalizeSwitchStatus 之前做——归一化会给旧记录补齐序列号/处置/质量表示。
+ */
+function ledgerPayloadFormError(value: unknown): string | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const top = value as { sequenceId?: unknown; records?: unknown };
+  if (!Array.isArray(top.records)) return null;
+  const topSequenced = top.sequenceId !== undefined;
+  for (const raw of top.records as unknown[]) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+    const batchId = (raw as { batchId?: unknown }).batchId;
+    const label = typeof batchId === 'string' ? `批次「${batchId.slice(0, AQL_TRACE_LIMITS.batchId)}」` : '账本记录';
+    const sequenced = hasField(raw, 'sequenceId');
+    if (!sequenced && (hasField(raw, 'nonconformingDisposition') || hasField(raw, 'regime'))) {
+      return `${label}带有 v1.34 之后才有的字段(不合格品处置/质量表示)却缺少检验序列号，`
+        + '不是任何正式版本写出的账本形态，按损坏处理(不适用旧账本推定)';
+    }
+    if (sequenced !== topSequenced) {
+      return topSequenced
+        ? `${label}缺少检验序列号而账本顶层带序列号(v1.34 起每条记录都写序列号)，不是任何正式版本写出的账本形态，按损坏处理`
+        : `${label}带检验序列号而账本顶层没有，不是任何正式版本写出的账本形态，按损坏处理`;
+    }
+  }
+  return null;
+}
+
+const asReplay = (result: SwitchStatus | string): BatchReplay | string => (
+  typeof result === 'string' ? result : { status: result, v132Scoring: false }
+);
+
 /**
  * 从当前检验序列的记录链重放状态，并与顶层 state/suspended/switchingScore/tightenedRejections/
  * sinceSwitch(严格序列另含 history)交叉核对。project.ts 在所有外来入口(localStorage、.qproj、
  * 跨窗口写入)对 mismatch fail-closed 拒绝并保留原文；专项报告据 status/notes 标记旧账本。
  */
 export function auditAqlLedger(value: Partial<SwitchStatus> | null | undefined): AqlLedgerAudit {
+  const mismatch = (detail: string): AqlLedgerAudit => ({ status: 'mismatch', detail, notes: [], alerts: [] });
+  const formError = ledgerPayloadFormError(value);
+  if (formError) return mismatch(formError);
   const status = normalizeSwitchStatus(value);
   const ledger = status.records;
-  const mismatch = (detail: string): AqlLedgerAudit => ({ status: 'mismatch', detail, notes: [] });
   const notes: string[] = [];
   let implicitCount = 0;
   let legacyResetCount = 0;
+  /** 其中把加严检验(含暂停)推定重置为正常检验的次数(独立警示)。 */
+  let tightenedResetCount = 0;
+  let v132ScoreCount = 0;
 
   // 人工转移留痕从第一条 transition 记录起生效；其之前(含紧邻它的那一处)的缺口属于 v1.43 之前。
   const firstTransition = ledger.findIndex(isAqlTransitionRecord);
@@ -1030,6 +1133,8 @@ export function auditAqlLedger(value: Partial<SwitchStatus> | null | undefined):
     if (endState === 'normal') continue;
     if (sequenceId === AQL_LEGACY_SEQUENCE_ID) {
       legacyResetCount += 1;
+      // 旧序列停在加严中却已开启新序列：只能是旧版本改参数把加严不留痕地重置了。
+      if (endState === 'tightened') tightenedResetCount += 1;
       continue;
     }
     if (endState === 'reduced' && gapAllowedBefore(endIndex + 1)) {
@@ -1045,7 +1150,9 @@ export function auditAqlLedger(value: Partial<SwitchStatus> | null | undefined):
   const fresh = () => replaySeed(status.sequenceId);
 
   // 3) 重放当前序列。known=null 表示 legacy 序列尚未到达第一个可确定的转移点(计数未知)。
-  const seed = (start: SwitchStatus): ReplayCandidate[] => [{ status: start, implicit: 0, resets: 0 }];
+  const seed = (start: SwitchStatus): ReplayCandidate[] => [
+    { status: start, implicit: 0, resets: 0, tightenedResets: 0, v132Scores: 0 },
+  ];
   let known: ReplayCandidate[] | null = legacySequence ? null : seed(fresh());
   let previousState: InspState | null = null;
   let previousScore: number | null = null;
@@ -1056,6 +1163,8 @@ export function auditAqlLedger(value: Partial<SwitchStatus> | null | undefined):
     const gapAllowed = gapAllowedBefore(start + offset);
     // v1.32/33 的 legacy 序列：改检验水平/AQL(哪怕随后改回)会不留痕地重置为初始正常检验。
     const legacyResetAllowed = legacySequence && gapAllowed && record.stateBefore === 'normal';
+    // v1.32 严一档计分只可能出现在 legacy 序列、且早于第一条(v1.43 才有的)转移记录的批次上。
+    const v132ScoringAllowed = legacySequence && gapAllowed;
 
     if (!known) {
       // legacy 未知段：只核对状态连续与逐对得分，遇到第一个可确定的转移点后转入严格重放。
@@ -1068,6 +1177,7 @@ export function auditAqlLedger(value: Partial<SwitchStatus> | null | undefined):
           known = seed(moved);
         } else if (legacyResetAllowed) {
           legacyResetCount += 1;
+          if (previousState === 'tightened') tightenedResetCount += 1;
           known = seed(fresh());
         } else {
           return mismatch(`记录链在${STATE_LABEL[previousState]}→${STATE_LABEL[record.stateBefore]}之间断开，`
@@ -1087,10 +1197,14 @@ export function auditAqlLedger(value: Partial<SwitchStatus> | null | undefined):
         const windowDependent = (record.stateBefore === 'normal' && record.stateAfter === 'tightened')
           || (record.stateBefore === 'tightened' && record.stateAfter === 'normal');
         const bases = previousScore === null || windowDependent ? [] : [...new Set([previousScore, 0])];
-        const replays = bases.map((base) => replayBatchRecord(replaySeedAt(status.sequenceId, record.stateBefore, base), record));
-        if (replays.length > 0 && replays.every((result) => typeof result === 'string')) {
+        const replays = bases.map((base) => replayBatchRecord(
+          replaySeedAt(status.sequenceId, record.stateBefore, base), record, v132ScoringAllowed,
+        ));
+        const explained = replays.filter((result): result is BatchReplay => typeof result !== 'string');
+        if (replays.length > 0 && explained.length === 0) {
           return mismatch(`${replays[0] as string}(与上一条记录的得分不连续)`);
         }
+        if (explained.length > 0 && explained.every((result) => result.v132Scoring)) v132ScoreCount += 1;
         previousState = record.stateAfter;
         previousScore = record.switchingScoreAfter;
         if (record.stateBefore !== record.stateAfter) {
@@ -1111,17 +1225,19 @@ export function auditAqlLedger(value: Partial<SwitchStatus> | null | undefined):
     let failure: string | null = null;
     for (const candidate of expanded) {
       const base = candidate.status;
-      let next: SwitchStatus | string;
+      let next: BatchReplay | string;
       if (base.suspended && !(isAqlTransitionRecord(record) && record.action === 'resume-tightened')) {
         next = `${ledgerLabel(record)}发生在抽样检验暂停期间，正式流程不允许`;
       } else if (base.state !== record.stateBefore) {
         next = `${ledgerLabel(record)}的检验前状态为${STATE_LABEL[record.stateBefore]}，`
           + `按记录链重放应为${STATE_LABEL[base.state]}${gapAllowed ? '' : '(缺少状态转移记录)'}`;
       } else {
-        next = isAqlBatchRecord(record) ? replayBatchRecord(base, record) : replayTransitionRecord(base, record);
+        next = isAqlBatchRecord(record)
+          ? replayBatchRecord(base, record, v132ScoringAllowed)
+          : asReplay(replayTransitionRecord(base, record));
       }
       if (typeof next === 'string') failure ??= next;
-      else survivors.push({ ...candidate, status: next });
+      else survivors.push({ ...candidate, status: next.status, v132Scores: candidate.v132Scores + (next.v132Scoring ? 1 : 0) });
     }
     if (survivors.length === 0) return mismatch(failure ?? `${ledgerLabel(record)}无法按正式转移规则重放`);
     known = dedupeCandidates(survivors);
@@ -1142,6 +1258,8 @@ export function auditAqlLedger(value: Partial<SwitchStatus> | null | undefined):
     }
     implicitCount += matches[0].implicit;
     legacyResetCount += matches[0].resets;
+    tightenedResetCount += matches[0].tightenedResets;
+    v132ScoreCount += matches[0].v132Scores;
   } else if (current.length === 0) {
     // 没有任何当前序列记录的 legacy 状态(v1.31 近似版迁入)：状态本身无从重放，
     // 但正常检验转移得分只能由批次记录累积，凭空的得分按不一致拒绝。
@@ -1153,14 +1271,18 @@ export function auditAqlLedger(value: Partial<SwitchStatus> | null | undefined):
     // legacy 序列全程没有可确定的转移点：只能核对终态、得分与转移窗口末尾。
     const endState = previousState!;
     const endScore = previousScore!;
-    const options: Array<{ state: InspState; score: number; windowCleared: boolean; implicit: boolean }> = [
-      { state: endState, score: endScore, windowCleared: false, implicit: false },
+    type EndOption = { state: InspState; score: number; windowCleared: boolean; inferred: 'none' | 'implicit' | 'tightened-reset' };
+    const options: EndOption[] = [
+      { state: endState, score: endScore, windowCleared: false, inferred: 'none' },
     ];
     // 暂停后恢复加严不留痕(窗口清零)；人工转移与参数重置仅旧账本推定。
-    if (endState === 'tightened') options.push({ state: 'tightened', score: 0, windowCleared: true, implicit: false });
+    if (endState === 'tightened') options.push({ state: 'tightened', score: 0, windowCleared: true, inferred: 'none' });
     if (finalGapAllowed) {
-      if (endState === 'normal' && endScore >= 30) options.push({ state: 'reduced', score: endScore, windowCleared: true, implicit: true });
-      options.push({ state: 'normal', score: 0, windowCleared: true, implicit: true });
+      if (endState === 'normal' && endScore >= 30) options.push({ state: 'reduced', score: endScore, windowCleared: true, inferred: 'implicit' });
+      // 加严 → 正常 不是任何人工转移能做到的，只能是旧版本改参数的不留痕重置(须独立警示)。
+      options.push({
+        state: 'normal', score: 0, windowCleared: true, inferred: endState === 'tightened' ? 'tightened-reset' : 'implicit',
+      });
     }
     // 窗口前缀未知，且恢复加严/参数重置可在任意位置清空窗口：只要求两者重叠的末尾一致。
     const observed = unknownOriginalResults.slice(-5);
@@ -1174,7 +1296,11 @@ export function auditAqlLedger(value: Partial<SwitchStatus> | null | undefined):
       return mismatch(`AQL 状态字段与责任账本记录链不一致：末条记录为${STATE_LABEL[endState]}检验/得分 ${endScore}，`
         + `状态字段为${STATE_LABEL[status.state]}检验/得分 ${status.switchingScore}，转移窗口为 [${status.sinceSwitch.join('')}]`);
     }
-    if (match.implicit) implicitCount += 1;
+    if (match.inferred === 'implicit') implicitCount += 1;
+    if (match.inferred === 'tightened-reset') {
+      legacyResetCount += 1;
+      tightenedResetCount += 1;
+    }
   }
 
   if (legacySequence) {
@@ -1186,9 +1312,17 @@ export function auditAqlLedger(value: Partial<SwitchStatus> | null | undefined):
   if (implicitCount > 0) {
     notes.push(`历史账本未含转移记录：${implicitCount} 处人工状态转移(管理条件/恢复正常)按正式规则推定`);
   }
+  if (v132ScoreCount > 0) {
+    notes.push(`历史账本含 ${v132ScoreCount} 处按 v1.32 严一档规则计分(严一档样本量与本批不同，仍按 d≤严一档 Ac 计 +3;现行规则为不可比、清零)`);
+  }
+  const alerts = tightenedResetCount > 0
+    ? [`检验状态由旧版本推定从加严检验（含暂停）重置为正常检验，无法核对（${tightenedResetCount} 处）：`
+      + 'v1.32 更改检验水平/AQL 会不留痕地重置状态，但同样的账本形态也可能是篡改。请核对纸质检验记录与参数变更审批后，'
+      + '再据此放宽检验或出具结论']
+    : [];
   return notes.length > 0
-    ? { status: 'legacy', detail: '', notes }
-    : { status: 'verified', detail: '', notes: [] };
+    ? { status: 'legacy', detail: '', notes, alerts }
+    : { status: 'verified', detail: '', notes: [], alerts: [] };
 }
 
 export interface AqlReportData {
