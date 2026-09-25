@@ -11,6 +11,7 @@ import {
   useApp,
 } from '../../store/appStore';
 import {
+  PROJECT_BACKUP_HINT,
   cancelPendingDatasetWork,
   quiescePendingDatasetWorkForClear,
   resumePendingDatasetWorkAfterClearFailure,
@@ -317,7 +318,7 @@ export function OptionsModal({ onClose }: { onClose: () => void }) {
         }
         resumePendingDatasetWorkAfterClearFailure();
         setClearing(false);
-        showToast(`本地数据清除未提交：${errText(error)}；当前工作表已标记为未保存，请先导出项目备份再重试`);
+        showToast(`本地数据清除未提交：${errText(error)}；当前工作表已标记为未保存，请先${PROJECT_BACKUP_HINT}备份再重试`);
         useApp.getState().setBusyOverlay(null);
         return;
       }

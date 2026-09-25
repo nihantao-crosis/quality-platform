@@ -30,6 +30,12 @@ const knownDatasetNames = new Set<string>();
 /** 演示表首次编辑是同步 API；候选名在首次只插入确认前始终带持久化保护标记。 */
 const unclaimedCopyNames = new Set<string>();
 const sessionClaimedCopyNames = new Set<string>();
+/**
+ * 本会话由新建类入口(onNameConflict='rename')写入、此后未经编辑的数据集：名称 → 写入时的 savedAt。
+ * 只有最近列表中同名条目的 savedAt 仍与之相同，才算「原样结果」(编辑、撤销、另一窗口改写都会换 savedAt)。
+ * 不落盘：重启后一律视为可能已编辑，按改名策略保守处理。
+ */
+const pristineDatasets = new Map<string, string>();
 let lastWorksheetStamp = 0;
 
 interface StoredDataset {
@@ -61,12 +67,32 @@ export interface DatasetModelOptions {
    * 同名数据集写入策略(STORE-04/UI-04):派生(子集/标准化/转置/堆叠/随机)、文件/剪贴板导入、
    * 工作表粘贴等「新建类」入口置 'rename'——目标名已被内容不同(或内容无法核对)的数据集占用时
    * 改名为「名 (2)」写入，绝不整键覆盖旧数据集(最近列表/本机库/撤销栈/规格记忆)。
+   * 例外(fix2609b M1):旧同名数据集是本会话新建类入口写入、此后未经任何编辑的原样结果时，
+   * 仍按名替换——它可由同一操作重新得到，改名只会多占最近列表位并挤出无关数据集。
    * 省略时保持按名替换语义(回看快照、另存副本等调用方已自行保证名称语义)。
    */
   onNameConflict?: 'rename';
+  /**
+   * Web 端(无本机库)新建类写入会把某数据集挤出最近列表时，默认先拒绝并提示备份(fix2609b M1)。
+   * 用户确认后由调用方带 true 重试；同一操作 60 秒内再次执行也视为确认。
+   */
+  allowEviction?: boolean;
+}
+
+/** Web 端新建类写入会把数据集挤出最近列表(浏览器端无法恢复)，等待用户确认。 */
+export class DatasetEvictionError extends Error {
+  readonly evicted: string[];
+  constructor(message: string, evicted: string[]) {
+    super(message);
+    this.name = 'DatasetEvictionError';
+    this.evicted = evicted;
+  }
 }
 
 export interface PendingCell { row: number; col: number }
+
+/** 派生数据集(转置/堆叠)的写入结果：name 为实际名称(同名改名时带序号)，requested 为请求名。 */
+export interface DerivedDatasetResult { name: string; requested: string; outcome: PersistOutcome }
 
 export interface ParetoRow { name: string; count: number }
 export interface ParetoModel { name: string; rows: ParetoRow[] }
@@ -201,12 +227,25 @@ function nextUniqueColumnName(base: string, used: Iterable<string>): string {
 }
 
 let storageWarned = false;
+/**
+ * 备份指引的唯一口径(fix2609b M4)：文件菜单里真实存在的入口是「保存项目文件…」（Ctrl+S）；
+ * 「导出项目汇总…」只是汇总报表，不能恢复数据，文案绝不能把用户引到那里。
+ */
+export const PROJECT_BACKUP_HINT = '「文件 → 保存项目文件…」（Ctrl+S）';
+
+/** 同名改名后，原冲突数据集写入完成时的实际位置(提示按此生成，不写死「保留在最近列表」)。 */
+export type ConflictDatasetLocation = 'recents' | 'vault' | 'lost';
+
 /** P0-5:持久化结果契约——只有 persisted=true 才允许 UI 显示绿色成功。 */
 export interface PersistOutcome {
   persisted: boolean;
   archiving: boolean;
   /** 实际写入的数据集名；onNameConflict='rename' 改名时与请求名不同，调用方提示须以此为准。 */
   name?: string;
+  /** 本次写入把哪些数据集挤出了最近列表(桌面端已补入本机库；Web 端无法恢复)。 */
+  evicted?: string[];
+  /** 改名写入时，原同名数据集现在的位置：最近列表 / 本机数据集库 / 已移出(Web 端不可恢复)。 */
+  conflictLocation?: ConflictDatasetLocation;
   /** SQLite 归档的真实完成承诺。archiving 只表示已发起，覆盖数据前必须 await 此承诺。 */
   durability?: Promise<void>;
   /** 校验拒绝原因(第三轮 P3):调用方据此区分「被拒」与「存储空间不足」,不再错报 */
@@ -265,11 +304,11 @@ function setRecentsUnpersisted(v: boolean): void {
     independentlyDurableRecoveryCopy = null;
     return;
   }
-  sessionLog('最近数据集列表未能持久化 · 活动表仍为权威版本，离开前请导出项目');
+  sessionLog(`最近数据集列表未能持久化 · 活动表仍为权威版本，离开前请${PROJECT_BACKUP_HINT}备份`);
   if (recentsPersistenceWarned) return;
   recentsPersistenceWarned = true;
   try {
-    useApp.getState().showToast('最近数据集列表未能保存（浏览器存储空间不足）；当前活动表仍为最新版本，请尽快「文件 → 导出项目」备份，腾出空间前将暂停切换其他数据集');
+    useApp.getState().showToast(`最近数据集列表未能保存（浏览器存储空间不足）；当前活动表仍为最新版本，请尽快${PROJECT_BACKUP_HINT}备份，腾出空间前将暂停切换其他数据集`);
   } catch { /* 非 UI 环境忽略 */ }
 }
 /** 项目导入成功后旧内存数据注定被替换——上遮罩重载前清除未持久化标记,避免 beforeunload 拦截自动重载。 */
@@ -285,7 +324,7 @@ if (typeof window !== 'undefined') {
     flushPendingCellPersistence();
     if (!activeUnpersistedFlag) return;
     e.preventDefault();
-    e.returnValue = '当前数据尚未持久化，离开将丢失；请先「文件 → 导出项目」备份。';
+    e.returnValue = `当前数据尚未持久化，离开将丢失；请先${PROJECT_BACKUP_HINT}备份。`;
   });
 }
 
@@ -315,11 +354,41 @@ function saveJson(key: string, v: unknown, silent = false): boolean {
     // silent=true 时由调用方接管提示(桌面端会转投 SQLite 数据集库)。
     if (!silent && !storageWarned) {
       storageWarned = true;
-      sessionLog('本地存储写入失败(可能超限)· 数据仍在内存,建议 保存到项目 导出文件');
+      sessionLog(`本地存储写入失败(可能超限)· 数据仍在内存,建议${PROJECT_BACKUP_HINT}备份`);
       try {
-        useApp.getState().showToast('本地存储已满,本次未自动保存;请用「保存到项目」导出为文件');
+        useApp.getState().showToast(`本地存储已满,本次未自动保存;请用${PROJECT_BACKUP_HINT}备份为项目文件`);
       } catch { /* 非浏览器环境忽略 */ }
     }
+    return false;
+  }
+}
+
+/**
+ * 与 saveJson 对称的删除入口(fix2609b M3)。业务键的删除同样要维护三份簿记：
+ * - protectedCorruptStores:live 仍是未能隔离的损坏原文时拒绝删除(那是唯一恢复证据)；
+ * - dirtyProjectStores:此前配额失败留下的旧载荷必须随删除作废，否则 .qproj 导出会让已清空的内容复活；
+ * - markLocalWrite:登记本窗口的删除，避免 storage 事件把自己的删除当成外部写入回灌。
+ */
+function removeJson(key: string): boolean {
+  const protectedEntry = protectedCorruptStores.get(key);
+  if (protectedEntry) {
+    let live: string | null = protectedEntry.raw;
+    try { live = localStorage.getItem(key); } catch { /* 使用已捕获原文重试 */ }
+    if (live == null) {
+      protectedCorruptStores.delete(key);
+    } else if (!quarantineCorruptStore(key, live, protectedEntry.detail)) {
+      const detail = `本地数据「${key}」是尚未成功隔离的损坏原文，已拒绝删除以保留恢复证据；请先释放存储空间或在「工具 → 选项」确认清除`;
+      sessionLog(detail);
+      try { useApp.getState().showToast(detail); } catch { /* 非 UI 环境忽略 */ }
+      return false;
+    }
+  }
+  dirtyProjectStores.delete(key);
+  try {
+    markLocalWrite(key, null);
+    localStorage.removeItem(key);
+    return true;
+  } catch {
     return false;
   }
 }
@@ -434,11 +503,28 @@ function splitDatasetName(name: string): { base: string; ext: string } {
   return { base, ext };
 }
 
+/** 「report.csv」+2 →「report (2).csv」；名称长度受上限约束。 */
+function numberedDatasetName(requested: string, sequence: number): string {
+  const { base, ext } = splitDatasetName(requested);
+  const suffix = ` (${sequence})${ext}`;
+  return `${base.slice(0, Math.max(1, MAX_DATASET_NAME_CHARS - suffix.length)).trimEnd() || '数据集'}${suffix}`;
+}
+
+/** 旧同名数据集是否为本会话新建类入口写入后未经编辑的原样结果(可由同一操作重新得到)。 */
+function isPristineDataset(name: string, st: DataState): boolean {
+  const savedAt = pristineDatasets.get(name);
+  if (savedAt === undefined) return false;
+  const recent = st.recents.find((entry) => entry.name === name);
+  return recent?.data !== undefined && recent.savedAt === savedAt && recent.data.savedAt === savedAt;
+}
+
 /**
  * 同名数据集写入策略的唯一实现(STORE-04/UI-04)。
  * - 名称空闲 → 原名；
  * - 名称被内容完全相同的数据集占用 → 原名(重复同一操作不制造「(2)(3)…」挤占最近列表上限)；
- * - 名称被内容不同或无法核对的数据集占用 → 依次尝试「名 (2)」「名 (3)」…，同样复用内容相同者，
+ * - 名称被本会话新建类入口写入、此后未经编辑的原样结果占用 → 原名按名替换(fix2609b M1：
+ *   与修复前语义一致，不为可重新得到的结果多占最近列表位、挤出无关数据集)；
+ * - 名称被已编辑、或内容无法核对的数据集占用 → 依次尝试「名 (2)」「名 (3)」…，同样复用内容相同者，
  *   取第一个空闲名。旧数据集及其编辑、本机库记录、规格记忆均不受影响。
  */
 function resolveDatasetWriteName(
@@ -448,10 +534,9 @@ function resolveDatasetWriteName(
   const first = occupiedBy(requested);
   if (first === undefined) return { name: requested, identical: false };
   if (first !== null && sameDatasetContent(first, incoming)) return { name: requested, identical: true };
-  const { base, ext } = splitDatasetName(requested);
+  if (isPristineDataset(requested, st)) return { name: requested, identical: false };
   for (let sequence = 2; ; sequence++) {
-    const suffix = ` (${sequence})${ext}`;
-    const candidate = `${base.slice(0, Math.max(1, MAX_DATASET_NAME_CHARS - suffix.length)).trimEnd() || '数据集'}${suffix}`;
+    const candidate = numberedDatasetName(requested, sequence);
     if (candidate === requested || reservedPrototypeNameError(candidate)) continue;
     const occupied = occupiedBy(candidate);
     if (occupied === undefined) return { name: candidate, identical: false };
@@ -504,8 +589,8 @@ interface DataState {
   deleteRow(row: number): void;
   undoEdit(): boolean;
   redoEdit(): boolean;
-  /** 新建空白工作表（5 列 × 3 行；有限占位值与 pendingCells 分离） */
-  newWorksheet(): void;
+  /** 新建空白工作表（5 列 × 3 行；有限占位值与 pendingCells 分离）。返回持久化结果(含被挤出最近列表的数据集)。 */
+  newWorksheet(): PersistOutcome;
   /** 当前数据集另存为「xxx (副本)」并激活。
    * 桌面端先只插入，durability 成功后才激活；name 在碰撞重试时更新，调用方须等待后读取。
    * 返回 name + 持久化结果(蜂群 P1-01:此前只返回名字、丢弃 PersistOutcome,
@@ -528,13 +613,13 @@ interface DataState {
   /** 用公式（引用工作表顶部 C# 数值列/列名）算出一列并追加;成功返回 null,失败返回错误信息 */
   addFormulaColumn(name: string, expr: string): string | null;
   /** 按条件表达式（C# 与工作表顶部编号同源）筛出子集为新数据集 */
-  subsetByCondition(cond: string): { ok: true; name: string; kept: number; total: number } | { ok: false; error: string };
+  subsetByCondition(cond: string): { ok: true; name: string; requested: string; kept: number; total: number; outcome: PersistOutcome } | { ok: false; error: string };
   /** 统计与替换测量值(3dp 显示容差);col=-1 全部列。replace 为 null 只计数。可撤销。 */
   findReplace(find: number, replace: number | null, col: number): number;
   /** 转置：k×n → n×k；可只转置 SPC 角色层确认的子组列。 */
-  transposeDataset(sourceColumns?: string[]): void;
+  transposeDataset(sourceColumns?: string[]): DerivedDatasetResult;
   /** 堆叠：多测量列堆成单列 + 「来源列」分组标签,生成新数据集「xxx (堆叠)」 */
-  stackColumns(): void;
+  stackColumns(): DerivedDatasetResult;
   /** MES 模拟：追加一个子组（首次调用前需 startMesDataset） */
   startMesDataset(n: number): void;
   appendSubgroup(vals: number[]): void;
@@ -848,28 +933,63 @@ function sameStoredDatasetVersion(left: StoredDataset, right: StoredDataset): bo
   return JSON.stringify(normalized(left)) === JSON.stringify(normalized(right));
 }
 
+/**
+ * 最近列表截断的唯一实现(fix2609b M1)。所有「新条目置顶 + 截到上限」都必须经此，
+ * 被截掉的条目交还调用方：桌面端经 settleEvictedRecents 补入本机库(只插入、不覆盖)，
+ * Web 端没有其他落盘位置，必须如实提示——绝不静默丢弃。
+ */
+function trimRecents(nextList: RecentEntry[]): { recents: RecentEntry[]; evicted: RecentEntry[] } {
+  if (nextList.length <= MAX_RECENT_DATASETS) return { recents: nextList, evicted: [] };
+  const recents = nextList.slice(0, MAX_RECENT_DATASETS);
+  const kept = new Set(recents.map((entry) => entry.name));
+  return { recents, evicted: nextList.slice(MAX_RECENT_DATASETS).filter((entry) => !kept.has(entry.name)) };
+}
+
+/**
+ * Web 端挤出确认(与「再次点击确认删除」同一交互)：首次被拒后，同一请求名 + 同一批将被移出的
+ * 数据集在时限内再次执行即视为用户确认。确认只消费一次。
+ */
+const EVICTION_CONFIRM_SECONDS = 60;
+let evictionConfirmation: { key: string; expires: number } | null = null;
+
+function evictionConfirmationKey(requestedName: string, evicted: string[]): string {
+  return JSON.stringify([requestedName, evicted]);
+}
+
+function armEvictionConfirmation(requestedName: string, evicted: string[]): void {
+  evictionConfirmation = {
+    key: evictionConfirmationKey(requestedName, evicted),
+    expires: Date.now() + EVICTION_CONFIRM_SECONDS * 1000,
+  };
+}
+
+function consumeEvictionConfirmation(requestedName: string, evicted: string[]): boolean {
+  const armed = evictionConfirmation;
+  if (!armed || armed.expires < Date.now()
+    || armed.key !== evictionConfirmationKey(requestedName, evicted)) return false;
+  evictionConfirmation = null;
+  return true;
+}
+
 /** 同名时活动表是用户刚刚看到并写入的版本，最近入口只能跟随，不能反向覆盖。 */
 function coordinateRecentsWithActive(
   recents: RecentEntry[],
   active: StoredDataset | null | undefined,
-): { recents: RecentEntry[]; changed: boolean } {
-  if (!active) return { recents, changed: false };
+): { recents: RecentEntry[]; changed: boolean; evicted: RecentEntry[] } {
+  if (!active) return { recents, changed: false, evicted: [] };
   const index = recents.findIndex((entry) => entry.name === active.name);
   const authoritative: RecentEntry = { name: active.name, savedAt: active.savedAt, data: active };
   if (index < 0) {
-    return {
-      recents: [authoritative, ...recents].slice(0, MAX_RECENT_DATASETS),
-      changed: true,
-    };
+    return { ...trimRecents([authoritative, ...recents]), changed: true };
   }
   const existing = recents[index];
   if (existing.savedAt === active.savedAt && existing.data
     && sameStoredDatasetVersion(existing.data, active)) {
-    return { recents, changed: false };
+    return { recents, changed: false, evicted: [] };
   }
   const next = [...recents];
   next[index] = authoritative;
-  return { recents: next, changed: true };
+  return { recents: next, changed: true, evicted: [] };
 }
 
 const storedAttr = loadValidatedStoreJson<{
@@ -1049,16 +1169,18 @@ function replacementBlockReason(options: { equivalentRecoveryCopy?: boolean }): 
     && !options.equivalentRecoveryCopy
     && independentlyDurableRecoveryCopy !== activeName) {
     // STORE-08:旧文案「请先重试保存或导出项目」指向不存在的入口与无效动作(导出不解除闸门)。
-    // 改为可操作口径：导出备份 → 移除不需要的最近数据集腾出空间 → 重试(闸门会自动重试保存)。
+    // 改为可操作口径：保存项目文件备份 → 移除不需要的最近数据集腾出空间 → 重试(闸门会自动重试保存)。
+    // fix2609b M4:入口名必须与文件菜单一致；当前表本身过大时，移除其他数据集无效，须明说。
     return `最近数据集列表尚未保存（浏览器存储空间不足），为防「${activeName}」的最新数据在刷新后丢失，已暂停切换/导入其他数据集；`
-      + '请先「文件 → 导出项目」备份，再在左侧「最近数据集」点 × 移除不再需要的数据集（已导出备份的也可移除）腾出空间后重试';
+      + `请先${PROJECT_BACKUP_HINT}备份，再在左侧「最近数据集」点 × 移除不再需要的数据集（已备份到项目文件的也可移除）腾出空间后重试；`
+      + `若当前表本身过大，需先保存项目文件，再把「${activeName}」从最近列表移除`;
   }
   if (lightweightRecentDurability.has(activeName) && !options.equivalentRecoveryCopy) {
     return `最近列表仅保存了数据集「${activeName}」的轻量引用，精确矩阵尚未落入本机库；请稍后重试`;
   }
   if (overflowRequiredVaultSnapshot) {
     const name = overflowRequiredVaultSnapshot.data.name;
-    return `数据集「${name}」的未持久化快照已占用安全保全槽；请先导出项目或重试归档，再替换当前数据集`;
+    return `数据集「${name}」的未持久化快照已占用安全保全槽；请先${PROJECT_BACKUP_HINT}备份或重试归档，再替换当前数据集`;
   }
   return null;
 }
@@ -1080,7 +1202,15 @@ function beginDatasetReplacement(options: { equivalentRecoveryCopy?: boolean } =
   if (detail && recentsUnpersistedFlag) {
     // STORE-08:真正的「重试保存」——用户移除其他最近数据集/清理空间后，
     // 无需再编辑一格即可在下一次切换时重新落盘并解锁；仍写不下则继续拦截。
-    persistRecents(useData.getState().recents);
+    // fix2609b M2:内存 recents 可能已被另一窗口的列表替换而不含活动表；重试写入的必须是
+    // 含活动表精确矩阵的列表，只有它落盘成功才算解锁，否则切换后活动表随替换丢失。
+    const st = useData.getState();
+    const activeData = inMemoryActiveDataset(st);
+    const coordinated = coordinateRecentsWithActive(st.recents, activeData);
+    if (coordinated.changed) useData.setState({ recents: coordinated.recents });
+    // 提示由闸门统一给出，重试失败不再先闪一条通用的「存储已满」。
+    persistRecents(coordinated.recents, activeData ?? undefined, { silent: true });
+    settleEvictedRecents(coordinated.evicted);
     detail = replacementBlockReason(options);
   }
   if (detail) {
@@ -1091,6 +1221,25 @@ function beginDatasetReplacement(options: { equivalentRecoveryCopy?: boolean } =
   const st = useData.getState();
   if (st.mesRunning) useData.setState({ mesRunning: false });
   return beginDatasetIntent();
+}
+
+/**
+ * 内存中的活动表(权威版本，含尚未落盘的编辑)，口径与 restoreSnapshot 相同。
+ * 最近列表里已有同内容条目时复用它(保持 savedAt，避免无谓重写)；演示表可随时重建，不入最近列表。
+ */
+function inMemoryActiveDataset(st: DataState): StoredDataset | null {
+  if (st.model.isDemo) return null;
+  const rows = st.model.subs.map((subgroup) => subgroup.vals);
+  const existing = st.recents.find((entry) => entry.name === st.model.name)?.data;
+  if (existing && sameDatasetContent(
+    { colNames: existing.colNames, rows: existing.rows, textCols: existing.textCols ?? [], pendingCells: existing.pendingCells ?? [] },
+    { colNames: st.model.colNames, rows, textCols: st.textCols, pendingCells: st.pendingCells },
+  )) return existing;
+  return {
+    name: st.model.name, colNames: st.model.colNames, rows, textCols: st.textCols,
+    pendingCells: st.pendingCells, ...storedModelMetadata(st.model, rows),
+    savedAt: new Date().toISOString(),
+  };
 }
 
 function isCurrentDatasetIntent(revision: number): boolean {
@@ -1124,14 +1273,16 @@ function restoreSnapshot(set: SetFn, get: GetFn, snap: EditSnapshot) {
     vaultInsertOnly: unclaimedCopyNames.has(snap.name) ? true : undefined,
     savedAt: new Date().toISOString(),
   };
-  const recents = [
+  pristineDatasets.delete(snap.name);
+  const { recents, evicted } = trimRecents([
     { name: data.name, savedAt: data.savedAt, data },
     ...get().recents.filter((r) => r.name !== data.name),
-  ].slice(0, MAX_RECENT_DATASETS);
+  ]);
   set({ model, textCols: snap.textCols, pendingCells: snap.pendingCells, recents });
   persistActive(data);
   persistRecents(recents, data);
   archiveToVault(data);
+  settleEvictedRecents(evicted);
 }
 
 /** 桌面端把数据集镜像归档到本机 SQLite 数据集库(不受 localStorage 配额限制)。
@@ -1322,7 +1473,7 @@ function reportVaultBackpressure(data: StoredDataset, detail: string): void {
   if (vaultBackpressureWarned) return;
   vaultBackpressureWarned = true;
   try {
-    useApp.getState().showToast(`本机数据集归档队列已满：${detail}。请等待落盘或导出项目后重试`);
+    useApp.getState().showToast(`本机数据集归档队列已满：${detail}。请等待落盘或先${PROJECT_BACKUP_HINT}备份后重试`);
   } catch { /* 非 UI 环境忽略 */ }
 }
 
@@ -1561,14 +1712,14 @@ export function resumePendingDatasetWorkAfterClearFailure(): void {
 /** 删除单个库数据集前，取消同名防抖并等待更早的同名/其他在途写入落定。 */
 export async function prepareVaultDatasetRemoval(name: string): Promise<void> {
   if (useData.getState().model.name === name) {
-    throw new Error(`不能删除当前活动数据集「${name}」；请先切换数据集或导出项目`);
+    throw new Error(`不能删除当前活动数据集「${name}」；请先切换数据集或${PROJECT_BACKUP_HINT}备份`);
   }
   removeVaultTimer(name);
   await waitForVaultWrites();
   let activeRef: string | null = null;
   try { activeRef = localStorage.getItem(LS_ACTIVE_REF); } catch { /* 由下面其他守卫继续保护 */ }
   if (useData.getState().model.name === name || requiredVaultSnapshotFor(name) || activeRef === name) {
-    throw new Error(`不能删除当前活动数据集「${name}」；请先切换数据集或导出项目`);
+    throw new Error(`不能删除当前活动数据集「${name}」；请先切换数据集或${PROJECT_BACKUP_HINT}备份`);
   }
   forgetFailedVaultArchive(name);
 }
@@ -1660,6 +1811,8 @@ export function cancelPendingDatasetWork(): void {
   knownDatasetNames.clear();
   unclaimedCopyNames.clear();
   sessionClaimedCopyNames.clear();
+  pristineDatasets.clear();
+  evictionConfirmation = null;
   knownDatasetNames.add('质检数据.mtw');
 }
 
@@ -1700,6 +1853,111 @@ export function archiveToVault(data: StoredDataset) {
   vaultTimerBytes += bytes;
 }
 
+function evictionWarning(detail: string): void {
+  sessionLog(detail);
+  try { useApp.getState().showToast(detail); } catch { /* 非 UI 环境忽略 */ }
+}
+
+function sameStoredContentJson(json: string, data: StoredDataset): boolean {
+  try {
+    const stored = JSON.parse(json) as StoredDataset;
+    return sameDatasetContent(
+      { colNames: stored.colNames, rows: stored.rows, textCols: stored.textCols ?? [], pendingCells: stored.pendingCells ?? [] },
+      { colNames: data.colNames, rows: data.rows, textCols: data.textCols ?? [], pendingCells: data.pendingCells ?? [] },
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 被挤出最近列表的数据集按只插入语义补入本机库(fix2609b M1 / PLATFORM-01)。
+ * 名称已被库中同内容记录占用 → 已可找回；被不同内容占用 → 绝不覆盖，另存为「名 (n)」并提示。
+ */
+async function insertEvictedDataset(
+  db: NonNullable<typeof platform.datasetDb>, data: StoredDataset, generation: number,
+): Promise<void> {
+  if (!db.insert) throw new Error('本机数据集库不支持安全只插入，请更新桌面程序');
+  const payload = (name: string) => JSON.stringify({ ...data, name, vaultInsertOnly: undefined });
+  if (generation !== vaultWorkGeneration) return;
+  if (await db.insert(data.name, payload(data.name))) return;
+  const existing = await db.get(data.name);
+  if (existing != null && sameStoredContentJson(existing, data)) return;
+  for (let sequence = 2; sequence <= 1000; sequence++) {
+    if (generation !== vaultWorkGeneration) return;
+    const candidate = numberedDatasetName(data.name, sequence);
+    if (reservedPrototypeNameError(candidate)) continue;
+    knownDatasetNames.add(candidate);
+    if (await db.insert(candidate, payload(candidate))) {
+      evictionWarning(`数据集「${data.name}」已移出最近列表；本机数据集库已有内容不同的同名记录（未覆盖），移出的版本已另存为「${candidate}」`);
+      return;
+    }
+    const occupied = await db.get(candidate);
+    if (occupied != null && sameStoredContentJson(occupied, data)) return;
+  }
+  throw new Error('本机数据集库中同名记录过多');
+}
+
+/**
+ * 最近列表截断后的唯一收口(fix2609b M1)。
+ * - 桌面端：被挤出且仍带矩阵的条目若不在现有归档管线中，按只插入语义补入本机库，
+ *   兑现「移出最近列表的数据集仍可在库中找回」(覆盖无 vault 的 .qproj 导入等条目从未入库的路径)。
+ * - Web 端：没有其他落盘位置，如实警告(新建类入口已在写入前拦截并要求确认)。
+ */
+function settleEvictedRecents(evicted: RecentEntry[]): void {
+  if (evicted.length === 0) return;
+  const db = platform.datasetDb;
+  if (!db) {
+    const names = evicted.map((entry) => `「${entry.name}」`).join('');
+    evictionWarning(`最近列表已满（${MAX_RECENT_DATASETS} 个），${names}已移出最近列表；浏览器端没有本机数据集库，无法恢复`);
+    return;
+  }
+  for (const entry of evicted) {
+    const data = entry.data;
+    // 轻量条目的精确矩阵已在库中或由 lightweightRecentDurability 保全。
+    if (!data || data.name !== entry.name) continue;
+    const name = entry.name;
+    // 该名称的最新载荷仍由现有归档管线(防抖/在途/失败重试/必保快照)负责落库。
+    if (vaultTimers.has(name) || vaultWriteQueues.has(name) || failedVaultArchives.has(name)
+      || requiredVaultSnapshotFor(name) || lightweightRecentDurability.has(name)) continue;
+    knownDatasetNames.add(name);
+    const write = trackVaultWrite(insertEvictedDataset(db, data, vaultWorkGeneration));
+    void write.catch((error) => {
+      evictionWarning(`数据集「${name}」移出最近列表后未能补存到本机数据集库（${errText(error)}）；请尽快${PROJECT_BACKUP_HINT}备份`);
+    });
+  }
+}
+
+/** 某名称在本次写入后的实际位置。 */
+function datasetLocation(name: string, recents: RecentEntry[]): ConflictDatasetLocation {
+  if (recents.some((entry) => entry.name === name)) return 'recents';
+  return platform.datasetDb ? 'vault' : 'lost';
+}
+
+/**
+ * 按实际结果生成同名改名 / 挤出最近列表的提示(UI-04)：不写死「原数据集保留在最近列表」。
+ * requestedName 为调用方请求的名称；无事可报时返回空数组。
+ */
+export function datasetWriteNotes(requestedName: string, outcome: PersistOutcome): string[] {
+  const notes: string[] = [];
+  const renamed = outcome.name !== undefined && outcome.name !== requestedName;
+  if (renamed) {
+    const where = outcome.conflictLocation === 'vault'
+      ? '原数据集不在最近列表，可在「数据 → 数据集库(本机)」中找回'
+      : outcome.conflictLocation === 'lost'
+        ? '原数据集已按确认移出最近列表，浏览器端无法恢复'
+        : '原数据集保留在最近列表';
+    notes.push(`已有内容不同的同名数据集「${requestedName}」，本次另存为「${outcome.name}」（${where}）`);
+  }
+  const others = (outcome.evicted ?? []).filter((name) => !(renamed && name === requestedName));
+  if (others.length > 0) {
+    notes.push(`${others.map((name) => `「${name}」`).join('')}已移出最近列表${platform.datasetDb
+      ? '，可在「数据 → 数据集库(本机)」中找回'
+      : '，浏览器端无法恢复'}`);
+  }
+  return notes;
+}
+
 /** 活动数据集落盘。localStorage 写不下时(超 ~5MB):桌面端即时归档到 SQLite
  * 并留恢复标记(重启自动恢复),Web 端沿用原有超限提示。 */
 function persistActive(data: StoredDataset, options: { allowVaultFallback?: boolean } = {}): PersistOutcome {
@@ -1725,7 +1983,7 @@ function persistActive(data: StoredDataset, options: { allowVaultFallback?: bool
   } // Web 端或安全副本活动槽失败：仅内存，独立副本由调用方另行确认
   const retained = retainRequiredVaultSnapshot(data);
   if (retained === 'blocked') {
-    const rejected = '未持久化快照保全预算已满；请立即导出项目，在此前不要关闭页面';
+    const rejected = `未持久化快照保全预算已满；请立即${PROJECT_BACKUP_HINT}备份，在此前不要关闭页面`;
     reportVaultBackpressure(data, rejected);
     setActiveUnpersisted(true);
     return { persisted: false, archiving: false, rejected };
@@ -1767,12 +2025,12 @@ function persistActive(data: StoredDataset, options: { allowVaultFallback?: bool
 }
 
 /** 最近列表落盘。写不下时桌面端把条目瘦身(仅名称/时间,数据在 SQLite 库)再写一次。 */
-function persistRecents(recents: RecentEntry[], exactData?: StoredDataset): boolean {
+function persistRecents(recents: RecentEntry[], exactData?: StoredDataset, options: { silent?: boolean } = {}): boolean {
   for (const entry of recents) {
     if (entry.data && sessionClaimedCopyNames.has(entry.name)) delete entry.data.vaultInsertOnly;
   }
   const db = platform.datasetDb;
-  if (saveJson(LS_RECENTS, recents, db != null)) {
+  if (saveJson(LS_RECENTS, recents, db != null || options.silent === true)) {
     for (const entry of recents) lightweightRecentDurability.delete(entry.name);
     setRecentsUnpersisted(false);
     return true;
@@ -1859,13 +2117,19 @@ watchExternalWrite(LS_RECENTS, () => {
   const fresh = loadValidatedStoreJson<RecentEntry[]>(LS_RECENTS);
   if (!Array.isArray(fresh)) return;
   let localActive: StoredDataset | null = null;
-  try {
-    const parsed = JSON.parse(localStorage.getItem(LS_DATASET) ?? 'null') as unknown;
-    if (!projectStoreValidationError(LS_DATASET, parsed)
-      && (parsed as StoredDataset).name === useData.getState().model.name) {
-      localActive = parsed as StoredDataset;
-    }
-  } catch { /* 损坏活动槽由其自身启动校验负责，不能拿来覆盖 recent */ }
+  if (activeUnpersistedFlag || recentsUnpersistedFlag) {
+    // fix2609b M2:本窗口活动表尚未完整落盘时，localStorage 里要么没有它、要么是旧版本；
+    // 权威版本只在内存中，外部列表不得把它挤掉或回退。
+    localActive = inMemoryActiveDataset(useData.getState());
+  } else {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(LS_DATASET) ?? 'null') as unknown;
+      if (!projectStoreValidationError(LS_DATASET, parsed)
+        && (parsed as StoredDataset).name === useData.getState().model.name) {
+        localActive = parsed as StoredDataset;
+      }
+    } catch { /* 损坏活动槽由其自身启动校验负责，不能拿来覆盖 recent */ }
+  }
   const coordinated = coordinateRecentsWithActive(fresh, localActive);
   const before = useData.getState().recents.length;
   useData.setState({ recents: coordinated.recents });
@@ -1875,6 +2139,8 @@ watchExternalWrite(LS_RECENTS, () => {
       useApp.getState().showToast(`另一窗口更新了最近数据集列表（${coordinated.recents.length} 项），已同步到本窗口`);
     } catch { /* 非浏览器环境忽略 */ }
   }
+  // 挤出警告放在同步提示之后，不被覆盖。
+  settleEvictedRecents(coordinated.evicted);
 });
 
 registerProjectLifecycleHooks({
@@ -1983,10 +2249,12 @@ function applyEdit(
   if (m.isDemo && platform.datasetDb) unclaimedCopyNames.add(name);
   const model = buildEditedModel ? buildEditedModel(name) : computeVarModel(name, cols, rows);
   const data: StoredDataset = { name, colNames: cols, rows, textCols, pendingCells, savedAt: new Date().toISOString(), ...storedModelMetadata(model, rows) };
-  const recents = [
+  pristineDatasets.delete(m.name);
+  pristineDatasets.delete(name);
+  const { recents, evicted } = trimRecents([
     { name, savedAt: data.savedAt, data },
     ...get().recents.filter((r) => r.name !== name),
-  ].slice(0, MAX_RECENT_DATASETS);
+  ]);
   set({ model, textCols, pendingCells, recents });
   // 双审 P2:带占位的工作表(新建/DOE 设计)录满后必须重新建议规格限,
   // 否则能力页永远沿用上一份数据集的 LSL/USL(specForActiveMeasurement 有已存规格时优先返回已存,无副作用)
@@ -2002,6 +2270,7 @@ function applyEdit(
     persistRecents(recents, data);
     archiveToVault(data);
   }
+  settleEvictedRecents(evicted);
   return null;
 }
 
@@ -2096,6 +2365,23 @@ export const useData = create<DataState>((set, get) => ({
       isDemo: modelOptions.isDemo === true,
       indivSeries: modelOptions.indivSeries?.map((value) => value),
     });
+    // fix2609b M1:Web 端(无本机库)新建类写入会把数据集挤出最近列表时，被挤出的数据再无任何
+    // 落盘位置。必须在闸门(停 MES、推进意图)之前拒绝并说明，用户确认后才允许继续。
+    if (modelOptions.onNameConflict === 'rename' && !platform.datasetDb) {
+      const prospective = trimRecents([
+        { name, savedAt: '' },
+        ...get().recents.filter((r) => r.name !== name),
+      ]).evicted.filter((entry) => entry.data).map((entry) => entry.name);
+      if (prospective.length > 0 && !modelOptions.allowEviction
+        && !consumeEvictionConfirmation(requestedName, prospective)) {
+        armEvictionConfirmation(requestedName, prospective);
+        const detail = `最近列表已满（${MAX_RECENT_DATASETS} 个），继续会移除${prospective.map((n) => `「${n}」`).join('')}，浏览器端无法恢复；`
+          + `请先${PROJECT_BACKUP_HINT}备份，或移除不需要的最近数据集；`
+          + `确认移除请在 ${EVICTION_CONFIRM_SECONDS} 秒内再次执行同一操作`;
+        sessionLog(`数据集写入已暂停 · ${detail}`);
+        throw new DatasetEvictionError(detail, prospective);
+      }
+    }
     if (modelOptions.independentRecoveryCopy === true) {
       beginDatasetReplacement({ equivalentRecoveryCopy: true });
     } else {
@@ -2109,10 +2395,14 @@ export const useData = create<DataState>((set, get) => ({
       ...storedModelMetadata(model, rows),
       savedAt: new Date().toISOString(),
     };
-    const recents = [
+    const { recents, evicted } = trimRecents([
       { name, savedAt: data.savedAt, data },
       ...get().recents.filter((r) => r.name !== name),
-    ].slice(0, MAX_RECENT_DATASETS);
+    ]);
+    // 新建类入口写入的原样结果：未经编辑前，同一操作可按名替换它(不必改名多占最近列表位)。
+    // 随机数据不可复现，由 generateRandom 在写入后撤销该标记。
+    if (modelOptions.onNameConflict === 'rename') pristineDatasets.set(name, data.savedAt);
+    else pristineDatasets.delete(name);
     // 导入/创建/另存为会切换数据集，编辑历史不得跨数据集生效。
     set({ model, textCols: normalized.textCols, pendingCells: validPending, recents, undoStack: [], redoStack: [] });
     if (!modelOptions.preserveSpcRoles) resetDatasetSpcRoles();
@@ -2128,11 +2418,16 @@ export const useData = create<DataState>((set, get) => ({
       sessionLog(`导入列名已规范化 ${name} · 空名使用 C#/T#，重名追加序号`);
       try { useApp.getState().showToast('导入列名存在空值或重复，已稳定规范化（重名列追加序号）'); } catch { /* 非 UI 环境忽略 */ }
     }
+    settleEvictedRecents(evicted);
+    const result: PersistOutcome = { ...outcome };
+    if (evicted.length > 0) result.evicted = evicted.map((entry) => entry.name);
     if (name !== requestedName) {
-      sessionLog(`同名数据集「${requestedName}」已存在(内容不同或仅在本机库无法核对)，新数据另存为「${name}」，原数据集保留`);
+      result.conflictLocation = datasetLocation(requestedName, recents);
+      sessionLog(`同名数据集「${requestedName}」已存在(已编辑、内容不同或仅在本机库无法核对)，新数据另存为「${name}」，`
+        + `原数据集${result.conflictLocation === 'recents' ? '保留在最近列表' : result.conflictLocation === 'vault' ? '在本机数据集库' : '已移出最近列表'}`);
     }
     sessionLog(`导入变量数据 ${name} · ${rows.length} 行 × ${normalized.colNames.length} 个数值列`);
-    return modelOptions.onNameConflict === 'rename' ? { ...outcome, name } : outcome;
+    return modelOptions.onNameConflict === 'rename' ? { ...result, name } : result;
   },
 
   writeAnalysisColumns: (numericColumns, textColumns = []) => {
@@ -2301,7 +2596,8 @@ export const useData = create<DataState>((set, get) => ({
 
   clearPareto: () => {
     set({ paretoModel: null });
-    try { localStorage.removeItem(LS_PARETO); } catch { /* 非浏览器环境忽略 */ }
+    // fix2609b M3:与 saveJson 对称——配额失败留下的旧载荷不得随 .qproj 导出复活。
+    removeJson(LS_PARETO);
   },
 
   loadRecent: async (name, preserveSpcRoles = false) => {
@@ -2360,12 +2656,8 @@ export const useData = create<DataState>((set, get) => ({
     });
     resetDatasetSpcRoles();
     useApp.setState({ paretoShowDemo: false, anovaShowDemo: false });
-    try {
-      localStorage.removeItem(LS_DATASET);
-      localStorage.removeItem(LS_ATTR);
-      localStorage.removeItem(LS_PARETO);
-      localStorage.removeItem(LS_ACTIVE_REF);
-    } catch { /* 非浏览器环境忽略 */ }
+    // fix2609b M3:删除业务键同样维护 dirty/损坏保护/跨窗口簿记，旧载荷不得混入之后的导出。
+    for (const key of [LS_DATASET, LS_ATTR, LS_PARETO, LS_ACTIVE_REF]) removeJson(key);
     suggestSpec(d.model, []);
     sessionLog('恢复演示数据集 质检数据.mtw');
   },
@@ -2461,8 +2753,9 @@ export const useData = create<DataState>((set, get) => ({
     // VarModel 只接受有限数；0 仅是内部占位，全部格子用 pendingCells 明确标记为「尚未录入」。
     const rows = Array.from({ length: 3 }, () => Array<number>(5).fill(0));
     const pendingCells = rows.flatMap((row, rowIndex) => row.map((_, col) => ({ row: rowIndex, col })));
-    get().importMatrix(name, colNames, rows, [], pendingCells);
+    const outcome = get().importMatrix(name, colNames, rows, [], pendingCells);
     set({ undoStack: [], redoStack: [] });
+    return outcome;
   },
 
   saveAsCopy: () => {
@@ -2595,6 +2888,8 @@ export const useData = create<DataState>((set, get) => ({
     const name = `随机数据 N(${mu},${sigma})`;
     // STORE-04:随机值不可复现，同参数再生成绝不能覆盖上一份
     const outcome = get().importMatrix(name, Array.from({ length: n }, (_, i) => `X${i + 1}`), rows, [], [], { onNameConflict: 'rename' });
+    // 随机值不可复现：即使未编辑，也不能被下一次同参数生成按名替换。
+    pristineDatasets.delete(outcome.name ?? name);
     return outcome.name ?? name;
   },
 
@@ -2616,9 +2911,12 @@ export const useData = create<DataState>((set, get) => ({
   },
 
   removeRecent: (name) => {
+    const removed = get().recents.filter((r) => r.name === name);
     const recents = get().recents.filter((r) => r.name !== name);
     set({ recents });
     persistRecents(recents);
+    // 桌面端承诺「从最近列表移除的数据集仍可在库中找回」：从未入库的条目(如无 vault 的 .qproj 导入)补入本机库。
+    if (platform.datasetDb) settleEvictedRecents(removed);
   },
 
   renameColumn: (col, name) => {
@@ -2764,10 +3062,16 @@ export const useData = create<DataState>((set, get) => ({
     const textCols = get().textCols.map((c) => ({ ...c, values: c.values.filter((_, i) => keep[i]) }));
     const base = m.name.replace(/\.[^.]+$/, '');
     // STORE-04:换条件再筛选不得覆盖上一份子集中用户补录/修正的数据
-    const outcome = get().importMatrix(`${base} (子集)`, [...m.colNames], rows, textCols, [], { onNameConflict: 'rename' });
-    const name = outcome.name ?? `${base} (子集)`;
+    const requested = `${base} (子集)`;
+    let outcome: PersistOutcome;
+    try {
+      outcome = get().importMatrix(requested, [...m.colNames], rows, textCols, [], { onNameConflict: 'rename' });
+    } catch (error) {
+      return { ok: false, error: errText(error) };
+    }
+    const name = outcome.name ?? requested;
     sessionLog(`条件筛选「${cond.trim()}」→ ${name} · 保留 ${kept}/${m.k} 行`);
-    return { ok: true, name, kept, total: m.k };
+    return { ok: true, name, requested, kept, total: m.k, outcome };
   },
 
   transposeDataset: (sourceColumns) => {
@@ -2789,7 +3093,9 @@ export const useData = create<DataState>((set, get) => ({
     const subgroupLabels: TextColumn[] = [{ name: '原列子组', values: selectedIndices.map((i) => m.colNames[i]) }];
     // 改名策略产生的「X (转置) (2)」再做同操作时同样回到基名，不叠成「X (转置) (2) (转置)」
     const base = m.name.replace(/ \(转置\)(?: \(\d+\))?$/, '');
-    get().importMatrix(`${base} (转置)`, colNames, t, subgroupLabels, [], { onNameConflict: 'rename' });
+    const requested = `${base} (转置)`;
+    const outcome = get().importMatrix(requested, colNames, t, subgroupLabels, [], { onNameConflict: 'rename' });
+    return { name: outcome.name ?? requested, requested, outcome };
   },
 
   stackColumns: () => {
@@ -2812,7 +3118,9 @@ export const useData = create<DataState>((set, get) => ({
     });
     // 改名策略产生的「X (堆叠) (2)」再做同操作时同样回到基名，不叠成「X (堆叠) (2) (堆叠)」
     const base = m.name.replace(/ \(堆叠\)(?: \(\d+\))?$/, '');
-    get().importMatrix(`${base} (堆叠)`, ['测量值'], rows, [{ name: '来源列', values: source }], [], { onNameConflict: 'rename' });
+    const requested = `${base} (堆叠)`;
+    const outcome = get().importMatrix(requested, ['测量值'], rows, [{ name: '来源列', values: source }], [], { onNameConflict: 'rename' });
+    return { name: outcome.name ?? requested, requested, outcome };
   },
 
   startMesDataset: (n) => {
@@ -2829,15 +3137,17 @@ export const useData = create<DataState>((set, get) => ({
     const data: StoredDataset = {
       name: model.name, colNames, rows: seedRows, textCols: [], pendingCells: [], savedAt: new Date().toISOString(),
     };
-    const recents = [
+    pristineDatasets.delete(data.name);
+    const { recents, evicted } = trimRecents([
       { name: data.name, savedAt: data.savedAt, data },
       ...get().recents.filter((entry) => entry.name !== data.name),
-    ].slice(0, MAX_RECENT_DATASETS);
+    ]);
     set({ model, textCols: [], pendingCells: [], recents, undoStack: [], redoStack: [] });
     resetDatasetSpcRoles();
     persistActive(data);
     persistRecents(recents, data);
     archiveToVault(data);
+    settleEvictedRecents(evicted);
     suggestSpec(model, []);
   },
 
@@ -2859,14 +3169,16 @@ export const useData = create<DataState>((set, get) => ({
     const data: StoredDataset = {
       name: model.name, colNames: [...model.colNames], rows, textCols: [], pendingCells: [], savedAt: new Date().toISOString(),
     };
-    const recents = [
+    pristineDatasets.delete(data.name);
+    const { recents, evicted } = trimRecents([
       { name: data.name, savedAt: data.savedAt, data },
       ...get().recents.filter((entry) => entry.name !== data.name),
-    ].slice(0, MAX_RECENT_DATASETS);
+    ]);
     set({ model, pendingCells: [], recents });
     persistActive(data);
     persistRecents(recents, data);
     archiveToVault(data);
+    settleEvictedRecents(evicted);
   },
 
   setMesRunning: (mesRunning) => set({ mesRunning }),
@@ -2875,6 +3187,7 @@ export const useData = create<DataState>((set, get) => ({
 // 模块启动已在内存中把同名 recent 提升为活动表版本；store 构造完成后再尝试
 // 修复磁盘，失败则 recentsUnpersisted/activeUnpersisted 持续警告且项目导出取 dirty 覆盖。
 if (startupRecentCoordination.changed) persistRecents(storedRecents, stored ?? undefined);
+settleEvictedRecents(startupRecentCoordination.evicted);
 
 /** SPC 角色在导入之后才被用户明确时，同步刷新全局规格建议，供仪表盘与能力页共用。 */
 export function syncSpecForActiveMeasurement() {
@@ -2989,6 +3302,7 @@ async function hydrateActiveRefFromVault(
       recents: coordinated.recents, undoStack: [], redoStack: [],
     });
     if (coordinated.changed) persistRecents(coordinated.recents, authoritative);
+    settleEvictedRecents(coordinated.evicted);
     suggestSpec(model, authoritative.textCols ?? []);
     sessionLog(authority === 'SQLite'
       ? `从数据集库恢复活动数据集 ${ref}(上次因超配额存于本机库)`

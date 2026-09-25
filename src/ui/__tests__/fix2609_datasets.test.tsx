@@ -146,6 +146,8 @@ describe('STORE-04 派生数据集同名写入策略', () => {
     expect(useData.getState().model.name).toBe('t.csv (转置) (3)');
     expect(rowsOf('t.csv (转置)')?.[0][0]).toBe(99);
 
+    // fix2609b M1:Web 端最近列表已满时新建类写入会先要求确认；按提示移除不需要的最近数据集腾出位置
+    for (const done of ['t.csv', 't.csv (转置) (2)', 't.csv (转置) (3)']) useData.getState().removeRecent(done);
     useData.getState().importMatrix('s.csv', ['a', 'b'], [[1, 2], [3, 4]]);
     useData.getState().stackColumns();
     expect(useData.getState().model.name).toBe('s.csv (堆叠)');
@@ -256,7 +258,10 @@ describe('STORE-08 Web 端最近列表写入失败后的恢复路径', () => {
     try { useData.getState().importMatrix('别的.csv', ['x'], [[1], [2]]); } catch (error) { message = (error as Error).message; }
     expect(message).toMatch(/最近数据集列表尚未保存/);
     expect(message).not.toContain('重试保存');
-    expect(message).toContain('导出项目');
+    // fix2609b M4:入口名与文件菜单一致(「保存项目文件…」)，不得把用户引到「导出项目汇总…」
+    expect(message).toContain('保存项目文件');
+    expect(message).toContain('Ctrl+S');
+    expect(message).not.toContain('导出项目');
     expect(message).toContain('最近数据集');
     expect(message).toContain('×');
     expect(message).toContain('大表.csv');

@@ -20,6 +20,8 @@ afterEach(cleanup);
 beforeEach(() => {
   localStorage.clear();
   useData.getState().resetDemo();
+  // 各用例彼此独立：不让前序用例填满最近列表(Web 端满列表时新建类写入会先要求确认挤出)
+  useData.setState({ recents: [] });
   useApp.setState({
     spcType: 'xbar-r', spcRules: { ...RULES }, spcDataLayout: 'auto',
     spcValueCol: null, spcSubgroupCol: null, spcStageCol: null, selSub: null,

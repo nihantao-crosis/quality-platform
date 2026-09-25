@@ -16,7 +16,7 @@ import { NormalProbPlot } from '../charts/NormalProbPlot';
 import { Fishbone } from './Fishbone';
 import { loadFishboneState } from '../../store/fishboneStore';
 import { useApp, resolveGageTolerance, GAGE_BATCH_COL_CAP, normalizeGageBatchCols } from '../../store/appStore';
-import { useData } from '../../store/dataStore';
+import { datasetWriteNotes, useData } from '../../store/dataStore';
 import type { ChartTokens } from '../tokens';
 import { paretoColors } from '../tokens';
 import { Card, CardHeader, KvRows, Badge, tabStyle, numInput, EmptyStateCard, DemoBadge } from '../common';
@@ -1043,7 +1043,7 @@ function AnovaInner({ T }: { T: ChartTokens }) {
             宽表模式把每个数值列当作一组。仅当各列是<b>同一响应量(同量纲)</b>在不同条件下的观测时,比较均值才有统计意义;
             若各列是不同物理量,请改用「数值因子」模式或因子实验思路。
           </span>
-          <button type="button" className="hov-act" onClick={() => { try { stackColumns(); setAnovaSel({ anovaMode: 'stacked' }); showToast('已堆叠为「测量值+来源列」长表并切换到分组列模式'); } catch (e) { showToast('堆叠失败:' + (e as Error).message); } }}
+          <button type="button" className="hov-act" onClick={() => { try { const derived = stackColumns(); setAnovaSel({ anovaMode: 'stacked' }); showToast(`已堆叠为「测量值+来源列」长表「${derived.name}」并切换到分组列模式${datasetWriteNotes(derived.requested, derived.outcome).map((text) => ` · ${text}`).join('')}`); } catch (e) { showToast('堆叠失败:' + (e as Error).message); } }}
             style={{ padding: '5px 12px', border: '1px solid #d9b96a', borderRadius: 4, cursor: 'pointer', color: '#8a6520', background: '#fff', fontFamily: 'inherit', fontWeight: 600, flex: 'none' }}>
             一键堆叠为长表
           </button>

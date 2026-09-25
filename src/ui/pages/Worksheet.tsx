@@ -5,7 +5,7 @@
 import { useState, useEffect, useLayoutEffect, useRef, useMemo } from 'react';
 import type { CSSProperties } from 'react';
 import { useApp } from '../../store/appStore';
-import { useData } from '../../store/dataStore';
+import { PROJECT_BACKUP_HINT, datasetWriteNotes, useData } from '../../store/dataStore';
 import { nf, evalRules, evalLimitedRules, parseMatrix, arrMin, arrMax, prepareSpcData, columnDisplayDp, worksheetDisplayOrder, withSigmaMethod } from '../../core';
 import { errText } from '../../platform/adapter';
 import { assertClipboardImportText } from '../../platform/importLimits';
@@ -303,11 +303,12 @@ export function Worksheet() {
         const outcome = importMatrix('剪贴板数据', r.colNames, r.rows, r.textCols, [], { onNameConflict: 'rename' });
         const name = outcome.name ?? '剪贴板数据';
         const note = r.textCols.length > 0 ? ` · 含 ${r.textCols.length} 个分组列` : '';
-        const renamed = name !== '剪贴板数据' ? ` · 已有内容不同的「剪贴板数据」，已另存为新数据集（原数据集保留在最近列表）` : '';
+        // UI-04:改名/挤出提示按原数据集的实际位置生成(最近列表 / 本机库 / 已移出)，不写死
+        const writeNotes = datasetWriteNotes('剪贴板数据', outcome).map((text) => ` · ${text}`).join('');
         if (outcome.persisted || outcome.archiving) {
-          showToast(`已粘贴导入「${name}」· ${r.rows.length} 行 × ${r.colNames.length} 个数值列${note}${renamed}`);
+          showToast(`已粘贴导入「${name}」· ${r.rows.length} 行 × ${r.colNames.length} 个数值列${note}${writeNotes}`);
         } else {
-          showToast('⚠ 粘贴数据已导入到内存,但浏览器存储空间不足,尚未持久化——刷新将丢失！请立即「文件 → 导出项目」备份');
+          showToast(`⚠ 粘贴数据已导入到内存,但浏览器存储空间不足,尚未持久化——刷新将丢失！请立即${PROJECT_BACKUP_HINT}备份${writeNotes}`);
         }
       } catch (error) {
         showToast('粘贴导入失败：' + errText(error));

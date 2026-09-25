@@ -1,7 +1,7 @@
 /** 菜单栏 — 10 个菜单 + 下拉，行为（导航/弹窗/通知/图表风格）与原型一致。 */
 import { useApp, type Page, type Modal, type ChartStyle } from '../../store/appStore';
 import { appVersionText, localDateStamp, sanitizeFileName } from '../../platform/reportLabels';
-import { useData } from '../../store/dataStore';
+import { PROJECT_BACKUP_HINT, datasetWriteNotes, useData } from '../../store/dataStore';
 import { errText, platform } from '../../platform/adapter';
 
 /** 桌面端经 tauri-plugin-updater 检查 GitHub Releases；Web 端不适用。 */
@@ -175,9 +175,9 @@ export function MenuBar({ wsName }: { wsName: string }) {
       return;
     }
     if (act.newSheet) {
-      useData.getState().newWorksheet();
+      const outcome = useData.getState().newWorksheet();
       goTo('worksheet');
-      showToast('已新建空白工作表（双击单元格录入数据）');
+      showToast(`已新建空白工作表（双击单元格录入数据）${datasetWriteNotes(outcome.name ?? '', outcome).map((text) => ` · ${text}`).join('')}`);
       return;
     }
     if (act.summary) {
@@ -207,7 +207,7 @@ export function MenuBar({ wsName }: { wsName: string }) {
       const copy = useData.getState().saveAsCopy();
       const { outcome } = copy;
       if (!outcome.persisted && !outcome.archiving) {
-        showToast(`另存失败（${outcome.rejected ?? '存储空间不足'}）：副本未能保存，请先导出项目或清理存储`);
+        showToast(`另存失败（${outcome.rejected ?? '存储空间不足'}）：副本未能保存，请先${PROJECT_BACKUP_HINT}备份或清理存储`);
       } else {
         // 盲审 P3:archiving 只是「已提交异步归档」,失败时界面此前永远停在
         // 「正在归档到本机库」而没有回执。落盘确认后补一条终态提示。
@@ -265,10 +265,13 @@ export function MenuBar({ wsName }: { wsName: string }) {
     } else if (act.transpose || act.stack) {
       setOpenMenu(null);
       try {
-        if (act.transpose) useData.getState().transposeDataset();
-        else useData.getState().stackColumns();
+        const derived = act.transpose ? useData.getState().transposeDataset() : useData.getState().stackColumns();
         goTo('worksheet');
-        showToast(act.transpose ? '已生成转置数据集' : '已生成堆叠数据集（含「来源列」分组,可直接做 ANOVA）');
+        // STORE-04 P3:显示实际名称；同名改名时按原数据集实际位置说明其去向
+        const notes = datasetWriteNotes(derived.requested, derived.outcome).map((text) => ` · ${text}`).join('');
+        showToast(act.transpose
+          ? `已生成转置数据集「${derived.name}」${notes}`
+          : `已生成堆叠数据集「${derived.name}」（含「来源列」分组,可直接做 ANOVA）${notes}`);
       } catch (e) {
         showToast('操作失败：' + errText(e));
       }

@@ -1,7 +1,7 @@
 /** 应用外壳 — 菜单栏 → 工具栏 → (左导航 + 主内容) → 状态栏 + 弹窗/Toast + 全局快捷键。 */
 import { useEffect, useMemo } from 'react';
 import { useApp, resolveGageTolerance } from './store/appStore';
-import { useData, resolveCapabilityMeasurementData, isCapabilityWarningAcknowledged } from './store/dataStore';
+import { useData, resolveCapabilityMeasurementData, isCapabilityWarningAcknowledged, datasetWriteNotes } from './store/dataStore';
 import {
   capabilityInputError, computeCapability, computeGageRR, gageStudyData, GAGE_TOLERANCE, nf,
   effectiveGageSelection, prepareGageStudy, prepareSpcData, resolveNumericColumn,
@@ -135,9 +135,9 @@ export default function App() {
         else setTimeout(() => window.print(), 80);
       } else if (k === 'n') {
         e.preventDefault();
-        useData.getState().newWorksheet();
+        const outcome = useData.getState().newWorksheet();
         s.goTo('worksheet');
-        s.showToast('已新建空白工作表（双击单元格录入数据）');
+        s.showToast(`已新建空白工作表（双击单元格录入数据）${datasetWriteNotes(outcome.name ?? '', outcome).map((text) => ` · ${text}`).join('')}`);
       } else if (k === 'z' && !e.shiftKey) {
         e.preventDefault();
         s.showToast(useData.getState().undoEdit() ? '已撤销上一次数据编辑' : '没有可撤销的编辑');

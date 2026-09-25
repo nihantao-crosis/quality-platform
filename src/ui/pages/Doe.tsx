@@ -5,7 +5,7 @@
  * 5–7 个两水平因子(分数因子)走同一 OLS 引擎的放宽版;既有 2–4 因子两水平路径与文案不回归。 */
 import { Fragment, useMemo, useRef, useState , type CSSProperties } from 'react';
 import { useApp, type DoeView } from '../../store/appStore';
-import { useData } from '../../store/dataStore';
+import { PROJECT_BACKUP_HINT, datasetWriteNotes, useData } from '../../store/dataStore';
 import {
   buildDoeConclusion,
   nf,
@@ -892,27 +892,29 @@ function CreateDesign() {
       return;
     }
     const pending = design.rows.map((_, row) => ({ row, col: design.responseCol }));
-    const outcome = importMatrix(name, design.colNames, design.rows, design.textCols, pending);
+    // UI-04 P3:时间戳只到时分秒，跨天同一秒生成会与旧设计(可能已录入响应)同名——同样走同名写入策略
+    const outcome = importMatrix(name, design.colNames, design.rows, design.textCols, pending, { onNameConflict: 'rename' });
     setCreatedPreview(null);
     goTo('worksheet');
+    const writeNotes = datasetWriteNotes(name, outcome).map((text) => `；${text}`).join('');
     if (outcome.persisted) {
-      showToast(`${description}；已持久化并写入工作表，请录入响应后回 DOE→分析`);
+      showToast(`${description}；已持久化并写入工作表，请录入响应后回 DOE→分析${writeNotes}`);
       return;
     }
     if (outcome.archiving) {
-      showToast(`${description}；已写入工作表，正在归档到本机数据集库，归档完成前请勿关闭应用`);
+      showToast(`${description}；已写入工作表，正在归档到本机数据集库，归档完成前请勿关闭应用${writeNotes}`);
       // 大数据集的写库在后台完成。消费 durability 的拒绝，既避免未处理的
       // Promise rejection，也保证后到的“已写入”成功文案不会盖住归档失败警告。
       if (outcome.durability) {
         void outcome.durability.catch((error: unknown) => {
           const detail = error instanceof Error ? error.message : String(error);
-          showToast(`⚠ 设计已写入当前工作表内存，但本机归档失败，尚未持久化——刷新或关闭将丢失！${detail ? `（${detail}）` : ''}请立即「文件 → 导出项目」备份`);
+          showToast(`⚠ 设计已写入当前工作表内存，但本机归档失败，尚未持久化——刷新或关闭将丢失！${detail ? `（${detail}）` : ''}请立即${PROJECT_BACKUP_HINT}备份`);
         });
       }
       return;
     }
     const rejected = outcome.rejected ? `（${outcome.rejected}）` : '';
-    showToast(`⚠ 设计已生成并写入当前工作表内存，但自动保存失败、尚未持久化——刷新或关闭将丢失！${rejected}请立即「文件 → 导出项目」备份`);
+    showToast(`⚠ 设计已生成并写入当前工作表内存，但自动保存失败、尚未持久化——刷新或关闭将丢失！${rejected}请立即${PROJECT_BACKUP_HINT}备份${writeNotes}`);
   };
 
   const create = () => {

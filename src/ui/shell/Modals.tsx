@@ -2,7 +2,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { appVersionText } from '../../platform/reportLabels';
 import { useApp, type ImportTab, type ExportFmt } from '../../store/appStore';
-import { markActiveDataReplaced, prepareVaultDatasetRemoval, useData, isCapabilityWarningAcknowledged } from '../../store/dataStore';
+import { PROJECT_BACKUP_HINT, datasetWriteNotes, markActiveDataReplaced, prepareVaultDatasetRemoval, useData, isCapabilityWarningAcknowledged, type PersistOutcome } from '../../store/dataStore';
 import { parseMatrix, parseCategoryCounts, extractPChartColumns, evalFormula, truthy, arrMin, arrMax, mean, stdev, FormulaError, worksheetNumericColumnCodes, detectCsvBlocks, csvBlockLabel, assessSpcCharts, countCapabilityViolations, spcChartFamilyFor, withSigmaMethod, type CategoryCounts, type CsvBlock, type ParsedMatrix } from '../../core';
 import { errText, decodeTextFileBytes, assertXlsxImportSize, platform } from '../../platform/adapter';
 import { assertClipboardImportText, assertTextImportSize } from '../../platform/importLimits';
@@ -327,7 +327,7 @@ function ImportModal() {
   const persistAwareToast = (outcome: { persisted: boolean; archiving: boolean }, successMsg: string) => {
     if (outcome.persisted) { showToast(successMsg); return; }
     if (outcome.archiving) { showToast(successMsg + '；数据集较大,正在归档到本机数据集库…'); return; }
-    showToast('⚠ 数据已导入到内存,但浏览器存储空间不足,尚未持久化——刷新将丢失！请立即「文件 → 导出项目」备份,或在「工具 → 选项」清理本地数据');
+    showToast(`⚠ 数据已导入到内存,但浏览器存储空间不足,尚未持久化——刷新将丢失！请立即${PROJECT_BACKUP_HINT}备份,或在「工具 → 选项」清理本地数据`);
   };
 
   const applyJob = (job: PendingImport) => {
@@ -360,7 +360,7 @@ function ImportModal() {
     }
     const p = parsed;
     if (dataKind === 'var') {
-      let varOutcome: { persisted: boolean; archiving: boolean; name?: string };
+      let varOutcome: PersistOutcome;
       try {
         // UI-04:同名文件再导入/剪贴板导入走同名写入策略，内容不同时另存为「名 (2)」，不覆盖已编辑的旧数据集
         varOutcome = importMatrix(name, p.colNames, p.rows, p.textCols, [], { onNameConflict: 'rename' });
@@ -373,7 +373,8 @@ function ImportModal() {
       if (p.skippedRows > 0) notes.push(`跳过 ${p.skippedRows} 行非法值`);
       if (p.textCols.length > 0) notes.push(`含 ${p.textCols.length} 个分组列（可用于 ANOVA / Gage）`);
       const finalName = varOutcome.name ?? name;
-      if (finalName !== name) notes.push(`已有内容不同的同名数据集「${name}」，本次另存为新数据集（原数据集保留在最近列表）`);
+      // UI-04:按原数据集实际位置(最近列表 / 本机库 / 已移出)生成，不写死「保留在最近列表」
+      notes.push(...datasetWriteNotes(name, varOutcome));
       persistAwareToast(varOutcome, `已导入 ${finalName} · ${p.rows.length} 行 × ${p.colNames.length} 个数值列；请在 SPC 页确认数据角色${notes.length ? ' · ' + notes.join(' · ') : ''}`);
       return true;
     }
@@ -976,13 +977,13 @@ function VaultModal() {
                       className="hov-act"
                       onClick={async () => {
                         if (useData.getState().model.name === d.name) {
-                          showToast(`不能删除当前活动数据集「${d.name}」；请先切换数据集或导出项目`);
+                          showToast(`不能删除当前活动数据集「${d.name}」；请先切换数据集或${PROJECT_BACKUP_HINT}备份`);
                           return;
                         }
                         let activeRef: string | null = null;
                         try { activeRef = localStorage.getItem('qp-active-ref-v1'); } catch { /* 忽略 */ }
                         if (activeRef === d.name) {
-                          showToast(`不能删除活动数据集「${d.name}」：它仅存在于本机库；请先另存/导出项目`);
+                          showToast(`不能删除活动数据集「${d.name}」：它仅存在于本机库；请先另存为副本或${PROJECT_BACKUP_HINT}备份`);
                           return;
                         }
                         if (deleteArmed !== d.name) {
@@ -1103,7 +1104,8 @@ function SubsetModal() {
     if (!r.ok) { showToast('无法筛选：' + r.error); return; }
     closeModal();
     goTo('worksheet');
-    showToast(`已生成子集「${r.name}」· 保留 ${r.kept}/${r.total} 行`);
+    const writeNotes = datasetWriteNotes(r.requested, r.outcome).map((text) => ` · ${text}`).join('');
+    showToast(`已生成子集「${r.name}」· 保留 ${r.kept}/${r.total} 行${writeNotes}`);
   };
 
   const chip: React.CSSProperties = { padding: '3px 8px', border: 0, borderRadius: 4, background: '#eef1f4', color: '#3a4350', cursor: 'pointer', fontSize: 11.5, fontFamily: 'IBM Plex Mono,monospace' };

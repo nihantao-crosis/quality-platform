@@ -984,7 +984,7 @@ registerProjectLifecycleHooks({
   // 导入有效项目是损坏账本的恢复路径；仅普通写入失败时要求先落稳当前内存账本。
   beforeMutation: () => {
     if (prefsPersistenceDirty) {
-      throw new Error('当前界面/分析参数尚未写入本地存储；请先导出项目或释放空间后再导入其他项目');
+      throw new Error('当前界面/分析参数尚未写入本地存储；请先「文件 → 保存项目文件…」（Ctrl+S）备份或释放空间后再导入其他项目');
     }
     if (!aqlStateCorrupt) requirePersistedAqlState();
   },

@@ -16,7 +16,7 @@ import {
   type InspectionLevel, type AnovaMode, type AqlMethod, type AqlAcMethod, type AqlRegime, type GageStandard, type NelsonRules, type NelsonRuleK, type SwitchStatus, type SpcDataLayout, type SpcSigmaMethod,
 } from '../core';
 import { useApp, resolveGageTolerance, DEFAULT_SPC_RULES, GAGE_TOL_MEMORY_CAP, normalizeGageBatchCols, normalizeGageTolMemory, type SpcType, type DoeView, type DoeTab, type HypoTab, type ParetoView } from './appStore';
-import { syncSpecForActiveMeasurement, useData, resolveCapabilityMeasurementData, isCapabilityWarningAcknowledged, type ParetoModel } from './dataStore';
+import { PROJECT_BACKUP_HINT, syncSpecForActiveMeasurement, useData, resolveCapabilityMeasurementData, isCapabilityWarningAcknowledged, type ParetoModel } from './dataStore';
 import { loadFishboneState, saveFishboneState, type FishboneData } from './fishboneStore';
 import { sessionLog } from './sessionLog';
 import { projectStoreValidationError, registerProjectLifecycleHooks, spcPayloadContractError } from '../platform/project';
@@ -1167,7 +1167,7 @@ function saveAnalysisOfKind(kind: AnalysisKind): SavedAnalysis | null {
   if (!persist(saved)) {
     // snapshotOf 可能已改写去重库；主索引写入失败时整库回滚，回滚失败再退回按旧记录清理孤儿载荷。
     if (!rollbackAnalysisDataLibrary(previousLibraryRaw)) pruneAnalysisDataLibrary(previousSaved);
-    const lastError = '本地存储空间不足，分析未保存；请先导出项目或删除旧记录后重试';
+    const lastError = `本地存储空间不足，分析未保存；请先${PROJECT_BACKUP_HINT}备份或删除旧记录后重试`;
     useAnalyses.setState({ lastError });
     sessionLog(`保存分析失败 ${entry.title} · ${lastError}`);
     return null;
@@ -1204,7 +1204,7 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
     const saved = get().saved.filter((a) => a.id !== id);
     if (!persist(saved)) {
       // P1-6:删除未落盘时保留记录并如实报告失败,调用方不得提示「已删除」。
-      const lastError = '本地存储空间不足，无法更新分析记录；请先导出项目后重试';
+      const lastError = `本地存储空间不足，无法更新分析记录；请先${PROJECT_BACKUP_HINT}备份后重试`;
       set({ lastError });
       useApp.getState().showToast(lastError);
       return false;
@@ -1250,7 +1250,7 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
         if (!stash.outcome.persisted && (!stash.outcome.archiving || !stash.outcome.durability)) {
           useApp.getState().showToast(
             `${label}与快照内容不同，但副本未能保存（${stash.outcome.rejected ?? '存储空间不足'}）；`
-            + `为避免丢失当前编辑，已取消回看${stashedSuffix()}。请先导出项目或清理存储后重试`,
+            + `为避免丢失当前编辑，已取消回看${stashedSuffix()}。请先${PROJECT_BACKUP_HINT}备份或清理存储后重试`,
           );
           return false;
         }
@@ -1262,7 +1262,7 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
           } catch (error) {
             useApp.getState().showToast(
               `${label}与快照内容不同，但副本「${stash.name}」未能写入本机数据库（${errText(error)}）；`
-              + `为避免丢失当前编辑，已取消回看${stashedSuffix()}。当前编辑仍保留在内存中，请先导出项目或清理存储后重试`,
+              + `为避免丢失当前编辑，已取消回看${stashedSuffix()}。当前编辑仍保留在内存中，请先${PROJECT_BACKUP_HINT}备份或清理存储后重试`,
             );
             return false;
           }

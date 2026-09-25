@@ -3,7 +3,7 @@
  * 分阶段控制限（按分组列分段,Minitab Stages 语义）。 */
 import { useMemo, useState, type CSSProperties } from 'react';
 import { useApp, type SpcType } from '../../store/appStore';
-import { syncSpecForActiveMeasurement, useData } from '../../store/dataStore';
+import { datasetWriteNotes, syncSpecForActiveMeasurement, useData } from '../../store/dataStore';
 import { expandSpcRuleItems, uniqueSpcPointCount, type SpcViolationItem } from '../../store/analyses';
 import {
   nf, evalRules, evalLimitedRules, RULE_DEFS, DEFAULT_RULE_K, ruleKDesc, ewmaSeries, cusumSeries, stagedXbar, stagedRange, stageValidationError,
@@ -151,9 +151,10 @@ export function Spc({ T }: { T: ChartTokens }) {
       onRoles={setRolesAndSyncSpec}
       onTranspose={() => {
         try {
-          transposeDataset(prepared.subgroupLabels);
+          const derived = transposeDataset(prepared.subgroupLabels);
           setRolesAndSyncSpec({ spcDataLayout: 'rows', spcValueCol: null, spcSubgroupCol: 'text:原列子组' });
-          showToast('已转为行式子组工作表；原列名已保留为子组标签');
+          const notes = datasetWriteNotes(derived.requested, derived.outcome).map((text) => ` · ${text}`).join('');
+          showToast(`已转为行式子组工作表「${derived.name}」；原列名已保留为子组标签${notes}`);
         } catch (e) { showToast((e as Error).message); }
       }}
     />
