@@ -27,6 +27,12 @@ export type DoeTab = 'analyze' | 'create';
 export type HypoTab = 'anova' | 't1' | 't2' | 'reg';
 export type ParetoView = 'pareto' | 'fishbone';
 export type ChartStyle = '经典' | '现代' | '高对比';
+/**
+ * STORE-09:独立 AQL 责任账本(qp-aql-state-v1)损坏时的受限状态。
+ * quarantined = 原文已复制进隔离区；unpreserved = 隔离区写入失败，原文只剩原位置这一份。
+ * 瞬态字段：不进 partialize/persistedPrefsOf，也不进 .qproj。
+ */
+export type AqlLedgerFault = 'quarantined' | 'unpreserved';
 
 /** 批量研究最多 64 个响应；公差记忆还必须额外容纳当前明细列（它可能不在批量集合中）。 */
 export const GAGE_BATCH_COL_CAP = 64;
@@ -164,6 +170,8 @@ interface AppState {
   aqlMethod: AqlMethod;     // 兼容旧快照；正式产品路径固定为 'gb'
   aqlAcMethod: AqlAcMethod; // 兼容旧快照；正式产品路径固定为 'gb'
   aqlSwitch: SwitchStatus;  // 当前正常/加严/放宽状态及批次历史
+  /** 账本损坏期间非空：AQL 页据此常驻说明并阻断登记；setAqlSwitch 同步拒绝写入。 */
+  aqlLedgerFault: AqlLedgerFault | null;
   openMenu: string | null;
   modal: Modal;
   toast: string | null;
@@ -381,6 +389,18 @@ interface PersistedAqlState {
 let aqlStateCorrupt = false;
 let aqlStateQuarantined = false;
 
+function currentAqlLedgerFault(): AqlLedgerFault | null {
+  if (!aqlStateCorrupt) return null;
+  return aqlStateQuarantined ? 'quarantined' : 'unpreserved';
+}
+
+/** 账本损坏时一切批次登记/状态转移的拒绝原因(store 与 AQL 页共用同一文案)。 */
+function aqlLedgerBlockedMessage(): string {
+  return aqlStateQuarantined
+    ? 'AQL 责任账本已损坏（原文已复制到隔离区），批次登记已暂停：新记录无法落盘，刷新后会丢失；请先导入有效项目备份或清除业务数据'
+    : 'AQL 责任账本已损坏（隔离区写入失败，原文仍保留在原位置），批次登记已暂停：新记录无法落盘，刷新后会丢失；请导入有效项目备份恢复，切勿清除数据';
+}
+
 function loadPersistedAqlState(): PersistedAqlState | null {
   let text: string | null = null;
   try {
@@ -480,6 +500,7 @@ export const useApp = create<AppState>()(persist((set, get) => ({
   aqlMethod: 'gb',
   aqlAcMethod: 'gb',
   aqlSwitch: initialAql?.aqlSwitch ?? freshSwitchStatus(),
+  aqlLedgerFault: currentAqlLedgerFault(),
   openMenu: null,
   modal: null,
   toast: null,
@@ -637,7 +658,12 @@ export const useApp = create<AppState>()(persist((set, get) => ({
       } : {}),
     };
   }),
-  setAqlSwitch: (aqlSwitch) => set({ aqlSwitch: normalizeSwitchStatus(aqlSwitch) }),
+  setAqlSwitch: (aqlSwitch) => {
+    // STORE-09:损坏账本期间的批次追溯只能进内存、刷新即丢，且没有任何导出通道能带走；
+    // 在唯一写入口拒绝，而不是让记录悄悄变成孤儿数据。
+    if (aqlStateCorrupt) throw new Error(aqlLedgerBlockedMessage());
+    set({ aqlSwitch: normalizeSwitchStatus(aqlSwitch) });
+  },
   setImportTab: (importTab) => set({ importTab }),
   setImportKind: (importKind) => set({ importKind }),
   setExportFmt: (exportFmt) => set({ exportFmt }),
@@ -817,6 +843,7 @@ export const useApp = create<AppState>()(persist((set, get) => ({
     merged.aqlMethod = 'gb';
     merged.aqlAcMethod = 'gb';
     merged.aqlSwitch = normalizeSwitchStatus(aql.aqlSwitch ?? current.aqlSwitch);
+    merged.aqlLedgerFault = currentAqlLedgerFault();
     return merged;
   },
   onRehydrateStorage: () => (state, error) => {
@@ -842,7 +869,11 @@ let aqlPersistenceDirty = false;
 function rehydrateAqlFromStorage(): void {
   if (aqlStateCorrupt) return;
   const fresh = loadPersistedAqlState();
-  if (!fresh) return;
+  if (!fresh) {
+    // 另一窗口写入了无法通过校验的账本：本窗口同样停写并进入受限状态。
+    if (aqlStateCorrupt) useApp.setState({ aqlLedgerFault: currentAqlLedgerFault() });
+    return;
+  }
   const app = useApp.getState();
   const incomingRecords = fresh.aqlSwitch?.records?.length ?? 0;
   const localRecords = app.aqlSwitch?.records?.length ?? 0;
@@ -883,7 +914,11 @@ useApp.subscribe((state, previous) => {
     || state.aqlSwitch !== previous.aqlSwitch) {
     const wasDirty = aqlPersistenceDirty;
     if (!savePersistedAqlState(state) && !wasDirty) {
-      state.showToast('AQL 责任账本尚未写入本地存储；请释放空间，项目导出会在安全落盘前阻止');
+      // STORE-09:损坏与配额不足是两种原因，排障方向完全不同，不能共用「请释放空间」。
+      state.showToast(aqlStateCorrupt
+        ? `${aqlStateQuarantined ? 'AQL 责任账本已损坏（原文已复制到隔离区）' : 'AQL 责任账本已损坏（隔离区写入失败）'}，本次改动只在当前窗口有效、不会保存；项目备份导出已阻止，请按 AQL 页提示恢复`
+        // 配额分支 beforeExport 会以内存覆盖项导出最新账本，导入其他项目才会被阻止。
+        : 'AQL 责任账本尚未写入本地存储（存储空间不足）；请释放空间，项目备份导出会携带内存中的最新账本，导入其他项目会在落盘前被阻止');
     }
   }
 });
@@ -908,6 +943,35 @@ function requirePersistedAqlState(): void {
   }
 }
 
+// —— GAP-7-16:项目导出(一致性快照) × 清除本地数据 互斥 ——
+// 项目导出的中央租约在 project.ts，这里通过 beforeExport 钩子镜像其生命周期，
+// 让清库入口无需依赖 project/dataStore 的私有状态即可 fail-closed。
+let projectExportInFlight: symbol | null = null;
+let localDataClearActive = false;
+
+/** 项目导出是否正在生成快照(导出租约持有中)。 */
+export function isProjectExportInFlight(): boolean {
+  return projectExportInFlight !== null;
+}
+
+/**
+ * 清除本地数据的独占租约：导出进行中或已有清库时抛出可直接展示的原因；
+ * 成功时返回幂等 release。持有期间新的项目导出会在 beforeExport 被拒绝。
+ */
+export function beginLocalDataClear(): () => void {
+  if (projectExportInFlight !== null) {
+    throw new Error('项目备份正在生成，本地数据未清除；请等待「项目已保存」提示出现后再清除数据');
+  }
+  if (localDataClearActive) throw new Error('本地数据清除已在进行，请等待完成');
+  localDataClearActive = true;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    localDataClearActive = false;
+  };
+}
+
 registerProjectLifecycleHooks({
   // 导入有效项目是损坏账本的恢复路径；仅普通写入失败时要求先落稳当前内存账本。
   beforeMutation: () => {
@@ -916,11 +980,19 @@ registerProjectLifecycleHooks({
     }
     if (!aqlStateCorrupt) requirePersistedAqlState();
   },
-  beforeExport: () => {
+  beforeExport: (owner) => {
+    // GAP-7-16:清库进行中的一致性快照必然读到半清空的数据，直接拒绝并说明真实原因。
+    if (localDataClearActive) throw new Error('正在清除本地数据，项目未导出；请等待清除完成后再保存项目');
     if (protectedCorruptPrefs) throw new Error('损坏的偏好设置尚未成功复制到隔离区，项目未导出');
     if (aqlStateCorrupt) requirePersistedAqlState();
     // 配额不足时允许下面以内存覆盖项导出最新账本；不能退回 localStorage 中的旧值。
     savePersistedAqlState(useApp.getState());
+    // 本钩子同步执行且先于 dataStore(其依赖 appStore)的异步 vault 冲刷注册，
+    // 因此标记在 buildProjectJsonFull 同步阶段即建立，覆盖整个快照生成窗口。
+    projectExportInFlight = owner;
+    return () => {
+      if (projectExportInFlight === owner) projectExportInFlight = null;
+    };
   },
   projectStoreOverrides: () => ({
     'qp-prefs-v1': JSON.stringify({ state: persistedPrefsOf(useApp.getState()), version: 3 }),
@@ -975,10 +1047,12 @@ export function resolveGageTolerance(
 
 export function clearAqlBusinessState(): void {
   aqlStateCorrupt = false;
+  aqlStateQuarantined = false;
   aqlPersistenceDirty = false;
   useApp.setState({
     aqlLot: 120, aqlLevel: 'II', aqlAQL: 1, aqlRegime: 'percent', aqlMethod: 'gb', aqlAcMethod: 'gb',
     aqlSwitch: freshSwitchStatus(),
+    aqlLedgerFault: null,
   });
   // setState 的订阅会先写入干净空账本；“清业务数据”契约要求最终连该键一起移除。
   try { localStorage.removeItem(AQL_STATE_STORAGE_KEY); } catch { /* 忽略 */ }

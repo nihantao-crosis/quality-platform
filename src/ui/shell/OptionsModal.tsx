@@ -1,7 +1,14 @@
 /** 选项 / 本地数据 — 存储占用一览、清除数据、重置偏好。 */
 import { useMemo, useState } from 'react';
 import { QUARANTINE_STORAGE_KEY } from '../../store/quarantine';
-import { AQL_STATE_STORAGE_KEY, clearAqlBusinessState, resetUiPreferences, useApp } from '../../store/appStore';
+import {
+  AQL_STATE_STORAGE_KEY,
+  beginLocalDataClear,
+  clearAqlBusinessState,
+  isProjectExportInFlight,
+  resetUiPreferences,
+  useApp,
+} from '../../store/appStore';
 import {
   cancelPendingDatasetWork,
   quiescePendingDatasetWorkForClear,
@@ -118,6 +125,10 @@ export function blockUiForUnresolvedClear(
 export async function clearDurableBusinessDataAtomically(
   db: typeof platform.datasetDb,
 ): Promise<void> {
+  // GAP-7-16 纵深防御：UI 入口已持有清库租约；直接调用者也不得在导出快照期间清库。
+  if (isProjectExportInFlight()) {
+    throw clearFailure('项目备份正在生成，本地数据未清除；请等待项目保存完成后再清除数据', null, 'not-committed');
+  }
   try {
     // 项目导入 journal 与清库恢复记录共享同一批业务 stores。
     // 必须先收口并清掉 localStorage/IndexedDB 两种 journal artifact，
@@ -239,6 +250,7 @@ export function OptionsModal({ onClose }: { onClose: () => void }) {
   const resetDemo = useData((s) => s.resetDemo);
   const [clearArmed, setClearArmed] = useState(false);
   const [clearing, setClearing] = useState(false);
+  const [clearBlocked, setClearBlocked] = useState<string | null>(null);
   const rows = useMemo(
     () => QP_KEYS.map(([k, label]) => ({ k: label, v: fmtSize(sizeOf(k)) })),
     [],
@@ -255,49 +267,70 @@ export function OptionsModal({ onClose }: { onClose: () => void }) {
       return;
     }
     if (clearing) return;
-    // 第二次确认就是清库事务的全局边界。遮罩在任何 await/
-    // quiesce 之前建立，使背景点击、Escape 和应用快捷键立即不可达。
-    useApp.getState().setBusyOverlay('正在停止后台写入并清除本地数据…');
-    setClearing(true);
-    mesStop();
+    // GAP-7-16:项目导出正在生成一致性快照时不得清库，否则备份读到半清空的库而失败，
+    // 且清库尾段的数据集替换会撞上导出租约，把遮罩永久卡住。在建立遮罩前 fail-closed，
+    // 并要求用户在导出完成后重新二次确认。
+    let releaseClear: () => void;
     try {
-      await quiescePendingDatasetWorkForClear();
+      releaseClear = beginLocalDataClear();
     } catch (error) {
-      resumePendingDatasetWorkAfterClearFailure();
-      setClearing(false);
-      showToast(`等待数据写入结束失败：${errText(error)}；未保存保护仍保留`);
-      useApp.getState().setBusyOverlay(null);
+      const reason = errText(error);
+      setClearArmed(false);
+      setClearBlocked(reason);
+      showToast(reason);
       return;
     }
+    setClearBlocked(null);
+    // 未决清库会整页重载进入启动屏障；在此之前继续持有租约，禁止任何导出读取未知状态。
+    let keepClearLease = false;
     try {
-      await clearDurableBusinessDataAtomically(platform.datasetDb);
-    } catch (error) {
-      // 状态未知时保持 quiesced，防止 SQLite 已提交后旧 timer 又把数据写回。
-      // 恢复 marker 未清理时也不能继续写，否则启动恢复会以旧快照覆盖新编辑。
-      if (blockUiForUnresolvedClear(error)) {
-        // dataStore quiesce 只能冻结 vault 归档，不能阻止 analyses/AQL/fishbone
-        // 等其它 store 写 localStorage。立即重载进入 main 的启动屏障，才是全局
-        // fail-closed；不能只留一个仍可关闭的 Options 弹窗。
-        setClearing(true);
+      // 第二次确认就是清库事务的全局边界。遮罩在任何 await/
+      // quiesce 之前建立，使背景点击、Escape 和应用快捷键立即不可达。
+      useApp.getState().setBusyOverlay('正在停止后台写入并清除本地数据…');
+      setClearing(true);
+      mesStop();
+      try {
+        await quiescePendingDatasetWorkForClear();
+      } catch (error) {
+        resumePendingDatasetWorkAfterClearFailure();
+        setClearing(false);
+        showToast(`等待数据写入结束失败：${errText(error)}；未保存保护仍保留`);
+        useApp.getState().setBusyOverlay(null);
         return;
       }
-      resumePendingDatasetWorkAfterClearFailure();
-      setClearing(false);
-      showToast(`本地数据清除未提交：${errText(error)}；当前工作表已标记为未保存，请先导出项目备份再重试`);
+      try {
+        await clearDurableBusinessDataAtomically(platform.datasetDb);
+      } catch (error) {
+        // 状态未知时保持 quiesced，防止 SQLite 已提交后旧 timer 又把数据写回。
+        // 恢复 marker 未清理时也不能继续写，否则启动恢复会以旧快照覆盖新编辑。
+        if (blockUiForUnresolvedClear(error)) {
+          // dataStore quiesce 只能冻结 vault 归档，不能阻止 analyses/AQL/fishbone
+          // 等其它 store 写 localStorage。立即重载进入 main 的启动屏障，才是全局
+          // fail-closed；不能只留一个仍可关闭的 Options 弹窗。
+          keepClearLease = true;
+          setClearing(true);
+          return;
+        }
+        resumePendingDatasetWorkAfterClearFailure();
+        setClearing(false);
+        showToast(`本地数据清除未提交：${errText(error)}；当前工作表已标记为未保存，请先导出项目备份再重试`);
+        useApp.getState().setBusyOverlay(null);
+        return;
+      }
+      // SQLite 与浏览器存储都已确认清空后，才提交销毁待写载荷/dirty/隔离保护。
+      cancelPendingDatasetWork();
+      useAnalyses.setState({ saved: [], lastError: null });
+      clearFishboneState();
+      clearAqlBusinessState();
+      try { localStorage.removeItem(AQL_STATE_STORAGE_KEY); } catch { /* 保持内存已清空 */ }
+      resetDemo();
+      useData.setState({ recents: [] });
+      closeModal();
+      showToast('浏览器数据与本机数据集库已清除，已恢复演示数据集（界面偏好保留）');
       useApp.getState().setBusyOverlay(null);
-      return;
+    } finally {
+      if (!keepClearLease) releaseClear();
     }
-    // SQLite 与浏览器存储都已确认清空后，才提交销毁待写载荷/dirty/隔离保护。
-    cancelPendingDatasetWork();
-    useAnalyses.setState({ saved: [], lastError: null });
-    clearFishboneState();
-    clearAqlBusinessState();
-    try { localStorage.removeItem(AQL_STATE_STORAGE_KEY); } catch { /* 保持内存已清空 */ }
-    resetDemo();
-    useData.setState({ recents: [] });
-    closeModal();
-    showToast('浏览器数据与本机数据集库已清除，已恢复演示数据集（界面偏好保留）');
-    useApp.getState().setBusyOverlay(null);
   };
   const resetPrefs = () => {
     resetUiPreferences();
@@ -326,6 +359,11 @@ export function OptionsModal({ onClose }: { onClose: () => void }) {
             重置界面偏好
           </button>
         </div>
+        {clearBlocked && (
+          <div role="alert" style={{ marginTop: 10, padding: '8px 10px', background: '#fff6e6', border: '1px solid #f0d69a', borderRadius: 5, fontSize: 12, color: '#8a6414', lineHeight: 1.55 }}>
+            {clearBlocked}
+          </div>
+        )}
         <div style={{ fontSize: 11.5, color: '#9aa2ad', marginTop: 12, lineHeight: 1.5 }}>
           清除数据会同时移除浏览器数据、本机 SQLite 数据集库、分析快照、规格限记忆与鱼骨图内容；导出过的文件不受影响。为防误删，需要连续确认两次。
         </div>

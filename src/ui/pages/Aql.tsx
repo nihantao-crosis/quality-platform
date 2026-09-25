@@ -41,7 +41,9 @@ function planTableRows(level: InspectionLevel, aqlPct: number, lot: number, stat
 }
 
 export function Aql({ T }: { T: ChartTokens }) {
-  const { aqlLot, aqlLevel, aqlAQL, aqlRegime: regime, aqlSwitch: storedSwitch, setAql, setAqlSwitch: setSw } = useApp();
+  const { aqlLot, aqlLevel, aqlAQL, aqlRegime: regime, aqlSwitch: storedSwitch, aqlLedgerFault, setAql, setAqlSwitch: setSw } = useApp();
+  // STORE-09:账本损坏期间登记/转移只能进内存且无法导出，整页停写并常驻恢复指引。
+  const ledgerLocked = aqlLedgerFault !== null;
   const sw = normalizeSwitchStatus(storedSwitch);
   const [lotDraft, setLotDraft] = useState<string | null>(null);
   const [lotError, setLotError] = useState<string | null>(null);
@@ -69,10 +71,14 @@ export function Aql({ T }: { T: ChartTokens }) {
   const decision = batchValid ? decideLot(plan, nonconforming, regime) : null;
   const dispositionRequired = plan.fullInspect && batchValid && nonconforming > 0;
   const batchReady = batchValid && batchId.trim().length > 0 && inspector.trim().length > 0
-    && (!dispositionRequired || nonconformingDisposition !== '') && !sw.suspended;
+    && (!dispositionRequired || nonconformingDisposition !== '') && !sw.suspended && !ledgerLocked;
   const schemeLocked = sw.state !== 'normal';
 
   const submitInspection = () => {
+    if (ledgerLocked) {
+      setBatchError('AQL 责任账本已损坏，批次登记已暂停；请按页首提示恢复账本');
+      return;
+    }
     if (!batchValid) {
       setBatchError(per100
         ? `不合格数必须是 0–${dMax} 的整数(每百单位体系允许大于样本量 n=${plan.n})`
@@ -117,6 +123,19 @@ export function Aql({ T }: { T: ChartTokens }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      {ledgerLocked && (
+        <div role="alert" style={{ padding: '11px 14px', background: '#fdecec', border: '1px solid #f1b8b8', borderRadius: 6, fontSize: 12.5, color: '#8f2323', lineHeight: 1.7 }}>
+          <b>AQL 责任账本已损坏，批次登记已暂停。</b>
+          {aqlLedgerFault === 'quarantined'
+            ? '本机的连续检验账本未通过校验（常见于新旧版本混用或写入中断），原文已复制到隔离区且未被覆盖。'
+            : '本机的连续检验账本未通过校验，且隔离区写入失败，原文只保留在原位置。'}
+          此期间登记的批次、检验状态转移都无法落盘，刷新即丢失，也无法随项目备份导出，因此已停止记录；方案参数可临时查表，但同样不会保存。
+          <br />
+          {aqlLedgerFault === 'quarantined'
+            ? <>恢复方法：①「文件 → 打开…」导入一份有效的项目备份（.qproj，会覆盖当前本地数据）；②或「工具 → 选项 / 本地数据 → 清除数据并恢复演示」清除全部业务数据后重新开始（隔离区原文会一并清除）。在恢复前，工作表与分析结论可先用「导出报表」留底。</>
+            : <>恢复方法：「文件 → 打开…」导入一份有效的项目备份（.qproj）。请勿清除数据——那会销毁账本仅存的原文。在恢复前，工作表与分析结论可先用「导出报表」留底。</>}
+        </div>
+      )}
       <Card style={{ padding: '11px 16px', display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
         <div>
           <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 12.5, color: '#5b6472' }}>
@@ -295,7 +314,7 @@ export function Aql({ T }: { T: ChartTokens }) {
             {sw.suspended ? (
               <div role="alert" style={{ padding: 12, background: '#fff6e6', border: '1px solid #f0d69a', borderRadius: 5, fontSize: 12.5, color: '#8a6414', lineHeight: 1.65 }}>
                 加严检验已累计 5 批不接收。按 GB/T 2828.1 第 9.4 条，只有供方完成纠正且负责部门确认有效后，才能以加严检验重新开始。
-                <button type="button" onClick={() => setSw(resumeTightenedInspection(sw))} style={{ display: 'block', marginTop: 10, padding: '6px 12px', border: 0, borderRadius: 4, background: '#8a6414', color: '#fff', cursor: 'pointer' }}>
+                <button type="button" disabled={ledgerLocked} onClick={() => setSw(resumeTightenedInspection(sw))} style={{ display: 'block', marginTop: 10, padding: '6px 12px', border: 0, borderRadius: 4, background: '#8a6414', color: '#fff', cursor: ledgerLocked ? 'not-allowed' : 'pointer', opacity: ledgerLocked ? 0.55 : 1 }}>
                   已确认纠正有效，恢复加严检验
                 </button>
               </div>
@@ -345,7 +364,7 @@ export function Aql({ T }: { T: ChartTokens }) {
                     记录本批并执行转移判定
                   </button>
                   {sw.state === 'reduced' && (
-                    <button type="button" onClick={() => setSw(restoreNormalInspection(sw, '负责部门因其他条件决定恢复正常检验'))} style={{ padding: '6px 12px', border: '1px solid #cfd5dd', background: '#fff', color: '#5b6472', borderRadius: 5, cursor: 'pointer' }}>
+                    <button type="button" disabled={ledgerLocked} onClick={() => setSw(restoreNormalInspection(sw, '负责部门因其他条件决定恢复正常检验'))} style={{ padding: '6px 12px', border: '1px solid #cfd5dd', background: '#fff', color: '#5b6472', borderRadius: 5, cursor: ledgerLocked ? 'not-allowed' : 'pointer' }}>
                       因其他条件恢复正常检验
                     </button>
                   )}
@@ -359,11 +378,11 @@ export function Aql({ T }: { T: ChartTokens }) {
             </div>
             <div style={{ display: 'flex', gap: 16, marginTop: 10, flexWrap: 'wrap' }}>
               <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11.5, color: '#5b6472' }}>
-                <input type="checkbox" checked={sw.productionSteady} onChange={(e) => setSw(setSwitchConditions(sw, { productionSteady: e.target.checked }))} />
+                <input type="checkbox" disabled={ledgerLocked} checked={sw.productionSteady} onChange={(e) => setSw(setSwitchConditions(sw, { productionSteady: e.target.checked }))} />
                 生产稳定
               </label>
               <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11.5, color: '#5b6472' }}>
-                <input type="checkbox" checked={sw.reducedApproved} onChange={(e) => setSw(setSwitchConditions(sw, { reducedApproved: e.target.checked }))} />
+                <input type="checkbox" disabled={ledgerLocked} checked={sw.reducedApproved} onChange={(e) => setSw(setSwitchConditions(sw, { reducedApproved: e.target.checked }))} />
                 负责部门同意放宽
               </label>
             </div>
