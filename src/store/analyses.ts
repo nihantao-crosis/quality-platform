@@ -18,7 +18,7 @@ import {
 } from '../core';
 import { CUSUM_K, cusumH } from '../core/advancedSpcParams';
 import { useApp, resolveGageTolerance, DEFAULT_SPC_RULES, GAGE_TOL_MEMORY_CAP, normalizeGageBatchCols, normalizeGageTolMemory, type SpcType, type DoeView, type DoeTab, type HypoTab, type ParetoView } from './appStore';
-import { PROJECT_BACKUP_HINT, datasetWriteNotes, syncSpecForActiveMeasurement, useData, resolveCapabilityMeasurementData, isCapabilityWarningAcknowledged, type ParetoModel } from './dataStore';
+import { PROJECT_BACKUP_HINT, datasetWriteNotes, specForActiveMeasurement, syncSpecForActiveMeasurement, useData, resolveCapabilityMeasurementData, isCapabilityWarningAcknowledged, type ParetoModel } from './dataStore';
 import { loadFishboneState, saveFishboneState, type FishboneData } from './fishboneStore';
 import { sessionLog } from './sessionLog';
 import { analysisLabelListText, projectStoreValidationError, registerProjectLifecycleHooks, spcPayloadContractError } from '../platform/project';
@@ -740,6 +740,26 @@ function pick(c: { color: string; bg: string }) {
 }
 
 /**
+ * fix2609k STORE-05 残余:gagerr 快照只固化 lsl/usl/lslOn/uslOn(%公差只依赖规格宽度),不含 tgt。
+ * 回看量具记录并切换数据集后,Target 必须来自目标数据集:先取其规格记忆/μ±4σ 建议的 tgt,
+ * 该值不在快照规格区间 [lsl, usl] 内(记忆与快照规格不一致)时取区间中点;单侧规格无从取中点时
+ * 沿用目标数据集的 tgt。绝不沿用上一数据集的 Target(否则能力页 Cpm 静默失真)。
+ */
+function restoreGageTargetFromDataset(snapshot: AnalysisSnapshot): void {
+  const { model, textCols } = useData.getState();
+  const remembered = specForActiveMeasurement(model, textCols);
+  const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
+  const lower = snapshot.lslOn !== false && finite(snapshot.lsl) ? snapshot.lsl : null;
+  const upper = snapshot.uslOn !== false && finite(snapshot.usl) ? snapshot.usl : null;
+  const candidate = remembered && finite(remembered.tgt) ? remembered.tgt : null;
+  const within = candidate != null && (lower == null || candidate >= lower) && (upper == null || candidate <= upper);
+  const tgt = within ? candidate
+    : lower != null && upper != null ? (lower + upper) / 2
+      : candidate;
+  if (tgt != null) useApp.setState({ tgt });
+}
+
+/**
  * CORE-01 写读对称(第 2 批复审 P2):分析列表显示保存时冻结的 title/metric/status,回看按当前口径重算。
  * v1.43 起堆叠子组改为「ID 值一变即开新子组」,旧版按值合并保存的 SPC/能力记录两者可能分裂。
  * 回看参数与数据回放完成后调用:只有重算摘要(含图型 title)与冻结摘要不同、且本次数据角色说明含「口径说明」
@@ -1367,6 +1387,8 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
     // 宣称「当前数据未作更改」却把用户采集掐掉。现改为依赖下方 importMatrix/importCounts
     // 的 beginDatasetReplacement 单一闸门:只有真正替换数据时才停,且顺带清掉 interval。
     const s = a.snapshot;
+    // fix2609k STORE-05:只有真的换了数据集(或同名内容已变、先另存了副本)才提示规格未按目标数据集恢复
+    const datasetNameBeforeRestore = useData.getState().model.name;
     let restoredEmbeddedData = false;
     let stashedName: string | null = null; // 自审 P3:失败文案不能说「未作更改」——stash 已发生
     let stashToast: string | null = null; // 回看完成后的提示会覆盖单槽 toast,须并入
@@ -1682,9 +1704,14 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
     // SPC 键与能力键解析到同一特性;将来若快照开始固化角色，需改用/并用 syncSpecForCapabilityMeasurement。
     const snapshotCarriesSpecs = s.lsl !== undefined || s.usl !== undefined || s.tgt !== undefined;
     let specResynced = true;
+    let specFromMemory = false;
     if (a.kind === 'spc' && usesWorksheet) syncSpecForActiveMeasurement();
     else if (usesWorksheet && restoredEmbeddedData && !snapshotCarriesSpecs) {
       specResynced = syncSpecForActiveMeasurement() != null;
+      specFromMemory = specResynced;
+    } else if (a.kind === 'gagerr' && usesWorksheet && restoredEmbeddedData && s.tgt === undefined) {
+      // fix2609k STORE-05 残余:量具快照只固化 lsl/usl/lslOn/uslOn,不含 tgt——Target 不得沿用上一数据集
+      restoreGageTargetFromDataset(s);
     }
     if (s.hypoTab) useApp.getState().setHypoTab(s.hypoTab);
     if (s.paretoView) useApp.getState().setParetoView(s.paretoView);
@@ -1699,9 +1726,17 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
       restoreNotices.push(message);
       sessionLog(`${message} · ${a.title}`);
     }
-    if (!specResynced) {
-      // 测量角色有歧义(宽表未指定测量列)时无法按特性取规格记忆:明确提示，不静默沿用上一数据集的规格
+    const datasetSwitched = useData.getState().model.name !== datasetNameBeforeRestore || stashedName != null;
+    if (!specResynced && datasetSwitched) {
+      // 测量角色有歧义(宽表未指定测量列)时无法按特性取规格记忆:明确提示，不静默沿用上一数据集的规格。
+      // 同名同内容回看(规格本就是该数据集自己的)不提示,避免 DOE/宽表每次回看都弹噪声。
       const message = `已切换到数据集「${useData.getState().model.name}」，但测量角色未确定，规格限未按该数据集恢复；请在过程能力页核对 LSL/USL`;
+      restoreNotices.push(message);
+      sessionLog(`${message} · ${a.title}`);
+    }
+    if (specFromMemory && stashedName != null) {
+      // 同名数据集在快照之后被改过(已另存副本):规格记忆对应的是改后的内容,须提示核对
+      const message = `规格按数据集「${useData.getState().model.name}」当前记忆恢复（快照保存后该数据集内容已变化，原内容已另存为「${stashedName}」），请在过程能力页核对 LSL/USL`;
       restoreNotices.push(message);
       sessionLog(`${message} · ${a.title}`);
     }

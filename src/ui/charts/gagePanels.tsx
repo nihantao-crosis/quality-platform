@@ -15,9 +15,9 @@
  */
 import { Fragment } from 'react';
 import type { ReactNode } from 'react';
-import { dataDecimals, decimateUniform, minitabQuantile } from '../../core';
+import { dataDecimals, decimateUniform, minitabQuantile, nf } from '../../core';
 import type { GagePanelData, GageResult, GageComponentKey } from '../../core';
-import { tickFormatter, type ChartTokens } from '../tokens';
+import { niceTicks, tickFormatter, type ChartTokens } from '../tokens';
 import { Ln, Svg, Txt } from './primitives';
 
 interface PanelProps {
@@ -33,6 +33,23 @@ interface PanelProps {
 const PW = 560;
 const PH = 300;
 const M = { t: 14, r: 64, b: 40, l: 62 };
+/** 限值标签(9px 等宽)每字符宽度估计 = 0.6×字号;与几何回归断言同一口径。 */
+const LIMIT_LABEL_SIZE = 9;
+const LIMIT_LABEL_CHAR_W = 0.6 * LIMIT_LABEL_SIZE;
+/** 标签可见字符数:组合附加符(R̄/X̿ 的上横线)不占独立字宽。 */
+export function gageLabelChars(text: string): number {
+  return Array.from(text.replace(/[\u0300-\u036f]/g, '')).length;
+}
+/**
+ * 控制图面板的右边距(fix2609k UI-07 残余):限值标签画在绘图区右侧 x = PW − r + 4,
+ * 固定 r=64 只容得下约 11 个字符——0.0003267、1234582.26 这类标签会越过面板右缘,被 6 联图
+ * 右列面板的白底遮住(页面与 Word/PPT/HTML 导出同一张 SVG)。按最长标签加宽右边距并压缩绘图区,
+ * 保证标签整体落在本面板 PW 之内(独立面板 SVG 也不被裁切)。
+ */
+export function gageLimitRightMargin(labels: readonly string[]): number {
+  const longest = labels.reduce((max, label) => Math.max(max, gageLabelChars(label)), 0);
+  return Math.max(M.r, Math.ceil(4 + longest * LIMIT_LABEL_CHAR_W + 2));
+}
 
 /** Minitab 17 图窗配色(自工厂 EMF 逐记录提取):整图浅灰底,数据蓝,中心线绿,控制限深红,
  * 变异分量三色柱 浅蓝/红/黄,箱体浅蓝填充,交互标记 蓝●/深红■/绿◆。 */
@@ -140,7 +157,8 @@ function rangeOf(values: number[]): [number, number] {
  * 0.07±1e-4 的量具数据 UCL=X̿=LCL 印成同一个数、R̄ 印成 0.000、刻度重复并出现 -0.000;
  * 万级数据 span≥100 走 0 位,R 图/Xbar 图的三条限值同样塌成同一个整数。
  * 现在:刻度走 tokens.tickFormatter(位数按相邻刻度间距推导、整轴统一记数法、去负零);
- * 限值标签与刻度共用同一格式化器(记数法一致),位数下限取三者最大:
+ * 限值标签沿用刻度的记数法(定点/指数),定点时位数只取下列三者最大(fix2609k:不再继承刻度保真循环
+ * 升出来的位数,否则标签位数随轴留白漂移、带多余尾零):
  *  ① Minitab 口径(批次720-A3):均值图 = 数据位数+1,极差图 = 数据位数;
  *  ② UCL−LCL 保留 2 位有效数字(三条限值两两可分);
  *  ③ 中心线保留 3 位有效数字(R̄ 不塌成 0)。
@@ -154,14 +172,18 @@ export function gageLimitDecimals(
   roleDecimals: number,
 ): number {
   let dp = Math.max(0, roleDecimals);
+  // fix2609k:数量级取整带 1e-9 容差(与 tokens.tickDecimals 同口径)——真值 1e-4 算成
+  // 9.9999999999983e-5(残差相对量级随数据尺度可达 1e-12)时不得跨到下一个数量级多出 1 位小数,
+  // 否则数学上相同的两组镜像数据印出 0.0001000 / 0.000100 两种标签。
+  const magnitudeOf = (value: number) => Math.floor(Math.log10(value) + 1e-9);
   const spread = Math.abs(limits.ucl - limits.lcl);
   const magnitude = Math.max(Math.abs(limits.ucl), Math.abs(limits.lcl), Math.abs(limits.cl));
   if (Number.isFinite(spread) && spread > 0 && spread > magnitude * 1e-9) {
-    dp = Math.max(dp, 1 - Math.floor(Math.log10(spread)));
+    dp = Math.max(dp, 1 - magnitudeOf(spread));
   }
   const center = Math.abs(limits.cl);
   if (Number.isFinite(center) && center > 0 && !(center < Math.abs(axisSpan) * 1e-6)) {
-    dp = Math.max(dp, 2 - Math.floor(Math.log10(center)));
+    dp = Math.max(dp, 2 - magnitudeOf(center));
   }
   return Math.min(20, dp);
 }
@@ -180,10 +202,13 @@ function panelDataDecimals(panel: GagePanelData): number {
   return dp;
 }
 
-/** 公共框架:白底、边框、水平网格与 Y 刻度;可带 Minitab 式 y 轴标题(旋转)与 x 轴标题。 */
-function panelFrame(T: ChartTokens, yLo: number, yHi: number, yTitle?: string, xTitle?: string) {
-  const pw = PW - M.l - M.r;
-  const ph = PH - M.t - M.b;
+/**
+ * 纵轴坐标域与刻度(panelFrame 与限值标签共用同一算法:限值标签需在确定右边距之前知道轴的记数法)。
+ * fix2609k UI-07 残余:刻度位置走 tokens.niceTicks(1-2-5 阶梯,与 Minitab/ControlChart 一致)。
+ * 此前是量程 5 等分的非圆整位置,保真循环因此升出 0.377428 / 1234561.3 这类 7~9 字符刻度,
+ * 右对齐后左端压到旋转的 y 轴标题上。圆整刻度的误差为 0,位数按步长自然回落。
+ */
+function panelAxis(yLo: number, yHi: number) {
   const coordinateScale = gageAxisScale(yLo, yHi);
   let loCoordinate = yLo / coordinateScale;
   let hiCoordinate = yHi / coordinateScale;
@@ -200,24 +225,46 @@ function panelFrame(T: ChartTokens, yLo: number, yHi: number, yTitle?: string, x
     hiCoordinate = center + 1;
   }
   const coordinateSpan = hiCoordinate - loCoordinate;
+  // 1-2-5 阶梯在 5 目标下至少 3 条网格(与 Minitab 同为 3~6 条);不足 3 条才按更细目标重取——
+  // 不为凑条数细分,否则大量级窄量程会多出一位小数(1234579.5),刻度又变长
+  const coarse = niceTicks(loCoordinate, hiCoordinate, 5);
+  const niceCoordinates = coarse.length >= 3 ? coarse : niceTicks(loCoordinate, hiCoordinate, 8);
+  const gridCoordinates = niceCoordinates.length >= 2
+    ? niceCoordinates
+    : Array.from({ length: 5 }, (_, index) => loCoordinate + (coordinateSpan * index) / 4);
+  const tickValues = gridCoordinates.map((coordinate) => restoreGageAxisCoordinate(coordinate, coordinateScale));
+  return { coordinateScale, hiCoordinate, coordinateSpan, gridCoordinates, tickValues };
+}
+
+/** 旋转 y 轴标题(x=14,字号 9.5)右侧与刻度文本之间至少留到的 x 位置。 */
+const Y_TITLE_CLEAR_X = 20;
+
+/** 公共框架:白底、边框、水平网格与 Y 刻度;可带 Minitab 式 y 轴标题(旋转)与 x 轴标题。
+ * rightMargin:控制图面板按限值标签长度加宽(gageLimitRightMargin),其余面板用默认 M.r。
+ * 左边距(fix2609k UI-07 残余):大量级窄量程的圆整刻度仍可达 9 字符(1234579.4),右对齐于
+ * left−6 时左端会压到旋转的 y 轴标题;按最长刻度文本加宽左边距,调用方一律用返回的 left 定位。 */
+function panelFrame(T: ChartTokens, yLo: number, yHi: number, yTitle?: string, xTitle?: string, rightMargin: number = M.r) {
+  const ph = PH - M.t - M.b;
+  const { coordinateScale, hiCoordinate, coordinateSpan, gridCoordinates, tickValues } = panelAxis(yLo, yHi);
   const YCoordinate = (value: number) => M.t + ((hiCoordinate - value) / coordinateSpan) * ph;
   const Y = (value: number) => YCoordinate(value / coordinateScale);
-  const gridCoordinates = Array.from({ length: 5 }, (_, index) => loCoordinate + (coordinateSpan * index) / 4);
-  const tickValues = gridCoordinates.map((coordinate) => restoreGageAxisCoordinate(coordinate, coordinateScale));
   // UI-07:全部面板的纵轴刻度统一走 tickFormatter(按相邻刻度间距推位数、去重、去负零)
   const tickText = tickFormatter(tickValues.filter(Number.isFinite));
   const grid = gridCoordinates.map((coordinate, index) => ({
     y: YCoordinate(coordinate),
     label: tickText(tickValues[index]),
   }));
+  const longestTick = grid.reduce((max, tick) => Math.max(max, gageLabelChars(tick.label)), 0);
+  const left = Math.max(M.l, Math.ceil(6 + longestTick * LIMIT_LABEL_CHAR_W + (yTitle ? Y_TITLE_CLEAR_X : 4)));
+  const pw = PW - left - rightMargin;
   const frame = (
     <Fragment>
       <rect x={0} y={0} width={PW} height={PH} fill={MTB.panelBg} />
-      <rect x={M.l} y={M.t} width={pw} height={ph} fill="none" stroke={T.axis} strokeWidth={1} />
+      <rect x={left} y={M.t} width={pw} height={ph} fill="none" stroke={T.axis} strokeWidth={1} />
       {grid.map((tick, index) => (
         <Fragment key={index}>
-          <Ln x1={M.l} y1={tick.y} x2={M.l + pw} y2={tick.y} stroke={T.grid} sw={1} />
-          <Txt x={M.l - 6} y={tick.y} s={tick.label} fill={T.axis} size={9} anchor="end" />
+          <Ln x1={left} y1={tick.y} x2={left + pw} y2={tick.y} stroke={T.grid} sw={1} />
+          <Txt x={left - 6} y={tick.y} s={tick.label} fill={T.axis} size={9} anchor="end" />
         </Fragment>
       ))}
       {yTitle && (
@@ -225,10 +272,10 @@ function panelFrame(T: ChartTokens, yLo: number, yHi: number, yTitle?: string, x
           textAnchor="middle" fontFamily="IBM Plex Mono, monospace"
           transform={`rotate(-90 14 ${M.t + ph / 2})`}>{yTitle}</text>
       )}
-      {xTitle && <Txt x={M.l + pw / 2} y={PH - 8} s={xTitle} fill={T.text} size={9.5} anchor="middle" />}
+      {xTitle && <Txt x={left + pw / 2} y={PH - 8} s={xTitle} fill={T.text} size={9.5} anchor="middle" />}
     </Fragment>
   );
-  return { pw, ph, Y, frame, tickValues };
+  return { pw, ph, Y, frame, tickValues, left };
 }
 
 /** Minitab 式 ⊕ 均值标记:空心圆+十字。 */
@@ -291,7 +338,7 @@ function componentsBody(T: ChartTokens, cats: GageBarCategory[]): ReactNode {
     }
   }
   const [yLo, yHi] = [0, maxValue * 1.08];
-  const { pw, ph, Y, frame } = panelFrame(T, yLo, yHi, '百分比');
+  const { pw, ph, Y, frame, left } = panelFrame(T, yLo, yHi, '百分比');
   const groupWidth = pw / cats.length;
   const barWidth = Math.min(16, (groupWidth * 0.6) / seriesDefs.length);
   const legendW = 108;
@@ -303,10 +350,10 @@ function componentsBody(T: ChartTokens, cats: GageBarCategory[]): ReactNode {
           {seriesDefs.map((def, seriesIndex) => {
             const value = cat[def.key];
             if (value == null) return null;
-            const x = M.l + groupWidth * catIndex + groupWidth / 2 + (seriesIndex - (seriesDefs.length - 1) / 2) * (barWidth + 2) - barWidth / 2;
+            const x = left + groupWidth * catIndex + groupWidth / 2 + (seriesIndex - (seriesDefs.length - 1) / 2) * (barWidth + 2) - barWidth / 2;
             return <rect key={def.key} x={x} y={Y(value)} width={barWidth} height={Math.max(0, M.t + ph - Y(value))} fill={def.color} stroke={T.axis} strokeWidth={0.6} />;
           })}
-          <Txt x={M.l + groupWidth * catIndex + groupWidth / 2} y={PH - M.b + 12} s={cat.name} fill={T.text} size={9} anchor="middle" />
+          <Txt x={left + groupWidth * catIndex + groupWidth / 2} y={PH - M.b + 12} s={cat.name} fill={T.text} size={9} anchor="middle" />
         </Fragment>
       ))}
       {/* Minitab:面板内右上角带框图例 */}
@@ -341,32 +388,46 @@ function groupedControlBody(
   const dataLo = Math.min(flatLo, limits ? limits.lcl : Infinity);
   const dataHi = Math.max(flatHi, limits ? limits.ucl : -Infinity);
   const [yLo, yHi] = niceRange(dataLo, dataHi);
-  const { pw, Y, frame, tickValues } = panelFrame(T, yLo, yHi, yTitle, xTitle);
   const total = o * p;
-  // 限值标签与刻度同一记数法;位数下限见 gageLimitDecimals(不把 cl/ucl/lcl 混进刻度推导)
-  const finiteTicks = tickValues.filter(Number.isFinite);
+  // 限值标签沿用刻度的记数法;定点时位数只取 gageLimitDecimals(不把 cl/ucl/lcl 混进刻度推导,
+  // 也不继承刻度保真循环升出来的位数——fix2609k UI-07 残余)
+  const finiteTicks = panelAxis(yLo, yHi).tickValues.filter(Number.isFinite);
   const limitText = limits
     ? (() => {
       const axisSpan = finiteTicks.length > 1 ? finiteTicks[finiteTicks.length - 1] - finiteTicks[0] : 0;
-      const fmt = tickFormatter(finiteTicks, gageLimitDecimals(limits, axisSpan, roleDecimals));
-      return (value: number) => (value === 0 ? '0' : fmt(value));
+      const limitDp = gageLimitDecimals(limits, axisSpan, roleDecimals);
+      const axisFmt = tickFormatter(finiteTicks, limitDp);
+      const axisExponent = finiteTicks.some((tick) => /e/i.test(axisFmt(tick)));
+      const fixed = (value: number) => nf(value, Math.min(100, limitDp)).replace(/^-(?=0(\.0*)?$)/, '');
+      return (value: number) => (value === 0 ? '0' : axisExponent ? axisFmt(value) : fixed(value));
     })()
     : null;
-  const X = (index: number) => M.l + ((index + 0.5) / total) * pw;
+  const labels = limits && limitText
+    ? {
+      ucl: `UCL=${limitText(limits.ucl)}`,
+      cl: `${limitLabel}=${limitText(limits.cl)}`,
+      lcl: limits.lcl !== limits.ucl ? `LCL=${limitText(limits.lcl)}` : null,
+    }
+    : null;
+  const rightMargin = labels
+    ? gageLimitRightMargin([labels.ucl, labels.cl, ...(labels.lcl ? [labels.lcl] : [])])
+    : M.r;
+  const { pw, Y, frame, left } = panelFrame(T, yLo, yHi, yTitle, xTitle, rightMargin);
+  const X = (index: number) => left + ((index + 0.5) / total) * pw;
   const points: string[] = [];
   flat.forEach((value, index) => points.push(`${X(index)},${Y(value)}`));
   const limitLine = (value: number, label: string, color: string, solid: boolean) => (
     <Fragment key={label}>
-      <Ln x1={M.l} y1={Y(value)} x2={M.l + pw} y2={Y(value)} stroke={color} sw={1.2} dash={solid ? undefined : T.limitDash} />
-      <Txt x={M.l + pw + 4} y={Y(value)} s={label} fill={color} size={9} weight={600} />
+      <Ln x1={left} y1={Y(value)} x2={left + pw} y2={Y(value)} stroke={color} sw={1.2} dash={solid ? undefined : T.limitDash} />
+      <Txt x={left + pw + 4} y={Y(value)} s={label} fill={color} size={LIMIT_LABEL_SIZE} weight={600} />
     </Fragment>
   );
   return (
     <Fragment>
       {frame}
-      {limits && limitText && limitLine(limits.ucl, `UCL=${limitText(limits.ucl)}`, MTB.limit, true)}
-      {limits && limitText && limitLine(limits.cl, `${limitLabel}=${limitText(limits.cl)}`, MTB.center, true)}
-      {limits && limitText && limits.lcl !== limits.ucl && limitLine(limits.lcl, `LCL=${limitText(limits.lcl)}`, MTB.limit, true)}
+      {limits && labels && limitLine(limits.ucl, labels.ucl, MTB.limit, true)}
+      {limits && labels && limitLine(limits.cl, labels.cl, MTB.center, true)}
+      {limits && labels?.lcl && limitLine(limits.lcl, labels.lcl, MTB.limit, true)}
       <polyline points={points.join(' ')} fill="none" stroke={MTB.data} strokeWidth={1.1} />
       {flat.map((value, index) => (
         <circle key={index} cx={X(index)} cy={Y(value)} r={2.6} fill={MTB.data} />
@@ -374,10 +435,10 @@ function groupedControlBody(
       {Array.from({ length: o }, (_, operator) => (
         <Fragment key={operator}>
           {operator > 0 && (
-            <Ln x1={M.l + (operator * p / total) * pw} y1={M.t} x2={M.l + (operator * p / total) * pw} y2={PH - M.b} stroke={MTB.data} sw={1} />
+            <Ln x1={left + (operator * p / total) * pw} y1={M.t} x2={left + (operator * p / total) * pw} y2={PH - M.b} stroke={MTB.data} sw={1} />
           )}
           {o > 1 && (
-            <Txt x={M.l + ((operator + 0.5) * p / total) * pw} y={M.t + 11} s={operatorLabels[operator] ?? `操作员${operator + 1}`} fill={T.text} size={9.5} anchor="middle" weight={600} />
+            <Txt x={left + ((operator + 0.5) * p / total) * pw} y={M.t + 11} s={operatorLabels[operator] ?? `操作员${operator + 1}`} fill={T.text} size={9.5} anchor="middle" weight={600} />
           )}
         </Fragment>
       ))}
@@ -395,8 +456,8 @@ function byPartBody(T: ChartTokens, panel: GagePanelData, partLabels: string[], 
   const all: number[] = panel.values.flat(2);
   const [allLo, allHi] = rangeOf(all);
   const [yLo, yHi] = niceRange(allLo, allHi);
-  const { pw, Y, frame } = panelFrame(T, yLo, yHi, undefined, partName);
-  const X = (part: number) => M.l + ((part + 0.5) / p) * pw;
+  const { pw, Y, frame, left } = panelFrame(T, yLo, yHi, undefined, partName);
+  const X = (part: number) => left + ((part + 0.5) / p) * pw;
   const meanPoints = panel.partMeans.map((mean, part) => `${X(part)},${Y(mean)}`);
   return (
     <Fragment>
@@ -484,8 +545,8 @@ function byOperatorBody(T: ChartTokens, panel: GagePanelData, operatorLabels: st
   const all: number[] = panel.values.flat(2);
   const [allLo, allHi] = rangeOf(all);
   const [yLo, yHi] = niceRange(allLo, allHi);
-  const { pw, Y, frame } = panelFrame(T, yLo, yHi, undefined, operatorName);
-  const X = (operator: number) => M.l + ((operator + 0.5) / o) * pw;
+  const { pw, Y, frame, left } = panelFrame(T, yLo, yHi, undefined, operatorName);
+  const X = (operator: number) => left + ((operator + 0.5) / o) * pw;
   const boxWidth = Math.min(64, (pw / o) * 0.42);
   const meanPoints = panel.operatorMeans.map((mean, operator) => `${X(operator)},${Y(mean)}`);
   return (
@@ -544,8 +605,8 @@ function interactionBody(T: ChartTokens, panel: GagePanelData, partLabels: strin
   const flat = panel.cellMeans.flat();
   const [flatLo, flatHi] = rangeOf(flat);
   const [yLo, yHi] = niceRange(flatLo, flatHi);
-  const { pw, Y, frame } = panelFrame(T, yLo, yHi, '平均', partName);
-  const X = (part: number) => M.l + ((part + 0.5) / p) * pw;
+  const { pw, Y, frame, left } = panelFrame(T, yLo, yHi, '平均', partName);
+  const X = (part: number) => left + ((part + 0.5) / p) * pw;
   const styles = panel.cellMeans.map((_, operator) => gageInteractionSeriesStyle(operator));
   const legendW = 112;
   return (

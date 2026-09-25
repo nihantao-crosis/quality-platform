@@ -13,6 +13,7 @@ import { ReportCard } from '../ReportCard';
 import { capabilityReport } from '../reportData';
 import { sameChartTokens, type ChartTokens } from '../tokens';
 import { useCapabilityPrepared } from '../useCapabilityPrepared';
+import { specLimitText } from '../../platform/reportLabels';
 import { Card, CardHeader, KvRows, numInput, Badge } from '../common';
 import { Histogram } from '../charts/Histogram';
 import { NormalProbPlot } from '../charts/NormalProbPlot';
@@ -426,7 +427,8 @@ function CapabilityView({ T }: { T: ChartTokens }) {
                 { k: '样本量 N', v: String(cap.n) },
                 { k: M.hasSubgroups ? 'σ 组内 (R̄/d₂)' : 'σ 组内 (MR̄/d₂)', v: nf(cap.sigmaWithin, 4) },
                 { k: 'σ 整体', v: nf(cap.sigmaOverall, 4) },
-                { k: '规格 LSL / 目标 / USL', v: (lslOn ? nf(lsl, 2) : '—') + ' / ' + nf(tgt, 2) + ' / ' + (uslOn ? nf(usl, 2) : '—') },
+                // fix2609k PLATFORM-07:规格与五种报告同源(specLimitText),9.995 / 0.002 不再被 toFixed(2) 改写
+                { k: '规格 LSL / 目标 / USL', v: (lslOn ? specLimitText(lsl) : '—') + ' / ' + specLimitText(tgt) + ' / ' + (uslOn ? specLimitText(usl) : '—') },
               ]}
             />
           </Card>

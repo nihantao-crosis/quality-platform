@@ -4,7 +4,7 @@
  * 这里刻意复用页面相同的角色解析与 core 结构化报告，导出不得重新猜变量或回落演示。
  */
 import { renderToStaticMarkup } from 'react-dom/server';
-import { MAX_SPC_REPORT_DETAIL_ROWS, timestampText, reportSpecDetailText, reportNum } from './reportLabels';
+import { MAX_SPC_REPORT_DETAIL_ROWS, timestampText, reportSpecDetailText, reportNum, reportRawFormatter } from './reportLabels';
 import {
   analyzeFactorial,
   analyzeDoe,
@@ -94,13 +94,31 @@ const svgChart = (title: string, element: React.ReactElement, width: number, hei
   height,
   note,
 });
-const fmt = (value: number | null | undefined, digits = 4) => {
+const fmt = (value: number | null | undefined, digits = 4, scale?: number) => {
   if (value == null || Number.isNaN(value)) return '—';
   if (value === Infinity) return '+∞';
   if (value === -Infinity) return '−∞';
-  // PLATFORM-14:小量级(|v| < 10^(1−digits))改按有效数字,不再把均值/σ/控制限/原始观测印成 0.0000
-  return reportNum(value, digits);
+  // PLATFORM-14:定点只剩不到 3 位有效数字时改按有效数字,不再把均值/σ/控制限印成 0.0000;
+  // scale 给出数据尺度时,|v| ≤ scale×1e-12 的浮点噪声按 0 输出(见 reportNum)
+  return reportNum(value, digits, scale);
 };
+/**
+ * 原始观测表的格式化器(fix2609k):整表一次决定形制——常规数据与既有报告逐字相同(定点 digits 位),
+ * 定点会截断的小量级/高分辨率数据整表改全精度最短表示(见 reportRawFormatter)。
+ */
+const rawFmt = (values: Iterable<number>, digits = 8) => {
+  const format = reportRawFormatter(values, digits);
+  return (value: number) => (Number.isFinite(value) ? format(value) : fmt(value, digits));
+};
+function* groupValues(groups: ReadonlyArray<{ vals: readonly number[] }>): Generator<number> {
+  for (const group of groups) yield* group.vals;
+}
+/** 数据尺度 max|x|(DOE 效应/系数/残差的浮点噪声判定基准)。 */
+function magnitudeOf(values: Iterable<number>): number {
+  let max = 0;
+  for (const value of values) if (Number.isFinite(value) && Math.abs(value) > max) max = Math.abs(value);
+  return max;
+}
 
 /**
  * 专项报告的判异路径不构建滑窗触发 list；引擎用 1 byte/点的 bit mask
@@ -164,9 +182,10 @@ function boundedGroupedValueRows(
   groups: ReadonlyArray<{ name: string; vals: readonly number[] }>,
 ): Array<Array<string | number>> {
   const rows: Array<Array<string | number>> = [];
+  const raw = rawFmt(groupValues(groups));
   for (const group of groups) {
     for (let index = 0; index < group.vals.length && rows.length < MAX_SPC_REPORT_DETAIL_ROWS; index++) {
-      rows.push([group.name, index + 1, fmt(group.vals[index], 8)]);
+      rows.push([group.name, index + 1, raw(group.vals[index])]);
     }
     if (rows.length >= MAX_SPC_REPORT_DETAIL_ROWS) break;
   }
@@ -177,6 +196,7 @@ function boundedAnovaObservationRows(
   groups: ReadonlyArray<{ name: string; vals: readonly number[]; rowIndices?: readonly number[] }>,
   preserveWorksheetOrder: boolean,
 ): Array<Array<string | number>> {
+  const raw = rawFmt(groupValues(groups));
   if (!preserveWorksheetOrder) {
     const rows: Array<Array<string | number>> = [];
     for (const group of groups) {
@@ -184,7 +204,7 @@ function boundedAnovaObservationRows(
         // ANOVA 原始观测表的首列是「组内序号」；t2 的原始表才是「组名」在前。
         // 两者不能共用 boundedGroupedValueRows 的列序，否则演示 ANOVA
         // 会在导出中把因子名写进「组内序号」列。
-        rows.push([index + 1, group.name, fmt(group.vals[index], 8)]);
+        rows.push([index + 1, group.name, raw(group.vals[index])]);
       }
       if (rows.length >= MAX_SPC_REPORT_DETAIL_ROWS) break;
     }
@@ -232,7 +252,7 @@ function boundedAnovaObservationRows(
   while (heap.length > 0 && rows.length < MAX_SPC_REPORT_DETAIL_ROWS) {
     const cursor = pop()!;
     const group = groups[cursor.group];
-    rows.push([cursor.row + 1, group.name, fmt(group.vals[cursor.index], 8)]);
+    rows.push([cursor.row + 1, group.name, raw(group.vals[cursor.index])]);
     const nextIndex = cursor.index + 1;
     const nextRow = group.rowIndices?.[nextIndex];
     if (nextRow != null) push({ group: cursor.group, index: nextIndex, row: nextRow });
@@ -337,7 +357,7 @@ function buildSummaryPayload(): AnalysisReportPayload {
       {
         title: '用于汇总的原始观测',
         headers: ['工作表行', selected.name],
-        rows: selected.values.slice(0, rawSummaryRows).map((value, index) => [index + 1, fmt(value, 10)]),
+        rows: (() => { const shown = selected.values.slice(0, rawSummaryRows); const raw = rawFmt(shown, 10); return shown.map((value, index) => [index + 1, raw(value)]); })(),
         totalRows: selected.values.length,
         note: boundedReportTableNote(
           '本报告一次只使用一个数值列，不会展平或合并其他量纲的变量。',
@@ -579,7 +599,7 @@ function buildHypothesisPayload(): AnalysisReportPayload {
         tables: [
           {
             title: '原始样本', headers: ['观测', columnName],
-            rows: values.slice(0, rawRowCount).map((value, index) => [index + 1, fmt(value, 8)]),
+            rows: (() => { const shown = values.slice(0, rawRowCount); const raw = rawFmt(shown); return shown.map((value, index) => [index + 1, raw(value)]); })(),
             totalRows: values.length,
           },
           { title: '检验结果', headers: ['N', '均值', 'μ₀', 't', 'df', 'P', '95% CI 下限', '95% CI 上限', 'SE'], rows: [[values.length, fmt(result.estimate), fmt(mu0), fmt(result.t), fmt(result.df, 2), fmt(result.p, 6), fmt(result.ciLow), fmt(result.ciHigh), fmt(result.se)]] },
@@ -656,7 +676,7 @@ function buildHypothesisPayload(): AnalysisReportPayload {
       tables: [
         {
           title: '原始 X/Y 观测', headers: ['行', xName, yName],
-          rows: xs.slice(0, MAX_SPC_REPORT_DETAIL_ROWS).map((value, index) => [index + 1, fmt(value, 8), fmt(ys[index], 8)]),
+          rows: (() => { const shownX = xs.slice(0, MAX_SPC_REPORT_DETAIL_ROWS); const rawX = rawFmt(shownX); const rawY = rawFmt(ys.slice(0, MAX_SPC_REPORT_DETAIL_ROWS)); return shownX.map((value, index) => [index + 1, rawX(value), rawY(ys[index])]); })(),
           totalRows: xs.length,
         },
         { title: '回归统计', headers: ['N', '相关系数 r', 'R²', '截距', '斜率', 't', 'df', 'P'], rows: [[result.n, fmt(result.r), fmt(result.r2), fmt(result.intercept), fmt(result.slope), fmt(result.t), result.df, fmt(result.p, 6)]] },
@@ -729,6 +749,8 @@ function buildDoePayload(): AnalysisReportPayload {
   if (M.isDemo) {
     const demo = analyzeDoe();
     const main = mainEffectMeans();
+    // fix2609k:效应/系数以响应尺度判浮点噪声(A×B 的 3.3e-16 按 0 输出,与页面 0.000 同源)
+    const demoScale = magnitudeOf(DOE_DESIGN.map((run) => run[3]));
     return {
       kind: 'doe',
       usesWorksheet: false,
@@ -744,7 +766,7 @@ function buildDoePayload(): AnalysisReportPayload {
         {
           title: '效应与系数',
           headers: ['项', '效应', '系数', '显著'],
-          rows: demo.terms.map((term) => [term.name, fmt(term.v), fmt(term.coef), term.sig ? '是' : '否']),
+          rows: demo.terms.map((term) => [term.name, fmt(term.v, 4, demoScale), fmt(term.coef, 4, demoScale), term.sig ? '是' : '否']),
         },
         {
           title: '演示设计矩阵',
@@ -858,6 +880,8 @@ function buildDoePayload(): AnalysisReportPayload {
     );
   }
   const report = buildDoeStructuredReport(detected.design, result, responseName, doeRunMetadata(M.colNames, rows, data.textCols));
+  // fix2609k:效应/系数/拟合/残差以响应尺度判浮点噪声,常规数据的 1e-16 残差不印成科学计数
+  const responseScale = magnitudeOf(response);
   const main = factorialAdjustedMainMeans(result, detected.design);
   const isT = result.method === 'ttest';
   const finiteT = result.terms.map((term) => Math.abs(term.tStat ?? 0)).filter(Number.isFinite);
@@ -920,14 +944,14 @@ function buildDoePayload(): AnalysisReportPayload {
       {
         title: '效应与系数',
         headers: ['项', '效应', '系数', 't', 'P', '显著'],
-        rows: report.coefficients.map((term) => [term.term, fmt(term.effect), fmt(term.coefficient), fmt(term.t), fmt(term.p, 6), term.significant ? '是' : '否']),
+        rows: report.coefficients.map((term) => [term.term, fmt(term.effect, 4, responseScale), fmt(term.coefficient, 4, responseScale), fmt(term.t), fmt(term.p, 6), term.significant ? '是' : '否']),
       },
       {
         title: '设计矩阵、拟合与残差',
         headers: ['行', '标准序', '运行序', '区组', '点类型', ...report.factors.map((factor) => factor.name), '观测', '拟合', '残差', '标准化残差'],
         rows: report.runs.slice(0, MAX_SPC_REPORT_DETAIL_ROWS).map((run) => [
           run.row, run.standardOrder ?? '—', run.runOrder, run.block ?? '—', run.pointType,
-          ...run.factorValues.map((value) => fmt(value, 6)), fmt(run.observed), fmt(run.fitted), fmt(run.residual), fmt(run.standardizedResidual),
+          ...run.factorValues.map((value) => fmt(value, 6)), fmt(run.observed), fmt(run.fitted, 4, responseScale), fmt(run.residual, 4, responseScale), fmt(run.standardizedResidual),
         ]),
         totalRows: report.runs.length,
       },
@@ -1073,18 +1097,22 @@ function buildCapabilityPayload(): AnalysisReportPayload {
     M.hasSubgroups ? M.subs.length : M.indiv.length,
     MAX_SPC_REPORT_DETAIL_ROWS,
   );
+  // fix2609k:原始观测整表全精度(定点可无损时与既有报告逐字相同)
+  const capabilityRaw = rawFmt(M.hasSubgroups
+    ? groupValues(M.subs.slice(0, capabilitySourceRowCount))
+    : M.indiv.slice(0, capabilitySourceRowCount));
   const sourceTable = M.hasSubgroups
     ? {
         title: '用于能力分析的解析子组数据',
         headers: ['子组', ...M.colNames],
-        rows: M.subs.slice(0, capabilitySourceRowCount).map((subgroup, index) => [prepared.subgroupLabels[index] ?? subgroup.i, ...subgroup.vals.map((value) => fmt(value, 8))]),
+        rows: M.subs.slice(0, capabilitySourceRowCount).map((subgroup, index) => [prepared.subgroupLabels[index] ?? subgroup.i, ...subgroup.vals.map((value) => capabilityRaw(value))]),
         totalRows: M.subs.length,
         note: boundedReportTableNote(prepared.note, M.subs.length, capabilitySourceRowCount),
       }
     : {
         title: '用于能力分析的解析单值数据',
         headers: ['观测', prepared.variableName],
-        rows: M.indiv.slice(0, capabilitySourceRowCount).map((value, index) => [prepared.subgroupLabels[index] ?? index + 1, fmt(value, 8)]),
+        rows: M.indiv.slice(0, capabilitySourceRowCount).map((value, index) => [prepared.subgroupLabels[index] ?? index + 1, capabilityRaw(value)]),
         totalRows: M.indiv.length,
         note: boundedReportTableNote(prepared.note, M.indiv.length, capabilitySourceRowCount),
       };
@@ -1096,7 +1124,7 @@ function buildCapabilityPayload(): AnalysisReportPayload {
     generatedAt: now(),
     summary: [
       `Cpk=${fmt(cap.cpk, 4)}，Ppk=${fmt(cap.ppk, 4)}，${verdict}。${assessment.spcViolations > 0 ? assessment.headline : ''}`,
-      `规格：${reportSpecDetailText({ lsl: app.lslOn ? app.lsl : null, tgt: app.tgt, usl: app.uslOn ? app.usl : null }, 6)}；${prepared.note}。`,
+      `规格：${reportSpecDetailText({ lsl: app.lslOn ? app.lsl : null, tgt: app.tgt, usl: app.uslOn ? app.usl : null })}；${prepared.note}。`,
       ad ? `Anderson-Darling A²*=${fmt(ad.a2star, 4)}，P=${fmt(ad.p, 6)}，${ad.normal ? '未拒绝正态性' : '显著偏离正态分布'}。` : '样本量不足 8，未执行 Anderson-Darling 正态性检验。',
     ],
     warnings: [
@@ -1197,6 +1225,7 @@ function buildGagePayload(): AnalysisReportPayload {
   }
   const observations = requestedReal && prepared.ok ? prepared.study.observations : gageStudyData();
   const gageObservationRows = Math.min(observations.length, MAX_SPC_REPORT_DETAIL_ROWS);
+  const gageRaw = rawFmt(observations.slice(0, gageObservationRows).map((observation) => observation.value));
   const tolerance = requestedReal
     ? resolveGageTolerance(app)
     : { mode: 'width' as const, value: GAGE_TOLERANCE };
@@ -1275,7 +1304,7 @@ function buildGagePayload(): AnalysisReportPayload {
           realStudy?.partLabels[observation.part] ?? observation.part + 1,
           realStudy?.operatorLabels[observation.operator] ?? observation.operator + 1,
           observation.trial + 1,
-          fmt(observation.value, 8),
+          gageRaw(observation.value),
         ]),
         totalRows: observations.length,
       },
@@ -1421,6 +1450,7 @@ function buildSpcPayload(): AnalysisReportPayload | undefined {
     : undefined;
   const sourceLabels = labelsFor(M.k);
   const sourceRowCount = Math.min(M.hasSubgroups ? M.k : M.indiv.length, MAX_SPC_REPORT_DETAIL_ROWS);
+  const spcRaw = rawFmt(M.hasSubgroups ? groupValues(M.subs.slice(0, sourceRowCount)) : M.indiv.slice(0, sourceRowCount));
   const spcSourceTable = M.hasSubgroups
     ? {
         title: '用于控制图的解析子组数据',
@@ -1428,7 +1458,7 @@ function buildSpcPayload(): AnalysisReportPayload | undefined {
         rows: M.subs.slice(0, sourceRowCount).map((sub, index) => [
           sourceLabels?.[index] ?? sub.i,
           ...(stageValues?.length === M.k ? [stageValues[index]] : []),
-          ...sub.vals.map((value) => fmt(value, 8)),
+          ...sub.vals.map((value) => spcRaw(value)),
         ]),
         totalRows: M.k,
         note: boundedReportTableNote(prepared.note, M.k, sourceRowCount),
@@ -1436,7 +1466,7 @@ function buildSpcPayload(): AnalysisReportPayload | undefined {
     : {
         title: '用于控制图的解析单值数据',
         headers: ['观测', prepared.variableName],
-        rows: M.indiv.slice(0, sourceRowCount).map((value, index) => [labelsFor(M.indiv.length)?.[index] ?? index + 1, fmt(value, 8)]),
+        rows: M.indiv.slice(0, sourceRowCount).map((value, index) => [labelsFor(M.indiv.length)?.[index] ?? index + 1, spcRaw(value)]),
         totalRows: M.indiv.length,
         note: boundedReportTableNote(prepared.note, M.indiv.length, sourceRowCount),
       };

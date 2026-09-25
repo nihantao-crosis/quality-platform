@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useApp, resolveGageTolerance } from './store/appStore';
 import { useData, isCapabilityWarningAcknowledged, datasetWriteNotes } from './store/dataStore';
 import {
-  capabilityInputError, computeCapability, computeGageRR, gageStudyData, GAGE_TOLERANCE, nf,
+  capabilityInputError, computeCapability, computeGageRR, gageStudyData, GAGE_TOLERANCE,
   peekResolvedGageStudy, resolveGageStudy, prepareSpcData, resolveNumericColumn,
   type GageStudyPreparation,
 } from './core';
@@ -12,6 +12,7 @@ import { exportProject } from './platform/project';
 import { useAnalyses } from './store/analyses';
 import { chartTokens } from './ui/tokens';
 import { useCapabilityPrepared } from './ui/useCapabilityPrepared';
+import { specLimitText } from './platform/reportLabels';
 import { PAGES } from './ui/pagesMeta';
 import { MenuBar } from './ui/shell/MenuBar';
 import { Toolbar } from './ui/shell/Toolbar';
@@ -257,9 +258,10 @@ function AppShell() {
     && (spcType === 'xbar-r' || spcType === 'xbar-s') ? 'i-mr' : spcType;
   const spcTypeLabel = ({ 'xbar-r': 'X̄-R', 'xbar-s': 'X̄-S', 'i-mr': 'I-MR', ewma: 'EWMA', cusum: 'CUSUM', p: 'P 图', c: 'C 图' } as const)[effectiveSpcType];
   const summaryColumn = resolveNumericColumn(M, activeVar);
+  // fix2609k PLATFORM-07:页头规格与能力页/五种报告同源(specLimitText),紧公差不被 toFixed(2) 改写
   const specLabel = lslOn && uslOn
-    ? `${nf(lsl, 2)}–${nf(usl, 2)}`
-    : lslOn ? `LSL ${nf(lsl, 2)}` : uslOn ? `USL ${nf(usl, 2)}` : '未启用';
+    ? `${specLimitText(lsl)}–${specLimitText(usl)}`
+    : lslOn ? `LSL ${specLimitText(lsl)}` : uslOn ? `USL ${specLimitText(usl)}` : '未启用';
   const dynTitle: Partial<Record<typeof page, string>> = {
     worksheet: `数据工作表 · ${M.name}`,
     summary: `描述性统计 · ${summaryColumn.name}`,

@@ -294,8 +294,10 @@ function expectPanelsReadable(observations: GageObservation[]) {
   const panels = [GageRPanel, GageXbarPanel, GageByPartPanel, GageByOperatorPanel, GageInteractionPanel];
   for (const Panel of panels) {
     const ticks = tickTexts(renderToStaticMarkup(createElement(Panel, props)));
-    expect(ticks).toHaveLength(5);
-    expect(new Set(ticks).size, `${Panel.name} 刻度 ${ticks.join(' ')}`).toBe(5);
+    // fix2609k:刻度改走 niceTicks(1-2-5 圆整位置),条数随量程在 3~8 之间,不再固定 5 等分
+    expect(ticks.length).toBeGreaterThanOrEqual(3);
+    expect(ticks.length).toBeLessThanOrEqual(8);
+    expect(new Set(ticks).size, `${Panel.name} 刻度 ${ticks.join(' ')}`).toBe(ticks.length);
     for (const tick of ticks) expect(tick).not.toMatch(/^-0(\.0*)?$/);
   }
   const figure = renderToStaticMarkup(createElement(GageReportFigure, {

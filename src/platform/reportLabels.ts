@@ -50,13 +50,16 @@ export function withinSigmaLabel(M: VarModel): string {
  * 规格限数值的唯一显示口径(PLATFORM-07):按用户输入原值展示,绝不定点四舍五入。
  * 此前 HTML/Word/PPT/文本报告用 toFixed(2),把 9.995/10.005 印成 9.99/10.01、
  * 平面度 USL=0.002 印成 0.00,与同一次导出的 Excel 和实际参与 Cp/Cpk 计算的规格不一致。
- * - 先按 12 位有效数字去掉浮点残差(0.1+0.2 → 0.3),再取最短十进制表示;
+ * - 仅当输入确属浮点残差(与 12 位有效数字的差不超过 4 ulp,如 0.1+0.2)时才按 12 位去残差,
+ *   否则保留 String(value) 的最短表示——13 位以上有效数字的录入(99.9999999999999)不被改写;
  * - 不足 2 位小数时补到 2 位(沿用报告既有形制「25.00 / 25.20」),多于 2 位时原样保留;
  * - 极小/极大值按 JS 最短表示走科学计数,不截断。
- * 五种出口(HTML/Word/PPT/文本/Excel)共用本函数,同一次导出只有一组规格数字。 */
+ * 五种出口(HTML/Word/PPT/文本/Excel)、能力专项报告(reportSpecDetailText)与能力页/页头
+ * 副标题共用本函数,同一份规格只有一组数字(报告数值与页面同源)。 */
 export function specLimitText(value: number): string {
   if (!Number.isFinite(value)) return String(value);
-  const cleaned = Number(value.toPrecision(12));
+  const rounded = Number(value.toPrecision(12));
+  const cleaned = Math.abs(value - rounded) <= 4 * Math.abs(value) * Number.EPSILON ? rounded : value;
   const text = String(cleaned);
   if (/e/i.test(text)) return text;
   const dot = text.indexOf('.');
@@ -74,16 +77,58 @@ export function reportSpecText(spec: SpecLimits): string {
   return `${formatSpecLimit(spec.lsl, '无下限')} / ${formatSpecLimit(spec.tgt, '—')} / ${formatSpecLimit(spec.usl, '无上限')}`;
 }
 
+/** 定点文本里的有效数字位数(去掉符号、小数点与前导零;尾随 0 计入)。 */
+function fixedSignificantDigits(text: string): number {
+  return text.replace(/^-/, '').replace('.', '').replace(/^0+/, '').length;
+}
+
 /**
  * 报告层统计量的显示口径(PLATFORM-14):常规量级沿用固定 digits 位小数(与页面 nf 同形制);
- * 当 toFixed(digits) 只剩不到 2 位有效数字(|v| < 10^(1−digits))时,改按有效数字输出——
- * 此前 SI 单位记录的小量级数据(电容 4.7e-9 F、形位误差 1e-5 m)的均值/σ/控制限/原始观测
- * 被印成 0.0000,与同表 Cpk=28.66 自相矛盾。有效位数 = clamp(digits, 3, 6)。
- * 0、非有限值与常规量级的输出与 nf 逐字相同(既有报告形制不变)。
+ * 当 toFixed(digits) 只剩不到 3 位有效数字时,改按有效数字输出(位数 = clamp(digits, 3, 6))——
+ * 此前 SI 单位记录的小量级数据(电容 4.7e-9 F、形位误差 1e-5 m)的均值/σ/控制限被印成 0.0000,
+ * 与同表 Cpk=28.66 自相矛盾;fix2609k 复审:旧阈值只保证 2 位有效数字,4.7e-7 数据的描述统计仍被
+ * 截成 "0.00000047",与同一份报告的 4.70262e-7 对不上,故阈值提到 3 位。
+ * - digits ≤ 2 的调用(α、百分比、df)只在定点结果为 0 时才切换:fmt(0.05,2) 仍是 "0.05";
+ * - scale(可选,数据尺度如响应列 max|y|):|v| ≤ scale×1e-12 视为浮点噪声按 0 输出——常规量级数据的
+ *   DOE 效应/系数不能把 3.331e-16 当有效值印成科学计数(页面同一格显示 0.000);
+ * - 0、非有限值与有效数字足够的常规量级输出与 nf 逐字相同(既有报告形制不变)。
+ * 原始观测不走本函数的定点口径,见 reportRawFormatter(全精度)。
  */
-export function reportNum(value: number, digits: number): string {
-  if (!Number.isFinite(value) || value === 0 || Math.abs(value) >= 10 ** (1 - digits)) return nf(value, digits);
+export function reportNum(value: number, digits: number, scale?: number): string {
+  if (!Number.isFinite(value) || value === 0) return nf(value, digits);
+  if (scale != null && Number.isFinite(scale) && scale > 0 && Math.abs(value) <= scale * 1e-12) return nf(0, digits);
+  const fixed = nf(value, digits);
+  const minSignificant = digits <= 2 ? 1 : 3;
+  if (fixedSignificantDigits(fixed) >= minSignificant) return fixed;
   return value.toPrecision(Math.max(3, Math.min(digits, 6)));
+}
+
+/** 原始观测的定点显示至少保留的有效数字位数(远超任何量测分辨率;demo 的随机双精度数据按此仍走定点)。 */
+const RAW_FIXED_MIN_SIGNIFICANT = 10;
+
+/**
+ * 原始观测表的格式化器(fix2609k PLATFORM-14 残余):原始观测是用户录入/导入的数据,报告不能按
+ * 统计量的定点位数截断(4.703e-7 在 toFixed(8) 下成了 "0.00000047",同表控制限却是 4.703e-7)。
+ * 按整张表一次性决定形制,同表不混用:
+ * - 表内每个有限值的 digits 位定点文本都「无损」(与其 15 位有效数字的值相等)或至少保留
+ *   10 位有效数字 → 沿用定点 digits 位(常规量级数据与既有报告逐字相同,Excel 数字格式不变);
+ * - 否则整表改为全精度最短表示 String(Number(v.toPrecision(15)))(去浮点残差,不截断),
+ *   专项 Excel 经 xlsxTableCell 回读即原始 double。
+ * 扫描遇到第一个需要切换的值即停止;非有限值由调用方处理。
+ */
+export function reportRawFormatter(values: Iterable<number>, digits = 8): (value: number) => string {
+  let fixedIsFaithful = true;
+  for (const value of values) {
+    if (!Number.isFinite(value)) continue;
+    const fixed = nf(value, digits);
+    if (Number(fixed) === Number(value.toPrecision(15))) continue;
+    if (fixedSignificantDigits(fixed) >= RAW_FIXED_MIN_SIGNIFICANT) continue;
+    fixedIsFaithful = false;
+    break;
+  }
+  return fixedIsFaithful
+    ? (value) => nf(value, digits)
+    : (value) => (Number.isFinite(value) ? String(Number(value.toPrecision(15))) : String(value));
 }
 
 /** 判异明细行硬上限(v1.42.4 审计 P2):Excel/HTML 是"完整明细"格式,但对抗性数据
@@ -148,10 +193,12 @@ export function escapeHtml(raw: string): string {
   return raw.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
-/** 带标签的规格明细文本(LSL=… / Target=… / USL=…;单侧写「无下限/无上限」)。 */
-export function reportSpecDetailText(spec: SpecLimits, digits = 6): string {
-  const part = (label: string, value: number | null) => (value == null ? `无${label === 'LSL' ? '下限' : '上限'}` : `${label}=${nf(value, digits)}`);
-  return `${part('LSL', spec.lsl)} / Target=${nf(spec.tgt, digits)} / ${part('USL', spec.usl)}`;
+/** 带标签的规格明细文本(LSL=… / Target=… / USL=…;单侧写「无下限/无上限」)。
+ * fix2609k:数值与 reportSpecText 同源(specLimitText),不再接受位数参数——此前能力专项报告按
+ * toFixed(6) 把 4.5e-9 F 的规格印成「LSL=0.000000」,与通用报告的 4.5e-9 不一致。 */
+export function reportSpecDetailText(spec: SpecLimits): string {
+  const part = (label: string, value: number | null) => (value == null ? `无${label === 'LSL' ? '下限' : '上限'}` : `${label}=${specLimitText(value)}`);
+  return `${part('LSL', spec.lsl)} / Target=${specLimitText(spec.tgt)} / ${part('USL', spec.usl)}`;
 }
 
 /** 导出文件名的本地日期戳(闭环审核 P3:UTC 与正文本地时间在时区边界跨日不一致;
