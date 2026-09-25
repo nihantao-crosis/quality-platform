@@ -93,7 +93,8 @@ describe('数据流冒烟', () => {
     fireEvent.click(screen.getByText('导入 CSV/Excel'));
     fireEvent.click(screen.getByText('剪贴板粘贴'));
     fireEvent.click(screen.getByText('不良数（P 图）'));
-    fireEvent.change(screen.getByRole('textbox'), {
+    // G13:P 图默认 n 改为 type=text 后也是 textbox,按占位符定位粘贴框
+    fireEvent.change(screen.getByPlaceholderText(/将数据粘贴到此处/), {
       target: { value: '不良数,每批样本量\n1,10\n4,40\n2,20' },
     });
     fireEvent.click(screen.getByText('导入', { exact: true }));

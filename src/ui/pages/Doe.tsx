@@ -58,7 +58,7 @@ import { ScatterPlot } from '../charts/ScatterPlot';
 import { MiniHist } from '../charts/misc';
 import { MainEffects, InteractionPlot, EffectsBar, CubePlot } from '../charts/doe';
 import { Svg, Ln, Txt } from '../charts/primitives';
-import { parseStrictNumber } from '../../core/numberInput';
+import { numericInputMode, parseStrictNumber } from '../../core/numberInput';
 
 
 /** 因子低/高水平编辑行(第三轮 P3:此前全因子/分数因子两处逐字重复;空框存 NaN 由生成入口报错,不静默写 0) */
@@ -1127,7 +1127,7 @@ function CreateDesign() {
                   const levelCheck = parseStrictNumber(t);
                   const levelError = levelCheck.ok ? null : levelCheck.empty ? '未填写' : levelCheck.reason;
                   return (
-                    <input key={li} value={t} inputMode="decimal" aria-label={`一般全因子因子 ${i + 1} 水平 ${li + 1} 数值`}
+                    <input key={li} value={t} type="text" inputMode={numericInputMode()} autoComplete="off" spellCheck={false} aria-label={`一般全因子因子 ${i + 1} 水平 ${li + 1} 数值`}
                       aria-invalid={levelError != null} title={levelError ?? undefined}
                       onChange={(e) => setGLevelValue(i, li, e.target.value)}
                       style={{ ...inp, width: 64, ...(levelError ? { borderColor: '#c22f2f' } : {}) }} />

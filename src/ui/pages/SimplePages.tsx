@@ -18,7 +18,7 @@ import { Fishbone } from './Fishbone';
 import { loadFishboneState } from '../../store/fishboneStore';
 import { useApp, resolveGageTolerance, GAGE_BATCH_COL_CAP, normalizeGageBatchCols } from '../../store/appStore';
 import { datasetWriteNotes, useData } from '../../store/dataStore';
-import { parseStrictNumber } from '../../core/numberInput';
+import { numericInputMode, parseStrictNumber } from '../../core/numberInput';
 import type { ChartTokens } from '../tokens';
 import { paretoColors } from '../tokens';
 import { Card, CardHeader, KvRows, Badge, tabStyle, numInput, EmptyStateCard, DemoBadge } from '../common';
@@ -736,8 +736,15 @@ function OneSampleTPanel({ T }: { T: ChartTokens }) {
   const namedCol = t1ColName ? model.colNames.indexOf(t1ColName) : -1;
   const col = namedCol >= 0 ? namedCol : 0;
   const mu0 = t1Mu0 ?? tgt;
+  // μ₀ 输入框保存原始串(type=text,GAP-8-4 同族):合法即写入 store;非法时保留原串、标红并显示原因,
+  // 检验结果与导出仍按上一次有效 μ₀,并明确告知。null=未在编辑,显示 store 中的值。
+  const [mu0Draft, setMu0Draft] = useState<string | null>(null);
+  const mu0Check = mu0Draft == null ? null : parseStrictNumber(mu0Draft);
+  const mu0Problem = mu0Check && !mu0Check.ok
+    ? `μ₀ ${mu0Check.empty ? '未填写' : `无效：${mu0Check.reason}`}；结果仍按上一次有效值 μ₀ = ${mu0}`
+    : null;
   const controls = (
-    <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#5b6472' }}>
+    <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end', fontSize: 12, color: '#5b6472' }}>
       测量列
       <select style={selStyle} value={col} onChange={(e) => setHypothesisOptions({ t1ColName: model.colNames[+e.target.value] })}>
         {model.colNames.map((n, i) => <option key={n} value={i}>{n}</option>)}
@@ -745,10 +752,20 @@ function OneSampleTPanel({ T }: { T: ChartTokens }) {
       <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
         μ₀
         <input
-          type="number" step="0.01" value={mu0} style={numInput}
-          onChange={(e) => { const parsed = parseStrictNumber(e.target.value); if (parsed.ok) setHypothesisOptions({ t1Mu0: parsed.value }); }}
+          type="text" inputMode={numericInputMode()} autoComplete="off" spellCheck={false} aria-label="单样本 t 目标 μ₀"
+          value={mu0Draft ?? String(mu0)} aria-invalid={mu0Problem ? true : undefined} title={mu0Problem ?? undefined}
+          style={{ ...numInput, ...(mu0Problem ? { borderColor: '#c22f2f' } : {}) }}
+          onChange={(e) => {
+            const text = e.target.value;
+            setMu0Draft(text);
+            const parsed = parseStrictNumber(text);
+            if (parsed.ok) setHypothesisOptions({ t1Mu0: parsed.value });
+          }}
+          onBlur={() => { if (mu0Check?.ok) setMu0Draft(null); }}
         />
       </label>
+      {mu0Problem && <span role="alert" style={{ color: '#c22f2f', flexBasis: '100%', textAlign: 'right' }}>{mu0Problem}</span>}
+      {mu0Check?.ok && mu0Check.note && <span role="status" style={{ color: '#8a929d', flexBasis: '100%', textAlign: 'right' }}>{mu0Check.note}</span>}
     </div>
   );
   const pendingCount = pendingCells.filter((cell) => cell.row >= 0 && cell.row < model.k && cell.col === col).length;

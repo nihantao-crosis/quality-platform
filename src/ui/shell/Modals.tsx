@@ -9,7 +9,7 @@ import { assertClipboardImportText, assertTextImportSize } from '../../platform/
 import { buildExportJob } from '../../platform/report';
 import { mesStart, mesStop } from '../../platform/mes';
 import { sessionLog } from '../../store/sessionLog';
-import { parseStrictInteger, parseStrictNumber } from '../../core/numberInput';
+import { numericInputMode, parseStrictInteger, parseStrictNumber, type StrictNumberResult } from '../../core/numberInput';
 import { isProjectFile, applyProjectText } from '../../platform/project';
 import { HelpModal } from './HelpModal';
 import { OptionsModal } from './OptionsModal';
@@ -72,7 +72,12 @@ function ImportModal() {
   const [blockChoices, setBlockChoices] = useState<{ name: string; raw: string; blocks: CsvBlock[] } | null>(null);
   const [clipText, setClipText] = useState('');
   const [dataKind, setDataKind] = useState<DataKind>(importKind);
-  const [pSampleSize, setPSampleSize] = useState(50);
+  // 默认 n 保存原始输入串(type=text),严格解析后才参与导入;非法时显示原因并禁用「导入」。
+  const [pSampleText, setPSampleText] = useState('50');
+  const pSampleParsed = parseStrictInteger(pSampleText, { min: 1 });
+  const pSampleProblem = dataKind === 'p' && !pSampleParsed.ok
+    ? `单列默认样本量 n ${pSampleParsed.empty ? '未填写' : `无效：${pSampleParsed.reason}`}`
+    : null;
   const [paretoCategoryCol, setParetoCategoryCol] = useState('');
   const [paretoCountCol, setParetoCountCol] = useState('');
   const [importBusy, setImportBusy] = useState(false);
@@ -380,7 +385,11 @@ function ImportModal() {
       return true;
     }
     if (dataKind === 'p') {
-      const extracted = extractPChartColumns(p, pSampleSize);
+      if (!pSampleParsed.ok) {
+        showToast(`导入失败：${pSampleProblem ?? '单列默认样本量 n 无效'}`);
+        return false;
+      }
+      const extracted = extractPChartColumns(p, pSampleParsed.value);
       if ('error' in extracted) {
         showToast('导入失败：' + extracted.error);
         return false;
@@ -420,6 +429,7 @@ function ImportModal() {
 
   const doImport = async () => {
     if (importTab === 'mes') return; // MES tab 有自己的控制按钮
+    if (pSampleProblem) { showToast(`导入失败：${pSampleProblem}`); return; }
     let job = pending;
     let epoch: number | null = null;
     try {
@@ -485,17 +495,20 @@ function ImportModal() {
           <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: '#5b6472' }}>
             单列默认样本量 n
             <input
-              type="number"
-              min={1}
-              value={pSampleSize}
-              onChange={(e) => {
-                const parsed = parseStrictInteger(e.target.value, { min: 1 });
-                if (parsed.ok) setPSampleSize(parsed.value);
-              }}
+              type="text"
+              inputMode="numeric"
+              autoComplete="off"
+              spellCheck={false}
+              value={pSampleText}
+              aria-invalid={pSampleProblem ? true : undefined}
+              title={pSampleProblem ?? undefined}
+              onChange={(e) => setPSampleText(e.target.value)}
               className="mono"
-              style={{ width: 64, padding: '3px 6px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12 }}
+              style={{ width: 64, padding: '3px 6px', border: `1px solid ${pSampleProblem ? '#c22f2f' : '#cfd5dd'}`, borderRadius: 4, fontSize: 12 }}
             />
           </label>
+          {pSampleProblem && <span role="alert" style={{ color: '#c22f2f', fontSize: 11.5, flexBasis: '100%' }}>{pSampleProblem}</span>}
+          {pSampleParsed.ok && pSampleParsed.note && <span role="status" style={{ color: '#8a929d', fontSize: 11.5, flexBasis: '100%' }}>单列默认样本量 n：{pSampleParsed.note}</span>}
           <span style={{ color: '#8a929d', fontSize: 11.5 }}>两列时按“不良数, 每批样本量”读取，界面默认 n 不参与计算</span>
         </>
       )}
@@ -523,7 +536,8 @@ function ImportModal() {
     <ModalFrame width={560} title="导入数据" onClose={closeImportModal}
       footer={<>
         <button type="button" onClick={closeImportModal} style={cancelBtn}>取消</button>
-        <button type="button" onClick={() => { void doImport(); }} disabled={importBusy} style={{ ...primaryBtn, ...(importBusy ? { cursor: 'wait', opacity: 0.65 } : {}) }}>{importBusy ? '解析中…' : '导入'}</button>
+        <button type="button" onClick={() => { void doImport(); }} disabled={importBusy || pSampleProblem != null} title={pSampleProblem ?? undefined}
+          style={{ ...primaryBtn, ...(importBusy ? { cursor: 'wait', opacity: 0.65 } : pSampleProblem ? { cursor: 'not-allowed', opacity: 0.5 } : {}) }}>{importBusy ? '解析中…' : '导入'}</button>
       </>}>
       <div style={{ padding: '18px 20px' }}>
         <div style={{ display: 'flex', gap: 6, marginBottom: 16, flexWrap: 'wrap' }}>
@@ -1076,11 +1090,15 @@ function FindReplaceModal() {
       <div style={{ padding: '18px 20px', display: 'flex', flexDirection: 'column', gap: 13, fontSize: 12.5, color: '#5b6472' }}>
         <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
           查找数值
-          <input autoFocus type="number" step="any" value={findS} onChange={(e) => setFindS(e.target.value)} placeholder="如 25.037" style={inp} />
+          <input autoFocus type="text" inputMode={numericInputMode()} autoComplete="off" spellCheck={false} aria-label="查找数值"
+            aria-invalid={!findParsed.ok && !findParsed.empty ? true : undefined}
+            value={findS} onChange={(e) => setFindS(e.target.value)} placeholder="如 25.037" style={inp} />
         </label>
         <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
           替换为
-          <input type="number" step="any" value={replS} onChange={(e) => setReplS(e.target.value)} placeholder="如 25.000" style={inp} />
+          <input type="text" inputMode={numericInputMode()} autoComplete="off" spellCheck={false} aria-label="替换为"
+            aria-invalid={!replParsed.ok && !replParsed.empty ? true : undefined}
+            value={replS} onChange={(e) => setReplS(e.target.value)} placeholder="如 25.000" style={inp} />
         </label>
         <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
           范围
@@ -1096,6 +1114,7 @@ function FindReplaceModal() {
               ? <span style={{ color: '#d98324' }}>没有匹配的测量值</span>
               : <span style={{ color: '#1c4e7a' }}>命中 <b className="mono">{matches}</b> 处,替换后可 Ctrl+Z 撤销</span>}
           {inputProblem && !inputProblem.ok && <div role="alert" style={{ color: '#c22f2f', marginTop: 4 }}>{inputProblem.reason}</div>}
+          {[findParsed, replParsed].map((r, i) => (r.ok && r.note ? <div key={i} role="status" style={{ color: '#8a929d', marginTop: 4 }}>{r.note}</div> : null))}
         </div>
       </div>
     </ModalFrame>
@@ -1297,50 +1316,79 @@ function ColStatsModal() {
 }
 
 // ---------- 生成随机数据 ----------
+type RandomField = 'mu' | 'sigma' | 'k' | 'n';
+/** 随机数据各参数的严格解析(GAP-8-4 同族):输入框保存原始串,非法即显示原因并禁用「生成」。 */
+function parseRandomField(field: RandomField, text: string): StrictNumberResult {
+  if (field === 'k') return parseStrictInteger(text, { min: 2, max: 100000 });
+  if (field === 'n') return parseStrictInteger(text, { min: 1, max: 10 });
+  const parsed = parseStrictNumber(text);
+  if (field === 'sigma' && parsed.ok && !(parsed.value > 0)) {
+    return { ok: false, empty: false, reason: `「${text.trim()}」不大于 0；标准差 σ 须大于 0` };
+  }
+  return parsed;
+}
+
 function RandomModal() {
   const { closeModal, goTo, showToast } = useApp();
   const generateRandom = useData((s) => s.generateRandom);
-  const [mu, setMu] = useState(25);
-  const [sigma, setSigma] = useState(0.03);
-  const [k, setK] = useState(25);
-  const [n, setN] = useState(5);
+  const [texts, setTexts] = useState<Record<RandomField, string>>({ mu: '25', sigma: '0.03', k: '25', n: '5' });
+  const fields: Array<[RandomField, string]> = [
+    ['mu', '均值 μ'],
+    ['sigma', '标准差 σ'],
+    ['k', '子组数 k'],
+    ['n', '子组大小 n'],
+  ];
+  const parsed = Object.fromEntries(fields.map(([field]) => [field, parseRandomField(field, texts[field])])) as Record<RandomField, StrictNumberResult>;
+  const problems = fields.flatMap(([field, label]) => {
+    const r = parsed[field];
+    return r.ok ? [] : [`${label}${r.empty ? ' 未填写' : `：${r.reason}`}`];
+  });
+  const canApply = problems.length === 0;
   const apply = () => {
+    const { mu, sigma, k, n } = parsed;
+    if (!mu.ok || !sigma.ok || !k.ok || !n.ok) {
+      showToast(`参数无效：${problems[0] ?? 'σ>0,子组数 2–100000,子组大小 1–10'}`);
+      return;
+    }
     try {
-      if (sigma <= 0 || k < 2 || k > 100000 || n < 1 || n > 10) {
-        showToast('参数无效：σ>0,子组数 2–100000,子组大小 1–10');
-        return;
-      }
-      const generated = generateRandom(mu, sigma, k, n);
+      const generated = generateRandom(mu.value, sigma.value, k.value, n.value);
       closeModal();
       goTo('worksheet');
       // fix2609d G4c:同名改名/挤出说明随成功提示一并给出(单槽 toast 会盖掉 store 层的挤出警告)
       const writeNotes = datasetWriteNotes(generated.requested, generated.outcome).map((text) => ` · ${text}`).join('');
-      showToast(`已生成 ${generated.name} · ${k} 子组 × ${n}${writeNotes}`);
+      showToast(`已生成 ${generated.name} · ${k.value} 子组 × ${n.value}${writeNotes}`);
     } catch (error) { showToast(errText(error)); }
   };
   const inp: React.CSSProperties = { width: 90, padding: '6px 9px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12.5, fontFamily: 'IBM Plex Mono,monospace', textAlign: 'right' };
-  const fields: Array<[string, number, (v: number) => void, number]> = [
-    ['均值 μ', mu, setMu, 0.001],
-    ['标准差 σ', sigma, setSigma, 0.001],
-    ['子组数 k', k, setK, 1],
-    ['子组大小 n', n, setN, 1],
-  ];
   return (
     <ModalFrame width={380} title="生成正态随机数据" onClose={closeModal}
       footer={<>
         <button type="button" onClick={closeModal} style={cancelBtn}>取消</button>
-        <button type="button" onClick={apply} style={primaryBtn}>生成</button>
+        <button type="button" disabled={!canApply} onClick={apply} title={problems[0]}
+          style={{ ...primaryBtn, ...(canApply ? {} : { opacity: 0.5, cursor: 'not-allowed' }) }}>生成</button>
       </>}>
       <div style={{ padding: '18px 20px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, fontSize: 12.5, color: '#5b6472' }}>
-        {fields.map(([label, val, set, step]) => (
-          <label key={label} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-            {label}
-            <input type="number" step={step} value={val} style={inp}
-              onChange={(e) => { const parsed = parseStrictNumber(e.target.value); if (parsed.ok) set(parsed.value); }} />
-          </label>
-        ))}
+        {fields.map(([field, label]) => {
+          const bad = !parsed[field].ok;
+          const integer = field === 'k' || field === 'n';
+          return (
+            <label key={field} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+              {label}
+              <input type="text" inputMode={integer ? 'numeric' : numericInputMode()} autoComplete="off" spellCheck={false}
+                aria-label={label} aria-invalid={bad ? true : undefined} value={texts[field]}
+                style={{ ...inp, ...(bad ? { borderColor: '#c22f2f' } : {}) }}
+                onChange={(e) => { const value = e.target.value; setTexts((prev) => ({ ...prev, [field]: value })); }} />
+            </label>
+          );
+        })}
+        {fields.map(([field, label]) => { const r = parsed[field]; return r.ok && r.note ? <div key={field} role="status" style={{ gridColumn: '1 / -1', fontSize: 11.5, color: '#8a929d' }}>{label}：{r.note}</div> : null; })}
+        {problems.length > 0 && (
+          <div role="alert" style={{ gridColumn: '1 / -1', fontSize: 11.5, color: '#c22f2f', display: 'flex', flexDirection: 'column', gap: 2 }}>
+            {problems.map((text) => <span key={text}>{text}</span>)}
+          </div>
+        )}
         <div style={{ gridColumn: '1 / -1', fontSize: 11.5, color: '#9aa2ad' }}>
-          生成 X ~ N(μ, σ²) 的 k×n 子组矩阵并设为活动数据集,适合练习控制图与能力分析。
+          生成 X ~ N(μ, σ²) 的 k×n 子组矩阵并设为活动数据集,适合练习控制图与能力分析。子组数 2–100000,子组大小 1–10,σ 须大于 0。
         </div>
       </div>
     </ModalFrame>

@@ -19,6 +19,13 @@ const NUMBER_PREFIX_RE = /^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?/;
 /** 严格三位分组：1,234 / 12,345,678 / 1,234.5 */
 const GROUPED_RE = /^([+-]?)(\d{1,3}(?:,\d{3})+)(\.\d*)?$/;
 
+/**
+ * iPhone/iPad 在欧洲等地区设置下，数字小数键显示为「,」。本应用在 iOS 上已改用全键盘
+ * （见 {@link numericInputMode}），123 页有「.」与「-」；逗号类拒绝原因附带这句说明，
+ * 让从其它 App 习惯「,」小数的用户知道怎么改。
+ */
+const IOS_DECIMAL_COMMA_HINT = '（iPhone/iPad 的小数键随地区设置可能显示为「,」，请在键盘 123 页输入「.」）';
+
 export type StrictNumberResult =
   | { ok: true; value: number; /** 接受了千分位等需要告知用户的写法时给出说明 */ note?: string }
   | { ok: false; empty: boolean; reason: string };
@@ -69,11 +76,11 @@ export function parseStrictNumber(text: string): StrictNumberResult {
     }
     return {
       ok: false, empty: false,
-      reason: `「${shown}」含逗号，无法确定是千分位还是小数点；请去掉逗号后输入（如 ${grouped[1]}${grouped[2].replace(/,/g, '')}）`,
+      reason: `「${shown}」含逗号，无法确定是千分位还是小数点；请去掉逗号后输入（如 ${grouped[1]}${grouped[2].replace(/,/g, '')}）${IOS_DECIMAL_COMMA_HINT}`,
     };
   }
   if (s.includes(',')) {
-    return { ok: false, empty: false, reason: `「${shown}」含逗号；小数请用「.」，千分位请去掉逗号` };
+    return { ok: false, empty: false, reason: `「${shown}」含逗号；小数请用「.」，千分位请去掉逗号${IOS_DECIMAL_COMMA_HINT}` };
   }
   if (/\s/.test(s)) {
     return { ok: false, empty: false, reason: `「${shown}」数字中间含空格；请只输入一个数值` };
@@ -106,4 +113,36 @@ export function parseStrictInteger(
     return { ok: false, empty: false, reason: `「${shown}」超出允许范围 ${lo}–${hi}` };
   }
   return parsed;
+}
+
+/** 平台判定所需的最小 navigator 形状；测试里可直接传对象覆盖 iOS / 非 iOS 两种平台。 */
+export interface NavigatorLike {
+  userAgent?: string;
+  maxTouchPoints?: number;
+}
+
+function currentNavigator(): NavigatorLike | undefined {
+  return typeof navigator === 'undefined' ? undefined : navigator;
+}
+
+/**
+ * 是否 iOS / iPadOS 触屏设备（Safari、PWA、内嵌 WebView）。iPadOS 13+ 默认「桌面版网站」，
+ * UA 报 Macintosh，只能靠 maxTouchPoints>0 与真 Mac 区分。
+ */
+export function isIosTouchDevice(nav: NavigatorLike | undefined = currentNavigator()): boolean {
+  if (!nav) return false;
+  const touchPoints = typeof nav.maxTouchPoints === 'number' ? nav.maxTouchPoints : 0;
+  return touchPoints > 0 && /iPad|iPhone|Macintosh/.test(nav.userAgent ?? '');
+}
+
+/**
+ * 可带负号 / 小数的手工数值输入框应使用的 inputMode（输入框本身一律 type="text"，由
+ * {@link parseStrictNumber} 严格解析原始串）。
+ *
+ * iOS/iPadOS 的 `decimal` 软键盘只有数字和小数点，**没有负号**，且小数键随地区设置可能是「,」，
+ * 负偏差、编码水平 -1 等无法用软键盘录入；因此 iOS 上改用 `text`（全键盘，123 页有「-」「.」）。
+ * 其它平台（Android Gboard 的 decimal 键盘带「-」、桌面端无软键盘）保留 `decimal`。
+ */
+export function numericInputMode(nav: NavigatorLike | undefined = currentNavigator()): 'decimal' | 'text' {
+  return isIosTouchDevice(nav) ? 'text' : 'decimal';
 }

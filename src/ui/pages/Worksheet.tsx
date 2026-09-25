@@ -12,7 +12,7 @@ import { assertClipboardImportText } from '../../platform/importLimits';
 import { Card, KvRows } from '../common';
 import { Icon, type IconName } from '../icons';
 import { isImeComposing } from '../imeGuard';
-import { parseStrictNumber } from '../../core/numberInput';
+import { numericInputMode, parseStrictNumber } from '../../core/numberInput';
 
 const OPS = ['张伟', '李娜', '王强'];
 const SHIFTS = ['早班', '中班', '夜班'];
@@ -141,7 +141,8 @@ function EditableCell({ value, dp, pending = false, label, gridRow, gridCol, ari
         autoFocus
         aria-label={`编辑${label}`}
         type="text"
-        inputMode="decimal"
+        // iOS 的 decimal 键盘没有负号(且小数键可能随地区显示为「,」),iOS 上改全键盘
+        inputMode={numericInputMode()}
         autoComplete="off"
         spellCheck={false}
         value={draft}
