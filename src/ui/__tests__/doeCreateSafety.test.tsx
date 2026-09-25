@@ -9,7 +9,8 @@ beforeEach(() => {
   cleanup();
   localStorage.clear();
   useData.getState().resetDemo();
-  useApp.setState({ page: 'doe', doeTab: 'create', modal: null, openMenu: null });
+  // fix2609 TESTS-02 同类残留:上一用例「已生成…共 8 运行」的 toast 会让 getByText(/共/) 命中两处。
+  useApp.setState({ page: 'doe', doeTab: 'create', modal: null, openMenu: null, toast: null });
 });
 
 describe('DOE 创建安全闸门', () => {

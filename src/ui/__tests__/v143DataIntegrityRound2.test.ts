@@ -759,46 +759,9 @@ describe('Web stores staging journal 与配额安全顺序', () => {
       .some((key) => key?.includes('project-import-journal'))).toBe(false);
   });
 
-  it('在 journal 保护下先释放目标缺失的大键，最终可容纳的项目不因瞬时配额失败', async () => {
-    const oldSpecs = JSON.stringify(Object.fromEntries(Array.from({ length: 180 }, (_, index) => [
-      `旧规格${index}`, { lsl: index, tgt: index + 1, usl: index + 2 },
-    ])));
-    const targetAnalysisData = JSON.stringify({
-      target: {
-        name: 'target', colNames: ['x'], rows: [[1], [2]],
-        textCols: [{ name: 'note', values: ['新'.repeat(3_000), 'ok'] }],
-      },
-    });
-    const targetAnalyses = JSON.stringify([{
-      id: 'target-analysis', kind: 'summary', title: '目标摘要', datasetName: 'target', metric: 'N=2', status: '已完成',
-      statusColor: '#000', statusBg: '#fff', createdAt: 1, snapshot: { sourceDataKey: 'target' },
-    }]);
-    localStorage.setItem('qp-specs-v1', oldSpecs);
-    const capacity = Math.max(oldSpecs.length, targetAnalysisData.length + targetAnalyses.length) + 512;
-    const businessKeys = new Set([
-      'qp-dataset-v1', 'qp-recents-v1', 'qp-attr-v1', 'qp-specs-v1', 'qp-fishbone-v1',
-      'qp-analyses-v1', 'qp-analysis-data-v1', 'qp-pareto-v1', 'qp-copy-sequences-v1',
-      'qp-quarantine-v1', 'qp-prefs-v1', 'qp-aql-state-v1', 'qp-active-ref-v1',
-    ]);
-    Storage.prototype.setItem = function capacityStorage(key: string, value: string) {
-      // 模拟生产的 IndexedDB 全量 journal + localStorage 小 marker，marker 不占业务配额。
-      if (!businessKeys.has(key)) return nativeSetItem.call(this, key, value);
-      const projected = [...businessKeys].reduce((sum, item) => {
-        if (item === key) return sum + value.length;
-        return sum + (localStorage.getItem(item)?.length ?? 0);
-      }, 0);
-      if (projected > capacity) throw new DOMException('quota', 'QuotaExceededError');
-      return nativeSetItem.call(this, key, value);
-    };
-    const imported = await applyProjectText(JSON.stringify({
-      format: 'quality-platform-project', formatVersion: 4, appVersion: 'x', exportedAt: 't',
-      stores: { 'qp-analyses-v1': targetAnalyses, 'qp-analysis-data-v1': targetAnalysisData },
-    }));
-    expect(imported.error).toBeNull();
-    expect(localStorage.getItem('qp-specs-v1')).toBeNull();
-    expect(localStorage.getItem('qp-analyses-v1')).toBe(targetAnalyses);
-    expect(localStorage.getItem('qp-analysis-data-v1')).toBe(targetAnalysisData);
-  });
+  // fix2609 TESTS-01:「在 journal 保护下先释放目标缺失的大键」已迁到 fix2609_G0-tests.test.ts。
+  // 留在这里时它只在前序成功导入把 appStore 模块级 prefsPersistenceSuspended 置真(本文件无从复位)
+  // 之后才通过;单独文件保证在「prefs 与 AQL 账本真实落盘」的正常应用状态下验证释放顺序。
 });
 
 describe('完整项目导出的一致只读快照', () => {

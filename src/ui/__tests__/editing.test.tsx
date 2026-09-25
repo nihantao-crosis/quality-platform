@@ -5,15 +5,27 @@
 import { DEFAULT_SPC_RULES } from '../../store/appStore';
 import { describe, it, expect, beforeEach } from 'vitest';
 import { assessSpcCharts, DEFAULT_RULE_K } from '../../core';
-import { useData } from '../../store/dataStore';
+import { cancelPendingDatasetWork, useData } from '../../store/dataStore';
 import { buildHtmlReport } from '../../platform/htmlReport';
 
+// fix2609 TESTS-02:resetDemo 不清模块级已见名集合(knownDatasetNames 等)与 recents;
+// 两处都复位,副本命名才与用例顺序无关(范式同 copyCollisionSafety.test.ts)。
 beforeEach(() => {
   localStorage.clear();
+  cancelPendingDatasetWork();
   useData.getState().resetDemo();
+  useData.setState({ recents: [] });
 });
 
 describe('工作表手工录入', () => {
+  // fix2609 TESTS-02 顺序隔离哨兵:本条先生成一次「质检数据 (副本)」,下一条仍须拿到「(副本)」
+  // 而非「(副本2)」——beforeEach 漏复位模块级已见名集合或 recents 时,默认顺序即转红。
+  it('演示集加子组行同样转「副本」(副本命名不受前序用例残留影响)', () => {
+    expect(useData.getState().model.isDemo).toBe(true);
+    useData.getState().addSubgroupRow();
+    expect(useData.getState().model.name).toBe('质检数据 (副本)');
+    expect(useData.getState().model.isDemo).toBe(false);
+  });
   it('编辑演示集单元格 → 转「副本」且统计重算', () => {
     const before = useData.getState().model;
     expect(before.isDemo).toBe(true);

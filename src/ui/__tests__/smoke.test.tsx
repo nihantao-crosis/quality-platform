@@ -6,13 +6,21 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, act, waitFor } from '@testing-library/react';
 import App from '../../App';
 import { useApp } from '../../store/appStore';
-import { useData } from '../../store/dataStore';
+import { cancelPendingDatasetWork, useData } from '../../store/dataStore';
 
 beforeEach(() => {
   cleanup();
   localStorage.clear();
-  useApp.setState({ page: 'dashboard', modal: null, openMenu: null, toast: null, spcType: 'xbar-r', selSub: null, lsl: 24.9, tgt: 25.0, usl: 25.1 });
+  // fix2609 TESTS-02 同类残留:t 检验用例改 hypoTab/t 列、P 图剪贴板用例改 importKind、
+  // 主题用例改 chartStyle,不复位则乱序时 ANOVA 页找不到「方差分析表」、剪贴板按 P 图口径导入失败。
+  useApp.setState({
+    page: 'dashboard', modal: null, openMenu: null, toast: null, spcType: 'xbar-r', selSub: null, lsl: 24.9, tgt: 25.0, usl: 25.1,
+    hypoTab: 'anova', t1ColName: null, t1Mu0: null, t2ColAName: null, t2ColBName: null,
+    importTab: 'csv', importKind: 'var', chartStyle: '经典',
+  });
+  cancelPendingDatasetWork();
   useData.getState().resetDemo();
+  useData.setState({ recents: [] });
 });
 
 describe('九页渲染冒烟', () => {

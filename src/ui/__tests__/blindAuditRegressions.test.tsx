@@ -10,6 +10,9 @@ import { sanitizeFileName } from '../../platform/reportLabels';
 import { toLookupMap } from '../../store/dataStore';
 import { useApp, AQL_STATE_STORAGE_KEY } from '../../store/appStore';
 import { useData } from '../../store/dataStore';
+import { useAnalyses } from '../../store/analyses';
+
+const ANALYSES_KEY = 'qp-analyses-v1';
 
 beforeEach(() => {
   localStorage.clear();
@@ -170,14 +173,37 @@ describe('盲审:多标签页写冲突', () => {
     ).toBe(true);
   });
 
-  it('storage 监听真的装上了(此前全仓零监听)', () => {
-    const events: string[] = [];
-    const orig = window.addEventListener.bind(window);
-    // 已安装的监听不可枚举,改为行为验证:派发未监听的键不应抛错,监听的键应触发水合
-    const before = useApp.getState().aqlLot;
-    otherTabWrite('qp-完全无关的键', '{}');
-    expect(useApp.getState().aqlLot).toBe(before); // 无关键不触发
-    void events; void orig;
+  // fix2609 TESTS-04:原「storage 监听真的装上了」只对未监听键派发事件再断言 aqlLot 不变,
+  // 监听器全删也恒为真(events/orig 为死变量)。改为守护此前零覆盖的 qp-analyses-v1 跨窗口水合
+  // (analyses.ts watchExternalWrite):删掉该注册或把水合改成空操作,本条必须转红。
+  it('已保存分析:另一窗口保存的记录被水合,本窗口随后的删除不得整键抹掉它', () => {
+    const previous = { page: useApp.getState().page, paretoView: useApp.getState().paretoView };
+    useAnalyses.setState({ saved: [], lastError: null });
+    useApp.setState({ page: 'pareto', paretoView: 'fishbone' });
+    try {
+      // 用**真实保存路径**生成夹具(记录 schema 严格,手编 JSON 会被校验器拒掉 → 测的是夹具)
+      const mine = useAnalyses.getState().saveCurrent();
+      const theirs = useAnalyses.getState().saveCurrent();
+      expect(mine && theirs, '夹具无效:分析未保存').toBeTruthy();
+      const theirText = localStorage.getItem(ANALYSES_KEY)!;
+      expect(JSON.parse(theirText).map((a: { id: string }) => a.id)).toEqual([theirs!.id, mine!.id]);
+
+      // 回到「另一窗口保存之前」的本窗口:内存与落盘都只有 mine(经本窗口自己的写登记)
+      expect(useAnalyses.getState().remove(theirs!.id)).toBe(true);
+      expect(useAnalyses.getState().saved.map((a) => a.id)).toEqual([mine!.id]);
+
+      otherTabWrite(ANALYSES_KEY, theirText);
+      expect(useAnalyses.getState().saved.map((a) => a.id), '未水合另一窗口保存的分析记录')
+        .toEqual([theirs!.id, mine!.id]);
+
+      // 本窗口删除自己的记录 → 落盘后对方那条必须还在
+      expect(useAnalyses.getState().remove(mine!.id)).toBe(true);
+      const persisted = JSON.parse(localStorage.getItem(ANALYSES_KEY) ?? '[]') as Array<{ id: string }>;
+      expect(persisted.map((a) => a.id), '本窗口的删除把另一窗口的分析记录整键抹掉了')
+        .toEqual([theirs!.id]);
+    } finally {
+      useApp.setState(previous);
+    }
   });
 });
 
