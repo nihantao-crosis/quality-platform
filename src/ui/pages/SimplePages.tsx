@@ -17,7 +17,6 @@ import { NormalProbPlot } from '../charts/NormalProbPlot';
 import { Fishbone } from './Fishbone';
 import { useApp, resolveGageTolerance, GAGE_BATCH_COL_CAP, normalizeGageBatchCols } from '../../store/appStore';
 import { datasetWriteNotes, useData } from '../../store/dataStore';
-import { numericInputMode, parseStrictNumber } from '../../core/numberInput';
 import { StrictNumberInput } from '../StrictNumberInput';
 import type { ChartTokens } from '../tokens';
 import { paretoColors } from '../tokens';
@@ -737,36 +736,27 @@ function OneSampleTPanel({ T }: { T: ChartTokens }) {
   const namedCol = t1ColName ? model.colNames.indexOf(t1ColName) : -1;
   const col = namedCol >= 0 ? namedCol : 0;
   const mu0 = t1Mu0 ?? tgt;
-  // μ₀ 输入框保存原始串(type=text,GAP-8-4 同族):合法即写入 store;非法时保留原串、标红并显示原因,
-  // 检验结果与导出仍按上一次有效 μ₀,并明确告知。null=未在编辑,显示 store 中的值。
-  const [mu0Draft, setMu0Draft] = useState<string | null>(null);
-  const mu0Check = mu0Draft == null ? null : parseStrictNumber(mu0Draft);
-  const mu0Problem = mu0Check && !mu0Check.ok
-    ? `μ₀ ${mu0Check.empty ? '未填写' : `无效：${mu0Check.reason}`}；结果仍按上一次有效值 μ₀ = ${mu0}`
-    : null;
   const controls = (
     <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end', fontSize: 12, color: '#5b6472' }}>
       测量列
       <select style={selStyle} value={col} onChange={(e) => setHypothesisOptions({ t1ColName: model.colNames[+e.target.value] })}>
         {model.colNames.map((n, i) => <option key={n} value={i}>{n}</option>)}
       </select>
-      <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-        μ₀
-        <input
-          type="text" inputMode={numericInputMode()} autoComplete="off" spellCheck={false} aria-label="单样本 t 目标 μ₀"
-          value={mu0Draft ?? String(mu0)} aria-invalid={mu0Problem ? true : undefined} title={mu0Problem ?? undefined}
-          style={{ ...numInput, ...(mu0Problem ? { borderColor: '#c22f2f' } : {}) }}
-          onChange={(e) => {
-            const text = e.target.value;
-            setMu0Draft(text);
-            const parsed = parseStrictNumber(text);
-            if (parsed.ok) setHypothesisOptions({ t1Mu0: parsed.value });
+      <span style={{ display: 'inline-flex', alignItems: 'flex-start', gap: 6 }}>
+        <span style={{ paddingTop: 4 }}>μ₀</span>
+        {/* μ₀ 用共享严格数值框(type=text,GAP-8-4 同族):合法整串实时重算;逐键途经的合法前缀
+            (「1,000」的「1」、「12.5mm」的「12.5」)在串变非法时回退到编辑前的值,不会留在 store/报告/项目里
+            (fix2609m G23c C1)。回退快照取原始字段 t1Mu0:未单独设置(null=跟随目标值)时回退仍是 null。 */}
+        <StrictNumberInput
+          label="单样本 t 目标 μ₀" value={mu0}
+          onCommit={(v) => { if (v != null) setHypothesisOptions({ t1Mu0: v }); }}
+          captureRevert={() => {
+            const raw = useApp.getState().t1Mu0;
+            return () => useApp.getState().setHypothesisOptions({ t1Mu0: raw });
           }}
-          onBlur={() => { if (mu0Check?.ok) setMu0Draft(null); }}
+          style={numInput}
         />
-      </label>
-      {mu0Problem && <span role="alert" style={{ color: '#c22f2f', flexBasis: '100%', textAlign: 'right' }}>{mu0Problem}</span>}
-      {mu0Check?.ok && mu0Check.note && <span role="status" style={{ color: '#8a929d', flexBasis: '100%', textAlign: 'right' }}>{mu0Check.note}</span>}
+      </span>
     </div>
   );
   const pendingCount = pendingCells.filter((cell) => cell.row >= 0 && cell.row < model.k && cell.col === col).length;

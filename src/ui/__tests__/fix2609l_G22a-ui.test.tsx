@@ -279,7 +279,7 @@ describe('(5) 参数框改为 type=text + 严格解析 + 可见原因', () => {
     expect(useApp.getState().gageTolValue).toBe(1);
     expect(input.value).toBe('0.5mm');
     const alert = screen.getAllByRole('alert').find((el) => el.textContent?.includes('过程公差数值无效'));
-    expect(alert?.textContent).toContain('仍按上一次有效值 1');
+    expect(alert?.textContent).toContain('未修改，仍按编辑前的值 1'); // fix2609m G23c C1 措辞
     fireEvent.change(input, { target: { value: '0.4' } });
     expect(useApp.getState().gageTolValue).toBe(0.4);
     fireEvent.change(input, { target: { value: '' } });

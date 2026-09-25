@@ -221,7 +221,7 @@ describe('(2) 其余数值入口:type=text + 严格解析 + 可见原因 + 非�
     fireEvent.change(mu0, { target: { value: '12.5mm' } });
     expect(mu0.value).toBe('12.5mm');
     expect(mu0.getAttribute('aria-invalid')).toBe('true');
-    expect(screen.getByRole('alert').textContent).toMatch(/μ₀ 无效：「12\.5mm」含单位或多余字符「mm」；请只输入数字；结果仍按上一次有效值 μ₀ = 10$/);
+    expect(screen.getByRole('alert').textContent).toMatch(/μ₀无效：「12\.5mm」含单位或多余字符「mm」；请只输入数字；未修改，仍按编辑前的值 10$/); // fix2609m G23c C1:改用共享严格数值框
     expect(useApp.getState().t1Mu0).toBe(10);
 
     fireEvent.change(mu0, { target: { value: '1,000' } });

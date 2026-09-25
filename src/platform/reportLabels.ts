@@ -184,9 +184,9 @@ export function sanitizeFileName(raw: string): string {
     // 非法字符 + 全部 C0/C1 控制字符(含 NUL)
     .replace(/[\\/:*?"<>|]/g, '_')
     // eslint-disable-next-line no-control-regex -- 目标正是剥掉控制字符
-    .replace(/[\u0000-\u001f\u007f-\u009f]/g, '_')
-    // 原串自带的孤立代理项(畸形文件名)同样不能进 IPC
-    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '_');
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, '_');
+  // 原串自带的孤立代理项(畸形文件名)同样不能进 IPC
+  out = replaceLoneSurrogates(out);
   // Windows 不允许文件名以点或空格结尾(线性扫描,不用回溯正则)
   out = trimTrailingDotsAndSpaces(out);
   if (WINDOWS_RESERVED_NAMES.test(out)) out = trimTrailingDotsAndSpaces(clipFileNameUnits(`_${out}`));
@@ -202,6 +202,31 @@ function clipFileNameUnits(text: string): string {
   const next = text.charCodeAt(end);
   if (last >= 0xd800 && last <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) end -= 1;
   return text.slice(0, end);
+}
+
+/**
+ * 孤立代理项替换为「_」,合法代理对原样保留(按码元线性扫描)。
+ * fix2609m G23c C2:此前用含后行断言的正则;vite 默认 target(safari14)下 esbuild 把它降级成运行时
+ * new RegExp,WebKit 16.4 以前(macOS 10.15 WKWebView、iOS/iPadOS 15.4–16.3 PWA)每次调用都抛
+ * SyntaxError,保存项目/项目汇总/全部报表导出的文件名全部失败。与 trimTrailingDotsAndSpaces 同写法。
+ */
+function replaceLoneSurrogates(text: string): string {
+  let out = '';
+  let start = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    const code = text.charCodeAt(i);
+    if (code < 0xd800 || code > 0xdfff) continue;
+    if (code <= 0xdbff) {
+      const next = text.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        i += 1; // 合法代理对:整对保留
+        continue;
+      }
+    }
+    out += text.slice(start, i) + '_';
+    start = i + 1;
+  }
+  return start === 0 ? text : out + text.slice(start);
 }
 
 function trimTrailingDotsAndSpaces(text: string): string {
