@@ -31,6 +31,8 @@ export const AQL_TRACE_LIMITS = {
 export const MAX_AQL_RECORDS = 1000;
 
 export interface AqlBatchRecord {
+  /** 批次记录不带 kind(v1.43 之前的账本全部如此);仅状态转移记录为 'transition'。 */
+  kind?: undefined;
   id: string;
   /** 生成该记录的检验体系序列；参数变更后旧记录只保留在总账中。 */
   sequenceId: string;
@@ -60,6 +62,74 @@ export interface AqlBatchRecord {
   note: string;
 }
 
+/**
+ * 人工管理条件引起的正式检验状态转移(S-2):
+ * · conditions-met:正常 → 放宽(得分≥30 且「生产稳定」「负责部门同意」同时勾选);
+ * · conditions-withdrawn:放宽 → 正常(任一管理条件被取消);
+ * · restore-normal:放宽 → 正常(负责部门因其他条件决定恢复)。
+ * 批次登记引起的转移已由批次记录的 stateBefore/stateAfter 留痕,不重复写转移记录。
+ */
+export type AqlTransitionAction = 'conditions-met' | 'conditions-withdrawn' | 'restore-normal';
+
+interface AqlTransitionFields {
+  kind: 'transition';
+  id: string;
+  sequenceId: string;
+  action: AqlTransitionAction;
+  /** 操作人(沿用 AQL 页「检验人」字段)。 */
+  inspector: string;
+  /** 操作时间。 */
+  inspectedAt: string;
+  stateBefore: InspState;
+  stateAfter: InspState;
+  switchingScoreBefore: number;
+  switchingScoreAfter: number;
+  /** 转移发生后的管理条件快照。 */
+  productionSteady: boolean;
+  reducedApproved: boolean;
+  note: string;
+}
+
+type BatchOnlyKey = Exclude<keyof AqlBatchRecord, keyof AqlTransitionFields>;
+/**
+ * 状态转移账本记录。批次专属字段在运行时恒不存在(normalizeAqlTransitionRecord 按白名单
+ * 拒绝);类型上声明为可选,只为让按批次记录展开/改写 records[i] 的既有调用方仍可编译,
+ * 读取方一律先按 kind(isAqlBatchRecord / isAqlTransitionRecord)区分。
+ */
+export type AqlTransitionRecord = AqlTransitionFields & { [K in BatchOnlyKey]?: AqlBatchRecord[K] };
+/** 责任账本条目:批次检验记录或人工状态转移记录,按发生顺序共用同一账本与 1000 条上限。 */
+export type AqlLedgerRecord = AqlBatchRecord | AqlTransitionRecord;
+
+export function isAqlTransitionRecord(record: AqlLedgerRecord): record is AqlTransitionRecord {
+  return record.kind === 'transition';
+}
+
+export function isAqlBatchRecord(record: AqlLedgerRecord): record is AqlBatchRecord {
+  return record.kind !== 'transition';
+}
+
+const TRANSITION_ACTION_LABEL: Record<AqlTransitionAction, string> = {
+  'conditions-met': '管理条件齐备 → 转放宽检验',
+  'conditions-withdrawn': '管理条件取消 → 恢复正常检验',
+  'restore-normal': '因其他条件恢复正常检验',
+};
+
+/** 转移动作的中文说明(AQL 页与专项报告共用)。 */
+export function aqlTransitionActionLabel(action: AqlTransitionAction): string {
+  return TRANSITION_ACTION_LABEL[action];
+}
+
+/** 转移后管理条件快照的中文说明。 */
+export function aqlTransitionConditionText(record: Pick<AqlTransitionRecord, 'productionSteady' | 'reducedApproved'>): string {
+  return `生产稳定=${record.productionSteady ? '是' : '否'}，负责部门同意=${record.reducedApproved ? '是' : '否'}`;
+}
+
+/** 人工状态转移时的操作人与时间;UI 以「检验人」字段作为操作人。 */
+export interface AqlTransitionMeta {
+  operator?: string;
+  at?: string;
+}
+
 export interface SwitchStatus {
   /** 当前检验体系序列，避免旧参数记录冒充当前序列最新批。 */
   sequenceId: string;
@@ -72,7 +142,7 @@ export interface SwitchStatus {
   productionSteady: boolean;
   reducedApproved: boolean;
   suspended: boolean;
-  records: AqlBatchRecord[]; // 含初次检验与复验批的可追溯记录
+  records: AqlLedgerRecord[]; // 含初次检验、复验批与人工状态转移的可追溯记录(按发生顺序)
 }
 
 export const SWITCH_INIT: SwitchStatus = {
@@ -132,6 +202,8 @@ function recordTransitionIsPossible(record: AqlBatchRecord): boolean {
 function normalizeAqlBatchRecord(value: unknown, fallbackSequenceId: string): AqlBatchRecord | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const x = value as Partial<AqlBatchRecord>;
+  // 批次记录从不带 kind;未知类型不得被当作批次记录放行。
+  if ((value as { kind?: unknown }).kind !== undefined) return null;
   const decisionOk = x.decision === 'accepted' || x.decision === 'rejected';
   const resultOk = x.result === 'A' || x.result === 'R';
   const stateOk = INSPECTION_STATES.has(x.stateBefore as InspState)
@@ -204,6 +276,71 @@ function normalizeAqlBatchRecord(value: unknown, fallbackSequenceId: string): Aq
   return recordTransitionIsPossible(record) ? record : null;
 }
 
+const TRANSITION_KEYS: ReadonlySet<string> = new Set<keyof AqlTransitionFields>([
+  'kind', 'id', 'sequenceId', 'action', 'inspector', 'inspectedAt', 'stateBefore', 'stateAfter',
+  'switchingScoreBefore', 'switchingScoreAfter', 'productionSteady', 'reducedApproved', 'note',
+]);
+
+/** 单条转移记录的前后状态、得分与条件快照必须符合对应动作的正式规则。 */
+function transitionIsPossible(x: AqlTransitionFields): boolean {
+  const bothMet = x.productionSteady && x.reducedApproved;
+  switch (x.action) {
+    case 'conditions-met':
+      return x.stateBefore === 'normal' && x.stateAfter === 'reduced' && bothMet
+        && x.switchingScoreBefore >= 30 && x.switchingScoreAfter === x.switchingScoreBefore;
+    case 'conditions-withdrawn':
+      return x.stateBefore === 'reduced' && x.stateAfter === 'normal' && !bothMet
+        && x.switchingScoreBefore >= 30 && x.switchingScoreAfter === 0;
+    case 'restore-normal':
+      return x.stateBefore === 'reduced' && x.stateAfter === 'normal' && bothMet
+        && x.switchingScoreBefore >= 30 && x.switchingScoreAfter === 0;
+    default:
+      return false;
+  }
+}
+
+/** 状态转移记录是 v1.43 新增类型:字段白名单 + 交叉校验,任何篡改/缺失都整条拒绝。 */
+function normalizeAqlTransitionRecord(value: unknown): AqlTransitionRecord | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  if (Object.keys(value).some((key) => !TRANSITION_KEYS.has(key))) return null;
+  const x = value as Partial<AqlTransitionFields>;
+  const text = (v: unknown, max: number): v is string => typeof v === 'string' && v.trim().length > 0 && v.length <= max;
+  if (x.kind !== 'transition'
+    || !text(x.id, AQL_TRACE_LIMITS.inspectedAt + AQL_TRACE_LIMITS.batchId)
+    || !text(x.sequenceId, AQL_TRACE_LIMITS.sequenceId) || x.sequenceId !== x.sequenceId.trim()
+    || (x.action !== 'conditions-met' && x.action !== 'conditions-withdrawn' && x.action !== 'restore-normal')
+    || !text(x.inspector, AQL_TRACE_LIMITS.inspector)
+    || !text(x.inspectedAt, AQL_TRACE_LIMITS.inspectedAt)
+    || typeof x.note !== 'string' || x.note.length > AQL_TRACE_LIMITS.note
+    || !INSPECTION_STATES.has(x.stateBefore as InspState) || !INSPECTION_STATES.has(x.stateAfter as InspState)
+    || !Number.isSafeInteger(x.switchingScoreBefore) || x.switchingScoreBefore! < 0
+    || !Number.isSafeInteger(x.switchingScoreAfter) || x.switchingScoreAfter! < 0
+    || typeof x.productionSteady !== 'boolean' || typeof x.reducedApproved !== 'boolean') return null;
+  const record: AqlTransitionFields = {
+    kind: 'transition',
+    id: x.id,
+    sequenceId: x.sequenceId,
+    action: x.action,
+    inspector: x.inspector,
+    inspectedAt: x.inspectedAt,
+    stateBefore: x.stateBefore!,
+    stateAfter: x.stateAfter!,
+    switchingScoreBefore: x.switchingScoreBefore!,
+    switchingScoreAfter: x.switchingScoreAfter!,
+    productionSteady: x.productionSteady,
+    reducedApproved: x.reducedApproved,
+    note: x.note,
+  };
+  return transitionIsPossible(record) ? record : null;
+}
+
+function normalizeAqlLedgerRecord(value: unknown, fallbackSequenceId: string): AqlLedgerRecord | null {
+  if (value && typeof value === 'object' && (value as { kind?: unknown }).kind === 'transition') {
+    return normalizeAqlTransitionRecord(value);
+  }
+  return normalizeAqlBatchRecord(value, fallbackSequenceId);
+}
+
 /** 兼容旧项目/旧 localStorage 中只有 state/history/sinceSwitch/note 的记录。 */
 export function normalizeSwitchStatus(value?: Partial<SwitchStatus> | null): SwitchStatus {
   const sequenceId = typeof value?.sequenceId === 'string' && value.sequenceId.trim()
@@ -213,8 +350,8 @@ export function normalizeSwitchStatus(value?: Partial<SwitchStatus> | null): Swi
   const requestedState: InspState = value?.state === 'tightened' || value?.state === 'reduced' ? value.state : 'normal';
   const records = Array.isArray(value?.records)
     ? value.records
-      .map((record) => normalizeAqlBatchRecord(record, sequenceId))
-      .filter((record): record is AqlBatchRecord => record !== null)
+      .map((record) => normalizeAqlLedgerRecord(record, sequenceId))
+      .filter((record): record is AqlLedgerRecord => record !== null)
     : [];
   const switchingScore = Number.isFinite(value?.switchingScore)
     ? Math.max(0, Math.trunc(value!.switchingScore!))
@@ -335,12 +472,17 @@ function trailingAcceptedCount(history: BatchResult[]): number {
   return count;
 }
 
-export function recordInspection(status: SwitchStatus, input: RecordInspectionInput): SwitchStatus {
-  const s = normalizeSwitchStatus(status);
-  if (s.suspended) throw new Error('抽样检验已暂停；须确认纠正措施有效后恢复加严检验');
+/** 账本满时 fail-closed:拒绝一切新写入(批次与状态转移),绝不为腾空间静默删除旧记录。 */
+function assertLedgerHasRoom(s: SwitchStatus): void {
   if (s.records.length >= MAX_AQL_RECORDS) {
     throw new RangeError(`本项目 AQL 责任账本已达到 ${MAX_AQL_RECORDS} 条上限；请先导出项目/专项报告完成归档，再新建项目继续记录。旧记录不会被自动删除`);
   }
+}
+
+export function recordInspection(status: SwitchStatus, input: RecordInspectionInput): SwitchStatus {
+  const s = normalizeSwitchStatus(status);
+  if (s.suspended) throw new Error('抽样检验已暂停；须确认纠正措施有效后恢复加严检验');
+  assertLedgerHasRoom(s);
   if (!Number.isSafeInteger(input.lot) || input.lot < 2) throw new RangeError('批量必须是大于等于 2 的安全整数');
   if (!AQL_COLS.includes(input.aql)) throw new RangeError(`仅支持正式主表 AQL：${AQL_COLS.join('、')}`);
   const regime = resolveAqlRegime(input.aql, input.regime);
@@ -434,7 +576,7 @@ export function recordInspection(status: SwitchStatus, input: RecordInspectionIn
   }
 
   const inspectedAt = input.inspectedAt?.trim() || new Date().toISOString();
-  const batchId = input.batchId?.trim() || `批次-${String(s.records.length + 1).padStart(4, '0')}`;
+  const batchId = input.batchId?.trim() || `批次-${String(s.records.filter(isAqlBatchRecord).length + 1).padStart(4, '0')}`;
   const inspector = input.inspector?.trim() || '未填写';
   if (batchId.length > AQL_TRACE_LIMITS.batchId) throw new RangeError(`批次号不能超过 ${AQL_TRACE_LIMITS.batchId} 个字符`);
   if (inspector.length > AQL_TRACE_LIMITS.inspector) throw new RangeError(`检验人不能超过 ${AQL_TRACE_LIMITS.inspector} 个字符`);
@@ -480,42 +622,100 @@ export function recordInspection(status: SwitchStatus, input: RecordInspectionIn
   };
 }
 
-/** 设置正常→放宽所需两个管理条件；条件补齐时立即按当前得分判定是否转放宽。 */
+/**
+ * 勾选/取消管理条件后会发生的正式状态转移(唯一评估器:AQL 页的「进入放宽」确认与
+ * setSwitchConditions 共用,避免 UI 预判与实际写账本两套口径)。
+ */
+export function switchConditionsTransition(
+  status: SwitchStatus,
+  patch: Partial<Pick<SwitchStatus, 'productionSteady' | 'reducedApproved'>>,
+): 'conditions-met' | 'conditions-withdrawn' | null {
+  const s = normalizeSwitchStatus(status);
+  const productionSteady = patch.productionSteady ?? s.productionSteady;
+  const reducedApproved = patch.reducedApproved ?? s.reducedApproved;
+  if (s.state === 'reduced' && (!productionSteady || !reducedApproved)) return 'conditions-withdrawn';
+  if (s.state === 'normal' && s.switchingScore >= 30 && productionSteady && reducedApproved) return 'conditions-met';
+  return null;
+}
+
+function transitionRecord(
+  s: SwitchStatus,
+  next: Pick<SwitchStatus, 'state' | 'switchingScore' | 'productionSteady' | 'reducedApproved' | 'note'>,
+  action: AqlTransitionAction,
+  meta: AqlTransitionMeta | undefined,
+): AqlTransitionRecord {
+  const inspectedAt = meta?.at?.trim() || new Date().toISOString();
+  const inspector = meta?.operator?.trim() || '未填写';
+  if (inspector.length > AQL_TRACE_LIMITS.inspector) throw new RangeError(`操作人不能超过 ${AQL_TRACE_LIMITS.inspector} 个字符`);
+  if (inspectedAt.length > AQL_TRACE_LIMITS.inspectedAt) throw new RangeError('操作时间字段过长');
+  return {
+    kind: 'transition',
+    id: `${inspectedAt}-T${s.records.length + 1}`,
+    sequenceId: s.sequenceId,
+    action,
+    inspector,
+    inspectedAt,
+    stateBefore: s.state,
+    stateAfter: next.state,
+    switchingScoreBefore: s.switchingScore,
+    switchingScoreAfter: next.switchingScore,
+    productionSteady: next.productionSteady,
+    reducedApproved: next.reducedApproved,
+    note: next.note.slice(0, AQL_TRACE_LIMITS.note),
+  };
+}
+
+/**
+ * 设置正常→放宽所需两个管理条件；条件补齐时立即按当前得分判定是否转放宽。
+ * 发生正式状态转移时向责任账本追加一条 kind:'transition' 记录(账本满则 fail-closed 拒绝)。
+ */
 export function setSwitchConditions(
   status: SwitchStatus,
   patch: Partial<Pick<SwitchStatus, 'productionSteady' | 'reducedApproved'>>,
+  meta?: AqlTransitionMeta,
 ): SwitchStatus {
   const s = normalizeSwitchStatus(status);
   const next = { ...s, ...patch };
-  if (s.state === 'reduced' && (!next.productionSteady || !next.reducedApproved)) {
-    return {
-      ...next, state: 'normal', switchingScore: 0, sinceSwitch: [],
+  const action = switchConditionsTransition(s, patch);
+  if (action === 'conditions-withdrawn') {
+    assertLedgerHasRoom(s);
+    const moved = {
+      ...next, state: 'normal' as const, switchingScore: 0, sinceSwitch: [],
       note: '生产稳定/负责部门同意条件不再满足 → 恢复正常检验',
     };
+    return { ...moved, records: [...s.records, transitionRecord(s, moved, action, meta)] };
   }
-  if (s.state === 'normal' && next.switchingScore >= 30 && next.productionSteady && next.reducedApproved) {
-    return {
-      ...next, state: 'reduced', sinceSwitch: [],
+  if (action === 'conditions-met') {
+    assertLedgerHasRoom(s);
+    const moved = {
+      ...next, state: 'reduced' as const, sinceSwitch: [],
       note: '转移得分 ≥30、生产稳定且负责部门同意 → 转放宽检验（表 2-C）',
     };
+    return { ...moved, records: [...s.records, transitionRecord(s, moved, action, meta)] };
   }
   return next;
 }
 
-/** 放宽检验中因“其他条件”由负责人决定恢复正常检验。 */
-export function restoreNormalInspection(status: SwitchStatus, reason = '其他条件要求恢复正常检验'): SwitchStatus {
+/** 放宽检验中因“其他条件”由负责人决定恢复正常检验；转移同样写入责任账本。 */
+export function restoreNormalInspection(
+  status: SwitchStatus,
+  reason = '其他条件要求恢复正常检验',
+  meta?: AqlTransitionMeta,
+): SwitchStatus {
   const s = normalizeSwitchStatus(status);
   if (s.suspended) throw new Error('暂停检验只能在确认纠正措施有效后恢复加严检验');
   if (s.state !== 'reduced') throw new Error('只有放宽检验可因其他条件恢复正常检验');
-  return {
+  assertLedgerHasRoom(s);
+  const moved = {
     ...s,
-    state: 'normal',
+    state: 'normal' as const,
     switchingScore: 0,
     tightenedRejections: 0,
     suspended: false,
     sinceSwitch: [],
-    note: reason,
+    note: reason.slice(0, AQL_TRACE_LIMITS.note),
   };
+  return { ...moved, records: [...s.records, transitionRecord(s, moved, 'restore-normal', meta)] };
 }
 
 /** 9.4：供方完成纠正且负责部门确认有效后，以加严检验重新开始。 */
@@ -555,7 +755,7 @@ export interface AqlReportData {
   reducedApproved: boolean;
   suspended: boolean;
   latestRecord: AqlBatchRecord | null;
-  records: AqlBatchRecord[];
+  records: AqlLedgerRecord[];
 }
 
 /** 专项报告/导出层可直接消费的结构化 AQL 数据，不依赖 React 或统一报告模块。 */
@@ -567,7 +767,7 @@ export function buildAqlReportData(
   const regime = resolveAqlRegime(aql, requestedRegime);
   const rql = rqlForResult(plan, 0.1, undefined, regime);
   // 参数切换后保留全部历史追溯，但不得把旧方案的批结果冒充当前方案最新批。
-  const latestRecord = [...s.records].reverse().find((record) => (
+  const latestRecord = [...s.records].reverse().filter(isAqlBatchRecord).find((record) => (
     record.sequenceId === s.sequenceId
     && record.lot === lot && record.level === level && record.aql === aql && record.regime === regime
   ));

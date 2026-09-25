@@ -11,6 +11,7 @@ import {
   type NelsonRuleK, type NelsonRules, type RuleNo, type SpcDataLayout, type SpcPreparedData, type VarModel, type TextColumn,
   type PointRuleSummary, type SpcSigmaMethod, type PChartModel, type CChartModel,
 } from '../../core';
+import { CUSUM_K, cusumH, cusumParamsText, ewmaParamsText } from '../../core/advancedSpcParams';
 import { ReportCard } from '../ReportCard';
 import { spcReport } from '../reportData';
 import { sameChartTokens, type ChartTokens } from '../tokens';
@@ -186,7 +187,8 @@ export function computeSpcPageView({
   const advMu = M.hasSubgroups ? M.xbarbar : M.indMean;
   const advSigma = M.hasSubgroups ? M.sigmaChart / Math.sqrt(M.n) : M.iSig;
   const ewma = ewmaSeries(advData, advMu, advSigma);
-  const cusum = cusumSeries(advData, advMu, advSigma, 0.5, M.hasSubgroups ? 4 : 5);
+  const cusumHValue = cusumH(M.hasSubgroups);
+  const cusum = cusumSeries(advData, advMu, advSigma, CUSUM_K, cusumHValue);
   const variableName = prepared.variableName;
   const groupXLabel = prepared.xAxisLabel;
   const groupPointLabels = labelsFor(M.k);
@@ -266,7 +268,7 @@ export function computeSpcPageView({
       ],
     },
     ewma: {
-      sub: `EWMA · λ=0.2, L=2.7 · 对小漂移敏感`,
+      sub: `EWMA · ${ewmaParamsText(ewma.lambda, ewma.L)} · 对小漂移敏感`,
       shewhart: false,
       coreViol: ewma.viol,
       charts: [
@@ -274,7 +276,7 @@ export function computeSpcPageView({
       ],
     },
     cusum: {
-      sub: `CUSUM · k=0.5, h=${M.hasSubgroups ? 4 : 5} · 累积和`,
+      sub: `CUSUM · ${cusumParamsText(CUSUM_K, cusumHValue)} · 累积和`,
       shewhart: false,
       coreViol: cusum.viol,
       charts: [
@@ -375,13 +377,14 @@ export function computeSpcPageView({
       { k: '中心线 μ₀', v: nf(ewma.cl, 4) },
       { k: 'UCL（末端）', v: nf(ewma.ucl[ewma.ucl.length - 1], 4) },
       { k: 'LCL（末端）', v: nf(ewma.lcl[ewma.lcl.length - 1], 4) },
-      { k: 'λ / L', v: '0.2 / 2.7' },
+      { k: 'λ / L', v: `${ewma.lambda} / ${ewma.L}` },
       { k: '点数', v: String(advData.length) },
     );
   } else if (effType === 'cusum') {
     stats.push(
       { k: '判定限 H', v: nf(cusum.H, 4) },
       { k: '允差 K', v: nf(cusum.K, 4) },
+      { k: 'k / h', v: `${CUSUM_K} / ${cusumHValue}` },
       { k: 'C⁺ 末值', v: nf(cusum.cp[cusum.cp.length - 1], 4) },
       { k: 'C⁻ 末值', v: nf(cusum.cn[cusum.cn.length - 1], 4) },
       { k: '点数', v: String(advData.length) },

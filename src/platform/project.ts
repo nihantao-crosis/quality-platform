@@ -13,7 +13,7 @@ import {
   assertQprojExportText,
   qprojExportByteLength,
 } from './importLimits';
-import { worksheetResourceError, worksheetPendingCellsError, attributeChartResourceError, individualSeriesResourceError, fishboneResourceError, MAX_IMPORT_CELL_CHARS, MAX_DATASET_NAME_CHARS, MAX_RECENT_DATASETS, MAX_VAULT_DATASETS, MAX_SAVED_AT_CHARS, MAX_PARETO_CATEGORIES, MAX_SAVED_ANALYSES, MAX_ANALYSIS_DATA_ENTRIES, MAX_ANALYSIS_ID_CHARS, MAX_ANALYSIS_DATA_KEY_CHARS, MAX_ANALYSIS_LABEL_CHARS, AQL_COLS, MAX_AQL_RECORDS, MAX_LOT_SIZE, aqlRegimeAllows, normalizeSwitchStatus, ruleKValueError, type AqlRegime, type NelsonRuleK, type SwitchStatus } from '../core';
+import { worksheetResourceError, worksheetPendingCellsError, attributeChartResourceError, individualSeriesResourceError, fishboneResourceError, MAX_IMPORT_CELL_CHARS, MAX_DATASET_NAME_CHARS, MAX_RECENT_DATASETS, MAX_VAULT_DATASETS, MAX_SAVED_AT_CHARS, MAX_PARETO_CATEGORIES, MAX_SAVED_ANALYSES, MAX_ANALYSIS_DATA_ENTRIES, MAX_ANALYSIS_ID_CHARS, MAX_ANALYSIS_DATA_KEY_CHARS, MAX_ANALYSIS_LABEL_CHARS, AQL_COLS, MAX_AQL_RECORDS, MAX_LOT_SIZE, aqlRegimeAllows, isAqlTransitionRecord, normalizeSwitchStatus, ruleKValueError, type AqlRegime, type NelsonRuleK, type SwitchStatus } from '../core';
 
 /** 共享键放在无业务 store 副作用的项目层，启动预恢复不得反向加载 store。 */
 export const QUARANTINE_STORAGE_KEY = 'qp-quarantine-v1';
@@ -39,7 +39,8 @@ const FORMAT = 'quality-platform-project';
 // v2 把 SQLite vault/active-ref 与独立 AQL 责任账本定义为不可忽略的项目语义。
 // v3 引入 snapshotVersion=6；v4 引入 snapshotVersion=7（MSA 真实追溯字段）。
 // v5（v1.43）引入偏好键 capabilityWarningAcknowledgement，并由导出侧保证跨键不变量
-// （活动表与同名最近条目一致、分析数据仓库无孤儿条目）。
+// （活动表与同名最近条目一致、分析数据仓库无孤儿条目）；AQL 责任账本同时可含
+// kind:'transition' 的人工状态转移记录（旧版 .qproj 读取器在格式层即提示升级，不会误报账本损坏）。
 // 旧读取器必须在项目格式层明确提示升级，不能接受后再把新快照误报成“损坏”。
 // 因此：任何新增偏好键/存储键/快照语义都必须同步提升本版本号（见 PREFS_STATE_KEYS 守卫测试）。
 const FORMAT_VERSION = 5;
@@ -523,7 +524,13 @@ function aqlSwitchValidationError(rawSwitch: unknown): string | null {
   }
   const normalized = normalizeSwitchStatus(candidate);
   if (Array.isArray(candidate.records) && normalized.records.length !== candidate.records.length) {
-    return 'AQL 责任账本含有损坏或矛盾记录';
+    // S-2:v1.43 起账本可含 kind:'transition' 的人工状态转移记录(白名单 + 交叉校验在
+    // normalizeSwitchStatus 内);未知 kind 或篡改的转移记录与损坏批次记录一样整本拒绝。
+    const rawTransitions = (candidate.records as unknown[])
+      .filter((record) => isObject(record) && record.kind === 'transition').length;
+    return rawTransitions !== normalized.records.filter(isAqlTransitionRecord).length
+      ? 'AQL 责任账本含有损坏或矛盾的状态转移记录'
+      : 'AQL 责任账本含有损坏或矛盾记录';
   }
   if (candidate.state === 'reduced' && normalized.state !== 'reduced') {
     return 'AQL 放宽状态缺少转移得分、生产稳定或负责部门批准条件';

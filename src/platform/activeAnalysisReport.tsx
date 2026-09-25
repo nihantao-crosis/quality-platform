@@ -12,6 +12,9 @@ import {
   buildAnovaInput,
   buildAnovaStructuredReport,
   buildAqlReportData,
+  aqlTransitionActionLabel,
+  aqlTransitionConditionText,
+  isAqlTransitionRecord,
   buildDoeConclusion,
   buildDoeStructuredReport,
   capabilityInputError,
@@ -77,6 +80,7 @@ import { OcCurvePer100 } from '../ui/charts/OcCurvePer100';
 import { FishboneChart } from '../ui/pages/Fishbone';
 import { loadFishboneState } from '../store/fishboneStore';
 import type { AnalysisReportChart, AnalysisReportPayload } from './analysisReportModel';
+import { CUSUM_K, MINITAB_DEFAULT_CUSUM_H, MINITAB_DEFAULT_EWMA_L, cusumH, cusumParamsText, ewmaParamsText } from '../core/advancedSpcParams';
 
 const T = chartTokens('经典', true);
 const now = timestampText; // 合一:与四格式同一时间戳实现
@@ -410,14 +414,21 @@ function buildAqlPayload(): AnalysisReportPayload {
       {
         title: '实际批次检验与追溯记录',
         headers: ['时间', '批次号', '检验人', '初检/复验', '批量 N', '水平', 'AQL', '质量表示', '状态', '主表', '初始字码', '执行字码', '检验量', '全检', 'Ac/Re', '不合格数', '不合格品处置', '判定', '转移后', '得分', '备注'],
-        rows: report.records.map((record) => [
+        // S-2:人工状态转移记录按发生顺序与批次记录同表留痕(操作人列于「检验人」)。
+        rows: report.records.map((record) => isAqlTransitionRecord(record) ? [
+          record.inspectedAt, '（状态转移）', record.inspector, '人工转移',
+          '—', '—', '—', '—', record.stateBefore, '—', '—', '—',
+          '—', '—', '—', '—', '—',
+          '—', record.stateAfter, record.switchingScoreAfter,
+          `${aqlTransitionActionLabel(record.action)}；${aqlTransitionConditionText(record)}；转移前得分 ${record.switchingScoreBefore}；${record.note}`,
+        ] : [
           record.inspectedAt, record.batchId, record.inspector, record.originalInspection ? '初检' : '复验',
           record.lot, record.level, record.aql, record.regime === 'per100' ? '每百单位不合格数' : '百分不合格品', record.stateBefore, record.sourceTable, record.initialCode, record.finalCode,
           record.sampleSize, record.fullInspection ? '是' : '否', `${record.acceptanceNumber}/${record.rejectionNumber}`,
           record.nonconforming, dispositionLabel(record.nonconformingDisposition),
           record.decision === 'accepted' ? '接收' : '不接收', record.stateAfter, record.switchingScoreAfter, record.note,
         ]),
-        note: '复验批保留追溯记录，但不计入 GB/T 2828.1 第 9.3 条转移规则。',
+        note: '复验批保留追溯记录，但不计入 GB/T 2828.1 第 9.3 条转移规则。「（状态转移）」行为管理条件勾选/取消或因其他条件恢复正常检验引起的人工状态转移，检验人列为操作人。',
       },
     ],
     charts,
@@ -1475,14 +1486,44 @@ function buildSpcPayload(): AnalysisReportPayload | undefined {
     const sigma = M.hasSubgroups ? withSigmaMethod(M, app.spcSigmaMethod).sigmaChart / Math.sqrt(M.n) : M.iSig;
     const isEwma = effectiveType === 'ewma';
     const ewma = isEwma ? ewmaSeries(source, mu, sigma) : null;
-    const cusum = isEwma ? null : cusumSeries(source, mu, sigma, 0.5, M.hasSubgroups ? 4 : 5);
+    const hValue = cusumH(M.hasSubgroups);
+    const cusum = isEwma ? null : cusumSeries(source, mu, sigma, CUSUM_K, hValue);
     const viol = ewma?.viol ?? cusum!.viol;
     const values = ewma?.z ?? cusum!.cp;
     const typeLabel = isEwma ? 'EWMA' : 'CUSUM';
+    // S-1:常数与页面图注共用同一格式化函数(advancedSpcParams),且取自本次计算实际所用值。
+    const paramsText = ewma ? ewmaParamsText(ewma.lambda, ewma.L) : cusumParamsText(CUSUM_K, hValue);
+    const sigmaNote = M.hasSubgroups
+      ? `子组均值序列的 σ̂/√n(σ̂ 取 ${app.spcSigmaMethod === 'pooled' ? '合并标准差' : 'R̄/d₂'})`
+      : '单值序列的 σ̂(MR̄/d₂)';
+    const paramRows: (string | number)[][] = ewma
+      ? [
+          ['中心线 μ₀', fmt(mu, 8), M.hasSubgroups ? '子组均值的总均值 X̿' : '单值均值 X̄'],
+          ['σ(每点)', fmt(sigma, 8), sigmaNote],
+          ['权重 λ', ewma.lambda, 'z_i = λx_i + (1−λ)z_{i−1},z_0 = μ₀'],
+          ['控制限宽度 L', ewma.L, `时变控制限 μ₀ ± L·σ·√(λ/(2−λ)·(1−(1−λ)^{2i}));Minitab 默认 L=${MINITAB_DEFAULT_EWMA_L}`],
+          ['UCL(末端)', fmt(ewma.ucl[ewma.ucl.length - 1], 8), ''],
+          ['LCL(末端)', fmt(ewma.lcl[ewma.lcl.length - 1], 8), ''],
+        ]
+      : [
+          ['目标 μ₀', fmt(mu, 8), M.hasSubgroups ? '子组均值的总均值 X̿' : '单值均值 X̄'],
+          ['σ(每点)', fmt(sigma, 8), sigmaNote],
+          ['允差系数 k', CUSUM_K, `K = k·σ = ${fmt(cusum!.K, 8)}`],
+          ['判定限系数 h', hValue, `H = h·σ = ${fmt(cusum!.H, 8)};Minitab 默认 h=${MINITAB_DEFAULT_CUSUM_H}`],
+        ];
     return {
       kind: 'spc', title: `${typeLabel} 控制图专项报告`, subtitle: `${prepared.variableName} · ${source.length} 个点`, generatedAt: now(),
-      summary: [viol.size ? `${typeLabel} 检出 ${viol.size} 个超限点，存在小漂移/累积偏移信号。` : `${typeLabel} 未检出超限点。`, prepared.note], warnings: [],
+      summary: [
+        viol.size ? `${typeLabel} 检出 ${viol.size} 个超限点，存在小漂移/累积偏移信号。` : `${typeLabel} 未检出超限点。`,
+        `${typeLabel} 设计常数：${paramsText}。`,
+        prepared.note,
+      ], warnings: [],
       tables: [spcSourceTable, {
+        title: `${typeLabel} 设计常数`,
+        headers: ['参数', '值', '说明'],
+        rows: paramRows,
+        note: `${paramsText}。按本表常数与源数据可逐点复算。`,
+      }, {
         title: '超限点',
         headers: ['点', '说明'],
         rows: boundedViolationRows(viol, source.length, isEwma ? 'EWMA 超出时变控制限' : 'CUSUM 超出判定限 H'),

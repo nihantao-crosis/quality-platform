@@ -6,8 +6,9 @@ import {
   AQL_PERCENT_COLS, AQL_PER100_COLS, maxNonconforming,
   decideLot, recordInspection, plansByState, normalizeSwitchStatus,
   AQL_TRACE_LIMITS,
-  restoreNormalInspection, resumeTightenedInspection, setSwitchConditions,
-  type InspectionLevel, type InspState, type NonconformingDisposition,
+  restoreNormalInspection, resumeTightenedInspection, setSwitchConditions, switchConditionsTransition,
+  isAqlTransitionRecord, aqlTransitionActionLabel, aqlTransitionConditionText,
+  type InspectionLevel, type InspState, type NonconformingDisposition, type SwitchStatus,
 } from '../../core';
 import type { ChartTokens } from '../tokens';
 import { Card, CardHeader, KvRows, tabStyle } from '../common';
@@ -27,6 +28,7 @@ const DISPOSITION_LABEL: Record<NonconformingDisposition, string> = {
   replaced: '已替换不合格品', scrapped: '已报废不合格品', concession: '已取得让步接收批准',
 };
 type PositiveDisposition = Exclude<NonconformingDisposition, 'none' | 'unrecorded'>;
+type SwitchConditions = Pick<SwitchStatus, 'productionSteady' | 'reducedApproved'>;
 const fmtLot = (lo: number, hi: number) => (hi === Infinity ? `${lo.toLocaleString()}+` : `${lo.toLocaleString()}–${hi.toLocaleString()}`);
 
 /** 按表 1 + 选定的正式主表生成批量范围 → 最终执行方案。 */
@@ -54,6 +56,9 @@ export function Aql({ T }: { T: ChartTokens }) {
   const [nonconformingDisposition, setNonconformingDisposition] = useState<PositiveDisposition | ''>('');
   const [batchError, setBatchError] = useState<string | null>(null);
   const [referenceState, setReferenceState] = useState<InspState>('normal');
+  // S-2:勾选管理条件会使正常→放宽时先武装,再次点击确认才写入(复用项目的二次点击确认模式)。
+  const [relaxArmed, setRelaxArmed] = useState<SwitchConditions | null>(null);
+  const [switchError, setSwitchError] = useState<string | null>(null);
   const statePlans = plansByState(aqlLot, aqlLevel, aqlAQL);
   const plan = statePlans[sw.state];
   const per100 = regime === 'per100';
@@ -116,6 +121,40 @@ export function Aql({ T }: { T: ChartTokens }) {
     } catch (error) {
       setBatchError(error instanceof Error ? error.message : '无法记录本批检验结果');
     }
+  };
+
+  // 人工状态转移的操作人沿用「检验人」字段;转移记录由 core 写入责任账本。
+  const operator = inspector.trim();
+  // 武装态只在「按当前账本仍会转放宽」时有效(另一窗口/批次登记已改变状态时自动失效)。
+  const relaxPending = relaxArmed !== null && switchConditionsTransition(sw, relaxArmed) === 'conditions-met'
+    ? relaxArmed : null;
+  const applySwitch = (make: () => SwitchStatus) => {
+    try {
+      setSw(make());
+      setSwitchError(null);
+    } catch (error) {
+      setSwitchError(error instanceof Error ? error.message : '无法更新检验状态');
+    }
+  };
+  const changeCondition = (key: keyof SwitchConditions, checked: boolean) => {
+    const base: SwitchConditions = relaxPending ?? { productionSteady: sw.productionSteady, reducedApproved: sw.reducedApproved };
+    const candidate: SwitchConditions = { ...base, [key]: checked };
+    setSwitchError(null);
+    if (switchConditionsTransition(sw, candidate) === 'conditions-met') {
+      setRelaxArmed(candidate);
+      return;
+    }
+    setRelaxArmed(null);
+    applySwitch(() => setSwitchConditions(sw, candidate, { operator }));
+  };
+  const confirmRelax = () => {
+    if (!relaxPending) return;
+    if (!operator) {
+      setSwitchError('请先填写检验人（作为本次转入放宽检验的操作人），再确认');
+      return;
+    }
+    setRelaxArmed(null);
+    applySwitch(() => setSwitchConditions(sw, relaxPending, { operator }));
   };
 
   const aqlOptions = per100 ? AQL_PER100_COLS : AQL_PERCENT_COLS;
@@ -366,7 +405,7 @@ export function Aql({ T }: { T: ChartTokens }) {
                     记录本批并执行转移判定
                   </button>
                   {sw.state === 'reduced' && (
-                    <button type="button" disabled={ledgerLocked} onClick={() => setSw(restoreNormalInspection(sw, '负责部门因其他条件决定恢复正常检验'))} style={{ padding: '6px 12px', border: '1px solid #cfd5dd', background: '#fff', color: '#5b6472', borderRadius: 5, cursor: ledgerLocked ? 'not-allowed' : 'pointer' }}>
+                    <button type="button" disabled={ledgerLocked} onClick={() => applySwitch(() => restoreNormalInspection(sw, '负责部门因其他条件决定恢复正常检验', { operator }))} style={{ padding: '6px 12px', border: '1px solid #cfd5dd', background: '#fff', color: '#5b6472', borderRadius: 5, cursor: ledgerLocked ? 'not-allowed' : 'pointer' }}>
                       因其他条件恢复正常检验
                     </button>
                   )}
@@ -380,14 +419,29 @@ export function Aql({ T }: { T: ChartTokens }) {
             </div>
             <div style={{ display: 'flex', gap: 16, marginTop: 10, flexWrap: 'wrap' }}>
               <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11.5, color: '#5b6472' }}>
-                <input type="checkbox" disabled={ledgerLocked} checked={sw.productionSteady} onChange={(e) => setSw(setSwitchConditions(sw, { productionSteady: e.target.checked }))} />
+                <input type="checkbox" disabled={ledgerLocked} checked={relaxPending?.productionSteady ?? sw.productionSteady} onChange={(e) => changeCondition('productionSteady', e.target.checked)} />
                 生产稳定
               </label>
               <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11.5, color: '#5b6472' }}>
-                <input type="checkbox" disabled={ledgerLocked} checked={sw.reducedApproved} onChange={(e) => setSw(setSwitchConditions(sw, { reducedApproved: e.target.checked }))} />
+                <input type="checkbox" disabled={ledgerLocked} checked={relaxPending?.reducedApproved ?? sw.reducedApproved} onChange={(e) => changeCondition('reducedApproved', e.target.checked)} />
                 负责部门同意放宽
               </label>
             </div>
+            {relaxPending && (
+              <div role="alert" style={{ marginTop: 10, padding: '9px 11px', background: '#e8f4ea', border: '1px solid #b9dcc2', borderRadius: 5, fontSize: 11.5, color: '#245f33', lineHeight: 1.65 }}>
+                转移得分 {sw.switchingScore} ≥ 30，且「生产稳定」「负责部门同意放宽」均已勾选：确认后立即转入放宽检验（表 2-C），并以检验人「{operator || '未填写'}」作为操作人写入责任账本。
+                {!operator && <div style={{ color: '#c22f2f' }}>请先在上方填写检验人，作为本次转移的操作人。</div>}
+                <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+                  <button type="button" disabled={!operator || ledgerLocked} onClick={confirmRelax} style={{ padding: '5px 12px', border: 0, borderRadius: 4, background: !operator || ledgerLocked ? '#c7ccd2' : '#2c8a45', color: '#fff', cursor: !operator || ledgerLocked ? 'not-allowed' : 'pointer' }}>
+                    再次点击确认转入放宽检验
+                  </button>
+                  <button type="button" onClick={() => { setRelaxArmed(null); setSwitchError(null); }} style={{ padding: '5px 12px', border: '1px solid #cfd5dd', borderRadius: 4, background: '#fff', color: '#5b6472', cursor: 'pointer' }}>
+                    取消
+                  </button>
+                </div>
+              </div>
+            )}
+            {switchError && <div role="alert" style={{ marginTop: 8, fontSize: 11.5, color: '#c22f2f' }}>{switchError}</div>}
             <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', minHeight: 18, marginTop: 12 }}>
               {sw.history.slice(-30).map((result, i) => (
                 <span key={`${i}-${result}`} title={result === 'A' ? '初次检验批接收' : '初次检验批不接收'} style={{ width: 14, height: 14, borderRadius: 3, background: result === 'A' ? '#2c8a45' : '#c22f2f', display: 'inline-block' }} />
@@ -403,12 +457,23 @@ export function Aql({ T }: { T: ChartTokens }) {
 
             {sw.records.length > 0 && (
               <div style={{ marginTop: 14, overflowX: 'auto' }}>
-                <div style={{ marginBottom: 6, fontSize: 12, fontWeight: 600, color: '#33404f' }}>最近批次追溯记录</div>
+                <div style={{ marginBottom: 6, fontSize: 12, fontWeight: 600, color: '#33404f' }}>最近批次与状态转移追溯记录</div>
                 <table style={{ width: '100%', minWidth: 900, borderCollapse: 'collapse', fontSize: 11 }}>
                   <thead><tr style={{ color: '#8a929d', textAlign: 'left' }}>
                     <th style={{ padding: '5px 4px' }}>批次</th><th style={{ padding: '5px 4px' }}>N/水平/AQL/表示</th><th style={{ padding: '5px 4px' }}>类型</th><th style={{ padding: '5px 4px' }}>方案</th><th style={{ padding: '5px 4px' }}>d</th><th style={{ padding: '5px 4px' }}>判定</th><th style={{ padding: '5px 4px' }}>不合格品处置</th><th style={{ padding: '5px 4px' }}>检验人</th>
                   </tr></thead>
-                  <tbody>{sw.records.slice(-8).reverse().map((record) => (
+                  <tbody>{sw.records.slice(-8).reverse().map((record) => isAqlTransitionRecord(record) ? (
+                    <tr key={record.id} style={{ borderTop: '1px solid #f0f2f5', background: '#f7f9fb' }}>
+                      <td style={{ padding: '5px 4px', color: '#33404f' }}>状态转移</td>
+                      <td style={{ padding: '5px 4px', color: '#6b7480' }}>{STATE_META[record.stateBefore].label}→{STATE_META[record.stateAfter].label}</td>
+                      <td style={{ padding: '5px 4px', color: '#6b7480' }}>人工转移</td>
+                      <td style={{ padding: '5px 4px', color: '#6b7480' }}>{aqlTransitionActionLabel(record.action)}</td>
+                      <td className="mono" style={{ padding: '5px 4px' }}>—</td>
+                      <td className="mono" style={{ padding: '5px 4px', color: '#6b7480' }}>得分 {record.switchingScoreBefore}→{record.switchingScoreAfter}</td>
+                      <td style={{ padding: '5px 4px', color: '#6b7480' }}>{aqlTransitionConditionText(record)}</td>
+                      <td style={{ padding: '5px 4px', color: '#6b7480' }}>{record.inspector}</td>
+                    </tr>
+                  ) : (
                     <tr key={record.id} style={{ borderTop: '1px solid #f0f2f5' }}>
                       <td style={{ padding: '5px 4px', color: '#33404f' }}>{record.batchId}</td>
                       <td className="mono" style={{ padding: '5px 4px', color: '#6b7480' }}>{record.lot}/{record.level}/{record.aql}/{record.regime === 'per100' ? '计点' : '百分'}</td>
