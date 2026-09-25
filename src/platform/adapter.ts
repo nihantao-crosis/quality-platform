@@ -191,6 +191,12 @@ export const MAX_XLSX_ENTRIES = 4096;
 /** 单条目最大压缩比。 */
 export const MAX_XLSX_RATIO = 400;
 
+/**
+ * 结构性拒绝的统一处置指引:这类包 SheetJS 本身能读,只是导入守卫为堵住「预扫描与 SheetJS
+ * 读到不同部件」而更严;Excel/WPS 另存会重写成规范形制。
+ */
+export const XLSX_RESAVE_HINT = '可用 Excel/WPS 打开后另存再导入';
+
 /** 结构预检后交给实际流式解压校验的中央目录声明。 */
 export interface XlsxArchiveEntryBudget {
   name: string;
@@ -229,6 +235,16 @@ function decodeXlsxEntryName(
     || name.split('/').some((part) => part === '..')
   ) {
     throw new Error(`Excel ZIP 第 ${entry} 个条目的文件名路径不安全`);
+  }
+  // PLATFORM-09-final:SheetJS 以 CFB 容器承载 ZIP,查找部件时先剥 ^Root Entry/ 再比较
+  // (safegetzipfile),而 cfb_add 又原样保留以「Root Entry/」开头的条目名。于是
+  // 「Root Entry/xl/worksheets/sheet1.xml」等影子条目排在前面即可遮蔽正常部件——守卫按
+  // JSZip 精确名预扫描的是正常条目,SheetJS 实际解析的却是未经预算扫描的影子。规范 OOXML
+  // 包没有这种前缀,直接拒绝;大小写变体虽不会被 SheetJS 剥,同属异常命名,一并 fail closed。
+  if (/^root entry\//i.test(name)) {
+    throw new Error(
+      `Excel ZIP 第 ${entry} 个条目「${name}」以「Root Entry/」开头，会在 SheetJS 查找中遮蔽正常部件，已拒绝导入；${XLSX_RESAVE_HINT}`,
+    );
   }
   return name;
 }

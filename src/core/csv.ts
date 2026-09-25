@@ -513,8 +513,13 @@ export function parseMatrix(text: string): ParsedMatrix | { error: string } {
   const textCols: TextColumn[] = textColIdx.map((j, t) => ({ name: textNames[t], values: textVals[t], sourceIndex: keptOrder.indexOf(j) }));
   // CORE-04 复审:表头与数据全空的整列(Excel 选区含空白 A 列、Tab 行首不再被 trim 吞掉)不计入
   // 原始列数,与帕累托自动路径的整列空白剥离同口径;专用格式(P 图)只按有内容的列判定。
+  // CORE-04-final:上界取 max(body 行宽, 表头宽)。splitQuotedRecords 对记录 trimEnd,Tab 行尾
+  // 的空单元格会被吃掉,若只数到 body 行宽,「表头有名、数据全空」的尾列在 Tab 路径不计入、
+  // 逗号路径却计入,两条路径不对称(P 图已标注但未填的「样本量」列会被静默换成默认 n)。
+  // 表头格已 trim,空表头 + 空数据的尾列仍按空列排除。
+  const countedCols = Math.max(nCols, header?.length ?? 0);
   let sourceColumnCount = 0;
-  for (let j = 0; j < nCols; j++) {
+  for (let j = 0; j < countedCols; j++) {
     if ((header?.[j] ?? '').trim() !== '' || body.some((r) => (r[j] ?? '').trim() !== '')) sourceColumnCount++;
   }
   return { colNames, rows, textCols, sourceColumnCount, totalLines: body.length, skippedRows: skipped, droppedCols: textCols.length };

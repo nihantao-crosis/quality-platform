@@ -10,6 +10,7 @@ import {
   detectExcelContainer,
   errText,
   assertXlsxImportSize,
+  XLSX_RESAVE_HINT,
   type XlsxArchiveEntryBudget,
 } from './adapter';
 
@@ -93,8 +94,9 @@ const WORKBOOK_CONTENT_TYPE =
 /**
  * 结构性拒绝的统一处置指引:这类包 SheetJS 本身能读,只是本守卫为堵住「预扫描与 SheetJS
  * 读到不同部件」而更严;Excel/WPS 另存会重写成规范形制(相对 Target、显式 Override)。
+ * 与 adapter 中央目录预检共用同一句。
  */
-const RESAVE_HINT = '可用 Excel/WPS 打开后另存再导入';
+const RESAVE_HINT = XLSX_RESAVE_HINT;
 const SHEETJS_WORKBOOK_CONTENT_TYPES = new Set([
   WORKBOOK_CONTENT_TYPE,
   'application/vnd.ms-excel.sheet.macroEnabled.main+xml',
@@ -364,10 +366,10 @@ function parseXmlDocument(xml: string, label: string): ParsedXmlElement {
     }
     if (opening < 0) break;
     if (xml.startsWith('<!--', opening)) {
-      throw new Error(`Excel ${label} XML 不得包含注释`);
+      throw new Error(`Excel ${label} XML 不得包含注释；${RESAVE_HINT}`);
     }
     if (xml.startsWith('<![CDATA[', opening)) {
-      throw new Error(`Excel ${label} XML 不得包含 CDATA`);
+      throw new Error(`Excel ${label} XML 不得包含 CDATA；${RESAVE_HINT}`);
     }
     if (xml.startsWith('<?', opening)) {
       const closing = xml.indexOf('?>', opening + 2);
@@ -480,6 +482,7 @@ function requiredAttribute(
   localName: string,
   namespaceUri: string | null,
   label: string,
+  hint?: string,
 ): string {
   const semanticMatches = semanticAttributes(element, localName);
   const matches = attributes(element, localName, namespaceUri);
@@ -489,7 +492,9 @@ function requiredAttribute(
     matches[0].value === '' ||
     matches[0].rawValue.includes('&')
   ) {
-    throw new Error(`Excel ${label}缺少或重复属性「${localName}」`);
+    throw new Error(
+      `Excel ${label}缺少或重复属性「${localName}」${hint ? `；${hint}` : ''}`,
+    );
   }
   return matches[0].value;
 }
@@ -798,7 +803,6 @@ function firstWorksheetTarget(
 function assertWorksheetContentType(
   contentTypesXml: string,
   worksheetEntryName: string,
-  hasExactWorkbookEntry: boolean,
 ): void {
   const types = parseXmlDocument(contentTypesXml, '[Content_Types].xml');
   if (
@@ -868,13 +872,12 @@ function assertWorksheetContentType(
   // PLATFORM-09(复审):.NET Open XML SDK / 部分 MES 导出器不写 /xl/workbook.xml 的 Override,
   // 只靠 `Default Extension="xml"` 给出 main+xml。SheetJS 在 parse_ct 没收集到任何 workbook 类
   // Override 时回退读 `xl/workbook.xml`(xlsx.mjs:26630-26633),与本守卫预扫描的恰是同一条目。
-  // 因此:零个 workbook 类 Override + 包内确有精确条目 xl/workbook.xml + 该路径也没有被别的
-  // Override 声明成非工作簿类型 → 视同唯一工作簿部件。多于 1 个、不是 xl/workbook.xml、
-  // 缺条目(SheetJS 会改读 xl/workbook.bin)一律仍拒绝。
+  // 因此:零个 workbook 类 Override + 该路径没有被别的 Override 声明成非工作簿类型 → 视同唯一
+  // 工作簿部件。「包内确有精确条目 xl/workbook.xml」由调用方 resolveFirstWorksheetEntry 先经
+  // readPackageMetadata 强制保证(缺条目时 SheetJS 会改读 xl/workbook.bin,在那里已拒绝),
+  // 故这里不再重复传一个恒为 true 的参数。多于 1 个、不是 xl/workbook.xml 一律仍拒绝。
   const implicitWorkbook =
-    workbookParts.length === 0 &&
-    hasExactWorkbookEntry &&
-    !overrides.has('xl/workbook.xml');
+    workbookParts.length === 0 && !overrides.has('xl/workbook.xml');
   if (
     !implicitWorkbook &&
     (workbookParts.length !== 1 ||
@@ -898,7 +901,7 @@ function assertWorksheetContentType(
     (extension ? defaults.get(extension) : undefined);
   if (contentType !== WORKSHEET_CONTENT_TYPE) {
     throw new Error(
-      `Excel 首表部件「${worksheetEntryName}」缺少有效 worksheet content type`,
+      `Excel 首表部件「${worksheetEntryName}」缺少有效 worksheet content type；${RESAVE_HINT}`,
     );
   }
 }
@@ -928,12 +931,8 @@ async function resolveFirstWorksheetEntry(
       `Excel 首表 relationship 指向缺失部件「${worksheetEntryName}」`,
     );
   }
-  const workbookEntry = zip.files['xl/workbook.xml'];
-  assertWorksheetContentType(
-    contentTypesXml,
-    worksheetEntryName,
-    entriesByName.has('xl/workbook.xml') && !!workbookEntry && !workbookEntry.dir,
-  );
+  // xl/workbook.xml 已由上面的 readPackageMetadata 证明是真实存在的精确条目。
+  assertWorksheetContentType(contentTypesXml, worksheetEntryName);
   return worksheetEntryName;
 }
 
@@ -1063,7 +1062,7 @@ class WorksheetXmlBudgetScanner {
     }
     if (/^<\s*[!?]/.test(tag)) {
       throw new Error(
-        `Excel 内部工作表「${this.entryName}」 XML 不得包含注释、CDATA 或处理指令`,
+        `Excel 内部工作表「${this.entryName}」 XML 不得包含注释、CDATA 或处理指令；${RESAVE_HINT}`,
       );
     }
     if (/^<\s*\//.test(tag)) {
@@ -1192,7 +1191,8 @@ class WorksheetXmlBudgetScanner {
     ) {
       throw new Error(`Excel 内部工作表「${this.entryName}」含非规范 row`);
     }
-    const rowText = requiredAttribute(element, 'r', null, '工作表 row ');
+    // SheetJS 能按顺序推断缺 r 的行号,但预扫描必须逐行核对真实地址,故更严并附处置指引。
+    const rowText = requiredAttribute(element, 'r', null, '工作表 row ', RESAVE_HINT);
     if (!/^\d+$/.test(rowText)) {
       throw new Error(`Excel 内部工作表「${this.entryName}」 row 地址无效`);
     }
@@ -1224,7 +1224,7 @@ class WorksheetXmlBudgetScanner {
         `Excel 内部工作表「${this.entryName}」含非规范 cell 结构`,
       );
     }
-    const ref = requiredAttribute(element, 'r', null, '工作表 cell ');
+    const ref = requiredAttribute(element, 'r', null, '工作表 cell ', RESAVE_HINT);
     const address = cellAddress(ref);
     if (!address) {
       throw new Error(`Excel 内部工作表「${this.entryName}」 cell 地址无效`);
@@ -1273,13 +1273,20 @@ export async function verifyXlsxArchiveContents(
   if (loadedNames.length !== entries.length) {
     throw new Error('Excel ZIP 实际条目数与中央目录声明不一致');
   }
+  // 按 SheetJS safegetzipfile 的查找口径折叠:先剥 ^Root Entry/ 前缀,再小写。
+  // 中央目录预检已拒绝「Root Entry/」前缀(adapter.decodeXlsxEntryName),这里是第二道防线,
+  // 保证守卫预扫描的条目与 SheetJS 实际取到的条目在任何折叠下都一一对应。
   const sheetJsLookupNames = new Map<string, string>();
   for (const name of loadedNames) {
-    const foldedName = name.toLowerCase();
+    const foldedName = name.replace(/^Root Entry\//, '').toLowerCase();
     const previous = sheetJsLookupNames.get(foldedName);
     if (previous && previous !== name) {
+      const kind =
+        previous.startsWith('Root Entry/') || name.startsWith('Root Entry/')
+          ? 'Root Entry/ 前缀折叠'
+          : '大小写';
       throw new Error(
-        `Excel ZIP 条目「${previous}」与「${name}」在 SheetJS 查找中大小写冲突`,
+        `Excel ZIP 条目「${previous}」与「${name}」在 SheetJS 查找中${kind}冲突；${RESAVE_HINT}`,
       );
     }
     sheetJsLookupNames.set(foldedName, name);
