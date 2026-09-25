@@ -1107,6 +1107,26 @@ function referencedAnalysisDataKeys(analyses: unknown): Set<string> {
 }
 
 /**
+ * 引用了 snapshot.sourceDataKey、但该键不在 analysisData 中的卡片；analysisData 缺失/不可用时
+ * 即全部引用卡片。用于导出失败文案指认用户在「已保存分析」里能看到的记录。
+ */
+function analysesReferencingMissingData(analyses: unknown, analysisData: unknown): JsonObject[] {
+  if (!Array.isArray(analyses)) return [];
+  return analyses.filter((analysis): analysis is JsonObject => {
+    if (!isObject(analysis) || !isObject(analysis.snapshot)) return false;
+    const key = analysis.snapshot.sourceDataKey;
+    return typeof key === 'string'
+      && !(isObject(analysisData) && Object.prototype.hasOwnProperty.call(analysisData, key));
+  });
+}
+
+/** 导出失败文案里至多列出 3 张卡片，超出以“等”收尾（总数由调用方单独给出）。 */
+function analysisLabelList(analyses: JsonObject[]): string {
+  const shown = analyses.slice(0, 3).map(analysisLabel).join('、');
+  return analyses.length > 3 ? `${shown}等` : shown;
+}
+
+/**
  * 孤儿分析数据是残留而非损坏（卡片被删/启动归一化丢弃后尽力而为的 prune 可能失败），
  * 没有任何入口能再读到它。导出前与旧版文件导入时共用本原语丢弃残留（fix2609 GAP-4-12）。
  * 返回 null 表示没有孤儿；kept 为空对象时调用方应整键省略。
@@ -1315,7 +1335,10 @@ function validateProjectFile(text: string): ValidatedProjectFile {
         && (!isObject(analysisData) || !Object.prototype.hasOwnProperty.call(analysisData, snapshot.sourceDataKey))) {
         return {
           file: null,
-          error: `分析历史引用的数据「${snapshot.sourceDataKey}」未包含在项目文件中`,
+          // 本机导出由 buildProjectJson 的悬空引用预检先行拦截并给出删除指引；走到这里的是
+          // 外来/被改动的项目文件，指引对象是导出该文件的一端。
+          error: `分析历史${analysisLabel(analysis)}引用的数据「${snapshot.sourceDataKey}」未包含在项目文件中；`
+            + '项目文件不完整，请在导出端左侧「已保存分析」中删除该记录后重新导出',
         };
       }
       if (typeof snapshot.sourceDataKey === 'string' && isObject(analysisData)) {
@@ -1332,7 +1355,12 @@ function validateProjectFile(text: string): ValidatedProjectFile {
   if (isObject(analysisData)) {
     const orphan = Object.keys(analysisData).find((key) => !referencedAnalysisData.has(key));
     if (orphan) {
-      return { file: null, error: `分析数据「${orphan}」没有对应的分析历史引用` };
+      // 写出侧导出前已裁掉孤儿，v5 文件带孤儿只可能是手工修改/篡改；没有对应卡片可指认，保留内部键。
+      return {
+        file: null,
+        error: `分析数据「${orphan}」没有对应的分析历史引用：项目文件含有未被任何已保存分析引用的分析数据，`
+          + '文件可能被手工修改，请使用应用重新导出',
+      };
     }
   }
   if (activeRef !== undefined && !vault.entries.some(([name]) => name === activeRef)) {
@@ -2197,6 +2225,8 @@ export function buildProjectJson(
 ): string {
   const stores: Record<string, string> = {};
   let knownStoreCount = 0;
+  // 分析数据快照库损坏时先记下而不立即抛：是否阻断取决于是否仍有卡片引用它（见循环后）。
+  let corruptAnalysisDataDetail: string | null = null;
   for (const k of PROJECT_KEYS) {
     let v: string | null;
     if (Object.prototype.hasOwnProperty.call(storeOverrides, k)) {
@@ -2220,21 +2250,53 @@ export function buildProjectJson(
       try {
         parsed = JSON.parse(v);
       } catch {
+        if (k === 'qp-analysis-data-v1') {
+          corruptAnalysisDataDetail = 'JSON 损坏';
+          continue;
+        }
         throw new Error(`项目数据「${k}」JSON 损坏，项目未导出`);
       }
       const detail = projectStoreValidationError(k, parsed);
+      if (detail && k === 'qp-analysis-data-v1') {
+        corruptAnalysisDataDetail = `损坏：${detail}`;
+        continue;
+      }
       if (detail) throw new Error(`项目数据「${k}」损坏，项目未导出：${detail}`);
     }
     stores[k] = v;
     knownStoreCount += 1;
   }
+  // 分析快照库与卡片的跨键一致性在这里用本机可执行的指引拦截（fix2609 M4(b)）：否则要么只报
+  // 「JSON 损坏」不给出路，要么落到下方自校验只给内部去重键，用户在「最需要备份时」无从下手。
+  const exportedAnalyses = stores['qp-analyses-v1'] === undefined ? undefined : JSON.parse(stores['qp-analyses-v1']);
+  if (corruptAnalysisDataDetail !== null) {
+    const referencing = analysesReferencingMissingData(exportedAnalyses, undefined);
+    // 无卡片引用的损坏库与孤儿同属残留（没有任何入口能再读到它）：不写入导出件，也不阻断备份；
+    // 本机 live 键不动，已隔离的原文随 qp-quarantine-v1 / 墓地键照常导出。
+    if (referencing.length > 0) {
+      throw new Error(
+        `项目数据「qp-analysis-data-v1」（分析数据快照库）${corruptAnalysisDataDetail}，项目未导出。`
+        + `有 ${referencing.length} 条已保存分析引用该库：${analysisLabelList(referencing)}。`
+        + '处理办法：保存一条新的工作表型分析即可替换损坏的快照库，之后按导出提示在左侧「已保存分析」中'
+        + '删除仍引用旧快照的记录；或直接删除上述记录后重试',
+      );
+    }
+  } else {
+    const dangling = analysesReferencingMissingData(
+      exportedAnalyses,
+      stores['qp-analysis-data-v1'] === undefined ? undefined : JSON.parse(stores['qp-analysis-data-v1']),
+    );
+    if (dangling.length > 0) {
+      throw new Error(
+        `有 ${dangling.length} 条已保存分析引用的数据快照已缺失（分析数据快照库可能曾被隔离或替换）：`
+        + `${analysisLabelList(dangling)}。这些记录已无法回看，请在左侧「已保存分析」中删除后重新导出，项目未导出`,
+      );
+    }
+  }
   // 孤儿分析数据是尽力而为 prune 失败后的残留：导出前丢弃，而不是让自校验把整份备份阻断
   // （本机最需要备份时反而导不出）。两键都已通过上方逐键校验，这里只做子集裁剪。
   if (stores['qp-analysis-data-v1'] !== undefined) {
-    const pruned = pruneUnreferencedAnalysisData(
-      stores['qp-analyses-v1'] === undefined ? undefined : JSON.parse(stores['qp-analyses-v1']),
-      JSON.parse(stores['qp-analysis-data-v1']),
-    );
+    const pruned = pruneUnreferencedAnalysisData(exportedAnalyses, JSON.parse(stores['qp-analysis-data-v1']));
     if (pruned) {
       if (Object.keys(pruned.kept).length > 0) stores['qp-analysis-data-v1'] = JSON.stringify(pruned.kept);
       else {
