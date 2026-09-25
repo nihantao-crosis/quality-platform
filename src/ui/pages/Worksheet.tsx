@@ -11,6 +11,8 @@ import { errText } from '../../platform/adapter';
 import { assertClipboardImportText } from '../../platform/importLimits';
 import { Card, KvRows } from '../common';
 import { Icon, type IconName } from '../icons';
+import { isImeComposing } from '../imeGuard';
+import { parseStrictNumber } from '../../core/numberInput';
 
 const OPS = ['张伟', '李娜', '王强'];
 const SHIFTS = ['早班', '中班', '夜班'];
@@ -46,10 +48,15 @@ function EditableCell({ value, dp, pending = false, label, gridRow, gridCol, act
     setDraft(pending ? '' : String(value));
     setEditing(true);
   };
-  const finishEditing = (save: boolean, refocus: boolean) => {
+  const finishEditing = (save: boolean, refocus: boolean, badInput = false) => {
     if (save) {
-      const next = parseFloat(draft);
-      if (Number.isFinite(next)) onCommit(next);
+      // GAP-8-4 同族:严格解析,不再用 parseFloat 前缀截断(「12.5mm」→12.5)。拒绝时明确提示,
+      // 不静默丢弃;type=number 被浏览器净化为空串的非法输入(badInput)同样提示。
+      const parsed = parseStrictNumber(draft);
+      if (parsed.ok) onCommit(parsed.value);
+      else if (!parsed.empty || badInput) {
+        useApp.getState().showToast(`未修改${label}：${parsed.empty ? '输入的内容不是有效数值' : parsed.reason}`);
+      }
     }
     restoreFocus.current = refocus;
     setEditing(false);
@@ -103,12 +110,13 @@ function EditableCell({ value, dp, pending = false, label, gridRow, gridCol, act
         step="any"
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
-        onBlur={() => finishEditing(true, false)}
+        onBlur={(e) => finishEditing(true, false, e.currentTarget.validity?.badInput === true)}
         onKeyDown={(e) => {
+          if (isImeComposing(e)) return;
           if (e.key === 'Enter') {
             e.preventDefault();
             e.stopPropagation();
-            finishEditing(true, true);
+            finishEditing(true, true, e.currentTarget.validity?.badInput === true);
           }
           if (e.key === 'Escape') {
             e.preventDefault();
@@ -170,6 +178,8 @@ function HeaderCell({ name, canDelete, gridCol, active, onActivate, onRequestFoc
           onChange={(e) => setDraft(e.target.value)}
           onBlur={() => finishEditing(true, false)}
           onKeyDown={(e) => {
+            // GAP-8-5:组字期间的 Enter/Esc 属于输入法(上屏拼音/关闭候选框),不得提交或退出重命名。
+            if (isImeComposing(e)) return;
             if (e.key === 'Enter') {
               e.preventDefault();
               e.stopPropagation();

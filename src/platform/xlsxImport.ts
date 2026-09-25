@@ -524,7 +524,28 @@ function decodePackagePathSegment(segment: string, label: string): string {
   return segment;
 }
 
+/**
+ * PLATFORM-09:OPC 允许 relationship 使用包内**绝对**部件名。openpyxl(pandas 默认引擎)、
+ * .NET Open XML SDK 等导出器统一写 `Target="/xl/worksheets/sheetN.xml"`。SheetJS 对它先剥
+ * 前导 '/'(resolve_path),再 'xl/' + 剥掉**第一个** `xl/` 得到读取的 ZIP 条目名——当且仅当
+ * 全串只含一个 `xl/` 且就在开头时,两套算法落到同一个条目 `xl/<余下部分>`。
+ * 只有这种无歧义形态才剥前导 `/xl/` 后交给逐段校验;`//…`、`/foo/xl/…`、`/xl/a/xl/b.xml`、
+ * 含 `..`/`.`/`%`/`?`/`#`/`\\`/空段等畸形绝对形态一律 fail-closed。
+ */
+function packageAbsoluteWorksheetTarget(target: string): string | null {
+  if (!target.startsWith('/xl/')) return null;
+  if (target.indexOf('xl/') !== target.lastIndexOf('xl/')) return null;
+  if (/[%?#\\]/.test(target)) return null;
+  const rest = target.slice('/xl/'.length);
+  if (rest === '') return null;
+  // 空段/点段交给下方逐段校验也会拒绝;这里提前挡住,保证放行的形态只有一种。
+  if (rest.split('/').some((segment) => segment === '' || segment === '.' || segment === '..')) return null;
+  return rest;
+}
+
 function normalizeRelationshipTarget(target: string): string {
+  const absoluteRest = packageAbsoluteWorksheetTarget(target);
+  if (absoluteRest !== null) target = absoluteRest;
   if (
     target === '' ||
     target.startsWith('/') ||
@@ -536,7 +557,7 @@ function normalizeRelationshipTarget(target: string): string {
     // substring before prepending `xl/`; reject that ambiguous non-standard form.
     target.includes('xl/')
   ) {
-    throw new Error('Excel 首表 relationship target 不是安全的包内相对路径');
+    throw new Error('Excel 首表 relationship target 不是可识别的包内相对路径或 /xl/ 绝对部件名，已拒绝导入；可用 Excel/WPS 打开后另存再导入');
   }
   const normalized = ['xl'];
   for (const rawSegment of target.split('/')) {

@@ -9,6 +9,7 @@ import { assertClipboardImportText, assertTextImportSize } from '../../platform/
 import { buildExportJob } from '../../platform/report';
 import { mesStart, mesStop } from '../../platform/mes';
 import { sessionLog } from '../../store/sessionLog';
+import { parseStrictInteger, parseStrictNumber } from '../../core/numberInput';
 import { isProjectFile, applyProjectText } from '../../platform/project';
 import { HelpModal } from './HelpModal';
 import { OptionsModal } from './OptionsModal';
@@ -488,8 +489,8 @@ function ImportModal() {
               min={1}
               value={pSampleSize}
               onChange={(e) => {
-                const v = parseInt(e.target.value);
-                if (Number.isFinite(v) && v >= 1) setPSampleSize(v);
+                const parsed = parseStrictInteger(e.target.value, { min: 1 });
+                if (parsed.ok) setPSampleSize(parsed.value);
               }}
               className="mono"
               style={{ width: 64, padding: '3px 6px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12 }}
@@ -1026,11 +1027,15 @@ function FindReplaceModal() {
   const [replS, setReplS] = useState('');
   const [col, setCol] = useState(-1);
 
-  const findV = parseFloat(findS);
-  const replV = parseFloat(replS);
-  const canFind = Number.isFinite(findV);
+  // 严格解析(GAP-8-4 同族):不再用 parseFloat 前缀截断,非法输入明确显示原因。
+  const findParsed = parseStrictNumber(findS);
+  const replParsed = parseStrictNumber(replS);
+  const findV = findParsed.ok ? findParsed.value : Number.NaN;
+  const replV = replParsed.ok ? replParsed.value : Number.NaN;
+  const canFind = findParsed.ok;
   const matches = canFind ? findReplace(findV, null, col) : null;
-  const canApply = canFind && Number.isFinite(replV) && (matches ?? 0) > 0;
+  const canApply = canFind && replParsed.ok && (matches ?? 0) > 0;
+  const inputProblem = [findParsed, replParsed].find((parsed) => !parsed.ok && !parsed.empty);
 
   const apply = () => {
     if (!canApply) return;
@@ -1069,6 +1074,7 @@ function FindReplaceModal() {
             : matches === 0
               ? <span style={{ color: '#d98324' }}>没有匹配的测量值</span>
               : <span style={{ color: '#1c4e7a' }}>命中 <b className="mono">{matches}</b> 处,替换后可 Ctrl+Z 撤销</span>}
+          {inputProblem && !inputProblem.ok && <div role="alert" style={{ color: '#c22f2f', marginTop: 4 }}>{inputProblem.reason}</div>}
         </div>
       </div>
     </ModalFrame>
@@ -1307,7 +1313,7 @@ function RandomModal() {
           <label key={label} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
             {label}
             <input type="number" step={step} value={val} style={inp}
-              onChange={(e) => { const v = parseFloat(e.target.value); if (Number.isFinite(v)) set(v); }} />
+              onChange={(e) => { const parsed = parseStrictNumber(e.target.value); if (parsed.ok) set(parsed.value); }} />
           </label>
         ))}
         <div style={{ gridColumn: '1 / -1', fontSize: 11.5, color: '#9aa2ad' }}>

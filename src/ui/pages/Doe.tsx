@@ -58,6 +58,7 @@ import { ScatterPlot } from '../charts/ScatterPlot';
 import { MiniHist } from '../charts/misc';
 import { MainEffects, InteractionPlot, EffectsBar, CubePlot } from '../charts/doe';
 import { Svg, Ln, Txt } from '../charts/primitives';
+import { parseStrictNumber } from '../../core/numberInput';
 
 
 /** 因子低/高水平编辑行(第三轮 P3:此前全因子/分数因子两处逐字重复;空框存 NaN 由生成入口报错,不静默写 0) */
@@ -965,10 +966,25 @@ function CreateDesign() {
     const facs = gFactors.slice(0, gK);
     const names = resolveFactorNames(facs);
     if (!names) return;
-    const parsed = facs.map((f, index) => ({ name: names[index], levels: f.levelTexts.map((t) => Number.parseFloat(t)) }));
+    // GAP-8-4:严格解析水平值。parseFloat 会把「1,000」静默截成 1、「12.5mm」截成 12.5 并写进
+    // 设计表;这里任何多余字符都拒绝并指出是哪个因子的第几个水平、为什么。
+    const parsed: Array<{ name: string; levels: number[] }> = [];
+    const acceptedNotes: string[] = [];
+    for (const [index, f] of facs.entries()) {
+      const levels: number[] = [];
+      for (const [li, text] of f.levelTexts.entries()) {
+        const result = parseStrictNumber(text);
+        if (!result.ok) {
+          showToast(`因子「${names[index]}」水平 ${li + 1} 无效：${result.empty ? '未填写' : result.reason}；水平值必须全部为有效数值`);
+          return;
+        }
+        if (result.note) acceptedNotes.push(result.note);
+        levels.push(result.value);
+      }
+      parsed.push({ name: names[index], levels });
+    }
     for (const f of parsed) {
       if (f.levels.length < 2 || f.levels.length > 5) { showToast(`因子「${f.name}」的水平数须在 2–5 之间`); return; }
-      if (f.levels.some((v) => !Number.isFinite(v))) { showToast(`因子「${f.name}」的水平值必须全部为有效数值`); return; }
       if (new Set(f.levels).size !== f.levels.length) { showToast(`因子「${f.name}」的水平值不能重复`); return; }
     }
     try {
@@ -977,7 +993,8 @@ function CreateDesign() {
       const generated = generateGeneralFactorialDesign(parsed, { replicates: gReps, randomize, seed: audit.seed });
       const d = randomize ? generated : alignUnrandomizedDoeOrders(generated);
       const stamp = new Date().toLocaleTimeString('zh-CN', { hour12: false }).replace(/:/g, '');
-      deliverDesign(`DOE一般全因子_${stamp}_${audit.auditSuffix}`, d, `已生成 ${d.rows.length} 运行的一般全因子设计（标准序、运行序、点类型；区组恒为 1；${audit.auditText}），多水平数据将走一般全因子 ANOVA`);
+      const levelNote = acceptedNotes.length > 0 ? `；水平值${acceptedNotes.join('、')}` : '';
+      deliverDesign(`DOE一般全因子_${stamp}_${audit.auditSuffix}`, d, `已生成 ${d.rows.length} 运行的一般全因子设计（标准序、运行序、点类型；区组恒为 1；${audit.auditText}${levelNote}），多水平数据将走一般全因子 ANOVA`);
     } catch (error) { showToast((error as Error).message); }
   };
 
@@ -1102,12 +1119,23 @@ function CreateDesign() {
                 <input aria-label={`一般全因子因子 ${i + 1} 水平数`} type="number" min={2} max={5} step={1} value={f.countText}
                   onChange={(e) => setGLevelCount(i, e.target.value)} style={{ ...inp, width: 56 }} />
                 <span>水平值</span>
-                {f.levelTexts.map((t, li) => (
-                  <input key={li} value={t} inputMode="decimal" aria-label={`一般全因子因子 ${i + 1} 水平 ${li + 1} 数值`}
-                    onChange={(e) => setGLevelValue(i, li, e.target.value)}
-                    style={{ ...inp, width: 64 }} />
-                ))}
+                {f.levelTexts.map((t, li) => {
+                  const levelCheck = parseStrictNumber(t);
+                  const levelError = levelCheck.ok ? null : levelCheck.empty ? '未填写' : levelCheck.reason;
+                  return (
+                    <input key={li} value={t} inputMode="decimal" aria-label={`一般全因子因子 ${i + 1} 水平 ${li + 1} 数值`}
+                      aria-invalid={levelError != null} title={levelError ?? undefined}
+                      onChange={(e) => setGLevelValue(i, li, e.target.value)}
+                      style={{ ...inp, width: 64, ...(levelError ? { borderColor: '#c22f2f' } : {}) }} />
+                  );
+                })}
                 {countBad && <span style={{ color: '#b0620f' }}>水平数须为 2–5</span>}
+                {(() => {
+                  const firstBad = f.levelTexts.map((t) => parseStrictNumber(t)).find((r) => !r.ok && !r.empty);
+                  return firstBad && !firstBad.ok
+                    ? <span role="alert" style={{ color: '#c22f2f' }}>{firstBad.reason}</span>
+                    : null;
+                })()}
               </div>
             );
           })}

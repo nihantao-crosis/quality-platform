@@ -14,6 +14,7 @@ import {
 } from '../../store/fishboneStore';
 import type { ChartTokens } from '../tokens';
 import { Card, DemoBadge, tabStyle } from '../common';
+import { isImeComposing } from '../imeGuard';
 import { Svg, Ln, Txt } from '../charts/primitives';
 
 export { FISHBONE_DEFAULT, loadFishbone } from '../../store/fishboneStore';
@@ -168,7 +169,7 @@ export function Fishbone({ T }: { T: ChartTokens }) {
             <input
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && addCause()}
+              onKeyDown={(e) => { if (!isImeComposing(e) && e.key === 'Enter') addCause(); }}
               style={{ ...inputStyle, flex: 1 }}
               placeholder={`添加「${cat.name.split(' ')[0]}」类原因…`}
             />

@@ -18,6 +18,7 @@ import { Fishbone } from './Fishbone';
 import { loadFishboneState } from '../../store/fishboneStore';
 import { useApp, resolveGageTolerance, GAGE_BATCH_COL_CAP, normalizeGageBatchCols } from '../../store/appStore';
 import { datasetWriteNotes, useData } from '../../store/dataStore';
+import { parseStrictNumber } from '../../core/numberInput';
 import type { ChartTokens } from '../tokens';
 import { paretoColors } from '../tokens';
 import { Card, CardHeader, KvRows, Badge, tabStyle, numInput, EmptyStateCard, DemoBadge } from '../common';
@@ -745,7 +746,7 @@ function OneSampleTPanel({ T }: { T: ChartTokens }) {
         μ₀
         <input
           type="number" step="0.01" value={mu0} style={numInput}
-          onChange={(e) => { const v = parseFloat(e.target.value); if (Number.isFinite(v)) setHypothesisOptions({ t1Mu0: v }); }}
+          onChange={(e) => { const parsed = parseStrictNumber(e.target.value); if (parsed.ok) setHypothesisOptions({ t1Mu0: parsed.value }); }}
         />
       </label>
     </div>

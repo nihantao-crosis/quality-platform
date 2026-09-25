@@ -792,19 +792,31 @@ describe('.xlsx 导入', () => {
             ),
           ),
       },
-      {
-        name: '绝对 target',
+      // PLATFORM-09 拆分:合法的 `/xl/…` 绝对部件名已改为接受(见下方独立正向用例),
+      // 这里只保留有歧义/畸形的绝对形态,它们仍须 fail closed。
+      ...[
+        '//xl/worksheets/sheet1.xml',
+        '/worksheets/sheet1.xml',
+        '/foo/xl/worksheets/sheet1.xml',
+        '/xl/worksheets/xl/sheet1.xml',
+        '/xl//worksheets/sheet1.xml',
+        '/xl/../xl/worksheets/sheet1.xml',
+        '/xl/./worksheets/sheet1.xml',
+        '/xl/worksheets/sheet1%2Exml',
+        '/xl/worksheets/sheet1.xml?x=1',
+        '/xl/worksheets/sheet1.xml#frag',
+        '/xl/worksheets\\sheet1.xml',
+        '/xl/',
+      ].map((target) => ({
+        name: `畸形绝对 target ${target}`,
         expected: /相对路径|路径不安全/,
-        mutate: (zip) =>
+        mutate: (zip: JSZip) =>
           replaceZipText(zip, 'xl/_rels/workbook.xml.rels', (xml) =>
             mutateFirstRelationship(xml, (relationship) =>
-              relationship.replace(
-                /Target="[^"]+"/,
-                'Target="/xl/worksheets/sheet1.xml"',
-              ),
+              relationship.replace(/Target="[^"]+"/, `Target="${target}"`),
             ),
           ),
-      },
+      })),
       {
         name: '穿越 target',
         expected: /穿越/,
@@ -911,6 +923,25 @@ describe('.xlsx 导入', () => {
         error: expect.stringMatching(scenario.expected),
       });
     }
+  });
+
+  it('合法的 /xl/… 包内绝对部件名(openpyxl/pandas、.NET 导出形制)被接受并读出同一张表', async () => {
+    const base = workbookBytes(
+      XLSX.utils.aoa_to_sheet([['测量值', '批次'], [1.5, 'A'], [2.5, 'B']]),
+      true,
+    );
+    const relative = await xlsxBytesToCsv(base);
+    const zip = await JSZip.loadAsync(base);
+    await replaceZipText(zip, 'xl/_rels/workbook.xml.rels', (xml) =>
+      mutateFirstRelationship(xml, (relationship) =>
+        relationship.replace(/Target="[^"]+"/, 'Target="/xl/worksheets/sheet1.xml"'),
+      ),
+    );
+    const absolute = await xlsxBytesToCsv(
+      await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }),
+    );
+    expect(relative).toEqual({ csv: '测量值,批次\n1.5,A\n2.5,B', sheetName: '测量数据' });
+    expect(absolute).toEqual(relative);
   });
 
   it('旧版 BIFF8 在同步解析前执行更保守的字节上限', async () => {

@@ -262,6 +262,42 @@ function isNum(s: string): boolean {
   return NUM_RE.test(s.trim());
 }
 
+/**
+ * 引号口径(CORE-05,RFC 4180 / Excel 同款宽松规则):只有位于**字段起始**(可有前导空白)
+ * 的 `"` 才开启引号字段;非引号字段中部的 `"` 是字面量(1/2" 螺栓、12" 管)。引号字段内
+ * `""` 为转义引号,单个 `"` 关闭引号;关闭后同一字段内再出现的 `"` 仍按字面量处理。
+ * 所有逐字符扫描器(记录拆分、单元格拆分、列宽测量、分隔符计数、帕累托预检)共用
+ * quoteOpensAt 这一判定,否则资源预检与实际拆分会对同一文本给出不同的列数/记录数。
+ * 分隔符未定时(嗅探首条记录/帕累托预检)把三种候选分隔符都视为字段边界。
+ */
+const ANY_DELIMITER = '\t,;';
+
+function isFieldBoundary(ch: string, delimiter: string): boolean {
+  if (delimiter === ' ') return /\s/.test(ch);
+  return delimiter.length === 1 ? ch === delimiter : delimiter.includes(ch);
+}
+
+/**
+ * 引号外位置 i 的 `"` 是否位于字段起始:向前跳过空白,到达文本开头、换行或字段边界即是;
+ * 碰到任何非空白字符(包括刚闭合的引号)即不是。只在遇到引号时回看,热循环不增加逐字符
+ * 分支;每段空白至多被一次回看扫描,整体仍为线性。
+ */
+function quoteOpensAt(src: string, i: number, delimiter: string): boolean {
+  for (let j = i - 1; j >= 0; j--) {
+    const prev = src[j];
+    if (prev === '\n' || prev === '\r' || isFieldBoundary(prev, delimiter)) return true;
+    if (prev.trim() !== '') return false;
+  }
+  return true;
+}
+
+/** 用候选分隔符集合切出首条非空逻辑记录再判分隔符;后续按该分隔符做真正的记录拆分。 */
+function sniffDelimiter(text: string): string {
+  const first = splitQuotedRecords(text, 0, ANY_DELIMITER);
+  const line = first.records[0];
+  return line === undefined ? ',' : detectDelimiter(line);
+}
+
 function detectDelimiter(line: string): string {
   // 只统计引号外的分隔符:RFC-4180 引号字段内的逗号不是分隔符(Excel→SheetJS 的主要形态)
   const counts: Array<[string, number]> = [
@@ -318,13 +354,13 @@ export function detectCsvBlocks(text: string): CsvBlock[] {
   // 弹窗的文件/剪贴板路径会在 parseMatrix 之前先做数据块检测。这里必须共用
   // 同一资源包线，否则超宽剪贴板会先在 grid 中构造整表单元格数组，绕过
   // parseMatrix 里的拒绝。
-  const logical = splitQuotedRecords(text.replace(/^\uFEFF/, ''), MAX_IMPORT_DATA_ROWS + 1);
+  const clean = text.replace(/^\uFEFF/, '');
+  const delim = sniffDelimiter(clean);
+  const logical = splitQuotedRecords(clean, MAX_IMPORT_DATA_ROWS + 1, delim);
   if (logical.tooManyRecords) return [];
   if (logical.recordTooLong || logical.unclosedQuote) return [];
   const lines = logical.records;
-  const firstContent = lines.find((line) => line.trim() !== '');
-  if (!firstContent) return [];
-  const delim = detectDelimiter(firstContent);
+  if (lines.length === 0) return [];
   if (delimitedRecordBudgetError(lines, delim, 1)) return [];
   const grid = lines.map((line) => splitDelimitedLine(line, delim));
   let width = 0;
@@ -392,7 +428,9 @@ export function detectCsvBlocks(text: string): CsvBlock[] {
 export function parseMatrix(text: string): ParsedMatrix | { error: string } {
   // RFC-4180 引号支持(Codex 复审 P1):Excel→SheetJS 的 CSV 对含分隔符/换行的单元格加引号,
   // 裸 split 会把「"OK, 复检"」劈成两列造成静默错列;按逻辑记录+引号感知拆分。
-  const logical = splitQuotedRecords(text.replace(/^\uFEFF/, ''), MAX_IMPORT_DATA_ROWS + 1);
+  const clean = text.replace(/^\uFEFF/, '');
+  const delim = sniffDelimiter(clean);
+  const logical = splitQuotedRecords(clean, MAX_IMPORT_DATA_ROWS + 1, delim);
   if (logical.tooManyRecords) {
     return { error: `数据行数超过 ${MAX_IMPORT_DATA_ROWS.toLocaleString()} 行上限；请拆分或先在外部抽样` };
   }
@@ -405,7 +443,6 @@ export function parseMatrix(text: string): ParsedMatrix | { error: string } {
   const lines = logical.records;
   if (lines.length < 2) return { error: '数据不足：至少需要 2 行' };
 
-  const delim = detectDelimiter(lines[0]);
   // 先用常数空间扫描首行；超宽首行不得为了判断表头而先构造数百万个字符串。
   const firstMeasure = measureDelimitedLine(lines[0], delim);
   const firstWidthError = worksheetResourceError({ rows: 0, cols: firstMeasure.columns });
@@ -552,7 +589,7 @@ function delimiterCountOutsideQuotes(line: string, delimiter: string): number {
   let quoted = false;
   let count = 0;
   for (let i = 0; i < line.length; i++) {
-    if (line[i] === '"') {
+    if (line[i] === '"' && (quoted || quoteOpensAt(line, i, delimiter))) {
       if (quoted && line[i + 1] === '"') i++;
       else quoted = !quoted;
     } else if (!quoted && line[i] === delimiter) count++;
@@ -610,7 +647,8 @@ function inspectParetoText(text: string): {
 
   for (let i = 0; i < text.length; i++) {
     const ch = text[i];
-    if (ch === '"') {
+    // 分隔符此时未定:三种候选分隔符都视为字段边界。
+    if (ch === '"' && (quoted || quoteOpensAt(text, i, ANY_DELIMITER))) {
       observe(ch);
       if (quoted && text[i + 1] === '"') {
         observe(text[++i]);
@@ -716,7 +754,7 @@ function paretoResourceError(text: string, delimiter: string, logicalRecords: nu
 
   for (let i = 0; i < text.length; i++) {
     const ch = text[i];
-    if (ch === '"') {
+    if (ch === '"' && (quoted || (delimiter === ' ' ? !tokenStarted : quoteOpensAt(text, i, delimiter)))) {
       recordHasContent = true;
       if (delimiter === ' ') tokenStarted = true;
       if (quoted && text[i + 1] === '"') {
@@ -772,7 +810,7 @@ function splitDelimitedLine(line: string, delimiter: string): string[] {
     };
     for (let i = 0; i < line.length; i++) {
       const ch = line[i];
-      if (ch === '"') {
+      if (ch === '"' && (quoted || !tokenStarted)) {
         tokenStarted = true;
         if (quoted && line[i + 1] === '"') { cell += '"'; i++; }
         else quoted = !quoted;
@@ -787,7 +825,7 @@ function splitDelimitedLine(line: string, delimiter: string): string[] {
   let quoted = false;
   for (let i = 0; i < line.length; i++) {
     const ch = line[i];
-    if (ch === '"') {
+    if (ch === '"' && (quoted || quoteOpensAt(line, i, delimiter))) {
       if (quoted && line[i + 1] === '"') { cell += '"'; i++; }
       else quoted = !quoted;
     } else if (!quoted && ch === delimiter) {
@@ -831,7 +869,7 @@ function measureDelimitedLine(line: string, delimiter: string): { columns: numbe
     };
     for (let i = 0; i < line.length; i++) {
       const ch = line[i];
-      if (ch === '"') {
+      if (ch === '"' && (quoted || !tokenStarted)) {
         tokenStarted = true;
         if (quoted && line[i + 1] === '"') { append('"'); i++; }
         else quoted = !quoted;
@@ -864,7 +902,7 @@ function measureDelimitedLine(line: string, delimiter: string): { columns: numbe
   };
   for (let i = 0; i < line.length; i++) {
     const ch = line[i];
-    if (ch === '"') {
+    if (ch === '"' && (quoted || quoteOpensAt(line, i, delimiter))) {
       if (quoted && line[i + 1] === '"') { append('"'); i++; }
       else quoted = !quoted;
     } else if (!quoted && ch === delimiter) {
@@ -904,10 +942,14 @@ function delimitedRecordBudgetError(
   return null;
 }
 
-/** 按逻辑 CSV 记录拆分：字段内换行保留，只有引号外换行才结束一条记录。 */
+/**
+ * 按逻辑 CSV 记录拆分：字段内换行保留，只有引号外换行才结束一条记录。
+ * `delimiter` 决定「字段起始」位置(见 quoteOpensAt);分隔符未定时传 ANY_DELIMITER。
+ */
 function splitQuotedRecords(
   text: string,
-  maxRecords = Number.POSITIVE_INFINITY,
+  maxRecords: number,
+  delimiter: string,
 ): { records: string[]; unclosedQuote: boolean; tooManyRecords: boolean; recordTooLong?: boolean } {
   const records: string[] = [];
   let record = '';
@@ -917,15 +959,18 @@ function splitQuotedRecords(
   // 单条记录本身也要有上限——正常 CSV 的一行不会超过这个量级。
   const MAX_RECORD_CHARS = MAX_IMPORT_DATA_COLS * 64;
   let recordTooLong = false;
+  // CORE-04:只用 trim 判断「纯空白行」,不得改写记录开头——Tab 分隔行首的 \t 表示
+  // 「第一个单元格为空」,整行 trim 会让该行所有单元格左移一列(Excel 左上角空白的常见版式)。
+  // 行尾空白照旧剥掉:尾部空单元格不影响列对齐,且保持既有列宽预算与帕累托形态判定不变。
   const pushRecord = (): boolean => {
-    if (record.trim() !== '') records.push(record.trim());
+    if (record.trim() !== '') records.push(record.trimEnd());
     record = '';
     return records.length > maxRecords;
   };
   for (let i = 0; i < text.length; i++) {
     if (record.length > MAX_RECORD_CHARS) { recordTooLong = true; break; }
     const ch = text[i];
-    if (ch === '"') {
+    if (ch === '"' && (quoted || quoteOpensAt(text, i, delimiter))) {
       record += ch;
       if (quoted && text[i + 1] === '"') {
         record += text[++i];
@@ -963,7 +1008,7 @@ export function parseCategoryCounts(text: string, columns?: CategoryCountColumns
   const resourceError = paretoResourceError(cleanText, inspection.delimiter, inspection.records);
   if (resourceError) return { error: resourceError };
 
-  const logical = splitQuotedRecords(cleanText, MAX_PARETO_RAW_RECORDS);
+  const logical = splitQuotedRecords(cleanText, MAX_PARETO_RAW_RECORDS, inspection.delimiter);
   if (logical.tooManyRecords) return { error: `帕累托原始记录数超过 ${MAX_PARETO_RAW_RECORDS.toLocaleString()} 条上限；请先在外部汇总或拆分` };
   if (logical.unclosedQuote) return { error: 'CSV 引号未闭合，请检查含逗号或换行的类别字段。' };
   const lines = logical.records;
@@ -971,6 +1016,13 @@ export function parseCategoryCounts(text: string, columns?: CategoryCountColumns
 
   const delim = inspection.delimiter;
   let cells = lines.map((line) => splitDelimitedLine(line, delim));
+  // CORE-04:记录不再整行 trim 后,Excel 选区左侧整列空白会以前导空单元格出现。自动识别
+  // 路径按「所有行都为空」的整列剥离(列对齐不变);显式选列路径保留原列号,与源表一致。
+  if (!columns) {
+    while (cells.length > 0 && cells.every((row) => row.length > 1 && row[0] === '')) {
+      cells = cells.map((row) => row.slice(1));
+    }
+  }
   const notes: string[] = [];
   let transposedHorizontal = false;
   if (delim === ' ') notes.push('已按空格分隔解析');

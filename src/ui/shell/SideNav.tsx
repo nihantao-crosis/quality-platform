@@ -5,6 +5,7 @@ import { datasetReplacementBlockReason, useData } from '../../store/dataStore';
 import { useAnalyses } from '../../store/analyses';
 import { PAGES } from '../pagesMeta';
 import { Icon } from '../icons';
+import { isImeComposing } from '../imeGuard';
 
 const GROUPS = ['仪表盘', '数据', '分析模块'] as const;
 
@@ -134,7 +135,11 @@ export function SideNav() {
               value={nameDraft}
               onChange={(e) => setNameDraft(e.target.value)}
               onBlur={() => { setProjectName(nameDraft); setEditingName(false); }}
-              onKeyDown={(e) => { if (e.key === 'Enter') { setProjectName(nameDraft); setEditingName(false); } if (e.key === 'Escape') setEditingName(false); }}
+              onKeyDown={(e) => {
+                if (isImeComposing(e)) return; // GAP-8-6:组字期间的 Enter/Esc 属于输入法
+                if (e.key === 'Enter') { setProjectName(nameDraft); setEditingName(false); }
+                if (e.key === 'Escape') setEditingName(false);
+              }}
               style={{ width: '100%', border: '2px solid #1f6fb2', borderRadius: 3, padding: '2px 6px', fontSize: 12, boxSizing: 'border-box' }}
             />
           ) : (
