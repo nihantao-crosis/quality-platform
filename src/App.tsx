@@ -14,13 +14,13 @@ import { chartTokens } from './ui/tokens';
 import { useCapabilityPrepared } from './ui/useCapabilityPrepared';
 import { specLimitText } from './platform/reportLabels';
 import { PAGES } from './ui/pagesMeta';
-import { MenuBar } from './ui/shell/MenuBar';
+import { MenuBar, undoRedoToast } from './ui/shell/MenuBar';
 import { Toolbar } from './ui/shell/Toolbar';
 import { SideNav } from './ui/shell/SideNav';
 import { StatusBar } from './ui/shell/StatusBar';
 import { Modals, Toast } from './ui/shell/Modals';
 import { SessionPanel } from './ui/shell/SessionPanel';
-import { ErrorBoundary } from './ui/ErrorBoundary';
+import { ErrorBoundary, recoverDemoDataset } from './ui/ErrorBoundary';
 import { Dashboard } from './ui/pages/Dashboard';
 import { Assistant } from './ui/pages/Assistant';
 import { Summary } from './ui/pages/Summary';
@@ -75,8 +75,9 @@ function ShellCrashCard({ error, reset }: { error: Error; reset: () => void }) {
           </button>
           <button type="button"
             onClick={() => {
-              useData.getState().resetDemo();
-              reset();
+              const recoverError = recoverDemoDataset();
+              if (recoverError) setExportNote(recoverError);
+              else reset();
             }}
             style={{ ...shellButton, border: '1px solid #cfd5dd', background: '#fff', color: '#5b6472' }}
           >
@@ -243,10 +244,10 @@ function AppShell() {
         s.showToast(`已新建空白工作表（双击单元格录入数据）${datasetWriteNotes(outcome.name ?? '', outcome).map((text) => ` · ${text}`).join('')}`);
       } else if (k === 'z' && !e.shiftKey) {
         e.preventDefault();
-        s.showToast(useData.getState().undoEdit() ? '已撤销上一次数据编辑' : '没有可撤销的编辑');
+        s.showToast(undoRedoToast('undo', useData.getState().undoEdit()));
       } else if (k === 'y' || (k === 'z' && e.shiftKey)) {
         e.preventDefault();
-        s.showToast(useData.getState().redoEdit() ? '已重做数据编辑' : '没有可重做的编辑');
+        s.showToast(undoRedoToast('redo', useData.getState().redoEdit()));
       }
     };
     window.addEventListener('keydown', onKey);

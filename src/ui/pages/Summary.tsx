@@ -5,6 +5,7 @@ import { useData } from '../../store/dataStore';
 import { useApp } from '../../store/appStore';
 import { arrMax, arrMin, computeDescriptive, nf, resolveNumericColumn } from '../../core';
 import type { ChartTokens } from '../tokens';
+import { reportNum } from '../../platform/reportLabels';
 import { Card, CardHeader, Badge } from '../common';
 import { Histogram } from '../charts/Histogram';
 import { coordinateDomain, createPowerOfTwoAxis, projectCoordinate } from '../charts/axisScale';
@@ -17,32 +18,34 @@ export function Summary({ T }: { T: ChartTokens }) {
   const pending = pendingCells.filter((cell) => cell.col === selected.index);
   const d = computeDescriptive(selected.values);
 
-  const dp = 3; // 显示小数位
+  // 显示小数位;fix2609l G22a(3b 尾巴):与报告层 reportNum 同一派生规则——定点只剩不到 3 位有效数字
+  // 时改按有效数字,小量级数据(如 4.7e-9 F)不再显示 0.000。
+  const dp = 3;
   const statRows: Array<[string, string, string?]> = [
     ['观测数 N', String(d.n)],
-    ['均值', nf(d.mean, dp)],
-    ['均值标准误 SE', nf(d.seMean, dp)],
-    ['标准差', nf(d.stdev, dp)],
-    ['方差', nf(d.variance, dp)],
+    ['均值', reportNum(d.mean, dp)],
+    ['均值标准误 SE', reportNum(d.seMean, dp)],
+    ['标准差', reportNum(d.stdev, dp)],
+    ['方差', reportNum(d.variance, dp)],
     ['变异系数 CV', d.cv == null ? '—（均值为 0）' : nf(d.cv, 2) + ' %'],
     // 常量列时偏度/峰度为 NaN(不可估计),显示「—」而非伪值
     ['偏度', Number.isFinite(d.skewness) ? nf(d.skewness, 3) : '—'],
     ['峰度', Number.isFinite(d.kurtosis) ? nf(d.kurtosis, 3) : '—'],
-    ['最小值', nf(d.min, dp)],
-    ['第一四分位 Q1', nf(d.q1, dp)],
-    ['中位数', nf(d.median, dp)],
-    ['第三四分位 Q3', nf(d.q3, dp)],
-    ['最大值', nf(d.max, dp)],
-    ['极差', nf(d.range, dp)],
-    ['四分位距 IQR', nf(d.iqr, dp)],
-    ['总和', nf(d.sum, dp)],
+    ['最小值', reportNum(d.min, dp)],
+    ['第一四分位 Q1', reportNum(d.q1, dp)],
+    ['中位数', reportNum(d.median, dp)],
+    ['第三四分位 Q3', reportNum(d.q3, dp)],
+    ['最大值', reportNum(d.max, dp)],
+    ['极差', reportNum(d.range, dp)],
+    ['四分位距 IQR', reportNum(d.iqr, dp)],
+    ['总和', reportNum(d.sum, dp)],
   ];
   const ciRows: Array<[string, string]> = [
-    ['均值 95% CI', `(${nf(d.ciMean[0], dp)}, ${nf(d.ciMean[1], dp)})`],
+    ['均值 95% CI', `(${reportNum(d.ciMean[0], dp)}, ${reportNum(d.ciMean[1], dp)})`],
     // 蜂群 P3-01:n<6 时区间退回全距,实际覆盖率只有 50%~93.75%,不能无条件标「95%」
     [d.ciMedianAchieved >= 0.95 ? '中位数 95% CI' : `中位数 CI（实际 ${nf(d.ciMedianAchieved * 100, 2)}%）`,
-      `(${nf(d.ciMedian[0], dp)}, ${nf(d.ciMedian[1], dp)})`],
-    ['标准差 95% CI', `(${nf(d.ciStdev[0], dp)}, ${nf(d.ciStdev[1], dp)})`],
+      `(${reportNum(d.ciMedian[0], dp)}, ${reportNum(d.ciMedian[1], dp)})`],
+    ['标准差 95% CI', `(${reportNum(d.ciStdev[0], dp)}, ${reportNum(d.ciStdev[1], dp)})`],
   ];
 
   return (
@@ -81,7 +84,7 @@ export function Summary({ T }: { T: ChartTokens }) {
           <Histogram T={T} data={selected.values} mu={d.mean} sigmaWithin={d.stdev} sigmaOverall={d.stdev} lsl={null} usl={null} tgt={d.mean} tgtLabel="均值" bins={bins} h={210} />
           <BoxPlot T={T} data={selected.values} d={d} />
           <div style={{ fontSize: 11.5, color: '#98a1ac', padding: '2px 4px 4px' }}>
-            上:直方图叠正态曲线（μ={nf(d.mean, dp)}, σ={nf(d.stdev, dp)}）· 下:箱线图（Q1–中位–Q3,须及 1.5·IQR,○ 为离群点）
+            上:直方图叠正态曲线（μ={reportNum(d.mean, dp)}, σ={reportNum(d.stdev, dp)}）· 下:箱线图（Q1–中位–Q3,须及 1.5·IQR,○ 为离群点）
           </div>
         </Card>
 

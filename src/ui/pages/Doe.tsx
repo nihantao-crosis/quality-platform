@@ -59,32 +59,70 @@ import { MiniHist } from '../charts/misc';
 import { MainEffects, InteractionPlot, EffectsBar, CubePlot } from '../charts/doe';
 import { Svg, Ln, Txt } from '../charts/primitives';
 import { numericInputMode, parseStrictNumber } from '../../core/numberInput';
+import { reportNum } from '../../platform/reportLabels';
 
 
-/** 因子低/高水平编辑行(第三轮 P3:此前全因子/分数因子两处逐字重复;空框存 NaN 由生成入口报错,不静默写 0) */
+/** 两水平/分数因子的因子草稿:低/高水平保存原始串,生成时才严格解析(fix2609l G22a,GAP-8-4 同族)。 */
+interface FactorDraft { name: string; lowText: string; highText: string }
+
+/** 低/高水平的严格解析结果;空框按「未填写」拒绝。 */
+function parseFactorLevel(text: string) {
+  return parseStrictNumber(text);
+}
+
+/** 因子低/高水平编辑行(第三轮 P3:此前全因子/分数因子两处逐字重复)。
+ * fix2609l G22a:此前是 type=number + parseFloat——Chromium 下「12.5mm」静默截成 12.5、受控 number 框
+ * 清空时回弹;现与一般全因子水平值同法:type=text 保存原串,非法时就地标红并给出原因,生成入口拒绝。 */
 function FactorRows({ factors, count, setF, inp, showLetter }: {
-  factors: { name: string; low: number; high: number }[];
+  factors: FactorDraft[];
   count: number;
-  setF: (i: number, patch: Partial<{ name: string; low: number; high: number }>) => void;
+  setF: (i: number, patch: Partial<FactorDraft>) => void;
   inp: CSSProperties;
   showLetter: boolean;
 }) {
+  const prefix = showLetter ? '分数因子' : '两水平全因子';
+  const levelInput = (i: number, side: 'low' | 'high', text: string) => {
+    const check = parseFactorLevel(text);
+    const bad = !check.ok;
+    return (
+      <input aria-label={`${prefix}因子 ${i + 1} ${side === 'low' ? '低' : '高'}水平`}
+        type="text" inputMode={numericInputMode()} autoComplete="off" spellCheck={false}
+        aria-invalid={bad ? true : undefined} title={bad ? check.reason : undefined}
+        value={text} onChange={(e) => setF(i, side === 'low' ? { lowText: e.target.value } : { highText: e.target.value })}
+        style={{ ...inp, ...(bad ? { borderColor: '#c22f2f' } : {}) }} />
+    );
+  };
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-      {factors.slice(0, count).map((f, i) => (
-        <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{ width: showLetter ? 56 : 40, color: '#8a929d' }}>{showLetter ? `${String.fromCharCode(65 + i)} ` : ''}因子{i + 1}</span>
-          <input aria-label={`${showLetter ? '分数因子' : '两水平全因子'}因子 ${i + 1} 名称`}
-            value={f.name} onChange={(e) => setF(i, { name: e.target.value })}
-            style={{ width: 130, padding: '5px 8px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12.5 }} />
-          <span>低</span>
-          <input aria-label={`${showLetter ? '分数因子' : '两水平全因子'}因子 ${i + 1} 低水平`}
-            type="number" step="any" value={Number.isFinite(f.low) ? f.low : ''} onChange={(e) => setF(i, { low: e.target.value === '' ? Number.NaN : parseFloat(e.target.value) })} style={inp} />
-          <span>高</span>
-          <input aria-label={`${showLetter ? '分数因子' : '两水平全因子'}因子 ${i + 1} 高水平`}
-            type="number" step="any" value={Number.isFinite(f.high) ? f.high : ''} onChange={(e) => setF(i, { high: e.target.value === '' ? Number.NaN : parseFloat(e.target.value) })} style={inp} />
-        </div>
-      ))}
+      {factors.slice(0, count).map((f, i) => {
+        const low = parseFactorLevel(f.lowText);
+        const high = parseFactorLevel(f.highText);
+        const problems = [
+          low.ok ? null : `低水平${low.empty ? '未填写' : `无效：${low.reason}`}`,
+          high.ok ? null : `高水平${high.empty ? '未填写' : `无效：${high.reason}`}`,
+        ].filter(Boolean);
+        const notes = [low.ok ? low.note : undefined, high.ok ? high.note : undefined].filter(Boolean);
+        return (
+          <div key={i} style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ width: showLetter ? 56 : 40, color: '#8a929d' }}>{showLetter ? `${String.fromCharCode(65 + i)} ` : ''}因子{i + 1}</span>
+              <input aria-label={`${prefix}因子 ${i + 1} 名称`}
+                value={f.name} onChange={(e) => setF(i, { name: e.target.value })}
+                style={{ width: 130, padding: '5px 8px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12.5 }} />
+              <span>低</span>
+              {levelInput(i, 'low', f.lowText)}
+              <span>高</span>
+              {levelInput(i, 'high', f.highText)}
+            </div>
+            {problems.length > 0 && (
+              <div role="alert" style={{ fontSize: 11.5, color: '#c22f2f', paddingLeft: showLetter ? 64 : 48 }}>因子{i + 1}{problems.join('；')}</div>
+            )}
+            {notes.length > 0 && (
+              <div role="status" style={{ fontSize: 11.5, color: '#8a929d', paddingLeft: showLetter ? 64 : 48 }}>{notes.join('；')}</div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -359,6 +397,10 @@ function AnalyzeDesign({ T }: { T: ChartTokens }) {
       fits: [], residuals: [], grand: 0, factorNames, nRuns: DOE_DESIGN.length,
     }
     : real!;
+  // fix2609l G22a(3b 尾巴):效应/系数与专项报告同一派生规则(reportNum + 响应尺度)——小量级响应
+  // 不再显示 0.000;常规量级数据的浮点噪声(|v| ≤ 响应尺度×1e-12)按 0 显示。
+  const responseScale = (isDemo ? DOE_DESIGN.map((row) => row[3]) : design!.response)
+    .reduce((max, value) => (Number.isFinite(value) ? Math.max(max, Math.abs(value)) : max), 0);
   const mainData = isDemo ? mainEffectMeans() : factorialAdjustedMainMeans(res, design!);
   const interData = isDemo ? interactionMeans() : factorialAdjustedInteractionMeans(res, design!, pa, pb);
   // 效应帕累托:饱和/演示用 |效应|+ME 线;t 检验用 |t| + t 临界线
@@ -542,8 +584,8 @@ function AnalyzeDesign({ T }: { T: ChartTokens }) {
               {res.terms.map((c) => (
                 <tr key={c.name} className="mono" style={{ borderTop: '1px solid #f0f2f5', textAlign: 'right' }}>
                   <td style={{ padding: '8px 16px', textAlign: 'left', color: '#33404f', fontFamily: 'IBM Plex Sans', fontWeight: 500 }}>{c.name}</td>
-                  <td style={{ padding: '8px 12px', color: '#2a333f', fontWeight: 600 }}>{nf(c.effect, 3)}</td>
-                  <td style={{ padding: '8px 12px', color: '#5b6472' }}>{nf(c.coef, 3)}</td>
+                  <td style={{ padding: '8px 12px', color: '#2a333f', fontWeight: 600 }}>{reportNum(c.effect, 3, responseScale)}</td>
+                  <td style={{ padding: '8px 12px', color: '#5b6472' }}>{reportNum(c.coef, 3, responseScale)}</td>
                   {isT && <td style={{ padding: '8px 12px', color: c.sig ? '#c22f2f' : '#5b6472' }}>{c.p! < 0.001 ? '<0.001' : nf(c.p!, 3)}</td>}
                   <td style={{ padding: '8px 16px', textAlign: 'center' }}>
                     <span style={{ fontFamily: 'IBM Plex Sans', fontSize: 11, fontWeight: 600, padding: '2px 9px', borderRadius: 9, ...(c.sig ? { background: '#e8f4ea', color: '#2c8a45' } : { background: '#f4f6f8', color: '#9aa2ad' }) }}>
@@ -825,15 +867,15 @@ function CreateDesign() {
   const [designType, setDesignType] = useState<CreateDesignType>('two-level');
   // 因子数改为手动数字输入:文本态允许自由编辑,实际生效值钳制在 2–4 并给出提示。
   const [kText, setKText] = useState('2');
-  const [factors, setFactors] = useState<FactorDef[]>([
-    { name: '过盈量', low: 0.045, high: 0.09 },
-    { name: '轴硬度', low: 28, high: 32 },
-    { name: '因子C', low: 0, high: 1 },
-    { name: '因子D', low: 0, high: 1 },
+  const [factors, setFactors] = useState<FactorDraft[]>([
+    { name: '过盈量', lowText: '0.045', highText: '0.09' },
+    { name: '轴硬度', lowText: '28', highText: '32' },
+    { name: '因子C', lowText: '0', highText: '1' },
+    { name: '因子D', lowText: '0', highText: '1' },
     // 716-R3:E–G 仅供分数因子(3–7 因子)使用;两水平全因子仍只取前 2–4 个,行为不变
-    { name: '因子E', low: 0, high: 1 },
-    { name: '因子F', low: 0, high: 1 },
-    { name: '因子G', low: 0, high: 1 },
+    { name: '因子E', lowText: '0', highText: '1' },
+    { name: '因子F', lowText: '0', highText: '1' },
+    { name: '因子G', lowText: '0', highText: '1' },
   ]);
   const [center, setCenter] = useState(3);
   const [reps, setReps] = useState(1);
@@ -889,8 +931,33 @@ function CreateDesign() {
     : ([...blockOptions].reverse().find((candidate) => candidate <= blocks) ?? blockOptions[0]);
   const runs = (1 << k) * reps + center * blocksEff;
   const blockPlan = factorialBlockPlan(k, blocksEff, reps);
-  const setF = (i: number, patch: Partial<FactorDef>) =>
+  const setF = (i: number, patch: Partial<FactorDraft>) =>
     setFactors((prev) => prev.map((f, j) => (j === i ? { ...f, ...patch } : f)));
+  /** 生成入口:严格解析低/高水平;任一非法即提示是哪个因子的哪一侧、为什么,返回 null。 */
+  const resolveTwoLevelFactors = (drafts: FactorDraft[], names: string[]): FactorDef[] | null => {
+    const out: FactorDef[] = [];
+    for (const [index, f] of drafts.entries()) {
+      const low = parseFactorLevel(f.lowText);
+      if (!low.ok) {
+        showToast(`因子「${names[index]}」低水平无效：${low.empty ? '未填写' : low.reason}；低/高水平必须为有效数值`);
+        return null;
+      }
+      const high = parseFactorLevel(f.highText);
+      if (!high.ok) {
+        showToast(`因子「${names[index]}」高水平无效：${high.empty ? '未填写' : high.reason}；低/高水平必须为有效数值`);
+        return null;
+      }
+      out.push({ name: names[index], low: low.value, high: high.value });
+    }
+    if (out.some((f) => !(f.low < f.high))) { showToast('每个因子必须满足低水平 < 高水平'); return null; }
+    return out;
+  };
+  /** 接受了千分位等写法时,把说明带进生成提示(与一般全因子同口径)。 */
+  const levelNotes = (drafts: FactorDraft[]): string => {
+    const notes = drafts.flatMap((f) => [parseFactorLevel(f.lowText), parseFactorLevel(f.highText)])
+      .flatMap((r) => (r.ok && r.note ? [r.note] : []));
+    return notes.length > 0 ? `；水平值${notes.join('、')}` : '';
+  };
   const resolveFactorNames = (drafts: Array<{ name: string }>): string[] | null => {
     const validation = validateDoeFactorNames(drafts.map((factor) => factor.name));
     if (!validation.ok) {
@@ -944,18 +1011,19 @@ function CreateDesign() {
     const facs = factors.slice(0, k);
     const names = resolveFactorNames(facs);
     if (!names) return;
-    if (facs.some((f) => !(f.low < f.high))) { showToast('每个因子必须满足低水平 < 高水平'); return; }
+    const levels = resolveTwoLevelFactors(facs, names);
+    if (!levels) return;
     try {
       const audit = resolveRandomization();
       if (!audit) return;
-      const generated = generateFactorialDesign(facs.map((f, index) => ({ name: names[index], low: f.low, high: f.high })),
+      const generated = generateFactorialDesign(levels,
         { centerPoints: center, replicates: reps, blocks: blocksEff, randomize, seed: audit.seed });
       const d = randomize ? generated : alignUnrandomizedDoeOrders(generated);
       const stamp = new Date().toLocaleTimeString('zh-CN', { hour12: false }).replace(/:/g, '');
       deliverDesign(
         `DOE设计_${stamp}_${audit.auditSuffix}`,
         d,
-        `已生成 ${d.rows.length} 运行 / ${d.blockCount} 区组的因子设计（${d.blockPlan?.description ?? blockPlan.description}；${audit.auditText}）`,
+        `已生成 ${d.rows.length} 运行 / ${d.blockCount} 区组的因子设计（${d.blockPlan?.description ?? blockPlan.description}；${audit.auditText}${levelNotes(facs)}）`,
       );
     } catch (error) { showToast((error as Error).message); }
   };
@@ -1043,12 +1111,13 @@ function CreateDesign() {
     const facs = factors.slice(0, fK);
     const names = resolveFactorNames(facs);
     if (!names) return;
-    if (facs.some((f) => !(f.low < f.high))) { showToast('每个因子必须满足低水平 < 高水平'); return; }
+    const levels = resolveTwoLevelFactors(facs, names);
+    if (!levels) return;
     try {
       const audit = resolveRandomization();
       if (!audit) return;
       const generated = generateFractionalFactorialDesign(
-        facs.map((f, index) => ({ name: names[index], low: f.low, high: f.high })),
+        levels,
         fSpec.p,
         {
           fold: foldArg,
@@ -1061,7 +1130,7 @@ function CreateDesign() {
       deliverDesign(
         `DOE分数因子_${stamp}_${audit.auditSuffix}`,
         d,
-        `已生成 ${fSpec.p === 0 ? `2^${fK} 全因子` : `${fSpec.label} 分数因子（第 ${d.fraction}/${1 << fSpec.p} 分部）`}，实际分辨率 ${d.resolutionLabel}，共 ${d.rows.length} 运行${d.folded ? '（折叠追加运行记为区组 2）' : ''}；${d.generators.length ? `生成元 ${d.generators.join('、')}，别名项按低阶优先剔除` : '无别名'}；${audit.auditText}`,
+        `已生成 ${fSpec.p === 0 ? `2^${fK} 全因子` : `${fSpec.label} 分数因子（第 ${d.fraction}/${1 << fSpec.p} 分部）`}，实际分辨率 ${d.resolutionLabel}，共 ${d.rows.length} 运行${d.folded ? '（折叠追加运行记为区组 2）' : ''}；${d.generators.length ? `生成元 ${d.generators.join('、')}，别名项按低阶优先剔除` : '无别名'}；${audit.auditText}${levelNotes(facs)}`,
       );
     } catch (error) { showToast((error as Error).message); }
   };

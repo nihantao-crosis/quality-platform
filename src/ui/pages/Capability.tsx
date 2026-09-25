@@ -1,6 +1,6 @@
 /** 过程能力分析 ★深度实现 — 可编辑规格限实时重算 + 直方图 + PPM 性能表。 */
 import type React from 'react';
-import { memo, useMemo, useState } from 'react';
+import { memo, useMemo } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { useApp } from '../../store/appStore';
 import { suggestedSpec, rememberSpecForCapabilityMeasurement, syncSpecForCapabilityMeasurement, capabilitySpecKey, capabilitySubgroupSemantics } from '../../store/dataStore';
@@ -13,24 +13,20 @@ import { ReportCard } from '../ReportCard';
 import { capabilityReport } from '../reportData';
 import { sameChartTokens, type ChartTokens } from '../tokens';
 import { useCapabilityPrepared } from '../useCapabilityPrepared';
-import { specLimitText } from '../../platform/reportLabels';
+import { reportNum, specLimitText } from '../../platform/reportLabels';
+import { StrictNumberInput } from '../StrictNumberInput';
 import { Card, CardHeader, KvRows, numInput, Badge } from '../common';
 import { Histogram } from '../charts/Histogram';
 import { NormalProbPlot } from '../charts/NormalProbPlot';
 
-/** 子组大小输入:文本态 + 失焦/回车提交(受控即时校验会让 "10" 的首键 '1' 被拒,永远打不出两位数)。 */
+/** 子组大小输入:失焦/回车提交(受控即时校验会让 "10" 的首键 '1' 被拒,永远打不出两位数)。
+ * fix2609l G22a:type=text + parseStrictInteger(2–10)——此前 Math.round 把「3.6」静默改成 4、
+ * 非法值不声不响回弹;现在非法时保留原串并就地显示原因,子组大小不变。 */
 function SubgroupSizeInput({ value, onCommit }: { value: number; onCommit: (z: number) => void }) {
-  const [text, setText] = useState(String(value));
-  const commit = () => {
-    const v = Math.round(Number(text.trim()));
-    if (text.trim() !== '' && Number.isFinite(v) && v >= 2 && v <= 10) onCommit(v);
-    setText(String(useApp.getState().capSubgroupSize));
-  };
   return (
-    <input type="number" min={2} max={10} step={1} value={text} className="mono" aria-label="子组大小"
-      onChange={(e) => setText(e.target.value)}
-      onBlur={commit}
-      onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+    <StrictNumberInput
+      label="子组大小" value={value} commitOn="blur" integer={{ min: 2, max: 10 }} className="mono"
+      onCommit={(z) => { if (z != null) onCommit(z); }}
       style={{ width: 58, padding: '4px 8px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12.5 }} />
   );
 }
@@ -162,7 +158,7 @@ function CapabilityView({ T }: { T: ChartTokens }) {
       {capSubgroupMode === 'const' && (
         <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12.5, color: '#5b6472' }}>
           子组大小
-          <SubgroupSizeInput key={capSubgroupSize} value={capSubgroupSize} onCommit={(z) => updateSubgroup({ capSubgroupSize: z })} />
+          <SubgroupSizeInput value={capSubgroupSize} onCommit={(z) => updateSubgroup({ capSubgroupSize: z })} />
           <span style={{ fontSize: 11, color: '#9aa2ad' }}>(2–10,按行序分组;末尾不足一组不参与)</span>
         </label>
       )}
@@ -238,17 +234,15 @@ function CapabilityView({ T }: { T: ChartTokens }) {
             />
           )}
           {i.label}
-          <input
-            type="number"
-            step="0.01"
+          {/* fix2609l G22a:type=text + 严格解析(GAP-8-4 同族)。parseFloat 会把「24.9mm」截成 24.9;
+              严格解析同样拒绝 1e999(超出双精度范围 → Infinity 落盘会让 prefs 被判「损坏」,双审 P2)。
+              非法时保留原串、就地显示原因,规格仍按上一次有效值实时计算。 */}
+          <StrictNumberInput
+            label={i.label}
             value={i.value}
             disabled={!i.on}
-            onChange={(e) => {
-              const v = parseFloat(e.target.value);
-              // Number.isFinite 而非 !isNaN:1e999 → Infinity 落盘会让 prefs 被判「损坏」,
-              // 保存分析后整份历史在重启时被隔离(双审 P2)
-              if (Number.isFinite(v)) setSpec({ [i.key]: v });
-            }}
+            onCommit={(v) => { if (v != null) setSpec({ [i.key]: v }); }}
+            messageWidth={220}
             style={{ ...numInput, ...(i.on ? {} : { background: '#f4f6f8', color: '#b6bdc6' }) }}
           />
         </label>
@@ -423,10 +417,10 @@ function CapabilityView({ T }: { T: ChartTokens }) {
             <KvRows
               valueWeight={500}
               rows={[
-                { k: '样本均值 X̄', v: nf(cap.mean, 4) },
+                { k: '样本均值 X̄', v: reportNum(cap.mean, 4) },
                 { k: '样本量 N', v: String(cap.n) },
-                { k: M.hasSubgroups ? 'σ 组内 (R̄/d₂)' : 'σ 组内 (MR̄/d₂)', v: nf(cap.sigmaWithin, 4) },
-                { k: 'σ 整体', v: nf(cap.sigmaOverall, 4) },
+                { k: M.hasSubgroups ? 'σ 组内 (R̄/d₂)' : 'σ 组内 (MR̄/d₂)', v: reportNum(cap.sigmaWithin, 4) },
+                { k: 'σ 整体', v: reportNum(cap.sigmaOverall, 4) },
                 // fix2609k PLATFORM-07:规格与五种报告同源(specLimitText),9.995 / 0.002 不再被 toFixed(2) 改写
                 { k: '规格 LSL / 目标 / USL', v: (lslOn ? specLimitText(lsl) : '—') + ' / ' + specLimitText(tgt) + ' / ' + (uslOn ? specLimitText(usl) : '—') },
               ]}

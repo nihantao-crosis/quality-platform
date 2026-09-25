@@ -11,6 +11,10 @@ import { isImeComposing } from '../imeGuard';
 
 const GROUPS = ['仪表盘', '数据', '分析模块'] as const;
 
+/** 项目名输入上限(PLATFORM-06 复核):超长项目名在渲染、持久化与每次导出文件名上都有开销。
+ * 与 store/project 校验的上限一致(120 字符);store 层另有截断/校验兜底。 */
+export const PROJECT_NAME_INPUT_MAX_CHARS = 120;
+
 export function SideNav() {
   const { page, goTo, showToast, projectName, setProjectName } = useApp();
   const { model, recents, loadRecent, removeRecent } = useData();
@@ -140,6 +144,8 @@ export function SideNav() {
           {editingName ? (
             <input
               autoFocus
+              aria-label="项目名称"
+              maxLength={PROJECT_NAME_INPUT_MAX_CHARS}
               value={nameDraft}
               onChange={(e) => setNameDraft(e.target.value)}
               onBlur={() => { setProjectName(nameDraft); setEditingName(false); }}

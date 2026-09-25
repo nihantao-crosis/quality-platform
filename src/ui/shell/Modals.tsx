@@ -12,7 +12,7 @@ import { sessionLog } from '../../store/sessionLog';
 import { numericInputMode, parseStrictInteger, parseStrictNumber, type StrictNumberResult } from '../../core/numberInput';
 import { isProjectFile, applyProjectText } from '../../platform/project';
 import { HelpModal } from './HelpModal';
-import { OptionsModal } from './OptionsModal';
+import { LOCAL_SPACE_RELEASE_HINT, OptionsModal } from './OptionsModal';
 
 
 import type { ImportKind } from '../../store/appStore';
@@ -333,7 +333,8 @@ function ImportModal() {
   const persistAwareToast = (outcome: { persisted: boolean; archiving: boolean }, successMsg: string) => {
     if (outcome.persisted) { showToast(successMsg); return; }
     if (outcome.archiving) { showToast(successMsg + '；数据集较大,正在归档到本机数据集库…'); return; }
-    showToast(`⚠ 数据已导入到内存,但浏览器存储空间不足,尚未持久化——刷新将丢失！请立即${PROJECT_BACKUP_HINT}备份,或在「工具 → 选项」清理本地数据`);
+    // fix2609l G22a:与选项页同一「释放空间」口径(IndexedDB 不可用时清库本身也要先腾出空间)
+    showToast(`⚠ 数据已导入到内存,但浏览器存储空间不足,尚未持久化——刷新将丢失！请立即${PROJECT_BACKUP_HINT}备份,再${LOCAL_SPACE_RELEASE_HINT}(也可在「工具 → 选项」清除本地数据)`);
   };
 
   const applyJob = (job: PendingImport) => {

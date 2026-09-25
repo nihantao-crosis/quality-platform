@@ -3,6 +3,7 @@ import { isProjectExportInFlight, useApp, type Page, type Modal, type ChartStyle
 import { appVersionText, localDateStamp, sanitizeFileName } from '../../platform/reportLabels';
 import { PROJECT_BACKUP_HINT, datasetWriteNotes, useData } from '../../store/dataStore';
 import { errText, platform } from '../../platform/adapter';
+import { recoverDemoDataset } from '../ErrorBoundary';
 
 /** 桌面端经 tauri-plugin-updater 检查 GitHub Releases；Web 端不适用。 */
 async function checkForUpdate(toast: (m: string) => void) {
@@ -163,6 +164,17 @@ const MENUS: { name: string; items: Item[] }[] = [
     { label: '关于本软件', act: mdl('about') } ] },
 ];
 
+/**
+ * 撤销/重做结果提示(菜单与 Ctrl+Z/Ctrl+Y 快捷键共用)。GAP-7-15:项目备份快照期间撤销/重做
+ * 只是被暂存,快照完成后才应用——不能提示「已撤销」。须在 undoEdit()/redoEdit() 返回后立即调用。
+ */
+export function undoRedoToast(action: 'undo' | 'redo', ok: boolean): string {
+  const label = action === 'undo' ? '撤销' : '重做';
+  if (!ok) return `没有可${label}的编辑`;
+  if (isProjectExportInFlight()) return `${label}已暂存，项目备份快照完成后自动应用`;
+  return action === 'undo' ? '已撤销上一次数据编辑' : '已重做数据编辑';
+}
+
 export function MenuBar({ wsName }: { wsName: string }) {
   const { openMenu, setOpenMenu, goTo, openModal, showToast, setChartStyle, toggleGrid } = useApp();
   // GAP-10-25:菜单如实反映可撤销/可重做层数；大表上撤销栈被字节预算压缩时标明原因。
@@ -187,11 +199,7 @@ export function MenuBar({ wsName }: { wsName: string }) {
     if (act.hypo) useApp.getState().setHypoTab(act.hypo);
     if (act.undo || act.redo) {
       const ok = act.undo ? useData.getState().undoEdit() : useData.getState().redoEdit();
-      // GAP-7-15:项目快照期间撤销/重做被暂存，不能提示「已撤销」。
-      const deferred = ok && isProjectExportInFlight();
-      showToast(deferred
-        ? `${act.undo ? '撤销' : '重做'}已暂存，项目备份快照完成后自动应用`
-        : ok ? (act.undo ? '已撤销上一次数据编辑' : '已重做数据编辑') : (act.undo ? '没有可撤销的编辑' : '没有可重做的编辑'));
+      showToast(undoRedoToast(act.undo ? 'undo' : 'redo', ok));
       return;
     }
     if (act.newSheet) {
@@ -275,7 +283,9 @@ export function MenuBar({ wsName }: { wsName: string }) {
         : s.showGrid ? '网格线已显示' : '网格线已隐藏');
     } else if (act.resetData) {
       import('../../platform/mes').then((m) => m.mesStop());
-      useData.getState().resetDemo();
+      // 替换闸门拒绝时给出原因,不抛出未捕获异常(与错误卡逃生口同一入口)
+      const recoverError = recoverDemoDataset();
+      if (recoverError) { setOpenMenu(null); showToast(recoverError); return; }
       goTo('worksheet');
       showToast('已恢复演示数据集 质检数据.mtw');
     } else if (act.print) {

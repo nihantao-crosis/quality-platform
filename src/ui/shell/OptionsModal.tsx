@@ -108,6 +108,13 @@ function clearFailureOutcome(error: unknown): ClearFailureOutcome | null {
     : null;
 }
 
+/**
+ * 浏览器存储空间不足时的统一出路(fix2609l G22a / 5a G17a 尾巴):导入未持久化提示与本页常驻说明
+ * 共用。IndexedDB 不可用时「清除数据」需先建立恢复点,空间不足同样会失败,所以首选出路是先移除
+ * 最近数据集/已保存分析释放空间;「工具 → 选项」清除数据是次选。
+ */
+export const LOCAL_SPACE_RELEASE_HINT = '在左侧「最近数据集」移除不需要的条目，或删除不需要的已保存分析以释放浏览器存储空间';
+
 function isRecoveryPointUnavailable(error: unknown): boolean {
   return typeof error === 'object' && error !== null
     && (error as { recoveryPointUnavailable?: unknown }).recoveryPointUnavailable === true;
@@ -352,6 +359,8 @@ export function OptionsModal({ onClose }: { onClose: () => void }) {
         cancelPendingDatasetWork();
         useAnalyses.setState({ saved: [], lastError: null });
         clearFishboneState();
+        // 5b-2 G18 双保险:显式让鱼骨图页按新 revision 重挂载,不依赖 busyOverlay 起落的时序
+        useApp.getState().bumpFishboneRevision();
         clearAqlBusinessState();
         try { localStorage.removeItem(AQL_STATE_STORAGE_KEY); } catch { /* 保持内存已清空 */ }
         resetDemo();
@@ -406,6 +415,7 @@ export function OptionsModal({ onClose }: { onClose: () => void }) {
         )}
         <div style={{ fontSize: 11.5, color: '#9aa2ad', marginTop: 12, lineHeight: 1.5 }}>
           清除数据会同时移除浏览器数据、本机 SQLite 数据集库、分析快照、规格限记忆与鱼骨图内容；导出过的文件不受影响。为防误删，需要连续确认两次。
+          浏览器存储已满且当前环境不支持 IndexedDB 时，清除前需要先{LOCAL_SPACE_RELEASE_HINT}。
         </div>
       </div>
     </div>

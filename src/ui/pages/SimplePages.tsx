@@ -18,6 +18,7 @@ import { Fishbone } from './Fishbone';
 import { useApp, resolveGageTolerance, GAGE_BATCH_COL_CAP, normalizeGageBatchCols } from '../../store/appStore';
 import { datasetWriteNotes, useData } from '../../store/dataStore';
 import { numericInputMode, parseStrictNumber } from '../../core/numberInput';
+import { StrictNumberInput } from '../StrictNumberInput';
 import type { ChartTokens } from '../tokens';
 import { paretoColors } from '../tokens';
 import { Card, CardHeader, KvRows, Badge, tabStyle, numInput, EmptyStateCard, DemoBadge } from '../common';
@@ -453,9 +454,10 @@ function GageRRInner({ T }: { T: ChartTokens }) {
               {tolModeOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
             </select>
             {(gageTolMode === 'width' || gageTolMode === 'upper' || gageTolMode === 'lower') && (
-              <input
-                type="number" aria-label="过程公差数值" value={gageTolValue ?? ''} placeholder={gageTolMode === 'width' ? '宽度' : '限值'}
-                onChange={(e) => { const raw = e.target.value.trim(); const v = raw === '' ? null : Number(raw); if (v === null || Number.isFinite(v)) setGageOptions({ gageTolValue: v }); }}
+              // fix2609l G22a:type=text + 严格解析(GAP-8-4 同族);非法原串保留并就地说明,仍按上一次有效值
+              <StrictNumberInput
+                label="过程公差数值" value={gageTolValue} allowEmpty placeholder={gageTolMode === 'width' ? '宽度' : '限值'}
+                onCommit={(v) => setGageOptions({ gageTolValue: v })}
                 style={{ width: 110, padding: '5px 8px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12 }}
               />
             )}

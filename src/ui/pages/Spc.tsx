@@ -1,12 +1,12 @@
 /** SPC 控制图 ★深度实现 — 七种图型（X̄-R/X̄-S/I-MR/EWMA/CUSUM/P/C），
  * Nelson 判异（Shewhart 图）/ 限值判异（EWMA/CUSUM）/ 点选明细 /
  * 分阶段控制限（按分组列分段,Minitab Stages 语义）。 */
-import { memo, useMemo, useState, type CSSProperties } from 'react';
+import { memo, useMemo, type CSSProperties } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { useApp, type SpcType } from '../../store/appStore';
 import { datasetWriteNotes, syncSpecForActiveMeasurement, useData } from '../../store/dataStore';
 import {
-  nf, evalRules, evalLimitedRules, RULE_DEFS, DEFAULT_RULE_K, ruleKDesc, ewmaSeries, cusumSeries, stagedXbar, stagedRange, resolveSpcStage,
+  nf, evalRules, evalLimitedRules, RULE_DEFS, DEFAULT_RULE_K, ruleKDesc, ruleKValueError, ewmaSeries, cusumSeries, stagedXbar, stagedRange, resolveSpcStage,
   prepareSpcData, spcMeasurementColumnNames, spcRoleOptions, withSigmaMethod, dataDecimals, shewhartSigmaIssue,
   type NelsonRuleK, type NelsonRules, type RuleNo, type SpcDataLayout, type SpcPreparedData, type VarModel, type TextColumn,
   type PointRuleSummary, type SpcSigmaMethod, type PChartModel, type CChartModel,
@@ -17,6 +17,8 @@ import { spcReport } from '../reportData';
 import { sameChartTokens, type ChartTokens } from '../tokens';
 import { SPC_PAGE_DETAIL_ROWS, buildSpcViolationView, singlePointSummary, type SpcChartViolations } from './spcViolationView';
 import { Card, KvRows, tabStyle, chipStyle } from '../common';
+import { StrictNumberInput } from '../StrictNumberInput';
+import { reportNum } from '../../platform/reportLabels';
 import { ControlChart, type ControlChartProps } from '../charts/ControlChart';
 
 const stageSelStyle: CSSProperties = {
@@ -29,32 +31,26 @@ const ruleKInputStyle: CSSProperties = {
   fontSize: 11.5, color: '#2a333f', background: '#fff', fontFamily: 'IBM Plex Mono,monospace',
 };
 
-/** 单个准则的 K 值输入:失焦/回车提交;非法或越界值经 normalizeRuleK 回落后按 store 实际生效值回弹。
- * 调用方以 key={value} 在 store 值变化时重挂载,编辑态之外无需同步 effect。 */
+/** 单个准则的 K 值输入:失焦/回车提交。
+ * fix2609l G22a:type=text + 严格解析 + ruleKValueError 同口径校验——此前越界/非整数值交给 normalizeRuleK
+ * 静默回落 Nelson 标准值(把 K2=7 改成 50 实际变成 9,用户毫不知情);现在非法时保留原串、就地显示原因,
+ * 当前 K 不变。合法值写入后 store 规范化结果即生效值,编辑态之外无需同步 effect。 */
 function RuleKInput({ ruleKey, value, onCommit, title }: {
   ruleKey: keyof NelsonRuleK;
   value: number;
   onCommit: (patch: Partial<NelsonRuleK>) => void;
   title: string;
 }) {
-  const [text, setText] = useState(String(value));
-  const commit = () => {
-    const parsed = Number(text.trim());
-    if (text.trim() !== '' && Number.isFinite(parsed)) onCommit({ [ruleKey]: parsed });
-    // zustand set 同步完成;此处读回的即规范化后的生效值(非法输入由此回弹)
-    setText(String(useApp.getState().spcRuleK[ruleKey]));
-  };
   return (
-    <input
-      type="number"
-      value={text}
-      step={ruleKey === 'k1' ? 0.1 : 1}
-      aria-label={title}
+    <StrictNumberInput
+      label={title}
       title={title}
+      value={value}
+      commitOn="blur"
+      validate={(v) => ruleKValueError(ruleKey, v)?.replace(/^k(\d)/, 'K$1') ?? null}
+      onCommit={(v) => { if (v != null) onCommit({ [ruleKey]: v }); }}
+      messageWidth={200}
       style={ruleKInputStyle}
-      onChange={(e) => setText(e.target.value)}
-      onBlur={commit}
-      onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
     />
   );
 }
@@ -391,57 +387,58 @@ export function computeSpcPageView({
 
   // CORE-08:不可判定时 UCL/LCL/H/K 只是占位(塌缩到中心线/0),不得当作真实参数展示。
   const UNDETERMINED = '—（不可判定）';
+  // fix2609l G22a(3b 尾巴):统计卡与报告层同一 reportNum 规则,小量级数据不再显示 0.0000 而报告为 4.70e-9
   const stats: { k: string; v: string }[] = [];
   if (effType === 'ewma') {
     stats.push(
-      { k: '中心线 μ₀', v: nf(ewma.cl, 4) },
-      { k: 'UCL（末端）', v: advancedUnavailable ? UNDETERMINED : nf(ewma.ucl[ewma.ucl.length - 1], 4) },
-      { k: 'LCL（末端）', v: advancedUnavailable ? UNDETERMINED : nf(ewma.lcl[ewma.lcl.length - 1], 4) },
+      { k: '中心线 μ₀', v: reportNum(ewma.cl, 4) },
+      { k: 'UCL（末端）', v: advancedUnavailable ? UNDETERMINED : reportNum(ewma.ucl[ewma.ucl.length - 1], 4) },
+      { k: 'LCL（末端）', v: advancedUnavailable ? UNDETERMINED : reportNum(ewma.lcl[ewma.lcl.length - 1], 4) },
       { k: 'λ / L', v: `${ewma.lambda} / ${ewma.L}` },
       { k: '点数', v: String(advData.length) },
     );
   } else if (effType === 'cusum') {
     stats.push(
-      { k: '判定限 H', v: advancedUnavailable ? UNDETERMINED : nf(cusum.H, 4) },
-      { k: '允差 K', v: advancedUnavailable ? UNDETERMINED : nf(cusum.K, 4) },
+      { k: '判定限 H', v: advancedUnavailable ? UNDETERMINED : reportNum(cusum.H, 4) },
+      { k: '允差 K', v: advancedUnavailable ? UNDETERMINED : reportNum(cusum.K, 4) },
       { k: 'k / h', v: `${CUSUM_K} / ${cusumHValue}` },
-      { k: 'C⁺ 末值', v: nf(cusum.cp[cusum.cp.length - 1], 4) },
-      { k: 'C⁻ 末值', v: nf(cusum.cn[cusum.cn.length - 1], 4) },
+      { k: 'C⁺ 末值', v: reportNum(cusum.cp[cusum.cp.length - 1], 4) },
+      { k: 'C⁻ 末值', v: reportNum(cusum.cn[cusum.cn.length - 1], 4) },
       { k: '点数', v: String(advData.length) },
     );
   } else {
     stats.push(
-      { k: '中心线 ' + (main.props.clLabel ?? 'CL'), v: nf(main.props.cl, main.dec) },
-      { k: 'UCL', v: shewhartUnavailable ? UNDETERMINED : nf(main.props.ucl, main.dec) },
-      { k: 'LCL', v: shewhartUnavailable ? UNDETERMINED : nf(main.props.lcl, main.dec) },
+      { k: '中心线 ' + (main.props.clLabel ?? 'CL'), v: reportNum(main.props.cl, main.dec) },
+      { k: 'UCL', v: shewhartUnavailable ? UNDETERMINED : reportNum(main.props.ucl, main.dec) },
+      { k: 'LCL', v: shewhartUnavailable ? UNDETERMINED : reportNum(main.props.lcl, main.dec) },
     );
     if (effType === 'p') {
       stats.length = 0;
       stats.push(
-        { k: '中心线 p̄', v: nf(pModel.pbar, 4) },
+        { k: '中心线 p̄', v: reportNum(pModel.pbar, 4) },
         { k: '样本量 nᵢ', v: pNLabel },
-        { k: 'UCL 范围', v: pModel.pVariableN ? `${nf(pMinUcl, 4)}–${nf(pMaxUcl, 4)}` : nf(pModel.pUcl, 4) },
-        { k: 'LCL 范围', v: pModel.pVariableN ? `${nf(pMinLcl, 4)}–${nf(pMaxLcl, 4)}` : nf(pModel.pLcl, 4) },
+        { k: 'UCL 范围', v: pModel.pVariableN ? `${reportNum(pMinUcl, 4)}–${reportNum(pMaxUcl, 4)}` : reportNum(pModel.pUcl, 4) },
+        { k: 'LCL 范围', v: pModel.pVariableN ? `${reportNum(pMinLcl, 4)}–${reportNum(pMaxLcl, 4)}` : reportNum(pModel.pLcl, 4) },
         { k: '样本数', v: String(pModel.pprop.length) },
       );
     } else if (effType === 'xbar-r' && staged) {
       stats.length = 0;
       staged.x.segments.forEach((sg) => {
-        stats.push({ k: `「${sg.label}」CL·UCL·LCL`, v: `${nf(sg.cl, 3)} / ${nf(sg.ucl, 3)} / ${nf(sg.lcl, 3)}` });
+        stats.push({ k: `「${sg.label}」CL·UCL·LCL`, v: `${reportNum(sg.cl, 3)} / ${reportNum(sg.ucl, 3)} / ${reportNum(sg.lcl, 3)}` });
       });
       stats.push({ k: '段数', v: String(staged.x.segments.length) }, { k: '子组数', v: String(M.k) });
     } else if (effType === 'xbar-r') {
       // 审查修复(720):pooled 时图上「R̄」标签=中心线 d₂σ̂ ≠ 数据极差均值,统计卡分列两值避免同屏同符号矛盾
-      stats.push({ k: 'R̄ (数据均值)', v: nf(M.rbar, 3) });
-      if (spcSigmaMethod === 'pooled') stats.push({ k: 'R 图 CL (d₂σ̂)', v: nf(M.rCl, 3) });
-      stats.push({ k: spcSigmaMethod === 'pooled' ? 'σ̂ (合并标准差)' : 'σ̂ (R̄/d₂)', v: nf(M.sigmaChart, 4) }, { k: '子组数', v: String(M.k) });
+      stats.push({ k: 'R̄ (数据均值)', v: reportNum(M.rbar, 3) });
+      if (spcSigmaMethod === 'pooled') stats.push({ k: 'R 图 CL (d₂σ̂)', v: reportNum(M.rCl, 3) });
+      stats.push({ k: spcSigmaMethod === 'pooled' ? 'σ̂ (合并标准差)' : 'σ̂ (R̄/d₂)', v: reportNum(M.sigmaChart, 4) }, { k: '子组数', v: String(M.k) });
     } else if (effType === 'xbar-s') {
-      stats.push({ k: 'S̄ (数据均值)', v: nf(M.sbar, 4) });
-      if (spcSigmaMethod === 'pooled') stats.push({ k: 'S 图 CL (c₄σ̂)', v: nf(M.sCl, 4) });
-      stats.push({ k: spcSigmaMethod === 'pooled' ? 'σ̂ (合并标准差)' : 'σ̂ (S̄/c₄)', v: nf(M.sigmaChartS, 4) }, { k: '子组数', v: String(M.k) });
+      stats.push({ k: 'S̄ (数据均值)', v: reportNum(M.sbar, 4) });
+      if (spcSigmaMethod === 'pooled') stats.push({ k: 'S 图 CL (c₄σ̂)', v: reportNum(M.sCl, 4) });
+      stats.push({ k: spcSigmaMethod === 'pooled' ? 'σ̂ (合并标准差)' : 'σ̂ (S̄/c₄)', v: reportNum(M.sigmaChartS, 4) }, { k: '子组数', v: String(M.k) });
     }
-    else if (effType === 'i-mr') stats.push({ k: 'MR̄', v: nf(M.mrbar, 3) }, { k: 'σ̂ (MR̄/d₂)', v: nf(M.iSig, 4) }, { k: '观测数', v: String(M.indiv.length) });
-    else stats.push({ k: 'c̄', v: nf(cModel.cbar, 3) }, { k: '单位数', v: String(cModel.cdata.length) });
+    else if (effType === 'i-mr') stats.push({ k: 'MR̄', v: reportNum(M.mrbar, 3) }, { k: 'σ̂ (MR̄/d₂)', v: reportNum(M.iSig, 4) }, { k: '观测数', v: String(M.indiv.length) });
+    else stats.push({ k: 'c̄', v: reportNum(cModel.cbar, 3) }, { k: '单位数', v: String(cModel.cdata.length) });
   }
 
   const baseReport = spcReport({
