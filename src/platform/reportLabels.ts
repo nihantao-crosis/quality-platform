@@ -210,7 +210,7 @@ function clipFileNameUnits(text: string): string {
  * new RegExp,WebKit 16.4 以前(macOS 10.15 WKWebView、iOS/iPadOS 15.4–16.3 PWA)每次调用都抛
  * SyntaxError,保存项目/项目汇总/全部报表导出的文件名全部失败。与 trimTrailingDotsAndSpaces 同写法。
  */
-function replaceLoneSurrogates(text: string): string {
+export function replaceLoneSurrogates(text: string, replacement = '_'): string {
   let out = '';
   let start = 0;
   for (let i = 0; i < text.length; i += 1) {
@@ -223,7 +223,7 @@ function replaceLoneSurrogates(text: string): string {
         continue;
       }
     }
-    out += text.slice(start, i) + '_';
+    out += text.slice(start, i) + replacement;
     start = i + 1;
   }
   return start === 0 ? text : out + text.slice(start);

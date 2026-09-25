@@ -17,16 +17,17 @@ import { NormalProbPlot } from '../ui/charts/NormalProbPlot';
 import type { ReportSpec } from './report';
 import { svgMarkupToPng } from './svgToPng';
 import { analysisTableTotalRows, analysisUsesWorksheet, type AnalysisReportPayload, type AnalysisReportTable } from './analysisReportModel';
-import { MAX_REPORT_TABLE_ROWS, MAX_XLSX_VIOLATION_ROWS, tableTruncationNote, timestampText, appVersionText, reportContextText, reportSpecText, reportNum, withinSigmaLabel, capabilityCaliberLine, stagedChartProps, type ReportCapabilityOptions } from './reportLabels';
+import { MAX_REPORT_TABLE_ROWS, MAX_XLSX_VIOLATION_ROWS, tableTruncationNote, timestampText, appVersionText, reportContextText, reportSpecText, reportNum, withinSigmaLabel, capabilityCaliberLine, stagedChartProps, replaceLoneSurrogates, type ReportCapabilityOptions } from './reportLabels';
 
 /** OOXML 文本合法化(双审 P2):XML 1.0 禁止绝大多数控制字符,原样写入会产出
  * Word/PowerPoint 拒绝打开的损坏文件而界面仍提示导出成功。导入文本(粘贴/CSV)
  * 可能携带 \x00-\x1F 等字符,在唯一入口统一剥离。 */
-const cleanXml = (text: string): string => text
-  .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\uFFFE\uFFFF]/g, '')
-  // 孤立代理对同属 XML 非法(成对代理是合法增补平面字符,必须保留)
-  .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/g, '')
-  .replace(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '');
+const cleanXml = (text: string): string => replaceLoneSurrogates(
+  text.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\uFFFE\uFFFF]/g, ''),
+  // 孤立代理项同属 XML 非法(成对代理是合法增补平面字符,必须保留)。fix2609m G23c 尾巴:
+  // 原用后行断言正则,WebKit 16.4 以前每次调用抛 SyntaxError;改为与文件名清洗同源的线性扫描。
+  '',
+);
 
 export interface ReportImages {
   xbar?: Uint8Array;

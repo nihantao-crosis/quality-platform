@@ -220,8 +220,11 @@ function CapabilityView({ T }: { T: ChartTokens }) {
     { label: '目标 Target', value: tgt, key: 'tgt', on: true },
     { label: 'USL 上限', value: usl, key: 'usl', on: uslOn, side: 'uslOn' },
   ];
+  // fix2609m G23c 尾巴:三个分析分支(输入错误/等待确认/正常)把规格编辑区放在根 div 的不同位置,
+  // 逐键输入途中若前缀触发分支切换(如小 σ 数据打出「2」进入「规格超 1000σ」确认),React 按位置对账会
+  // 卸载重挂输入框——焦点与 StrictNumberInput 的编辑会话(回退快照)一起丢失。固定 key 让三处按 key 对账。
   const specEditor = (
-    <Card style={{ padding: '11px 16px', display: 'flex', alignItems: 'center', gap: 18, flexWrap: 'wrap' }}>
+    <Card key="spec-editor" style={{ padding: '11px 16px', display: 'flex', alignItems: 'center', gap: 18, flexWrap: 'wrap' }}>
       <span style={{ fontSize: 12, color: '#8a929d', fontWeight: 600 }}>规格限 (可编辑，实时重算)</span>
       {inputs.map((i) => (
         <label key={i.key} style={{ display: 'inline-flex', alignItems: 'center', gap: 7, fontSize: 12.5, color: i.on ? '#5b6472' : '#b6bdc6' }}>
@@ -236,7 +239,7 @@ function CapabilityView({ T }: { T: ChartTokens }) {
           {i.label}
           {/* fix2609l G22a:type=text + 严格解析(GAP-8-4 同族)。parseFloat 会把「24.9mm」截成 24.9;
               严格解析同样拒绝 1e999(超出双精度范围 → Infinity 落盘会让 prefs 被判「损坏」,双审 P2)。
-              非法时保留原串、就地显示原因,规格仍按上一次有效值实时计算。 */}
+              非法时保留原串、就地显示原因;终串非法则回退到编辑前的值(fix2609m G23c C1)。 */}
           <StrictNumberInput
             label={i.label}
             value={i.value}

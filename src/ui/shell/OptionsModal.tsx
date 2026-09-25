@@ -31,7 +31,7 @@ import {
   type BrowserDataSnapshot,
 } from '../../platform/clearRecovery';
 import { mesStop } from '../../platform/mes';
-import { settleProjectImportRecoveryBeforeDataClear } from '../../platform/project';
+import { STORAGE_SPACE_RELEASE_HINT, settleProjectImportRecoveryBeforeDataClear } from '../../platform/project';
 import { KvRows } from '../common';
 import { clearFishboneState } from '../../store/fishboneStore';
 
@@ -113,7 +113,8 @@ function clearFailureOutcome(error: unknown): ClearFailureOutcome | null {
  * 共用。IndexedDB 不可用时「清除数据」需先建立恢复点,空间不足同样会失败,所以首选出路是先移除
  * 最近数据集/已保存分析释放空间;「工具 → 选项」清除数据是次选。
  */
-export const LOCAL_SPACE_RELEASE_HINT = '在左侧「最近数据集」移除不需要的条目，或删除不需要的已保存分析以释放浏览器存储空间';
+/** 与导出侧 fail-closed 文案同源(platform/project.ts),避免两份同文常量漂移。 */
+export const LOCAL_SPACE_RELEASE_HINT = STORAGE_SPACE_RELEASE_HINT;
 
 function isRecoveryPointUnavailable(error: unknown): boolean {
   return typeof error === 'object' && error !== null

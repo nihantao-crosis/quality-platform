@@ -1,7 +1,7 @@
 /** 四个弹窗：导入 / 导出 / 计算器 / 关于 + Toast。 */
 import { useState, useEffect, useRef } from 'react';
 import { appVersionText } from '../../platform/reportLabels';
-import { useApp, type ImportTab, type ExportFmt } from '../../store/appStore';
+import { isProjectExportInFlight, useApp, type ImportTab, type ExportFmt } from '../../store/appStore';
 import { PROJECT_BACKUP_HINT, completeVaultDatasetRemoval, datasetWriteNotes, markActiveDataReplaced, prepareVaultDatasetRemoval, useData, isCapabilityWarningAcknowledged, type PersistOutcome } from '../../store/dataStore';
 import { parseMatrix, parseCategoryCounts, extractPChartColumns, evalFormula, truthy, arrMin, arrMax, mean, stdev, FormulaError, worksheetNumericColumnCodes, detectCsvBlocks, csvBlockLabel, assessSpcCharts, countCapabilityViolations, capabilityStabilityCaliber, spcChartFamilyFor, spcEffectiveViewType, withSigmaMethod, type CategoryCounts, type CsvBlock, type ParsedMatrix } from '../../core';
 import { errText, decodeTextFileBytes, assertXlsxImportSize, platform } from '../../platform/adapter';
@@ -1078,6 +1078,11 @@ function FindReplaceModal() {
   const apply = () => {
     if (!canApply) return;
     const n = findReplace(findV, replV, col);
+    if (n === 0) {
+      // fix2609m G23a A2 尾巴:项目导出快照期间替换被 store 拒绝(已提示「请稍后重试」),不关闭、不报成功
+      if (!isProjectExportInFlight()) showToast('未找到可替换的值');
+      return;
+    }
     closeModal();
     goTo('worksheet');
     showToast(`已替换 ${n} 处 ${findV} → ${replV}(可 Ctrl+Z 撤销)`);
@@ -1237,7 +1242,8 @@ function SortModal() {
   const [col, setCol] = useState(0);
   const [asc, setAsc] = useState(true);
   const apply = () => {
-    sortBy(col, asc);
+    // fix2609m G23a A2 尾巴:项目导出快照期间排序被 store 拒绝(已提示「请稍后重试」),不关闭、不报成功
+    if (!sortBy(col, asc)) return;
     closeModal();
     goTo('worksheet');
     showToast(`已按「${model.colNames[col]}」${asc ? '升序' : '降序'}排序（可 Ctrl+Z 撤销）`);

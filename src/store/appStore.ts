@@ -10,7 +10,7 @@ import {
   freshSwitchStatus, normalizeSwitchStatus, DEFAULT_RULE_K, normalizeRuleK, isAqlBatchRecord,
 } from '../core';
 import { isIsoCalendarDate } from '../platform/calendarDate';
-import { clampProjectName, projectStoreValidationError, registerProjectLifecycleHooks } from '../platform/project';
+import { STORAGE_SPACE_RELEASE_HINT, clampProjectName, projectStoreValidationError, registerProjectLifecycleHooks } from '../platform/project';
 import { preserveCorruptStore } from './quarantine';
 
 export type Page =
@@ -1071,7 +1071,7 @@ registerProjectLifecycleHooks({
   beforeExport: (owner) => {
     // GAP-7-16:清库进行中的一致性快照必然读到半清空的数据，直接拒绝并说明真实原因。
     if (localDataClearActive) throw new Error('正在清除本地数据，项目未导出；请等待清除完成后再保存项目');
-    if (protectedCorruptPrefs) throw new Error('损坏的偏好设置尚未成功复制到隔离区，项目未导出');
+    if (protectedCorruptPrefs) throw new Error(`损坏的偏好设置尚未成功复制到隔离区，项目未导出；请先${STORAGE_SPACE_RELEASE_HINT}，再重试保存项目`);
     if (aqlStateCorrupt) requirePersistedAqlState();
     // 配额不足时允许下面以内存覆盖项导出最新账本；不能退回 localStorage 中的旧值。
     savePersistedAqlState(useApp.getState());

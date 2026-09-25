@@ -54,11 +54,19 @@ describe('C2 sanitizeFileName 孤立代理项:线性扫描、结果不变', () =
     const out = await transformWithEsbuild(readFileSync(file, 'utf8'), file, { loader: 'ts', target: 'safari14' });
     expect(LOOKBEHIND.test(out.code)).toBe(false);
   });
+
+  it('Word/PPT 导出模块(officeExport)转译后同样不含后行断言;孤立代理项被剥除、合法代理对保留', async () => {
+    const file = 'src/platform/officeExport.tsx';
+    const out = await transformWithEsbuild(readFileSync(file, 'utf8'), file, { loader: 'tsx', target: 'safari14' });
+    expect(LOOKBEHIND.test(out.code)).toBe(false);
+    const { replaceLoneSurrogates } = await import('../../platform/reportLabels');
+    expect(replaceLoneSurrogates('a\uD83D\uDE00b\uD800c\uDC00d', '')).toBe('a\uD83D\uDE00bcd');
+  });
 });
 
-/** 懒加载模块(只经 dynamic import 进入独立 chunk,首屏与保存/导出文件名路径不加载)。
- * 这里的后行断言只影响对应导出格式,不影响启动、保存项目与文件名清洗。 */
-const LAZY_ONLY = ['src/platform/officeExport.tsx'];
+/** 懒加载白名单(只经 dynamic import 进入独立 chunk 的模块可以豁免)。officeExport 的 OOXML 清洗
+ * 已改为线性扫描(fix2609m G23c 尾巴),目前白名单为空:src 全部源码都不得出现后行断言。 */
+const LAZY_ONLY: string[] = [];
 
 function sourceFiles(dir: string): string[] {
   const out: string[] = [];
