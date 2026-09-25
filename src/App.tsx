@@ -154,14 +154,20 @@ function AppShell() {
     () => resolveCapabilityMeasurementData(M, textCols),
     [M, textCols, pendingCells, capSubgroupMode, capSubgroupSize, capValueCol, capSubgroupIdCol, spcDataLayout, spcValueCol, spcSubgroupCol], // eslint-disable-line react-hooks/exhaustive-deps
   );
-  const capModel = preparedCap.model;
-  const capSpec = { lsl: lslOn ? lsl : null, tgt, usl: uslOn ? usl : null };
-  const capWarningAcknowledged = capModel != null && isCapabilityWarningAcknowledged(
-    M, textCols, capModel, capSpec, capabilityWarningAcknowledgement,
-  );
-  const cap = capModel && capabilityInputError(capModel.all, capModel.sigmaWithin, capSpec, { allowDistantSpec: capWarningAcknowledged }) == null
-    ? computeCapability(capModel.all, capModel.sigmaWithin, capSpec, { allowDistantSpec: capWarningAcknowledged })
-    : null;
+  // GAP-10-22 复审 P2:AppShell 全量订阅 store,toast/菜单等任意变化都会重渲染壳层。确认指纹
+  // (内部再解析能力口径 + 全量指纹)与能力计算都是 O(N),与 Dashboard 同写法一并记忆化;
+  // preparedCap 已随全部能力口径字段失效,依赖它即覆盖 resolver 从 store 读取的字段。
+  const cap = useMemo(() => {
+    const capModel = preparedCap.model;
+    if (!capModel) return null;
+    const capSpec = { lsl: lslOn ? lsl : null, tgt, usl: uslOn ? usl : null };
+    const capWarningAcknowledged = isCapabilityWarningAcknowledged(
+      M, textCols, capModel, capSpec, capabilityWarningAcknowledgement,
+    );
+    return capabilityInputError(capModel.all, capModel.sigmaWithin, capSpec, { allowDistantSpec: capWarningAcknowledged }) == null
+      ? computeCapability(capModel.all, capModel.sigmaWithin, capSpec, { allowDistantSpec: capWarningAcknowledged })
+      : null;
+  }, [M, textCols, preparedCap, lsl, usl, tgt, lslOn, uslOn, capabilityWarningAcknowledgement]);
   // Gage 角色经 effectiveGageSelection 与 MSA 页同源(未手选时用推荐,不再按列序猜)。
   // fix2609c CORE-02/03:壳层不再每次渲染无条件解析 Gage 研究——只在启用导入数据且位于 MSA 页时
   // 按需解析(与页面共享单槽记忆);其他页只读已算好的结果,输入变了就显示「未运行」。异常降级为未运行。
@@ -178,14 +184,18 @@ function AppShell() {
       return { ok: false, reason: `Gage 数据解析失败：${errText(error)}` };
     }
   }, [requestedRealGage, page, M, textCols, pendingCells, gageValueName, gagePartName, gageOperatorName]);
-  let gageRR: number | null = null;
-  if (!requestedRealGage) {
-    gageRR = computeGageRR(gageStudyData(), { mode: 'width', value: GAGE_TOLERANCE }).totalGageRR;
-  } else if (preparedGage?.ok) {
+  // 同一阻塞路径:状态栏 %GRR 的 ANOVA 同样随输入记忆化,不随 toast/菜单重算。
+  const gageRR = useMemo<number | null>(() => {
+    if (!requestedRealGage) {
+      return computeGageRR(gageStudyData(), { mode: 'width', value: GAGE_TOLERANCE }).totalGageRR;
+    }
+    if (!preparedGage?.ok) return null;
     try {
-      gageRR = computeGageRR(preparedGage.study.observations, resolveGageTolerance({ gageTolMode, gageTolValue, lsl, usl, lslOn, uslOn })).totalGageRR;
-    } catch { /* 状态栏显示未运行；页面负责给出具体原因 */ }
-  }
+      return computeGageRR(preparedGage.study.observations, resolveGageTolerance({ gageTolMode, gageTolValue, lsl, usl, lslOn, uslOn })).totalGageRR;
+    } catch {
+      return null; // 状态栏显示未运行；页面负责给出具体原因
+    }
+  }, [requestedRealGage, preparedGage, gageTolMode, gageTolValue, lsl, usl, lslOn, uslOn]);
 
   // 全局快捷键（菜单栏标注的 Ctrl+S/O/P/N;输入控件聚焦时不劫持）
   useEffect(() => {

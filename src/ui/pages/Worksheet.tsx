@@ -160,12 +160,14 @@ function EditableCell({ value, dp, pending = false, label, gridRow, gridCol, ari
 }
 
 /** 双击或按 Enter/F2 重命名测量列；hover/focus 显示删除按钮。 */
-function HeaderCell({ name, canDelete, gridCol, ariaColIndex, active, onActivate, onRequestFocus, onNavigate, onRename, onDelete }: {
+function HeaderCell({ name, canDelete, gridCol, ariaColIndex, fixedWidth = false, active, onActivate, onRequestFocus, onNavigate, onRename, onDelete }: {
   name: string;
   canDelete: boolean;
   gridCol: number;
   /** 列虚拟化时的真实 aria-colindex(UI-05);全列渲染时省略 */
   ariaColIndex?: number;
+  /** 列虚拟化定宽列(UI-05 复审 P3):长列名以省略号截断,全名由 title 给出 */
+  fixedWidth?: boolean;
   active: boolean;
   onActivate: (row: number, col: number) => void;
   onRequestFocus: (row: number, col: number) => void;
@@ -240,7 +242,7 @@ function HeaderCell({ name, canDelete, gridCol, ariaColIndex, active, onActivate
       aria-label={`列 ${name}；按 Enter 或 F2 重命名${canDelete ? '，按 Delete 删除列' : ''}`}
       className="col-head"
       style={{ ...thName, cursor: 'cell', ...(canDelete ? { padding: '5px 28px 5px 12px' } : {}) }}
-      title="双击或按 Enter/F2 重命名此列"
+      title={`${name} · 双击或按 Enter/F2 重命名此列`}
       onDoubleClick={beginEditing}
       onFocus={() => onActivate(0, gridCol)}
       onKeyDown={(event) => {
@@ -258,8 +260,8 @@ function HeaderCell({ name, canDelete, gridCol, ariaColIndex, active, onActivate
         onNavigate(event, 0, gridCol);
       }}
     >
-      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-        <span>{name}</span>
+      <span style={{ display: fixedWidth ? 'flex' : 'inline-flex', alignItems: 'center', gap: 6 }}>
+        <span style={fixedWidth ? { overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0 } : undefined}>{name}</span>
         {canDelete && (
           <button
             type="button"
@@ -308,9 +310,12 @@ export function Worksheet() {
   const [viewH, setViewH] = useState(600);
   const [scrollLeft, setScrollLeft] = useState(0);
   const [viewW, setViewW] = useState(1200);
-  // 渲染列 = 数值列 + 文本列 + 派生列(≤5);宽表按单元格总数提前启用行窗口(UI-05)
-  const renderColumnEstimate = M.colNames.length + textCols.length;
-  const virtual = M.k > VIRTUAL_AT || M.k * Math.min(renderColumnEstimate, COL_VIRTUAL_AT) > VIRTUAL_CELLS;
+  // 渲染列 = 数值列 + 文本列 + 派生列(均值/离散 2 列 + 演示附加 3 列),与下方 cols.length 同口径。
+  // 宽表(已开列窗口)才按「行数 × 窗口列数」提前启用行窗口(UI-05);≤40 列的窄表仍只按
+  // 行数 >400 判定,DOM 与旧版一致(复审 P3:400×31、301×40 不再被开行窗口)。
+  const renderColumnCount = M.colNames.length + textCols.length + (rowSpc ? 2 : 0) + (M.isDemo ? 3 : 0);
+  const virtual = M.k > VIRTUAL_AT
+    || (renderColumnCount > COL_VIRTUAL_AT && M.k * COL_VIRTUAL_AT > VIRTUAL_CELLS);
   useEffect(() => {
     const el = scrollRef.current;
     if (el) setViewH(el.clientHeight || 600);
@@ -513,13 +518,28 @@ export function Worksheet() {
     ? Math.max(colStart + 1, Math.min(colEnd, logicalActiveGridCol))
     : logicalActiveGridCol;
 
+  // UI-05 复审 P2:焦点只响应「新的」键盘焦点请求。行/列窗口变化(鼠标、触控板滚动)引起的
+  // 重跑不得再调用带滚动的 focus()——否则会抢走 grid 外输入框的焦点,并把横向/纵向滚动拉回。
+  // 唯一例外:grid 内原焦点格随滚动被卸载、焦点落回 body 时,无滚动地移到钳制后的停靠格,
+  // 键盘用户不致失去位置。
+  const handledGridFocusRequest = useRef(0);
+  const lastGridFocus = useRef<HTMLElement | null>(null);
   useLayoutEffect(() => {
-    if (gridFocusRequest === 0) return;
     const root = scrollRef.current;
-    const target = root?.querySelector<HTMLElement>(
+    if (!root) return;
+    const target = root.querySelector<HTMLElement>(
       `[data-grid-row="${activeGridRow}"][data-grid-col="${activeGridCol}"]`,
     );
-    target?.focus();
+    if (gridFocusRequest !== handledGridFocusRequest.current) {
+      handledGridFocusRequest.current = gridFocusRequest;
+      target?.focus();
+      return;
+    }
+    const lost = lastGridFocus.current;
+    const active = document.activeElement;
+    if (target && lost && !lost.isConnected && (active == null || active === document.body)) {
+      target.focus({ preventScroll: true });
+    }
   }, [activeGridRow, activeGridCol, gridFocusRequest, winStart, winEnd, colStart, colEnd]);
 
   const sources: Array<{ icon: IconName; iconColor: string; label: string; status: string; statusColor: string; onClick: () => void }> = [
@@ -534,6 +554,12 @@ export function Worksheet() {
       <div style={{ background: '#fff', border: '1px solid #d7dbe1', borderRadius: 5, overflow: 'hidden', boxShadow: '0 1px 2px rgba(20,30,50,0.04)' }}>
         <div
           ref={scrollRef}
+          onFocus={(event) => { lastGridFocus.current = event.target instanceof HTMLElement ? event.target : null; }}
+          onBlur={(event) => {
+            // 焦点移到 grid 外的真实元素 = 用户主动离开;relatedTarget 为空(格被卸载/点空白)保留记录
+            const next = event.relatedTarget;
+            if (next instanceof Node && !event.currentTarget.contains(next)) lastGridFocus.current = null;
+          }}
           onScroll={virtual || colVirtual
             ? (e) => {
                 const target = e.target as HTMLDivElement;
@@ -594,6 +620,7 @@ export function Worksheet() {
                       canDelete={M.n > 1}
                       gridCol={gridCol}
                       ariaColIndex={ariaColIndex(gridCol)}
+                      fixedWidth={colVirtual}
                       active={activeGridRow === 0 && activeGridCol === gridCol}
                       onActivate={activateGridCell}
                       onRequestFocus={requestGridFocus}
@@ -610,6 +637,7 @@ export function Worksheet() {
                       data-grid-row={0}
                       data-grid-col={gridCol}
                       aria-colindex={ariaColIndex(gridCol)}
+                      title={c.name}
                       style={thName}
                       onFocus={() => activateGridCell(0, gridCol)}
                       onKeyDown={(event) => navigateGrid(event, 0, gridCol)}
@@ -663,6 +691,7 @@ export function Worksheet() {
                         data-grid-row={gridRow}
                         data-grid-col={gridCol}
                         aria-colindex={ariaColIndex(gridCol)}
+                        title={textCols[ref.index].values[i] || undefined}
                         style={txtCell}
                         onFocus={() => activateGridCell(gridRow, gridCol)}
                         onKeyDown={(event) => navigateGrid(event, gridRow, gridCol)}
@@ -704,6 +733,7 @@ export function Worksheet() {
                       data-grid-row={gridRow}
                       data-grid-col={gridCol}
                       aria-colindex={ariaColIndex(gridCol)}
+                      title={demoValues?.[demoIndex] || undefined}
                       style={txtCell}
                       onFocus={() => activateGridCell(gridRow, gridCol)}
                       onKeyDown={(event) => navigateGrid(event, gridRow, gridCol)}
