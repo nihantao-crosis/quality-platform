@@ -19,14 +19,44 @@ export function withinSigmaLabel(M: VarModel): string {
   return M.hasSubgroups ? 'σ 组内 (R̄/d₂)' : 'σ 组内 (MR̄/d₂(2))';
 }
 
-export function formatSpecLimit(value: number | null, missingLabel: string, digits?: number): string {
-  if (value == null) return missingLabel;
-  return digits == null ? String(value) : nf(value, digits);
+/**
+ * 规格限数值的唯一显示口径(PLATFORM-07):按用户输入原值展示,绝不定点四舍五入。
+ * 此前 HTML/Word/PPT/文本报告用 toFixed(2),把 9.995/10.005 印成 9.99/10.01、
+ * 平面度 USL=0.002 印成 0.00,与同一次导出的 Excel 和实际参与 Cp/Cpk 计算的规格不一致。
+ * - 先按 12 位有效数字去掉浮点残差(0.1+0.2 → 0.3),再取最短十进制表示;
+ * - 不足 2 位小数时补到 2 位(沿用报告既有形制「25.00 / 25.20」),多于 2 位时原样保留;
+ * - 极小/极大值按 JS 最短表示走科学计数,不截断。
+ * 五种出口(HTML/Word/PPT/文本/Excel)共用本函数,同一次导出只有一组规格数字。 */
+export function specLimitText(value: number): string {
+  if (!Number.isFinite(value)) return String(value);
+  const cleaned = Number(value.toPrecision(12));
+  const text = String(cleaned);
+  if (/e/i.test(text)) return text;
+  const dot = text.indexOf('.');
+  const decimals = dot < 0 ? 0 : text.length - dot - 1;
+  return decimals >= 2 ? text : cleaned.toFixed(2);
 }
 
-/** 关闭的一侧明确显示为“—”，不能把 store 中暂存的数值冒充启用规格。 */
-export function reportSpecText(spec: SpecLimits, digits?: number): string {
-  return `${formatSpecLimit(spec.lsl, '无下限', digits)} / ${formatSpecLimit(spec.tgt, '—', digits)} / ${formatSpecLimit(spec.usl, '无上限', digits)}`;
+export function formatSpecLimit(value: number | null, missingLabel: string): string {
+  return value == null ? missingLabel : specLimitText(value);
+}
+
+/** 关闭的一侧明确显示为“—”，不能把 store 中暂存的数值冒充启用规格。
+ * 不接受位数参数:规格是用户录入的图纸值,任何出口都不得另按定点位数改写(PLATFORM-07)。 */
+export function reportSpecText(spec: SpecLimits): string {
+  return `${formatSpecLimit(spec.lsl, '无下限')} / ${formatSpecLimit(spec.tgt, '—')} / ${formatSpecLimit(spec.usl, '无上限')}`;
+}
+
+/**
+ * 报告层统计量的显示口径(PLATFORM-14):常规量级沿用固定 digits 位小数(与页面 nf 同形制);
+ * 当 toFixed(digits) 只剩不到 2 位有效数字(|v| < 10^(1−digits))时,改按有效数字输出——
+ * 此前 SI 单位记录的小量级数据(电容 4.7e-9 F、形位误差 1e-5 m)的均值/σ/控制限/原始观测
+ * 被印成 0.0000,与同表 Cpk=28.66 自相矛盾。有效位数 = clamp(digits, 3, 6)。
+ * 0、非有限值与常规量级的输出与 nf 逐字相同(既有报告形制不变)。
+ */
+export function reportNum(value: number, digits: number): string {
+  if (!Number.isFinite(value) || value === 0 || Math.abs(value) >= 10 ** (1 - digits)) return nf(value, digits);
+  return value.toPrecision(Math.max(3, Math.min(digits, 6)));
 }
 
 /** 判异明细行硬上限(v1.42.4 审计 P2):Excel/HTML 是"完整明细"格式,但对抗性数据

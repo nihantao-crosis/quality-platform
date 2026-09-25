@@ -1642,7 +1642,18 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
       patch.gageOperatorName = s.gageOperatorName ?? cats[1]?.name ?? null;
     }
     useApp.setState(patch);
+    // STORE-05:回放工作表快照即切换数据集(importMatrix 以 preserveSpecs 跳过了 suggestSpec)。
+    // 快照自带规格的记录(能力/量具)已由上方 patch 固化，不得再被记忆覆盖(Capability.tsx 不变式);
+    // 快照不含规格的记录(ANOVA/DOE/描述性统计等)必须按目标数据集的规格记忆恢复(无记忆则 μ±4σ 建议,
+    // 与 loadRecent 同口径)，否则上一数据集的 LSL/USL 会泄漏给能力页与仪表盘 Cpk 卡。
+    // 注:这三类快照不固化 spc/cap 角色,importMatrix 已把能力口径复位为「沿用 SPC 角色」,
+    // SPC 键与能力键解析到同一特性;将来若快照开始固化角色，需改用/并用 syncSpecForCapabilityMeasurement。
+    const snapshotCarriesSpecs = s.lsl !== undefined || s.usl !== undefined || s.tgt !== undefined;
+    let specResynced = true;
     if (a.kind === 'spc' && usesWorksheet) syncSpecForActiveMeasurement();
+    else if (usesWorksheet && restoredEmbeddedData && !snapshotCarriesSpecs) {
+      specResynced = syncSpecForActiveMeasurement() != null;
+    }
     if (s.hypoTab) useApp.getState().setHypoTab(s.hypoTab);
     if (s.paretoView) useApp.getState().setParetoView(s.paretoView);
     if (s.doeView) useApp.getState().setDoeView(s.doeView);
@@ -1653,6 +1664,12 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
     if (a.kind === 'spc' && (s.snapshotVersion == null || s.snapshotVersion < 6)
       && (legacySpcType === 'xbar-r' || legacySpcType === 'xbar-s' || legacySpcType === 'i-mr')) {
       const message = '该旧版 SPC 记录已按修正后的 Minitab 控制图常数（d₂/d₃/c₄）重新计算；控制限可能与旧版有轻微差异';
+      restoreNotices.push(message);
+      sessionLog(`${message} · ${a.title}`);
+    }
+    if (!specResynced) {
+      // 测量角色有歧义(宽表未指定测量列)时无法按特性取规格记忆:明确提示，不静默沿用上一数据集的规格
+      const message = `已切换到数据集「${useData.getState().model.name}」，但测量角色未确定，规格限未按该数据集恢复；请在过程能力页核对 LSL/USL`;
       restoreNotices.push(message);
       sessionLog(`${message} · ${a.title}`);
     }

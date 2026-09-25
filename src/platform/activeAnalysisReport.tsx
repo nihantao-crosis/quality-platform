@@ -4,7 +4,7 @@
  * 这里刻意复用页面相同的角色解析与 core 结构化报告，导出不得重新猜变量或回落演示。
  */
 import { renderToStaticMarkup } from 'react-dom/server';
-import { MAX_SPC_REPORT_DETAIL_ROWS, timestampText, reportSpecDetailText } from './reportLabels';
+import { MAX_SPC_REPORT_DETAIL_ROWS, timestampText, reportSpecDetailText, reportNum } from './reportLabels';
 import {
   analyzeFactorial,
   analyzeDoe,
@@ -40,7 +40,6 @@ import {
   GAGE_TOLERANCE,
   gageStudyData,
   mainEffectMeans,
-  nf,
   isDoeAnalysisColumn,
   linearRegression,
   oneSampleT,
@@ -99,7 +98,8 @@ const fmt = (value: number | null | undefined, digits = 4) => {
   if (value == null || Number.isNaN(value)) return '—';
   if (value === Infinity) return '+∞';
   if (value === -Infinity) return '−∞';
-  return nf(value, digits);
+  // PLATFORM-14:小量级(|v| < 10^(1−digits))改按有效数字,不再把均值/σ/控制限/原始观测印成 0.0000
+  return reportNum(value, digits);
 };
 
 /**

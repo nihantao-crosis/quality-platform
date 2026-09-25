@@ -214,7 +214,8 @@ describe('通用导出单双侧规格', () => {
     expect(labels).toContain('USL');
 
     const summary = XLSX.utils.sheet_to_json<(string | number)[]>(workbook.Sheets['统计摘要'], { header: 1 });
-    expect(summary).toContainEqual(['规格 LSL / 目标 / USL', '无下限 / 25 / 25.2']);
+    // PLATFORM-07:Excel 与 HTML/Word/PPT/文本同一规格格式化口径(specLimitText)
+    expect(summary).toContainEqual(['规格 LSL / 目标 / USL', '无下限 / 25.00 / 25.20']);
     expect(summary.find((row) => row[0] === 'Cp')?.[1]).toBe('—');
     expect(summary.find((row) => row[0] === 'Cpk')?.[1]).toBeCloseTo(expected.cpk, 3);
   });
@@ -245,7 +246,7 @@ describe('通用导出单双侧规格', () => {
     expectSingleSidedCapabilityRows(wordXml, 'word', expected.cpm!);
     expectSingleSidedCapabilityRows(slideXml, 'ppt', expected.cpm!);
     const summary = XLSX.utils.sheet_to_json<(string | number)[]>(workbook.Sheets['统计摘要'], { header: 1 });
-    expect(summary).toContainEqual(['规格 LSL / 目标 / USL', '24.8 / 25 / 无上限']);
+    expect(summary).toContainEqual(['规格 LSL / 目标 / USL', '24.80 / 25.00 / 无上限']);
     expect(summary.find((row) => row[0] === 'Cpk')?.[1]).toBeCloseTo(expected.cpk, 3);
   });
 

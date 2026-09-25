@@ -15,9 +15,9 @@
  */
 import { Fragment } from 'react';
 import type { ReactNode } from 'react';
-import { decimateUniform, minitabQuantile } from '../../core';
+import { dataDecimals, decimateUniform, minitabQuantile } from '../../core';
 import type { GagePanelData, GageResult, GageComponentKey } from '../../core';
-import type { ChartTokens } from '../tokens';
+import { tickFormatter, type ChartTokens } from '../tokens';
 import { Ln, Svg, Txt } from './primitives';
 
 interface PanelProps {
@@ -135,8 +135,50 @@ function rangeOf(values: number[]): [number, number] {
   return [lo, hi];
 }
 
-const fmtTick = (value: number, span: number) =>
-  span >= 100 ? value.toFixed(0) : span >= 1 ? value.toFixed(2) : value.toFixed(3);
+/**
+ * 控制限标签的小数位(UI-07)。此前刻度与 UCL/CL/LCL 标签共用「按量程取 0/2/3 位定点」:
+ * 0.07±1e-4 的量具数据 UCL=X̿=LCL 印成同一个数、R̄ 印成 0.000、刻度重复并出现 -0.000;
+ * 万级数据 span≥100 走 0 位,R 图/Xbar 图的三条限值同样塌成同一个整数。
+ * 现在:刻度走 tokens.tickFormatter(位数按相邻刻度间距推导、整轴统一记数法、去负零);
+ * 限值标签与刻度共用同一格式化器(记数法一致),位数下限取三者最大:
+ *  ① Minitab 口径(批次720-A3):均值图 = 数据位数+1,极差图 = 数据位数;
+ *  ② UCL−LCL 保留 2 位有效数字(三条限值两两可分);
+ *  ③ 中心线保留 3 位有效数字(R̄ 不塌成 0)。
+ * 注意(ControlChart 闭环教训):cl/ucl/lcl **不进入刻度位数推导**,只以差值/自身量级给下限;
+ * UCL−LCL 相对量级 <1e-9、中心线相对轴跨度 <1e-6 视为浮点噪声不计,避免被 1e-15 级差异逼到 15 位。
+ * 精确 0 的限值标签印「0」(工厂 Minitab 形制「LCL=0」)。
+ */
+export function gageLimitDecimals(
+  limits: { cl: number; ucl: number; lcl: number },
+  axisSpan: number,
+  roleDecimals: number,
+): number {
+  let dp = Math.max(0, roleDecimals);
+  const spread = Math.abs(limits.ucl - limits.lcl);
+  const magnitude = Math.max(Math.abs(limits.ucl), Math.abs(limits.lcl), Math.abs(limits.cl));
+  if (Number.isFinite(spread) && spread > 0 && spread > magnitude * 1e-9) {
+    dp = Math.max(dp, 1 - Math.floor(Math.log10(spread)));
+  }
+  const center = Math.abs(limits.cl);
+  if (Number.isFinite(center) && center > 0 && !(center < Math.abs(axisSpan) * 1e-6)) {
+    dp = Math.max(dp, 2 - Math.floor(Math.log10(center)));
+  }
+  return Math.min(20, dp);
+}
+
+/** 原始观测的数据位数(values[operator][part][trial],与 dataDecimals 同一 3 位上限);
+ * 逐格取最大并在触顶时提前返回,20 万行不做 flat 拷贝。 */
+function panelDataDecimals(panel: GagePanelData): number {
+  const cap = 3;
+  let dp = 0;
+  for (const operator of panel.values) {
+    for (const part of operator) {
+      dp = Math.max(dp, dataDecimals(part, cap));
+      if (dp >= cap) return dp;
+    }
+  }
+  return dp;
+}
 
 /** 公共框架:白底、边框、水平网格与 Y 刻度;可带 Minitab 式 y 轴标题(旋转)与 x 轴标题。 */
 function panelFrame(T: ChartTokens, yLo: number, yHi: number, yTitle?: string, xTitle?: string) {
@@ -160,14 +202,14 @@ function panelFrame(T: ChartTokens, yLo: number, yHi: number, yTitle?: string, x
   const coordinateSpan = hiCoordinate - loCoordinate;
   const YCoordinate = (value: number) => M.t + ((hiCoordinate - value) / coordinateSpan) * ph;
   const Y = (value: number) => YCoordinate(value / coordinateScale);
-  const grid = Array.from({ length: 5 }, (_, index) => {
-    const coordinate = loCoordinate + (coordinateSpan * index) / 4;
-    const value = restoreGageAxisCoordinate(coordinate, coordinateScale);
-    return {
-      y: YCoordinate(coordinate),
-      label: fmtTick(value, restoreGageAxisCoordinate(coordinateSpan, coordinateScale)),
-    };
-  });
+  const gridCoordinates = Array.from({ length: 5 }, (_, index) => loCoordinate + (coordinateSpan * index) / 4);
+  const tickValues = gridCoordinates.map((coordinate) => restoreGageAxisCoordinate(coordinate, coordinateScale));
+  // UI-07:全部面板的纵轴刻度统一走 tickFormatter(按相邻刻度间距推位数、去重、去负零)
+  const tickText = tickFormatter(tickValues.filter(Number.isFinite));
+  const grid = gridCoordinates.map((coordinate, index) => ({
+    y: YCoordinate(coordinate),
+    label: tickText(tickValues[index]),
+  }));
   const frame = (
     <Fragment>
       <rect x={0} y={0} width={PW} height={PH} fill={MTB.panelBg} />
@@ -186,7 +228,7 @@ function panelFrame(T: ChartTokens, yLo: number, yHi: number, yTitle?: string, x
       {xTitle && <Txt x={M.l + pw / 2} y={PH - 8} s={xTitle} fill={T.text} size={9.5} anchor="middle" />}
     </Fragment>
   );
-  return { pw, ph, Y, frame };
+  return { pw, ph, Y, frame, tickValues };
 }
 
 /** Minitab 式 ⊕ 均值标记:空心圆+十字。 */
@@ -288,6 +330,7 @@ function groupedControlBody(
   series: number[][],
   limits: { cl: number; ucl: number; lcl: number } | null,
   limitLabel: string,
+  roleDecimals: number,
   yTitle?: string,
   xTitle?: string,
 ): ReactNode {
@@ -298,8 +341,17 @@ function groupedControlBody(
   const dataLo = Math.min(flatLo, limits ? limits.lcl : Infinity);
   const dataHi = Math.max(flatHi, limits ? limits.ucl : -Infinity);
   const [yLo, yHi] = niceRange(dataLo, dataHi);
-  const { pw, Y, frame } = panelFrame(T, yLo, yHi, yTitle, xTitle);
+  const { pw, Y, frame, tickValues } = panelFrame(T, yLo, yHi, yTitle, xTitle);
   const total = o * p;
+  // 限值标签与刻度同一记数法;位数下限见 gageLimitDecimals(不把 cl/ucl/lcl 混进刻度推导)
+  const finiteTicks = tickValues.filter(Number.isFinite);
+  const limitText = limits
+    ? (() => {
+      const axisSpan = finiteTicks.length > 1 ? finiteTicks[finiteTicks.length - 1] - finiteTicks[0] : 0;
+      const fmt = tickFormatter(finiteTicks, gageLimitDecimals(limits, axisSpan, roleDecimals));
+      return (value: number) => (value === 0 ? '0' : fmt(value));
+    })()
+    : null;
   const X = (index: number) => M.l + ((index + 0.5) / total) * pw;
   const points: string[] = [];
   flat.forEach((value, index) => points.push(`${X(index)},${Y(value)}`));
@@ -312,9 +364,9 @@ function groupedControlBody(
   return (
     <Fragment>
       {frame}
-      {limits && limitLine(limits.ucl, `UCL=${fmtTick(limits.ucl, yHi - yLo)}`, MTB.limit, true)}
-      {limits && limitLine(limits.cl, `${limitLabel}=${fmtTick(limits.cl, yHi - yLo)}`, MTB.center, true)}
-      {limits && limits.lcl !== limits.ucl && limitLine(limits.lcl, `LCL=${fmtTick(limits.lcl, yHi - yLo)}`, MTB.limit, true)}
+      {limits && limitText && limitLine(limits.ucl, `UCL=${limitText(limits.ucl)}`, MTB.limit, true)}
+      {limits && limitText && limitLine(limits.cl, `${limitLabel}=${limitText(limits.cl)}`, MTB.center, true)}
+      {limits && limitText && limits.lcl !== limits.ucl && limitLine(limits.lcl, `LCL=${limitText(limits.lcl)}`, MTB.limit, true)}
       <polyline points={points.join(' ')} fill="none" stroke={MTB.data} strokeWidth={1.1} />
       {flat.map((value, index) => (
         <circle key={index} cx={X(index)} cy={Y(value)} r={2.6} fill={MTB.data} />
@@ -569,19 +621,21 @@ export function GageReportFigure({
   gaugeName = '', reportBy = '', studyDate = '', toleranceText = '', otherText = '',
 }: GageReportFigureProps) {
   const single = panel.operatorCount === 1;
+  // Minitab 限值标签口径:均值图 = 数据位数+1,极差图 = 数据位数(与 SPC ControlChart 同源)
+  const dataDp = panelDataDecimals(panel);
   const cells: Array<{ title: string; body: ReactNode }> = single
     ? [
       { title: '变异分量', body: componentsBody(T, cats) },
-      { title: 'R 控制图', body: groupedControlBody(T, panel, operatorLabels, panel.cellRanges, panel.rLimits, 'R̄', '样本极差', partName) },
+      { title: 'R 控制图', body: groupedControlBody(T, panel, operatorLabels, panel.cellRanges, panel.rLimits, 'R̄', dataDp, '样本极差', partName) },
       { title: `${valueName} × ${partName}`, body: byPartBody(T, panel, partLabels, partName) },
-      { title: 'XBar 控制图', body: groupedControlBody(T, panel, operatorLabels, panel.cellMeans, panel.xbarLimits, 'X̿', '样本均值', partName) },
+      { title: 'XBar 控制图', body: groupedControlBody(T, panel, operatorLabels, panel.cellMeans, panel.xbarLimits, 'X̿', dataDp + 1, '样本均值', partName) },
     ]
     : [
       { title: '变异分量', body: componentsBody(T, cats) },
       { title: `${valueName} × ${partName}`, body: byPartBody(T, panel, partLabels, partName) },
-      { title: `R 控制图（按 ${operatorName}）`, body: groupedControlBody(T, panel, operatorLabels, panel.cellRanges, panel.rLimits, 'R̄', '样本极差', partName) },
+      { title: `R 控制图（按 ${operatorName}）`, body: groupedControlBody(T, panel, operatorLabels, panel.cellRanges, panel.rLimits, 'R̄', dataDp, '样本极差', partName) },
       { title: `${valueName} × ${operatorName}`, body: byOperatorBody(T, panel, operatorLabels, operatorName) },
-      { title: `Xbar 控制图（按 ${operatorName}）`, body: groupedControlBody(T, panel, operatorLabels, panel.cellMeans, panel.xbarLimits, 'X̿', '样本均值', partName) },
+      { title: `Xbar 控制图（按 ${operatorName}）`, body: groupedControlBody(T, panel, operatorLabels, panel.cellMeans, panel.xbarLimits, 'X̿', dataDp + 1, '样本均值', partName) },
       { title: `${partName} 乘 ${operatorName} 交互作用`, body: interactionBody(T, panel, partLabels, operatorLabels, partName) },
     ];
   const rows = single ? 2 : 3;
@@ -619,11 +673,11 @@ export function GageReportFigure({
 // ---------- 兼容导出:独立面板组件(测试与旧调用方使用) ----------
 
 export function GageRPanel({ T, panel, operatorLabels }: PanelProps) {
-  return <Svg w={PW} h={PH}>{groupedControlBody(T, panel, operatorLabels, panel.cellRanges, panel.rLimits, 'R̄')}</Svg>;
+  return <Svg w={PW} h={PH}>{groupedControlBody(T, panel, operatorLabels, panel.cellRanges, panel.rLimits, 'R̄', panelDataDecimals(panel))}</Svg>;
 }
 
 export function GageXbarPanel({ T, panel, operatorLabels }: PanelProps) {
-  return <Svg w={PW} h={PH}>{groupedControlBody(T, panel, operatorLabels, panel.cellMeans, panel.xbarLimits, 'X̿')}</Svg>;
+  return <Svg w={PW} h={PH}>{groupedControlBody(T, panel, operatorLabels, panel.cellMeans, panel.xbarLimits, 'X̿', panelDataDecimals(panel) + 1)}</Svg>;
 }
 
 export function GageByPartPanel({ T, panel, partLabels }: PanelProps) {

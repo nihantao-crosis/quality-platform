@@ -14,7 +14,34 @@ import {
   MAX_XLSX_SHEET_ROWS, MAX_XLSX_VIOLATION_ROWS, tableTruncationNote, violationTruncationNote,
 } from './reportLabels';
 
-type XlsxCell = string | number;
+type XlsxCell = string | number | XLSX.CellObject;
+
+/** 定点小数串(nf/toFixed 的产物):不接受前导零整数(如编号「007」)与正号,以免把标识符改写成数。 */
+const FIXED_NUMBER_TEXT = /^-?(?:0|[1-9]\d*)(?:\.(\d+))?$/;
+/** 有效数字串(reportNum/toPrecision 的指数分支,如「4.703e-9」)。 */
+const EXP_NUMBER_TEXT = /^-?\d(?:\.(\d+))?e[+-]\d+$/;
+
+/**
+ * 专项载荷单元格 → Excel 单元格(PLATFORM-15)。专项载荷里的统计量与原始观测是
+ * 按报告显示口径格式化好的数字串,直接交给 aoa_to_sheet 会写成 t:'s'「以文本形式存储的数字」:
+ * SUM/AVERAGE 失效、排序按字典序、粘贴到 Minitab 成文本列。此处把**整格就是一个数**的
+ * 字符串写成数值单元格(t:'n'),并用单元格数字格式保留原显示位数(如 25.0000、4.703E-09)。
+ * 超过 15 位的纯整数串(长编号/条码)无法无损转成 double,保持文本;带小数部分的串是
+ * 报告按显示位数格式化的统计量/观测(如 fmt(v,10) 的「123456.0000000000」),一律写数值。
+ */
+export function xlsxTableCell(value: string | number): XlsxCell {
+  if (typeof value !== 'string') return value;
+  const fixed = FIXED_NUMBER_TEXT.exec(value);
+  const exp = fixed ? null : EXP_NUMBER_TEXT.exec(value);
+  if (!fixed && !exp) return value;
+  if (fixed && fixed[1] === undefined && value.replace(/^-/, '').length > 15) return value;
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return value;
+  const v = numeric === 0 ? 0 : numeric; // 「-0.0000」不写负零
+  const decimals = (fixed ?? exp)![1]?.length ?? 0;
+  if (exp) return { t: 'n', v, z: `0${decimals > 0 ? `.${'0'.repeat(decimals)}` : ''}E+00` };
+  return decimals > 0 ? { t: 'n', v, z: `0.${'0'.repeat(decimals)}` } : { t: 'n', v };
+}
 
 /**
  * 专项报告单表装配：生产始终使用 Excel 硬上限；可注入更小预算仅用于
@@ -56,7 +83,7 @@ export function buildAnalysisXlsxRows(
     let shownRows = 0;
     // 循环追加而非 push(...spread):13 万行以上的专项表会超出实参上限直接 RangeError。
     for (const row of table.rows) {
-      if (!append(row)) break;
+      if (!append(row.map(xlsxTableCell))) break;
       shownRows++;
     }
     if (totalRows > shownRows) {
@@ -97,7 +124,8 @@ export function buildXlsx(
     const dataRows = M.subs.map((s) => [
       s.i,
       ...s.vals,
-      ...(showDerived ? [Number(nf(s.mean, 4)), Number(nf(assessment?.family === 'xbar-s' ? M.svals[s.i - 1] : s.range, 4))] : []),
+      // PLATFORM-14:写原始 double,不得 Number(nf(·,4)) 预先四舍五入(小量级数据会被写成数值 0)
+      ...(showDerived ? [s.mean, assessment?.family === 'xbar-s' ? M.svals[s.i - 1] : s.range] : []),
     ]);
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([head, ...dataRows]), '数据');
   };
@@ -128,23 +156,28 @@ export function buildXlsx(
     cpk: cap.cpk, verdict: cap.verdict, adP: xlsxAd ? xlsxAd.p : null, n: C.all.length,
     spcViolations: capSpcCount,
   }) : null;
-  const capRows: (string | number)[][] = cap && capAssessment ? [
-    ['Cp', cap.cp == null ? '—' : Number(nf(cap.cp, 3))],
-    ['Cpk', Number(nf(cap.cpk, 3))],
-    ['Pp', cap.pp == null ? '—' : Number(nf(cap.pp, 3))],
-    ['Ppk', Number(nf(cap.ppk, 3))],
-    ['Cpm', cap.cpm == null ? '—' : Number(nf(cap.cpm, 3))],
-    ['CPU', cap.cpu == null ? '—' : Number(nf(cap.cpu, 3))],
-    ['CPL', cap.cpl == null ? '—' : Number(nf(cap.cpl, 3))],
-    ['Z.bench', Number(nf(cap.zBench, 3))],
-    ['西格玛水平', Number(nf(cap.sigmaLevel, 3))],
+  // PLATFORM-14:能力指数写原始 double,显示位数交给单元格数字格式(0.000),不预先四舍五入。
+  // 非有限值(σ=0 时的 Z.bench 等)仍交 aoa_to_sheet 的原生分支写成错误单元格,与旧行为一致。
+  const index3 = (value: number | null): XlsxCell => (
+    value == null ? '—' : Number.isFinite(value) ? { t: 'n', v: value, z: '0.000' } : value
+  );
+  const capRows: XlsxCell[][] = cap && capAssessment ? [
+    ['Cp', index3(cap.cp)],
+    ['Cpk', index3(cap.cpk)],
+    ['Pp', index3(cap.pp)],
+    ['Ppk', index3(cap.ppk)],
+    ['Cpm', index3(cap.cpm)],
+    ['CPU', index3(cap.cpu)],
+    ['CPL', index3(cap.cpl)],
+    ['Z.bench', index3(cap.zBench)],
+    ['西格玛水平', index3(cap.sigmaLevel)],
     ['PPM 合计（整体）', Math.round(cap.ppm.overall.total)],
     ['判定', capAssessment.status],
   ] : [
     ['过程能力', `未运行: ${capError}`],
   ];
   // 稳定性是独立于能力计算的 SPC 结果；即使 σ=0/规格闸门使能力未运行，也必须保留这一行。
-  const stabilityRow: (string | number)[] = [
+  const stabilityRow: XlsxCell[] = [
     '过程稳定性',
     assessment.chartPointCount > 0
       ? `各图累计 ${assessment.chartPointCount} 个失控点（${assessment.locationLabel} 图 ${assessment.locationPoints} 个 + ${assessment.dispersionLabel} 图 ${assessment.dispersionPoints} 个）；去重${assessment.analysisUnitLabel} ${assessment.uniqueAnalysisUnitCount} 个${cap ? '——能力值仅描述当前样本' : '——过程不稳定'}`
@@ -154,7 +187,7 @@ export function buildXlsx(
   const adRow = adEval.result
     ? `A²*=${nf(adEval.result.a2star, 3)}, P ${adEval.result.p < 0.005 ? '< 0.005' : '= ' + nf(adEval.result.p, 3)} → ${adEval.result.normal ? '未拒绝正态假设' : '显著偏离正态'}`
     : (adEval.unavailableReason ?? '不可判定');
-  const summary: (string | number)[][] = [
+  const summary: XlsxCell[][] = [
     ['质量分析平台 · 统计摘要', ''],
     // 与其余三格式同口径的元数据(双审 P3:此前 Excel 缺生成时间/正态性/CPU/CPL,四格式均缺版本号)
     ['软件版本', appVersionText()],
@@ -168,9 +201,10 @@ export function buildXlsx(
       ['SPC 观测数 N', M.all.length],
     ] : []),
     [C !== M ? '能力观测数 N' : '观测数 N', C.all.length],
-    ['能力口径均值', Number(nf(C.oMean, 5))],
-    [withinSigmaLabel(C), Number(nf(C.sigmaWithin, 5))],
-    ['σ 整体', Number(nf(C.oSd, 5))],
+    // PLATFORM-14:原始 double(小量级数据不再被 Number(nf(·,5)) 写成数值 0)
+    ['能力口径均值', C.oMean],
+    [withinSigmaLabel(C), C.sigmaWithin],
+    ['σ 整体', C.oSd],
     ['', ''],
     ['规格 LSL / 目标 / USL', reportSpecText(spec)],
     ['正态性 (Anderson-Darling)', adRow],

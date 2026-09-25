@@ -9,7 +9,7 @@ import {
   assessCapability, evaluateAndersonDarling,
   type SpcAssessment, type SpecLimits, type CapabilityInputOptions,
 } from '../core';
-import { localDateStamp, sanitizeFileName, timestampText, appVersionText, reportContextText, reportSpecText, withinSigmaLabel } from './reportLabels';
+import { localDateStamp, sanitizeFileName, timestampText, appVersionText, reportContextText, reportSpecText, reportNum, withinSigmaLabel } from './reportLabels';
 
 const OPS = ['张伟', '李娜', '王强'];
 const SHIFTS = ['早班', '中班', '夜班'];
@@ -56,14 +56,14 @@ export function textReport(
   L.push('【数据集】');
   L.push(`  ${reportContextText(M, C)} · SPC 列: ${M.colNames.join(' / ')}`);
   if (C !== M) L.push(`  能力列: ${C.colNames.join(' / ')}`);
-  L.push(`  能力口径均值 ${nf(C.oMean, 4)} · σ整体 ${nf(C.oSd, 4)} · ${withinSigmaLabel(C)} ${nf(C.sigmaWithin, 4)}`);
+  L.push(`  能力口径均值 ${reportNum(C.oMean, 4)} · σ整体 ${reportNum(C.oSd, 4)} · ${withinSigmaLabel(C)} ${reportNum(C.sigmaWithin, 4)}`);
   L.push('');
   if (M.hasSubgroups) {
     L.push('【SPC · X̄-R 控制图】');
-    L.push(`  中心线 X̄ ${nf(M.xbarbar, 3)} · UCL ${nf(M.uclX, 3)} · LCL ${nf(M.lclX, 3)} · R̄ ${nf(M.rbar, 3)}`);
+    L.push(`  中心线 X̄ ${reportNum(M.xbarbar, 3)} · UCL ${reportNum(M.uclX, 3)} · LCL ${reportNum(M.lclX, 3)} · R̄ ${reportNum(M.rbar, 3)}`);
   } else {
     L.push('【SPC · I-MR 控制图】');
-    L.push(`  中心线 X̄ ${nf(M.indMean, 3)} · UCL ${nf(M.iUcl, 3)} · LCL ${nf(M.iLcl, 3)} · MR̄ ${nf(M.mrbar, 3)}`);
+    L.push(`  中心线 X̄ ${reportNum(M.indMean, 3)} · UCL ${reportNum(M.iUcl, 3)} · LCL ${reportNum(M.iLcl, 3)} · MR̄ ${reportNum(M.mrbar, 3)}`);
   }
   L.push('  ' + assessment.verdictLine);
   if (violationEvents.length > 0) {
@@ -72,7 +72,7 @@ export function textReport(
     violationEvents.forEach((v) => L.push(`    · ${v.chart} 图 · 点 ${v.i + 1} · 准则 ${v.rule} · ${v.desc}`));
   }
   L.push('');
-  L.push('【过程能力】规格 ' + reportSpecText(spec, 2));
+  L.push('【过程能力】规格 ' + reportSpecText(spec));
   if (!cap) {
     L.push(`  能力分析未运行: ${capError}`);
   } else {

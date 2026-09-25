@@ -12,7 +12,7 @@ import { Histogram } from '../ui/charts/Histogram';
 import { NormalProbPlot } from '../ui/charts/NormalProbPlot';
 import type { ReportSpec } from './report';
 import { analysisTableTotalRows, analysisUsesWorksheet, type AnalysisReportPayload } from './analysisReportModel';
-import { MAX_REPORT_TABLE_ROWS, tableTruncationNote, escapeHtml, timestampText, appVersionText, reportContextText, reportSpecText, withinSigmaLabel, MAX_HTML_VIOLATION_ROWS, violationTruncationNote } from './reportLabels';
+import { MAX_REPORT_TABLE_ROWS, tableTruncationNote, escapeHtml, timestampText, appVersionText, reportContextText, reportSpecText, reportNum, withinSigmaLabel, MAX_HTML_VIOLATION_ROWS, violationTruncationNote } from './reportLabels';
 
 const CSS = `
   body { font-family: "IBM Plex Sans", "PingFang SC", "Microsoft YaHei", sans-serif; color: #2a333f; margin: 0; padding: 32px 40px; }
@@ -170,10 +170,10 @@ export function buildHtmlReport(
 <table>
   <tr><th>能力口径均值</th><th>${withinSigmaLabel(C)}</th><th>σ 整体</th><th>规格 LSL / 目标 / USL</th><th>能力判定</th></tr>
   <tr>
-    <td class="num">${nf(C.oMean, 4)}</td>
-    <td class="num">${nf(C.sigmaWithin, 4)}</td>
-    <td class="num">${nf(C.oSd, 4)}</td>
-    <td class="num">${reportSpecText(spec, 2)}</td>
+    <td class="num">${reportNum(C.oMean, 4)}</td>
+    <td class="num">${reportNum(C.sigmaWithin, 4)}</td>
+    <td class="num">${reportNum(C.oSd, 4)}</td>
+    <td class="num">${reportSpecText(spec)}</td>
     <td><span class="${verdictCls}">${verdictTxt}</span>${cap ? `（Cpk ${nf(cap.cpk, 2)}）` : ''}</td>
   </tr>
 </table>

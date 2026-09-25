@@ -17,7 +17,7 @@ import { NormalProbPlot } from '../ui/charts/NormalProbPlot';
 import type { ReportSpec } from './report';
 import { svgMarkupToPng } from './svgToPng';
 import { analysisTableTotalRows, analysisUsesWorksheet, type AnalysisReportPayload, type AnalysisReportTable } from './analysisReportModel';
-import { MAX_REPORT_TABLE_ROWS, MAX_XLSX_VIOLATION_ROWS, tableTruncationNote, timestampText, appVersionText, reportContextText, reportSpecText, withinSigmaLabel } from './reportLabels';
+import { MAX_REPORT_TABLE_ROWS, MAX_XLSX_VIOLATION_ROWS, tableTruncationNote, timestampText, appVersionText, reportContextText, reportSpecText, reportNum, withinSigmaLabel } from './reportLabels';
 
 /** OOXML 文本合法化(双审 P2):XML 1.0 禁止绝大多数控制字符,原样写入会产出
  * Word/PowerPoint 拒绝打开的损坏文件而界面仍提示导出成功。导入文本(粘贴/CSV)
@@ -275,8 +275,8 @@ export async function buildDocx(
     p(`工作表 ${M.name} · ${reportContextText(M, C)} · 生成于 ${timestampText()} · v${appVersionText()}`),
     h('1. 过程概览'),
     kvTable([
-      ['能力口径均值', nf(C.oMean, 4)], [withinSigmaLabel(C), nf(C.sigmaWithin, 4)], ['σ 整体', nf(C.oSd, 4)],
-      ['规格', reportSpecText(spec, 2)], ['判定', cap ? `${capabilityVerdictText(C, cap, capSpcCount)} (Cpk ${nf(cap.cpk, 2)})` : '能力分析未运行'],
+      ['能力口径均值', reportNum(C.oMean, 4)], [withinSigmaLabel(C), reportNum(C.sigmaWithin, 4)], ['σ 整体', reportNum(C.oSd, 4)],
+      ['规格', reportSpecText(spec)], ['判定', cap ? `${capabilityVerdictText(C, cap, capSpcCount)} (Cpk ${nf(cap.cpk, 2)})` : '能力分析未运行'],
     ]),
     h(`2. SPC 控制图（${assessment.locationLabel}-${assessment.dispersionLabel}）与判异`),
     p(`${assessment.locationLabel} 控制图（位置）`),
@@ -439,7 +439,7 @@ export async function buildPptx(
       { text: '能力口径均值', options: { bold: true } }, { text: withinSigmaLabel(C), options: { bold: true } },
       { text: 'σ 整体', options: { bold: true } }, { text: '规格 L/T/U', options: { bold: true } }, { text: '判定', options: { bold: true } },
     ],
-    [nf(C.oMean, 4), nf(C.sigmaWithin, 4), nf(C.oSd, 4), reportSpecText(spec, 2), cap ? `${capabilityVerdictText(C, cap, capSpcCount)} (Cpk ${nf(cap.cpk, 2)})` : '能力分析未运行'].map((t) => ({ text: t })),
+    [reportNum(C.oMean, 4), reportNum(C.sigmaWithin, 4), reportNum(C.oSd, 4), reportSpecText(spec), cap ? `${capabilityVerdictText(C, cap, capSpcCount)} (Cpk ${nf(cap.cpk, 2)})` : '能力分析未运行'].map((t) => ({ text: t })),
   ];
   s2.addTable(rows, { x: 0.6, y: 1.1, w: 12.1, fontSize: 14, border: { type: 'solid', color: 'E2E5EA', pt: 1 }, fill: { color: 'FFFFFF' } });
   if (cap) {
