@@ -777,7 +777,7 @@ export function resumeTightenedInspection(status: SwitchStatus, meta?: AqlTransi
  *
  * 单条记录的自洽校验(normalizeAqlBatchRecord / normalizeAqlTransitionRecord)挡不住「记录原样
  * 保留、只改 state/switchingScore/tightenedRejections/sinceSwitch」或「删掉中间拒收记录」这类
- * 篡改。本审计从当前检验序列的初始态出发，用与录入完全相同的生产函数(recordInspection /
+ * 篡改。本审计从每个检验序列(含已结束的序列，G24a A1)的初始态出发，用与录入完全相同的生产函数(recordInspection /
  * setSwitchConditions / restoreNormalInspection / resumeTightenedInspection)逐条重放记录链，
  * 要求每条记录的检验后状态/转移得分与重放一致，且顶层状态字段等于重放终态。
  *
@@ -1085,8 +1085,140 @@ const asReplay = (result: SwitchStatus | string): BatchReplay | string => (
   typeof result === 'string' ? result : { status: result, v132Scoring: false }
 );
 
+/** 一个序列重放过程中直接推定(未随候选携带)的计数。 */
+interface SequenceReplayCounts {
+  implicit: number;
+  resets: number;
+  tightenedResets: number;
+  v132Scores: number;
+}
+
+interface SequenceReplay extends SequenceReplayCounts {
+  /** 严格重放的候选集合；null 表示 legacy 序列全程未到达可确定的转移点(计数未知)。 */
+  known: ReplayCandidate[] | null;
+  /** 最后一条记录的检验后状态/得分(序列无记录时为 null)。 */
+  previousState: InspState | null;
+  previousScore: number | null;
+  /** legacy 未知段内同表初检批的结果(供终态转移窗口末尾核对)。 */
+  unknownOriginalResults: BatchResult[];
+}
+
 /**
- * 从当前检验序列的记录链重放状态，并与顶层 state/suspended/switchingScore/tightenedRejections/
+ * 逐条重放 ledger[begin, end)(同一检验序列的全部记录)。当前序列与已结束的序列共用(G24a A1):
+ * 非 legacy 序列从初始正常检验严格重放，任何断点都不一致；legacy 序列从首个可确定的转移点起严格重放，
+ * 之前只核对状态连续与逐对得分，并在第一条转移记录之前把无法解释的断点推定为 v1.32/33 参数重置
+ * (从加严/暂停重置者另计，须醒目警示)。返回不一致说明或重放结果。
+ */
+function replayLedgerSequence(
+  ledger: readonly AqlLedgerRecord[],
+  begin: number,
+  end: number,
+  sequenceId: string,
+  gapAllowedBefore: (index: number) => boolean,
+): SequenceReplay | string {
+  const legacySequence = sequenceId === AQL_LEGACY_SEQUENCE_ID;
+  const fresh = () => replaySeed(sequenceId);
+  const seed = (start: SwitchStatus): ReplayCandidate[] => [
+    { status: start, implicit: 0, resets: 0, tightenedResets: 0, v132Scores: 0 },
+  ];
+  const counts: SequenceReplayCounts = { implicit: 0, resets: 0, tightenedResets: 0, v132Scores: 0 };
+  let known: ReplayCandidate[] | null = legacySequence ? null : seed(fresh());
+  let previousState: InspState | null = null;
+  let previousScore: number | null = null;
+  const unknownOriginalResults: BatchResult[] = [];
+
+  for (let index = begin; index < end; index += 1) {
+    const record = ledger[index];
+    const gapAllowed = gapAllowedBefore(index);
+    // v1.32/33 的 legacy 序列：改检验水平/AQL(哪怕随后改回)会不留痕地重置为初始正常检验。
+    const legacyResetAllowed = legacySequence && gapAllowed && record.stateBefore === 'normal';
+    // v1.32 严一档计分只可能出现在 legacy 序列、且早于第一条(v1.43 才有的)转移记录的批次上。
+    const v132ScoringAllowed = legacySequence && gapAllowed;
+
+    if (!known) {
+      // legacy 未知段：只核对状态连续与逐对得分，遇到第一个可确定的转移点后转入严格重放。
+      if (previousState !== null && record.stateBefore !== previousState) {
+        const moved = gapAllowed
+          ? implicitManualTransition(replaySeedAt(sequenceId, previousState, previousScore ?? 0), record.stateBefore)
+          : null;
+        if (moved) {
+          counts.implicit += 1;
+          known = seed(moved);
+        } else if (legacyResetAllowed) {
+          counts.resets += 1;
+          if (previousState === 'tightened') counts.tightenedResets += 1;
+          known = seed(fresh());
+        } else {
+          return `记录链在${STATE_LABEL[previousState]}→${STATE_LABEL[record.stateBefore]}之间断开，`
+            + '不是正式规则允许的人工转移或缺少状态转移记录';
+        }
+      } else if (isAqlTransitionRecord(record)) {
+        if (previousScore !== null && record.switchingScoreBefore !== previousScore) {
+          return `${ledgerLabel(record)}的转移前得分 ${record.switchingScoreBefore} 与上一条记录的得分 ${previousScore} 不连续`;
+        }
+        known = seed(record.action === 'resume-tightened'
+          // 解除暂停记录本身说明此前处于加严暂停态(暂停门槛为累计 5 批不接收)。
+          ? replaySeed(sequenceId, { state: 'tightened', suspended: true, tightenedRejections: 5 })
+          : replaySeedAt(sequenceId, record.stateBefore, record.switchingScoreBefore));
+      } else {
+        // 逐对得分核对：以上一条记录的得分(或人工往返/参数重置清零后的 0)为起点单批重放。
+        // 换入/换出加严取决于跨批窗口(未知段无从得知)，其得分已由单条校验固定为 0。
+        const windowDependent = (record.stateBefore === 'normal' && record.stateAfter === 'tightened')
+          || (record.stateBefore === 'tightened' && record.stateAfter === 'normal');
+        const bases = previousScore === null || windowDependent ? [] : [...new Set([previousScore, 0])];
+        const replays = bases.map((base) => replayBatchRecord(
+          replaySeedAt(sequenceId, record.stateBefore, base), record, v132ScoringAllowed,
+        ));
+        const explained = replays.filter((result): result is BatchReplay => typeof result !== 'string');
+        if (replays.length > 0 && explained.length === 0) {
+          return `${replays[0] as string}(与上一条记录的得分不连续)`;
+        }
+        if (explained.length > 0 && explained.every((result) => result.v132Scoring)) counts.v132Scores += 1;
+        previousState = record.stateAfter;
+        previousScore = record.switchingScoreAfter;
+        if (record.stateBefore !== record.stateAfter) {
+          // 换表记录之后计数全部确定：得分取记录值(已逐对核对)，窗口与加严累计清零。
+          known = seed(replaySeedAt(sequenceId, record.stateAfter, record.switchingScoreAfter));
+        } else if (record.originalInspection) {
+          unknownOriginalResults.push(record.result);
+        }
+        continue;
+      }
+    }
+
+    // 严格重放(计数已知)：候选集合逐条推进，任何候选都无法解释该记录即不一致。
+    const expanded = known.flatMap((candidate) => expandCandidates(
+      candidate, gapAllowed, legacySequence && gapAllowed ? fresh() : null,
+    ));
+    const survivors: ReplayCandidate[] = [];
+    let failure: string | null = null;
+    for (const candidate of expanded) {
+      const base = candidate.status;
+      let next: BatchReplay | string;
+      if (base.suspended && !(isAqlTransitionRecord(record) && record.action === 'resume-tightened')) {
+        next = `${ledgerLabel(record)}发生在抽样检验暂停期间，正式流程不允许`;
+      } else if (base.state !== record.stateBefore) {
+        next = `${ledgerLabel(record)}的检验前状态为${STATE_LABEL[record.stateBefore]}，`
+          + `按记录链重放应为${STATE_LABEL[base.state]}${gapAllowed ? '' : '(缺少状态转移记录)'}`;
+      } else {
+        next = isAqlBatchRecord(record)
+          ? replayBatchRecord(base, record, v132ScoringAllowed)
+          : asReplay(replayTransitionRecord(base, record));
+      }
+      if (typeof next === 'string') failure ??= next;
+      else survivors.push({ ...candidate, status: next.status, v132Scores: candidate.v132Scores + (next.v132Scoring ? 1 : 0) });
+    }
+    if (survivors.length === 0) return failure ?? `${ledgerLabel(record)}无法按正式转移规则重放`;
+    known = dedupeCandidates(survivors);
+    previousState = record.stateAfter;
+    previousScore = record.switchingScoreAfter;
+  }
+  return { ...counts, known, previousState, previousScore, unknownOriginalResults };
+}
+
+/**
+ * 逐个序列重放整本账本(已结束的序列同样重放，其终态须能落在未暂停的正常检验)，再以当前检验序列的
+ * 重放终态与顶层 state/suspended/switchingScore/tightenedRejections/
  * sinceSwitch(严格序列另含 history)交叉核对。project.ts 在所有外来入口(localStorage、.qproj、
  * 跨窗口写入)对 mismatch fail-closed 拒绝并保留原文；专项报告据 status/notes 标记旧账本。
  */
@@ -1123,25 +1255,43 @@ export function auditAqlLedger(value: Partial<SwitchStatus> | null | undefined):
     return mismatch('当前检验序列之后仍有其他序列的记录，记录顺序或序列号被改动');
   }
 
-  // 2) v1.34 起只有正常检验(未暂停)才能更改检验水平/AQL 开启新序列：每个已结束序列的末条记录
-  //    必须停在正常检验(旧账本允许未留痕的放宽→正常)。legacy 序列末尾可能有 v1.32/33 的不留痕
-  //    参数重置，无法核对，只作标记。
+  // 2) 已结束的序列与当前序列用同一套引擎逐条重放(G24a A1:此前只看末条 stateAfter,序列内部的断点、
+  //    被删的中间记录与 legacy 推定重置都会随「正常检验下改一次 AQL」静默消失)。
+  //    v1.34 起只有正常检验(未暂停)才能更改检验水平/AQL 开启新序列：重放终态(含旧账本允许的未留痕
+  //    放宽→正常、legacy 序列的 v1.32/33 参数重置推定)必须能落在未暂停的正常检验。
+  const tally = (counts: SequenceReplayCounts) => {
+    implicitCount += counts.implicit;
+    legacyResetCount += counts.resets;
+    tightenedResetCount += counts.tightenedResets;
+    v132ScoreCount += counts.v132Scores;
+  };
   for (const sequenceId of order) {
     if (sequenceId === status.sequenceId) continue;
+    const begin = ledger.findIndex((record) => record.sequenceId === sequenceId);
     const endIndex = lastIndexOf.get(sequenceId)!;
+    const replayed = replayLedgerSequence(ledger, begin, endIndex + 1, sequenceId, gapAllowedBefore);
+    if (typeof replayed === 'string') return mismatch(replayed);
+    tally(replayed);
+    const legacyEnded = sequenceId === AQL_LEGACY_SEQUENCE_ID;
+    const endGapAllowed = gapAllowedBefore(endIndex + 1);
     const endState = ledger[endIndex].stateAfter;
-    if (endState === 'normal') continue;
-    if (sequenceId === AQL_LEGACY_SEQUENCE_ID) {
+    if (replayed.known) {
+      const endings = replayed.known
+        .flatMap((candidate) => expandCandidates(
+          candidate, endGapAllowed, legacyEnded && endGapAllowed ? replaySeed(sequenceId) : null,
+        ))
+        .filter((candidate) => candidate.status.state === 'normal' && !candidate.status.suspended)
+        .sort((x, y) => candidateCost(x) - candidateCost(y));
+      if (endings.length === 0) {
+        return mismatch(`检验序列 ${sequenceId} 在${STATE_LABEL[endState]}检验中结束，正式流程只允许在正常检验时更改检验水平/AQL`);
+      }
+      tally(endings[0]);
+    } else if (endState !== 'normal') {
+      // legacy 序列全程没有可确定的转移点：末尾停在加严/放宽却已开启新序列，只能是 v1.32/33 改参数的
+      // 不留痕重置(加严须独立警示)。
       legacyResetCount += 1;
-      // 旧序列停在加严中却已开启新序列：只能是旧版本改参数把加严不留痕地重置了。
       if (endState === 'tightened') tightenedResetCount += 1;
-      continue;
     }
-    if (endState === 'reduced' && gapAllowedBefore(endIndex + 1)) {
-      implicitCount += 1;
-      continue;
-    }
-    return mismatch(`检验序列 ${sequenceId} 在${STATE_LABEL[endState]}检验中结束，正式流程只允许在正常检验时更改检验水平/AQL`);
   }
 
   const start = ledger.findIndex((record) => record.sequenceId === status.sequenceId);
@@ -1150,100 +1300,12 @@ export function auditAqlLedger(value: Partial<SwitchStatus> | null | undefined):
   const fresh = () => replaySeed(status.sequenceId);
 
   // 3) 重放当前序列。known=null 表示 legacy 序列尚未到达第一个可确定的转移点(计数未知)。
-  const seed = (start: SwitchStatus): ReplayCandidate[] => [
-    { status: start, implicit: 0, resets: 0, tightenedResets: 0, v132Scores: 0 },
-  ];
-  let known: ReplayCandidate[] | null = legacySequence ? null : seed(fresh());
-  let previousState: InspState | null = null;
-  let previousScore: number | null = null;
-  const unknownOriginalResults: BatchResult[] = [];
-
-  for (let offset = 0; offset < current.length; offset += 1) {
-    const record = current[offset];
-    const gapAllowed = gapAllowedBefore(start + offset);
-    // v1.32/33 的 legacy 序列：改检验水平/AQL(哪怕随后改回)会不留痕地重置为初始正常检验。
-    const legacyResetAllowed = legacySequence && gapAllowed && record.stateBefore === 'normal';
-    // v1.32 严一档计分只可能出现在 legacy 序列、且早于第一条(v1.43 才有的)转移记录的批次上。
-    const v132ScoringAllowed = legacySequence && gapAllowed;
-
-    if (!known) {
-      // legacy 未知段：只核对状态连续与逐对得分，遇到第一个可确定的转移点后转入严格重放。
-      if (previousState !== null && record.stateBefore !== previousState) {
-        const moved = gapAllowed
-          ? implicitManualTransition(replaySeedAt(status.sequenceId, previousState, previousScore ?? 0), record.stateBefore)
-          : null;
-        if (moved) {
-          implicitCount += 1;
-          known = seed(moved);
-        } else if (legacyResetAllowed) {
-          legacyResetCount += 1;
-          if (previousState === 'tightened') tightenedResetCount += 1;
-          known = seed(fresh());
-        } else {
-          return mismatch(`记录链在${STATE_LABEL[previousState]}→${STATE_LABEL[record.stateBefore]}之间断开，`
-            + '不是正式规则允许的人工转移或缺少状态转移记录');
-        }
-      } else if (isAqlTransitionRecord(record)) {
-        if (previousScore !== null && record.switchingScoreBefore !== previousScore) {
-          return mismatch(`${ledgerLabel(record)}的转移前得分 ${record.switchingScoreBefore} 与上一条记录的得分 ${previousScore} 不连续`);
-        }
-        known = seed(record.action === 'resume-tightened'
-          // 解除暂停记录本身说明此前处于加严暂停态(暂停门槛为累计 5 批不接收)。
-          ? replaySeed(status.sequenceId, { state: 'tightened', suspended: true, tightenedRejections: 5 })
-          : replaySeedAt(status.sequenceId, record.stateBefore, record.switchingScoreBefore));
-      } else {
-        // 逐对得分核对：以上一条记录的得分(或人工往返/参数重置清零后的 0)为起点单批重放。
-        // 换入/换出加严取决于跨批窗口(未知段无从得知)，其得分已由单条校验固定为 0。
-        const windowDependent = (record.stateBefore === 'normal' && record.stateAfter === 'tightened')
-          || (record.stateBefore === 'tightened' && record.stateAfter === 'normal');
-        const bases = previousScore === null || windowDependent ? [] : [...new Set([previousScore, 0])];
-        const replays = bases.map((base) => replayBatchRecord(
-          replaySeedAt(status.sequenceId, record.stateBefore, base), record, v132ScoringAllowed,
-        ));
-        const explained = replays.filter((result): result is BatchReplay => typeof result !== 'string');
-        if (replays.length > 0 && explained.length === 0) {
-          return mismatch(`${replays[0] as string}(与上一条记录的得分不连续)`);
-        }
-        if (explained.length > 0 && explained.every((result) => result.v132Scoring)) v132ScoreCount += 1;
-        previousState = record.stateAfter;
-        previousScore = record.switchingScoreAfter;
-        if (record.stateBefore !== record.stateAfter) {
-          // 换表记录之后计数全部确定：得分取记录值(已逐对核对)，窗口与加严累计清零。
-          known = seed(replaySeedAt(status.sequenceId, record.stateAfter, record.switchingScoreAfter));
-        } else if (record.originalInspection) {
-          unknownOriginalResults.push(record.result);
-        }
-        continue;
-      }
-    }
-
-    // 严格重放(计数已知)：候选集合逐条推进，任何候选都无法解释该记录即不一致。
-    const expanded = known.flatMap((candidate) => expandCandidates(
-      candidate, gapAllowed, legacySequence && gapAllowed ? fresh() : null,
-    ));
-    const survivors: ReplayCandidate[] = [];
-    let failure: string | null = null;
-    for (const candidate of expanded) {
-      const base = candidate.status;
-      let next: BatchReplay | string;
-      if (base.suspended && !(isAqlTransitionRecord(record) && record.action === 'resume-tightened')) {
-        next = `${ledgerLabel(record)}发生在抽样检验暂停期间，正式流程不允许`;
-      } else if (base.state !== record.stateBefore) {
-        next = `${ledgerLabel(record)}的检验前状态为${STATE_LABEL[record.stateBefore]}，`
-          + `按记录链重放应为${STATE_LABEL[base.state]}${gapAllowed ? '' : '(缺少状态转移记录)'}`;
-      } else {
-        next = isAqlBatchRecord(record)
-          ? replayBatchRecord(base, record, v132ScoringAllowed)
-          : asReplay(replayTransitionRecord(base, record));
-      }
-      if (typeof next === 'string') failure ??= next;
-      else survivors.push({ ...candidate, status: next.status, v132Scores: candidate.v132Scores + (next.v132Scoring ? 1 : 0) });
-    }
-    if (survivors.length === 0) return mismatch(failure ?? `${ledgerLabel(record)}无法按正式转移规则重放`);
-    known = dedupeCandidates(survivors);
-    previousState = record.stateAfter;
-    previousScore = record.switchingScoreAfter;
-  }
+  const replayedCurrent = replayLedgerSequence(
+    ledger, start === -1 ? ledger.length : start, ledger.length, status.sequenceId, gapAllowedBefore,
+  );
+  if (typeof replayedCurrent === 'string') return mismatch(replayedCurrent);
+  tally(replayedCurrent);
+  const { known, previousState, previousScore, unknownOriginalResults } = replayedCurrent;
 
   // 4) 顶层状态级字段与重放终态交叉核对。
   if (known) {
@@ -1303,7 +1365,8 @@ export function auditAqlLedger(value: Partial<SwitchStatus> | null | undefined):
     }
   }
 
-  if (legacySequence) {
+  // 已结束的 legacy 序列同样只能部分核对：兼容说明不能随新序列开启而消失(G24a A1)。
+  if (legacySequence || order.includes(AQL_LEGACY_SEQUENCE_ID)) {
     notes.push('历史账本(v1.34 之前建立的检验序列)没有序列号，只能从首个可确定的状态转移点起重放核对');
   }
   if (legacyResetCount > 0) {

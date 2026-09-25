@@ -268,8 +268,10 @@ const PREFS_EMBEDDED_AQL_KEYS = ['aqlLot', 'aqlLevel', 'aqlAQL', 'aqlRegime', 'a
  * fix2609m B2:旧 prefs 内嵌账本入口必须与独立账本同口径 fail-closed。
  * getItem 在「原文」上核对(migrate 会先归一化旧账本，归一化会静默丢弃坏记录、改写状态)，
  * 结果交给 merge:没有独立账本而要回退到 prefs 内嵌账本时，校验不过即进入受限状态。
+ * G24a A2:getItem 只记下原文与校验结论；原文进隔离区推迟到 merge 确定要回退到内嵌账本时——
+ * 独立账本有效时内嵌子集根本不会被使用，把它写进隔离区只是噪声并挤占配额。
  */
-let prefsEmbeddedAqlFault: { preserved: boolean; subset: Record<string, unknown> } | null = null;
+let prefsEmbeddedAqlFault: { name: string; raw: string; detail: string; subset: Record<string, unknown> } | null = null;
 /**
  * 受限状态期间 prefs 仍会因其他偏好改动而重写(partialize 不含 AQL 字段)。为让坏证据留在原位置、
  * 下次启动继续受限(与损坏的独立账本「原文不被覆盖」同一语义)，重写 prefs 时把原 AQL 字段原样带上。
@@ -301,6 +303,14 @@ function prefsEmbeddedAqlValidationError(subset: Record<string, unknown>): strin
   });
 }
 
+/** 去掉 state 中旧内嵌 AQL 字段后的 prefs 信封(仅用于其余偏好的校验)。 */
+function withoutEmbeddedAql(parsed: unknown): unknown {
+  const envelope = parsed as { state: Record<string, unknown> };
+  const state = { ...envelope.state };
+  for (const key of PREFS_EMBEDDED_AQL_KEYS) delete state[key];
+  return { ...envelope, state };
+}
+
 const safePrefsStorage = {
   getItem(name: string): string | null {
     let raw: string | null = null;
@@ -312,12 +322,11 @@ const safePrefsStorage = {
       const embeddedAql = prefsEmbeddedAqlSubset(parsed);
       const embeddedAqlDetail = embeddedAql ? prefsEmbeddedAqlValidationError(embeddedAql) : null;
       if (embeddedAql && embeddedAqlDetail) {
-        prefsEmbeddedAqlFault = {
-          subset: embeddedAql,
-          preserved: preserveCorruptStore(name, raw, `旧偏好内嵌的 AQL 责任账本未通过校验：${embeddedAqlDetail}`),
-        };
+        prefsEmbeddedAqlFault = { name, raw, detail: embeddedAqlDetail, subset: embeddedAql };
       }
-      const detail = projectStoreValidationError(name, parsed);
+      // 内嵌 AQL 子集校验不过时由上面的结论(merge 决定是否隔离)负责；其余偏好仍按原口径核对，
+      // 避免同一 AQL 子集经整份 prefs 校验在这里提前写隔离区。
+      const detail = projectStoreValidationError(name, prefsEmbeddedAqlFault ? withoutEmbeddedAql(parsed) : parsed);
       if (!detail) return raw;
       if (!preserveCorruptStore(name, raw, detail)) protectedCorruptPrefs = { raw, detail };
       else protectedCorruptPrefs = null;
@@ -888,9 +897,14 @@ export const useApp = create<AppState>()(persist((set, get) => ({
     // 校验(getItem 已在原文上核对)。不通过 → 与独立账本损坏同样受限：原文已进隔离区、回退当前默认值、
     // 绝不 normalizeSwitchStatus(p.aqlSwitch) 后当作有效账本使用或写入 qp-aql-state-v1。
     if (!aqlStateCorrupt && !separateAql && prefsEmbeddedAqlFault) {
+      const { name, raw, subset } = prefsEmbeddedAqlFault;
+      const detail = `旧偏好内嵌的 AQL 责任账本未通过校验：${prefsEmbeddedAqlFault.detail}`;
       aqlStateCorrupt = true;
-      aqlStateQuarantined = prefsEmbeddedAqlFault.preserved;
-      prefsEmbeddedAqlHold = prefsEmbeddedAqlFault.subset;
+      // G24a A2:确定要回退到内嵌账本时才把 prefs 原文写进隔离区。
+      aqlStateQuarantined = preserveCorruptStore(name, raw, detail);
+      // 隔离失败：与整份 prefs 损坏同一语义——写保护原文，下次写 prefs 前先重试隔离。
+      if (!aqlStateQuarantined && !protectedCorruptPrefs) protectedCorruptPrefs = { raw, detail };
+      prefsEmbeddedAqlHold = subset;
     }
     // 独立账本一旦损坏就保留原文等待导入备份/显式清除，绝不能退回旧 prefs 后覆写坏证据。
     const aql = aqlStateCorrupt ? current : separateAql ?? p;
