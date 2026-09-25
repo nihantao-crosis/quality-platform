@@ -21,6 +21,30 @@ const SHIFTS = ['早班', '中班', '夜班'];
 const VIRTUAL_AT = 400;
 const ROW_H = 30;
 const OVERSCAN = 12;
+/**
+ * UI-05 列虚拟化:导入闸门放行到 5000 列 / 200 万格,只按行开窗时 400×5000 会一次创建
+ * 200 万个 EditableCell。渲染列数超过 COL_VIRTUAL_AT 时改为定宽列(table-layout: fixed),
+ * 只渲染水平可视窗口 ±COL_OVERSCAN 列,两侧用等宽占位格撑开横向滚动条。
+ * 行虚拟化同时按「行数 × 渲染列数」判定:宽表即使 ≤400 行也不一次渲染全部行。
+ */
+const COL_VIRTUAL_AT = 40;
+const COL_W = 120;
+const COL_OVERSCAN = 4;
+const ROWNUM_W = 44;
+const VIRTUAL_CELLS = 12_000;
+
+/** 横向窗口 [start, end)(显示列序,不含行号槽)。 */
+function worksheetColumnWindow(columnCount: number, scrollLeft: number, viewWidth: number): { start: number; end: number } {
+  if (columnCount <= COL_VIRTUAL_AT) return { start: 0, end: columnCount };
+  const span = Math.ceil(Math.max(viewWidth, COL_W) / COL_W) + 1;
+  // 数据集换成更窄的宽表时,残留的 scrollLeft 可能越过末列:钳到最后一屏,绝不渲染空窗口
+  const first = Math.min(Math.floor(Math.max(0, scrollLeft) / COL_W), Math.max(0, columnCount - span));
+  const last = first + span;
+  return {
+    start: Math.max(0, Math.min(columnCount, first - COL_OVERSCAN)),
+    end: Math.max(0, Math.min(columnCount, last + COL_OVERSCAN)),
+  };
+}
 
 const numCell: CSSProperties = { border: '1px solid #eef0f3', padding: '5px 12px', textAlign: 'right', color: '#2a333f' };
 const txtCell: CSSProperties = { border: '1px solid #eef0f3', padding: '5px 12px', textAlign: 'left', color: '#5b6472' };
@@ -28,13 +52,15 @@ const thTop: CSSProperties = { position: 'sticky', top: 0, zIndex: 2, background
 const thName: CSSProperties = { position: 'sticky', top: 26, zIndex: 2, background: '#f4f6f8', border: '1px solid #e2e5ea', color: '#2a333f', fontWeight: 600, padding: '5px 12px', textAlign: 'left', fontFamily: 'IBM Plex Sans' };
 
 /** 双击或从键盘进入编辑态的测量单元格。dp=按数据量级自适应的小数位;悬停显示全精度原值。 */
-function EditableCell({ value, dp, pending = false, label, gridRow, gridCol, active, onActivate, onNavigate, onCommit }: {
+function EditableCell({ value, dp, pending = false, label, gridRow, gridCol, ariaColIndex, active, onActivate, onNavigate, onCommit }: {
   value: number;
   dp: number;
   pending?: boolean;
   label: string;
   gridRow: number;
   gridCol: number;
+  /** 列虚拟化时的真实 aria-colindex(UI-05);全列渲染时省略 */
+  ariaColIndex?: number;
   active: boolean;
   onActivate: (row: number, col: number) => void;
   onNavigate: (event: React.KeyboardEvent<HTMLElement>, row: number, col: number) => void;
@@ -75,6 +101,7 @@ function EditableCell({ value, dp, pending = false, label, gridRow, gridCol, act
         tabIndex={active ? 0 : -1}
         data-grid-row={gridRow}
         data-grid-col={gridCol}
+        aria-colindex={ariaColIndex}
         className="worksheet-editable-cell"
         aria-label={`${label}${pending ? '，待录入' : `，当前值 ${value}`}；按 Enter 或 F2 编辑`}
         style={{ ...numCell, cursor: 'cell', ...(pending ? { background: '#fff6e6', color: '#a46b00', fontFamily: 'IBM Plex Sans', fontStyle: 'italic' } : {}) }}
@@ -100,6 +127,7 @@ function EditableCell({ value, dp, pending = false, label, gridRow, gridCol, act
       role="gridcell"
       data-grid-row={gridRow}
       data-grid-col={gridCol}
+      aria-colindex={ariaColIndex}
       aria-label={`${label}，编辑中`}
       style={{ ...numCell, padding: 0 }}
     >
@@ -132,10 +160,12 @@ function EditableCell({ value, dp, pending = false, label, gridRow, gridCol, act
 }
 
 /** 双击或按 Enter/F2 重命名测量列；hover/focus 显示删除按钮。 */
-function HeaderCell({ name, canDelete, gridCol, active, onActivate, onRequestFocus, onNavigate, onRename, onDelete }: {
+function HeaderCell({ name, canDelete, gridCol, ariaColIndex, active, onActivate, onRequestFocus, onNavigate, onRename, onDelete }: {
   name: string;
   canDelete: boolean;
   gridCol: number;
+  /** 列虚拟化时的真实 aria-colindex(UI-05);全列渲染时省略 */
+  ariaColIndex?: number;
   active: boolean;
   onActivate: (row: number, col: number) => void;
   onRequestFocus: (row: number, col: number) => void;
@@ -170,6 +200,7 @@ function HeaderCell({ name, canDelete, gridCol, active, onActivate, onRequestFoc
         role="columnheader"
         data-grid-row={0}
         data-grid-col={gridCol}
+        aria-colindex={ariaColIndex}
         aria-label={`列 ${name}，重命名中`}
         style={{ ...thName, padding: 0 }}
       >
@@ -204,6 +235,7 @@ function HeaderCell({ name, canDelete, gridCol, active, onActivate, onRequestFoc
       tabIndex={active ? 0 : -1}
       data-grid-row={0}
       data-grid-col={gridCol}
+      aria-colindex={ariaColIndex}
       aria-keyshortcuts={canDelete ? 'Enter F2 Delete' : 'Enter F2'}
       aria-label={`列 ${name}；按 Enter 或 F2 重命名${canDelete ? '，按 Delete 删除列' : ''}`}
       className="col-head"
@@ -274,7 +306,11 @@ export function Worksheet() {
   const worksheetRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewH, setViewH] = useState(600);
-  const virtual = useData((s) => s.model.k) > VIRTUAL_AT;
+  const [scrollLeft, setScrollLeft] = useState(0);
+  const [viewW, setViewW] = useState(1200);
+  // 渲染列 = 数值列 + 文本列 + 派生列(≤5);宽表按单元格总数提前启用行窗口(UI-05)
+  const renderColumnEstimate = M.colNames.length + textCols.length;
+  const virtual = M.k > VIRTUAL_AT || M.k * Math.min(renderColumnEstimate, COL_VIRTUAL_AT) > VIRTUAL_CELLS;
   useEffect(() => {
     const el = scrollRef.current;
     if (el) setViewH(el.clientHeight || 600);
@@ -383,6 +419,23 @@ export function Worksheet() {
   ];
   extra.forEach(([suffix, name], i) => cols.push({ code: `S${i + 1}${suffix}`, name, measIdx: null }));
 
+  // 列窗口(UI-05):显示列序 [colStart, colEnd);非宽表时即全部列,渲染与旧版一致。
+  const colVirtual = cols.length > COL_VIRTUAL_AT;
+  const { start: colStart, end: colEnd } = worksheetColumnWindow(cols.length, scrollLeft, viewW);
+  const visibleColIndices = Array.from({ length: colEnd - colStart }, (_, offset) => colStart + offset);
+  const leftSpacerW = colStart * COL_W;
+  const rightSpacerW = (cols.length - colEnd) * COL_W;
+  const renderedCellCount = 1 + (leftSpacerW > 0 ? 1 : 0) + visibleColIndices.length + (rightSpacerW > 0 ? 1 : 0);
+  /** 列窗口下每个渲染格都带真实 aria-colindex(行号槽为 1),辅助技术按全表列号播报。 */
+  const ariaColIndex = (gridCol: number) => (colVirtual ? gridCol + 1 : undefined);
+  const fixedColStyle: CSSProperties | undefined = colVirtual
+    ? { width: COL_W, minWidth: COL_W, maxWidth: COL_W, boxSizing: 'border-box' }
+    : undefined;
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el) setViewW(el.clientWidth || 1200);
+  }, [colVirtual]);
+
   // ARIA grid 是复合组件：整张工作表在页面 Tab 顺序中只能有一个停靠点，
   // 进入后由方向键在列头、行号和全部数据格之间移动。逻辑 row=0 是唯一
   // 可访问表头行，row=1..k 是数据行；col=0 是行号槽。
@@ -409,6 +462,19 @@ export function Worksheet() {
       if (nextScrollTop !== viewportTop) {
         scrollRef.current.scrollTop = nextScrollTop;
         setScrollTop(nextScrollTop);
+      }
+    }
+    if (colVirtual && nextCol > 0 && scrollRef.current) {
+      // 列窗口:目标列在窗口外时先横向滚到可视区(左侧 sticky 行号槽遮住 ROWNUM_W)
+      const cellLeft = (nextCol - 1) * COL_W;
+      const viewportLeft = scrollRef.current.scrollLeft;
+      const viewportWidth = (scrollRef.current.clientWidth || viewW) - ROWNUM_W;
+      let nextScrollLeft = viewportLeft;
+      if (cellLeft < viewportLeft) nextScrollLeft = cellLeft;
+      else if (cellLeft + COL_W > viewportLeft + viewportWidth) nextScrollLeft = Math.max(0, cellLeft + COL_W - viewportWidth);
+      if (nextScrollLeft !== viewportLeft) {
+        scrollRef.current.scrollLeft = nextScrollLeft;
+        setScrollLeft(nextScrollLeft);
       }
     }
     setActiveGridCell({ row: nextRow, col: nextCol });
@@ -441,7 +507,11 @@ export function Worksheet() {
   const activeGridRow = virtual && logicalActiveGridRow > 0
     ? Math.max(winStart + 1, Math.min(winEnd, logicalActiveGridRow))
     : logicalActiveGridRow;
-  const activeGridCol = Math.min(activeGridCell.col, cols.length);
+  const logicalActiveGridCol = Math.min(activeGridCell.col, cols.length);
+  // 列窗口同理:横向滚走的停靠列钳到窗口边界,保证 grid 始终有一个 Tab 停靠点。
+  const activeGridCol = colVirtual && logicalActiveGridCol > 0
+    ? Math.max(colStart + 1, Math.min(colEnd, logicalActiveGridCol))
+    : logicalActiveGridCol;
 
   useLayoutEffect(() => {
     if (gridFocusRequest === 0) return;
@@ -450,7 +520,7 @@ export function Worksheet() {
       `[data-grid-row="${activeGridRow}"][data-grid-col="${activeGridCol}"]`,
     );
     target?.focus();
-  }, [activeGridRow, activeGridCol, gridFocusRequest, winStart, winEnd]);
+  }, [activeGridRow, activeGridCol, gridFocusRequest, winStart, winEnd, colStart, colEnd]);
 
   const sources: Array<{ icon: IconName; iconColor: string; label: string; status: string; statusColor: string; onClick: () => void }> = [
     { icon: 'grid', iconColor: '#2c8a45', label: 'Excel / CSV 导入', status: '已连接', statusColor: '#2c8a45', onClick: () => { setImportTab('csv'); openModal('import'); } },
@@ -464,24 +534,37 @@ export function Worksheet() {
       <div style={{ background: '#fff', border: '1px solid #d7dbe1', borderRadius: 5, overflow: 'hidden', boxShadow: '0 1px 2px rgba(20,30,50,0.04)' }}>
         <div
           ref={scrollRef}
-          onScroll={virtual ? (e) => setScrollTop((e.target as HTMLDivElement).scrollTop) : undefined}
+          onScroll={virtual || colVirtual
+            ? (e) => {
+                const target = e.target as HTMLDivElement;
+                if (virtual) setScrollTop(target.scrollTop);
+                if (colVirtual) setScrollLeft(target.scrollLeft);
+              }
+            : undefined}
           style={{ overflow: 'auto', maxHeight: 'calc(100vh - 220px)' }}
         >
           <table
-            className="mono"
+            className={colVirtual ? 'mono ws-colvirtual' : 'mono'}
             role="grid"
             aria-label="数据工作表"
             aria-rowcount={M.k + 1}
             aria-colcount={cols.length + 1}
-            style={{ borderCollapse: 'collapse', fontSize: 12.5, whiteSpace: 'nowrap', minWidth: '100%' }}
+            style={{
+              borderCollapse: 'collapse', fontSize: 12.5, whiteSpace: 'nowrap', minWidth: '100%',
+              // 列窗口:定宽布局,表宽即全部列宽,滚动条与未渲染列一致
+              ...(colVirtual ? { tableLayout: 'fixed', width: ROWNUM_W + cols.length * COL_W } : {}),
+            }}
           >
             <thead>
               {/* C#/S# 代号仅为视觉辅助；可访问列标题由下方唯一表头行承担。 */}
               <tr role="presentation" aria-hidden="true">
-                <th style={{ ...thTop, left: 0, zIndex: 3, width: 44, minWidth: 44 }} />
-                {cols.map((c) => (
-                  <th key={c.code} style={thTop}>{c.code}</th>
-                ))}
+                <th style={{ ...thTop, left: 0, zIndex: 3, width: ROWNUM_W, minWidth: ROWNUM_W }} />
+                {leftSpacerW > 0 && <th className="worksheet-col-spacer" style={{ ...thTop, width: leftSpacerW, minWidth: leftSpacerW, padding: 0 }} />}
+                {visibleColIndices.map((displayIndex) => {
+                  const c = cols[displayIndex];
+                  return <th key={c.code} style={{ ...thTop, ...fixedColStyle }}>{c.code}</th>;
+                })}
+                {rightSpacerW > 0 && <th className="worksheet-col-spacer" style={{ ...thTop, width: rightSpacerW, minWidth: rightSpacerW, padding: 0 }} />}
               </tr>
               <tr role="row" aria-rowindex={1}>
                 {/* 行号槽表头:Minitab 行号槽无标题;行式子组口径保留「子组」语义(716-R3 P1-1) */}
@@ -491,6 +574,7 @@ export function Worksheet() {
                   tabIndex={activeGridRow === 0 && activeGridCol === 0 ? 0 : -1}
                   data-grid-row={0}
                   data-grid-col={0}
+                  aria-colindex={ariaColIndex(0)}
                   aria-label={rowSpc ? '子组行号列' : '行号列'}
                   style={{ ...thName, left: 0, zIndex: 3, border: '1px solid #d7dbe1', textAlign: 'center' }}
                   onFocus={() => activateGridCell(0, 0)}
@@ -498,7 +582,9 @@ export function Worksheet() {
                 >
                   {rowSpc ? '子组' : ''}
                 </th>
-                {cols.map((c, displayIndex) => {
+                {leftSpacerW > 0 && <th role="presentation" aria-hidden="true" className="worksheet-col-spacer" style={{ ...thName, padding: 0 }} />}
+                {visibleColIndices.map((displayIndex) => {
+                  const c = cols[displayIndex];
                   const gridCol = displayIndex + 1;
                   // measIdx 非空 = 数值测量列(可重命名/删除);列已按导入原序交错,不能再用位置推断
                   return c.measIdx != null ? (
@@ -507,6 +593,7 @@ export function Worksheet() {
                       name={c.name}
                       canDelete={M.n > 1}
                       gridCol={gridCol}
+                      ariaColIndex={ariaColIndex(gridCol)}
                       active={activeGridRow === 0 && activeGridCol === gridCol}
                       onActivate={activateGridCell}
                       onRequestFocus={requestGridFocus}
@@ -522,6 +609,7 @@ export function Worksheet() {
                       tabIndex={activeGridRow === 0 && activeGridCol === gridCol ? 0 : -1}
                       data-grid-row={0}
                       data-grid-col={gridCol}
+                      aria-colindex={ariaColIndex(gridCol)}
                       style={thName}
                       onFocus={() => activateGridCell(0, gridCol)}
                       onKeyDown={(event) => navigateGrid(event, 0, gridCol)}
@@ -530,12 +618,13 @@ export function Worksheet() {
                     </th>
                   );
                 })}
+                {rightSpacerW > 0 && <th role="presentation" aria-hidden="true" className="worksheet-col-spacer" style={{ ...thName, padding: 0 }} />}
               </tr>
             </thead>
             <tbody>
               {virtual && winStart > 0 && (
                 <tr role="presentation" aria-hidden="true" className="worksheet-virtual-spacer" style={{ height: winStart * ROW_H }}>
-                  <td colSpan={cols.length + 1} style={{ padding: 0, border: 0 }} />
+                  <td colSpan={renderedCellCount} style={{ padding: 0, border: 0 }} />
                 </tr>
               )}
               {visibleSubs.map((s, vi) => {
@@ -543,6 +632,86 @@ export function Worksheet() {
                 const gridRow = i + 1;
                 const meanOoc = meanViol.has(i);
                 const dispersionOoc = dispersionViol.has(i);
+                const demoValues = M.isDemo
+                  ? [OPS[i % 3], '2026-06-' + String((i % 28) + 1).padStart(2, '0'), SHIFTS[i % 3]]
+                  : null;
+                // 按显示列序渲染一个数据格:测量/文本列 → 均值/离散派生列 → 演示附加列(与列头同序)
+                const renderCell = (displayIndex: number) => {
+                  const gridCol = displayIndex + 1;
+                  if (displayIndex < displayOrder.length) {
+                    const ref = displayOrder[displayIndex];
+                    return ref.kind === 'numeric' ? (
+                      <EditableCell
+                        key={'n' + ref.index}
+                        value={s.vals[ref.index]}
+                        dp={colDp[ref.index]}
+                        pending={pendingSet.has(`${i}:${ref.index}`)}
+                        label={`${M.colNames[ref.index]}，第 ${s.i} 行`}
+                        gridRow={gridRow}
+                        gridCol={gridCol}
+                        ariaColIndex={ariaColIndex(gridCol)}
+                        active={activeGridRow === gridRow && activeGridCol === gridCol}
+                        onActivate={activateGridCell}
+                        onNavigate={navigateGrid}
+                        onCommit={(nv) => updateCell(i, ref.index, nv)}
+                      />
+                    ) : (
+                      <td
+                        key={'t' + ref.index}
+                        role="gridcell"
+                        tabIndex={activeGridRow === gridRow && activeGridCol === gridCol ? 0 : -1}
+                        data-grid-row={gridRow}
+                        data-grid-col={gridCol}
+                        aria-colindex={ariaColIndex(gridCol)}
+                        style={txtCell}
+                        onFocus={() => activateGridCell(gridRow, gridCol)}
+                        onKeyDown={(event) => navigateGrid(event, gridRow, gridCol)}
+                      >
+                        {textCols[ref.index].values[i] ?? ''}
+                      </td>
+                    );
+                  }
+                  const derivedIndex = displayIndex - displayOrder.length;
+                  if (rowSpc && derivedIndex < 2) {
+                    const isMean = derivedIndex === 0;
+                    const ooc = isMean ? meanOoc : dispersionOoc;
+                    const rawValue = isMean ? rowSpc.subs[i].mean : dispersionValues[i];
+                    return (
+                      <td
+                        key={isMean ? 'mean' : 'dispersion'}
+                        role="gridcell"
+                        tabIndex={activeGridRow === gridRow && activeGridCol === gridCol ? 0 : -1}
+                        data-grid-row={gridRow}
+                        data-grid-col={gridCol}
+                        aria-colindex={ariaColIndex(gridCol)}
+                        title={String(rawValue)}
+                        style={isMean
+                          ? { ...numCell, fontWeight: 600, ...(ooc ? { background: '#fdecec', color: '#c22f2f' } : { color: '#1f6fb2' }) }
+                          : { ...numCell, ...(ooc ? { background: '#fdecec', color: '#c22f2f', fontWeight: 600 } : {}) }}
+                        onFocus={() => activateGridCell(gridRow, gridCol)}
+                        onKeyDown={(event) => navigateGrid(event, gridRow, gridCol)}
+                      >
+                        {nf(rawValue, meanDp)}
+                      </td>
+                    );
+                  }
+                  const demoIndex = derivedIndex - (rowSpc ? 2 : 0);
+                  return (
+                    <td
+                      key={gridCol}
+                      role="gridcell"
+                      tabIndex={activeGridRow === gridRow && activeGridCol === gridCol ? 0 : -1}
+                      data-grid-row={gridRow}
+                      data-grid-col={gridCol}
+                      aria-colindex={ariaColIndex(gridCol)}
+                      style={txtCell}
+                      onFocus={() => activateGridCell(gridRow, gridCol)}
+                      onKeyDown={(event) => navigateGrid(event, gridRow, gridCol)}
+                    >
+                      {demoValues?.[demoIndex] ?? ''}
+                    </td>
+                  );
+                };
                 // 小数据集用 content-visibility 低成本跳渲染;大数据集由上方窗口化接管
                 return (
                   <tr
@@ -562,6 +731,7 @@ export function Worksheet() {
                       tabIndex={activeGridRow === gridRow && activeGridCol === 0 ? 0 : -1}
                       data-grid-row={gridRow}
                       data-grid-col={0}
+                      aria-colindex={ariaColIndex(0)}
                       role="rowheader"
                       aria-keyshortcuts={M.k > 2 ? 'Delete' : undefined}
                       aria-label={`第 ${s.i} 行${M.k > 2 ? '；按 Delete 删除此行' : ''}`}
@@ -599,97 +769,25 @@ export function Worksheet() {
                         </button>
                       )}
                     </td>
-                    {displayOrder.map((ref, displayIndex) => ref.kind === 'numeric' ? (
-                      <EditableCell
-                        key={'n' + ref.index}
-                        value={s.vals[ref.index]}
-                        dp={colDp[ref.index]}
-                        pending={pendingSet.has(`${i}:${ref.index}`)}
-                        label={`${M.colNames[ref.index]}，第 ${s.i} 行`}
-                        gridRow={gridRow}
-                        gridCol={displayIndex + 1}
-                        active={activeGridRow === gridRow && activeGridCol === displayIndex + 1}
-                        onActivate={activateGridCell}
-                        onNavigate={navigateGrid}
-                        onCommit={(nv) => updateCell(i, ref.index, nv)}
-                      />
-                    ) : (
-                      <td
-                        key={'t' + ref.index}
-                        role="gridcell"
-                        tabIndex={activeGridRow === gridRow && activeGridCol === displayIndex + 1 ? 0 : -1}
-                        data-grid-row={gridRow}
-                        data-grid-col={displayIndex + 1}
-                        style={txtCell}
-                        onFocus={() => activateGridCell(gridRow, displayIndex + 1)}
-                        onKeyDown={(event) => navigateGrid(event, gridRow, displayIndex + 1)}
-                      >
-                        {textCols[ref.index].values[i] ?? ''}
-                      </td>
-                    ))}
-                    {rowSpc && (
-                      <>
-                        <td
-                          role="gridcell"
-                          tabIndex={activeGridRow === gridRow && activeGridCol === displayOrder.length + 1 ? 0 : -1}
-                          data-grid-row={gridRow}
-                          data-grid-col={displayOrder.length + 1}
-                          title={String(rowSpc.subs[i].mean)}
-                          style={{ ...numCell, fontWeight: 600, ...(meanOoc ? { background: '#fdecec', color: '#c22f2f' } : { color: '#1f6fb2' }) }}
-                          onFocus={() => activateGridCell(gridRow, displayOrder.length + 1)}
-                          onKeyDown={(event) => navigateGrid(event, gridRow, displayOrder.length + 1)}
-                        >
-                          {nf(rowSpc.subs[i].mean, meanDp)}
-                        </td>
-                        <td
-                          role="gridcell"
-                          tabIndex={activeGridRow === gridRow && activeGridCol === displayOrder.length + 2 ? 0 : -1}
-                          data-grid-row={gridRow}
-                          data-grid-col={displayOrder.length + 2}
-                          title={String(dispersionValues[i])}
-                          style={{ ...numCell, ...(dispersionOoc ? { background: '#fdecec', color: '#c22f2f', fontWeight: 600 } : {}) }}
-                          onFocus={() => activateGridCell(gridRow, displayOrder.length + 2)}
-                          onKeyDown={(event) => navigateGrid(event, gridRow, displayOrder.length + 2)}
-                        >
-                          {nf(dispersionValues[i], meanDp)}
-                        </td>
-                      </>
-                    )}
-                    {M.isDemo && (
-                      <>
-                        {[OPS[i % 3], '2026-06-' + String((i % 28) + 1).padStart(2, '0'), SHIFTS[i % 3]].map((value, extraIndex) => {
-                          const gridCol = displayOrder.length + (rowSpc ? 2 : 0) + extraIndex + 1;
-                          return (
-                            <td
-                              key={gridCol}
-                              role="gridcell"
-                              tabIndex={activeGridRow === gridRow && activeGridCol === gridCol ? 0 : -1}
-                              data-grid-row={gridRow}
-                              data-grid-col={gridCol}
-                              style={txtCell}
-                              onFocus={() => activateGridCell(gridRow, gridCol)}
-                              onKeyDown={(event) => navigateGrid(event, gridRow, gridCol)}
-                            >
-                              {value}
-                            </td>
-                          );
-                        })}
-                      </>
-                    )}
+                    {leftSpacerW > 0 && <td role="presentation" aria-hidden="true" className="worksheet-col-spacer" style={{ padding: 0, border: 0 }} />}
+                    {visibleColIndices.map(renderCell)}
+                    {rightSpacerW > 0 && <td role="presentation" aria-hidden="true" className="worksheet-col-spacer" style={{ padding: 0, border: 0 }} />}
                   </tr>
                 );
               })}
               {virtual && winEnd < M.k && (
                 <tr role="presentation" aria-hidden="true" className="worksheet-virtual-spacer" style={{ height: (M.k - winEnd) * ROW_H }}>
-                  <td colSpan={cols.length + 1} style={{ padding: 0, border: 0 }} />
+                  <td colSpan={renderedCellCount} style={{ padding: 0, border: 0 }} />
                 </tr>
               )}
             </tbody>
           </table>
         </div>
-        {virtual && (
+        {(virtual || colVirtual) && (
           <div style={{ padding: '5px 12px', fontSize: 11, color: '#98a1ac', borderTop: '1px solid #eef0f3' }}>
-            大数据集已启用行虚拟化 · 共 {M.k.toLocaleString()} 行,仅渲染可视窗口({winStart + 1}–{winEnd})
+            {virtual ? `大数据集已启用行虚拟化 · 共 ${M.k.toLocaleString()} 行,仅渲染可视窗口(${winStart + 1}–${winEnd})` : ''}
+            {virtual && colVirtual ? ' · ' : ''}
+            {colVirtual ? `宽表已启用列虚拟化 · 共 ${cols.length.toLocaleString()} 列,仅渲染第 ${colStart + 1}–${colEnd} 列` : ''}
           </div>
         )}
       </div>

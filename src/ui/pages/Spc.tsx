@@ -1,18 +1,20 @@
 /** SPC 控制图 ★深度实现 — 七种图型（X̄-R/X̄-S/I-MR/EWMA/CUSUM/P/C），
  * Nelson 判异（Shewhart 图）/ 限值判异（EWMA/CUSUM）/ 点选明细 /
  * 分阶段控制限（按分组列分段,Minitab Stages 语义）。 */
-import { useMemo, useState, type CSSProperties } from 'react';
+import { memo, useMemo, useState, type CSSProperties } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { useApp, type SpcType } from '../../store/appStore';
 import { datasetWriteNotes, syncSpecForActiveMeasurement, useData } from '../../store/dataStore';
-import { expandSpcRuleItems, uniqueSpcPointCount, type SpcViolationItem } from '../../store/analyses';
 import {
   nf, evalRules, evalLimitedRules, RULE_DEFS, DEFAULT_RULE_K, ruleKDesc, ewmaSeries, cusumSeries, stagedXbar, stagedRange, stageValidationError,
   prepareSpcData, spcMeasurementColumnNames, spcRoleOptions, withSigmaMethod, dataDecimals,
-  type NelsonRuleK, type RuleNo, type SpcDataLayout, type SpcPreparedData, type VarModel, type TextColumn,
+  type NelsonRuleK, type NelsonRules, type RuleNo, type SpcDataLayout, type SpcPreparedData, type VarModel, type TextColumn,
+  type PointRuleSummary, type SpcSigmaMethod, type PChartModel, type CChartModel,
 } from '../../core';
 import { ReportCard } from '../ReportCard';
 import { spcReport } from '../reportData';
-import type { ChartTokens } from '../tokens';
+import { sameChartTokens, type ChartTokens } from '../tokens';
+import { SPC_PAGE_DETAIL_ROWS, buildSpcViolationView, singlePointSummary, type SpcChartViolations } from './spcViolationView';
 import { Card, KvRows, tabStyle, chipStyle } from '../common';
 import { ControlChart, type ControlChartProps } from '../charts/ControlChart';
 
@@ -122,58 +124,42 @@ function SpcRolePanel({
   );
 }
 
-export function Spc({ T }: { T: ChartTokens }) {
-  const {
-    spcType, setSpcType, spcRules, toggleRule, spcRuleK, setSpcRuleK,
-    spcDataLayout, spcValueCol, spcSubgroupCol, setSpcRoles,
-    spcStageCol, setSpcStageCol, selSub, setSelSub, showToast,
-    spcSigmaMethod, setSpcSigmaMethod, spcShowZones, toggleSpcZones,
-  } = useApp();
-  const { model: rawModel, textCols: rawTextCols, pendingCells, pModel, cModel, mesRunning, transposeDataset } = useData();
-  // 第三轮 P2:O(N) 角色解析不得在每次交互(含 toast 出现/消失)重跑——与 App/Worksheet 同纪律
-  const prepared = useMemo(
-    () => prepareSpcData(rawModel, rawTextCols, {
-      layout: spcDataLayout, valueColumn: spcValueCol, subgroupColumn: spcSubgroupCol,
-      pendingCells,
-    }),
-    [rawModel, rawTextCols, pendingCells, spcDataLayout, spcValueCol, spcSubgroupCol],
-  );
-  const setRolesAndSyncSpec = (patch: Partial<{
-    spcDataLayout: SpcDataLayout; spcValueCol: string | null; spcSubgroupCol: string | null;
-  }>) => {
-    setSpcRoles(patch);
-    syncSpecForActiveMeasurement();
-  };
-  const rolePanel = (
-    <SpcRolePanel
-      model={rawModel} textCols={rawTextCols} prepared={prepared}
-      layout={spcDataLayout} valueColumn={spcValueCol} subgroupColumn={spcSubgroupCol}
-      onRoles={setRolesAndSyncSpec}
-      onTranspose={() => {
-        try {
-          const derived = transposeDataset(prepared.subgroupLabels);
-          setRolesAndSyncSpec({ spcDataLayout: 'rows', spcValueCol: null, spcSubgroupCol: 'text:原列子组' });
-          const notes = datasetWriteNotes(derived.requested, derived.outcome).map((text) => ` · ${text}`).join('');
-          showToast(`已转为行式子组工作表「${derived.name}」；原列名已保留为子组标签${notes}`);
-        } catch (e) { showToast((e as Error).message); }
-      }}
-    />
-  );
-  if (prepared.error && spcType !== 'p' && spcType !== 'c') {
-    return (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-        {rolePanel}
-        <Card style={{ padding: 24, borderColor: '#f0caca', color: '#a62b2b', lineHeight: 1.7 }}>
-          <b>控制图未运行：</b>{prepared.error}<br />
-          请在上方明确选择数据布局、测量值列和子组 ID。系统不会回退到“把所有数值列都当测量值”的旧口径。
-        </Card>
-      </div>
-    );
-  }
+const TYPE_TABS: Array<[SpcType, string]> = [
+  ['xbar-r', 'X̄-R'], ['xbar-s', 'X̄-S'], ['i-mr', 'I-MR'],
+  ['ewma', 'EWMA'], ['cusum', 'CUSUM'], ['p', 'P 图'], ['c', 'C 图'],
+];
+
+const MAIN_CHART_LABEL: Record<SpcType, string> = {
+  'xbar-r': 'X̄', 'xbar-s': 'X̄', 'i-mr': 'I', ewma: 'EWMA', cusum: 'CUSUM', p: 'P', c: 'C',
+};
+
+interface SpcPageInputs {
+  prepared: SpcPreparedData;
+  rawModel: VarModel;
+  spcType: SpcType;
+  spcSigmaMethod: SpcSigmaMethod;
+  spcStageCol: string | null;
+  spcRules: NelsonRules;
+  spcRuleK: NelsonRuleK;
+  spcShowZones: boolean;
+  pModel: PChartModel;
+  cModel: CChartModel;
+}
+
+/**
+ * SPC 页全部 O(N) 派生(σ 方法、分阶段、EWMA/CUSUM、判异、有界明细、统计卡与结论卡)。
+ * GAP-10-23:整体放进一个 useMemo,只随数据与分析设置变化重跑;toast/菜单开合/点选数据点
+ * 都不再重算。判异明细走 pointRuleDetailLimit 有界通道,只物化列表显示的前 12 条,
+ * 失控点数/点-准则命中数/按准则计数取引擎完整统计,与旧的全量展开逐项一致。
+ */
+export function computeSpcPageView({
+  prepared, rawModel, spcType, spcSigmaMethod, spcStageCol, spcRules, spcRuleK, spcShowZones, pModel, cModel,
+}: SpcPageInputs) {
   const M = withSigmaMethod(prepared.model ?? rawModel, spcSigmaMethod);
   const rCenterLabel = spcSigmaMethod === 'classic' ? 'R̄' : 'd₂σ̂';
   const sCenterLabel = spcSigmaMethod === 'classic' ? 'S̄' : 'c₄σ̂';
   const textCols = prepared.textCols;
+  const detailOptions = { pointRuleDetailLimit: SPC_PAGE_DETAIL_ROWS };
 
   const means = M.subs.map((s) => s.mean);
   const subgroupLabels = prepared.subgroupLabels;
@@ -191,8 +177,8 @@ export function Spc({ T }: { T: ChartTokens }) {
   const staged =
     stageLabels && !stageError && M.hasSubgroups
       ? {
-          x: stagedXbar(M.subs.map((s) => s.vals), stageLabels, spcRules, spcSigmaMethod, spcRuleK),
-          r: stagedRange(M.subs.map((s) => s.vals), stageLabels, spcRules, spcSigmaMethod, spcRuleK),
+          x: stagedXbar(M.subs.map((s) => s.vals), stageLabels, spcRules, spcSigmaMethod, spcRuleK, detailOptions),
+          r: stagedRange(M.subs.map((s) => s.vals), stageLabels, spcRules, spcSigmaMethod, spcRuleK, detailOptions),
         }
       : null;
   // EWMA/CUSUM 数据源：子组均值（σ/√n）或单值序列
@@ -219,7 +205,7 @@ export function Spc({ T }: { T: ChartTokens }) {
     disabled?: boolean;
     shewhart: boolean; // Nelson 准则是否适用
     coreViol?: Set<number>; // 由 core 直接给出（EWMA/CUSUM/分阶段）
-    coreList?: { i: number; rule: number; desc: string }[];
+    coreSummary?: PointRuleSummary; // 分阶段:段内判异的有界统计
   };
 
   const specs: Record<SpcType, SpecDef> = {
@@ -232,7 +218,7 @@ export function Spc({ T }: { T: ChartTokens }) {
       disabled: !M.hasSubgroups,
       shewhart: true,
       coreViol: staged ? staged.x.viol : undefined,
-      coreList: staged ? staged.x.list : undefined,
+      coreSummary: staged ? staged.x.pointRuleSummary : undefined,
       charts: staged
         ? [
             {
@@ -325,35 +311,31 @@ export function Spc({ T }: { T: ChartTokens }) {
   const main = spec.charts.find((c) => c.main)!;
 
   let viol: Set<number>;
-  let violList: { i: number; rule: number; desc: string }[];
-  if (spec.coreViol && spec.coreList) {
+  let mainSummary: PointRuleSummary;
+  if (spec.coreViol && spec.coreSummary) {
     // 分阶段：判异已在段内完成
     viol = spec.coreViol;
-    violList = spec.coreList;
+    mainSummary = spec.coreSummary;
   } else if (spec.shewhart) {
     const r = effType === 'p'
       ? evalLimitedRules(main.props.data, main.props.cl, pModel.pUcls, pModel.pLcls, spcRules, spcRuleK,
           // P 图限值被 [0,1] 钳位后不可反推 σ:直传逐批真实 σᵢ=√(p̄(1−p̄)/nᵢ)
-          pModel.pNs.map((n) => Math.sqrt(main.props.cl * (1 - main.props.cl) / n)))
+          pModel.pNs.map((n) => Math.sqrt(main.props.cl * (1 - main.props.cl) / n)), detailOptions)
       : effType === 'c'
-        ? evalLimitedRules(main.props.data, main.props.cl, main.props.ucl, main.props.lcl, spcRules, spcRuleK, Math.sqrt(main.props.cl))
-      : evalRules(main.props.data, main.props.cl, (main.props.ucl - main.props.cl) / 3, spcRules, spcRuleK);
+        ? evalLimitedRules(main.props.data, main.props.cl, main.props.ucl, main.props.lcl, spcRules, spcRuleK, Math.sqrt(main.props.cl), detailOptions)
+      : evalRules(main.props.data, main.props.cl, (main.props.ucl - main.props.cl) / 3, spcRules, spcRuleK, detailOptions);
     viol = r.viol;
-    violList = r.list;
+    mainSummary = r.pointRuleSummary!;
   } else {
     viol = spec.coreViol!;
-    violList = [...viol].sort((a, b) => a - b).map((i) => ({
-      i,
-      rule: 1,
-      desc: effType === 'ewma' ? 'EWMA 超出时变控制限' : '累积和超出判定限 H',
-    }));
+    mainSummary = singlePointSummary(viol, effType === 'ewma' ? 'EWMA 超出时变控制限' : '累积和超出判定限 H');
   }
 
   // 离散图(R/S/MR)按其适用的准则 1–4 判异。反馈要求"先看极差图":极差失控会使
   // X̄ 控制限失去解释前提,故离散图须显示完整适用信号并计入结论。
   // 分阶段模式下用段内判异结果 staged.r(否则会因固定控制限而漏判/误判)。
   const dispViolByChart = new Map<string, Set<number>>();
-  const dispItems: SpcViolationItem[] = [];
+  const variationSources: SpcChartViolations[] = [];
   if (spec.shewhart) {
     for (const ch of spec.charts) {
       if (ch.main) continue;
@@ -362,44 +344,30 @@ export function Spc({ T }: { T: ChartTokens }) {
         // 分阶段极差图:段内判异是唯一权威——0 失控也必须显式传空集,否则 ControlChart
         // 会回退到「点超全局固定限值」自算红点,图上标红与结论/明细/导出全矛盾(双审 P2)
         dispViolByChart.set(ch.t, staged.r.viol);
-        if (staged.r.viol.size) {
-          expandSpcRuleItems(staged.r.viol, staged.r.list, chartLabel, spcRuleK).forEach((o) =>
-            dispItems.push({ ...o, desc: `${chartLabel} 图：${o.desc}` }));
+        if (staged.r.viol.size && staged.r.pointRuleSummary) {
+          variationSources.push({ chartLabel, viol: staged.r.viol, summary: staged.r.pointRuleSummary, descPrefix: `${chartLabel} 图：` });
         }
       } else if (!spec.coreViol && ch.props.ucl != null) {
         const { ucl, lcl, data: cdata } = ch.props;
-        const dr = evalLimitedRules(cdata as number[], ch.props.cl, ucl, lcl, spcRules, spcRuleK);
+        const dr = evalLimitedRules(cdata as number[], ch.props.cl, ucl, lcl, spcRules, spcRuleK, undefined, detailOptions);
         dispViolByChart.set(ch.t, dr.viol); // 空集也传,同上:禁止图表回退自算
-        if (dr.viol.size) {
-          expandSpcRuleItems(dr.viol, dr.list, chartLabel, spcRuleK).forEach((item) => {
-            // MR 图数组索引 0 对应原始观测 2；结果列表统一映射回原观测索引。
-            const i = effType === 'i-mr' ? item.i + 1 : item.i;
-            dispItems.push({ ...item, i, desc: `${chartLabel} 图：${item.desc}` });
+        if (dr.viol.size && dr.pointRuleSummary) {
+          // MR 图数组索引 0 对应原始观测 2；结果列表统一映射回原观测索引。
+          variationSources.push({
+            chartLabel, viol: dr.viol, summary: dr.pointRuleSummary,
+            indexOffset: effType === 'i-mr' ? 1 : 0, descPrefix: `${chartLabel} 图：`,
           });
         }
       }
     }
   }
-  const mainChartLabel: Record<SpcType, string> = {
-    'xbar-r': 'X̄', 'xbar-s': 'X̄', 'i-mr': 'I', ewma: 'EWMA', cusum: 'CUSUM', p: 'P', c: 'C',
-  };
-  const allViolItems = [
-    // 分阶段的 coreViol 虽已按自定义 K 判异，明细仍必须用同一 K 展开窗口；
-    // 否则 K 大于默认值时图上红点会多于列表/结论卡。EWMA/CUSUM 均是单点明细，传 K 无影响。
-    ...expandSpcRuleItems(viol, violList, mainChartLabel[effType], spcRuleK),
-    ...dispItems,
-  ].sort((a, b) => a.i - b.i || a.chartLabel.localeCompare(b.chartLabel) || a.rule - b.rule);
-  const uniqueViolCount = uniqueSpcPointCount(allViolItems);
-  const uniqueViolPoints = new Set(allViolItems.map((o) => o.i));
+  // 分阶段的 coreViol 虽已按自定义 K 判异，明细窗口同样由引擎按同一 K 逐点标记；
+  // EWMA/CUSUM 均是单点明细。
+  const violations = buildSpcViolationView(
+    { chartLabel: MAIN_CHART_LABEL[effType], viol, summary: mainSummary },
+    variationSources,
+  );
   const variationChartLabel = effType === 'xbar-r' ? 'R' : effType === 'xbar-s' ? 'S' : effType === 'i-mr' ? 'MR' : null;
-  const variationViolCount = uniqueSpcPointCount(dispItems);
-
-  const sel = selSub != null && selSub < main.props.data.length ? selSub : null;
-  const labWord = { 'xbar-r': '子组', 'xbar-s': '子组', 'i-mr': '观测', ewma: '点', cusum: '点', p: '样本', c: '单位' }[effType];
-  const mainLabels = effType === 'p' || effType === 'c' ? undefined : labelsFor(main.props.data.length);
-  const ptLab = (i: number) => effType === 'p'
-    ? `${labWord} ${i + 1}（n=${pModel.pNs[i]}）`
-    : labWord + ' ' + (mainLabels?.[i] ?? (i + 1));
 
   const stats: { k: string; v: string }[] = [];
   if (effType === 'ewma') {
@@ -453,6 +421,117 @@ export function Spc({ T }: { T: ChartTokens }) {
     else stats.push({ k: 'c̄', v: nf(cModel.cbar, 3) }, { k: '单位数', v: String(cModel.cdata.length) });
   }
 
+  const report = spcReport({
+    // 有界前缀 + 引擎完整统计:顶部结论卡与右侧列表、导出同口径(含 R/S/MR 离散图失控点)
+    violList: violations.items,
+    violationSummary: {
+      pointRuleHitCount: violations.pointRuleHitCount,
+      affectedPointCount: violations.affectedPointCount,
+      byRule: violations.byRule,
+    },
+    k: main.props.data.length,
+    n: effType === 'p' ? pModel.pNs : effType === 'c' ? 1 : M.n,
+    hasSubgroups: effType === 'p' || effType === 'c' ? false : M.hasSubgroups,
+    structure: effType === 'p' ? 'attribute-p' : effType === 'c' ? 'attribute-c' : M.hasSubgroups ? 'subgroup' : 'individual',
+    typeLabel: TYPE_TABS.find(([k]) => k === effType)?.[1] ?? effType,
+    advancedChart: effType === 'ewma' || effType === 'cusum' ? effType : undefined,
+    variationChartLabel,
+    variationViolations: violations.variationItems,
+    variationSummary: violations.variation,
+    variableName: effType === 'p' || effType === 'c' ? undefined : variableName,
+    dataRole: effType === 'p'
+      ? `每批不良数 / 实际检验数；${pModel.pVariableN ? '逐批 nᵢ 生成变控制限' : `固定 n=${pModel.pN}`}`
+      : effType === 'c' ? undefined : prepared.note,
+  });
+
+  return {
+    M, textCols, labelsFor, stageCol, canStage, stageError, staged, advData, ewma, cusum, variableName,
+    specs, effType, spec, main, viol, dispViolByChart, violations, variationChartLabel, stats, report,
+  };
+}
+
+function SpcView({ T }: { T: ChartTokens }) {
+  // GAP-10-23:按字段订阅(useShallow),toast/openMenu/varOpen 等纯 UI 字段不触发本页重渲染;
+  // 文件末尾 React.memo 再挡住 App 父级重渲染的连带重算。
+  const {
+    spcType, setSpcType, spcRules, toggleRule, spcRuleK, setSpcRuleK,
+    spcDataLayout, spcValueCol, spcSubgroupCol, setSpcRoles,
+    spcStageCol, setSpcStageCol, selSub, setSelSub, showToast,
+    spcSigmaMethod, setSpcSigmaMethod, spcShowZones, toggleSpcZones,
+  } = useApp(useShallow((s) => ({
+    spcType: s.spcType, setSpcType: s.setSpcType, spcRules: s.spcRules, toggleRule: s.toggleRule,
+    spcRuleK: s.spcRuleK, setSpcRuleK: s.setSpcRuleK,
+    spcDataLayout: s.spcDataLayout, spcValueCol: s.spcValueCol, spcSubgroupCol: s.spcSubgroupCol, setSpcRoles: s.setSpcRoles,
+    spcStageCol: s.spcStageCol, setSpcStageCol: s.setSpcStageCol, selSub: s.selSub, setSelSub: s.setSelSub, showToast: s.showToast,
+    spcSigmaMethod: s.spcSigmaMethod, setSpcSigmaMethod: s.setSpcSigmaMethod, spcShowZones: s.spcShowZones, toggleSpcZones: s.toggleSpcZones,
+  })));
+  const {
+    model: rawModel, textCols: rawTextCols, pendingCells, pModel, cModel, mesRunning, transposeDataset,
+  } = useData(useShallow((s) => ({
+    model: s.model, textCols: s.textCols, pendingCells: s.pendingCells, pModel: s.pModel, cModel: s.cModel,
+    mesRunning: s.mesRunning, transposeDataset: s.transposeDataset,
+  })));
+  // 第三轮 P2:O(N) 角色解析不得在每次交互(含 toast 出现/消失)重跑——与 App/Worksheet 同纪律
+  const prepared = useMemo(
+    () => prepareSpcData(rawModel, rawTextCols, {
+      layout: spcDataLayout, valueColumn: spcValueCol, subgroupColumn: spcSubgroupCol,
+      pendingCells,
+    }),
+    [rawModel, rawTextCols, pendingCells, spcDataLayout, spcValueCol, spcSubgroupCol],
+  );
+  const blocked = Boolean(prepared.error) && spcType !== 'p' && spcType !== 'c';
+  const view = useMemo(
+    () => blocked ? null : computeSpcPageView({
+      prepared, rawModel, spcType, spcSigmaMethod, spcStageCol, spcRules, spcRuleK, spcShowZones, pModel, cModel,
+    }),
+    [blocked, prepared, rawModel, spcType, spcSigmaMethod, spcStageCol, spcRules, spcRuleK, spcShowZones, pModel, cModel],
+  );
+  const setRolesAndSyncSpec = (patch: Partial<{
+    spcDataLayout: SpcDataLayout; spcValueCol: string | null; spcSubgroupCol: string | null;
+  }>) => {
+    setSpcRoles(patch);
+    syncSpecForActiveMeasurement();
+  };
+  const rolePanel = (
+    <SpcRolePanel
+      model={rawModel} textCols={rawTextCols} prepared={prepared}
+      layout={spcDataLayout} valueColumn={spcValueCol} subgroupColumn={spcSubgroupCol}
+      onRoles={setRolesAndSyncSpec}
+      onTranspose={() => {
+        try {
+          const derived = transposeDataset(prepared.subgroupLabels);
+          setRolesAndSyncSpec({ spcDataLayout: 'rows', spcValueCol: null, spcSubgroupCol: 'text:原列子组' });
+          const notes = datasetWriteNotes(derived.requested, derived.outcome).map((text) => ` · ${text}`).join('');
+          showToast(`已转为行式子组工作表「${derived.name}」；原列名已保留为子组标签${notes}`);
+        } catch (e) { showToast((e as Error).message); }
+      }}
+    />
+  );
+  if (!view) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        {rolePanel}
+        <Card style={{ padding: 24, borderColor: '#f0caca', color: '#a62b2b', lineHeight: 1.7 }}>
+          <b>控制图未运行：</b>{prepared.error}<br />
+          请在上方明确选择数据布局、测量值列和子组 ID。系统不会回退到“把所有数值列都当测量值”的旧口径。
+        </Card>
+      </div>
+    );
+  }
+  const {
+    M, textCols, labelsFor, stageCol, canStage, stageError, staged, advData, ewma, cusum, variableName,
+    specs, effType, spec, main, viol, dispViolByChart, violations, variationChartLabel, stats, report,
+  } = view;
+  const uniqueViolCount = violations.affectedPointCount;
+  const variationViolCount = violations.variation.affectedPointCount;
+
+  const sel = selSub != null && selSub < main.props.data.length ? selSub : null;
+  const labWord = { 'xbar-r': '子组', 'xbar-s': '子组', 'i-mr': '观测', ewma: '点', cusum: '点', p: '样本', c: '单位' }[effType];
+  const mainLabels = effType === 'p' || effType === 'c' ? undefined : labelsFor(main.props.data.length);
+  const ptLab = (i: number) => effType === 'p'
+    ? `${labWord} ${i + 1}（n=${pModel.pNs[i]}）`
+    : labWord + ' ' + (mainLabels?.[i] ?? (i + 1));
+
   let subRows: { k: string; v: string }[] = [];
   if (sel != null) {
     if (effType === 'xbar-r' || effType === 'xbar-s') {
@@ -486,31 +565,12 @@ export function Spc({ T }: { T: ChartTokens }) {
       subRows = [{ k: '缺陷数', v: String(cModel.cdata[sel]) }];
     }
   }
-  const selBad = sel != null && uniqueViolPoints.has(sel);
+  const selBad = sel != null && violations.isViolationPoint(sel);
 
-  const typeTabs: Array<[SpcType, string]> = [
-    ['xbar-r', 'X̄-R'], ['xbar-s', 'X̄-S'], ['i-mr', 'I-MR'],
-    ['ewma', 'EWMA'], ['cusum', 'CUSUM'], ['p', 'P 图'], ['c', 'C 图'],
-  ];
   const ruleToggles = (['r1', 'r2', 'r3', 'r4', 'r5', 'r6', 'r7', 'r8'] as const).map((k) => [k, `准则 ${k.slice(1)}`] as const);
   const ruleKKeys = Object.keys(DEFAULT_RULE_K) as Array<keyof NelsonRuleK>;
   const ruleKCustom = ruleKKeys.some((key) => spcRuleK[key] !== DEFAULT_RULE_K[key]);
 
-  const report = spcReport({
-    violList: allViolItems, // 含 R/S/MR 离散图失控点——顶部结论卡与右侧列表口径一致
-    k: main.props.data.length,
-    n: effType === 'p' ? pModel.pNs : effType === 'c' ? 1 : M.n,
-    hasSubgroups: effType === 'p' || effType === 'c' ? false : M.hasSubgroups,
-    structure: effType === 'p' ? 'attribute-p' : effType === 'c' ? 'attribute-c' : M.hasSubgroups ? 'subgroup' : 'individual',
-    typeLabel: typeTabs.find(([k]) => k === effType)?.[1] ?? effType,
-    advancedChart: effType === 'ewma' || effType === 'cusum' ? effType : undefined,
-    variationChartLabel,
-    variationViolations: dispItems,
-    variableName: effType === 'p' || effType === 'c' ? undefined : variableName,
-    dataRole: effType === 'p'
-      ? `每批不良数 / 实际检验数；${pModel.pVariableN ? '逐批 nᵢ 生成变控制限' : `固定 n=${pModel.pN}`}`
-      : effType === 'c' ? undefined : prepared.note,
-  });
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -519,7 +579,7 @@ export function Spc({ T }: { T: ChartTokens }) {
       <Card style={{ padding: '11px 16px', display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
         <span style={{ fontSize: 12, color: '#8a929d', fontWeight: 600 }}>控制图类型</span>
         <div style={{ display: 'flex', gap: 6 }}>
-          {typeTabs.map(([k, l]) => {
+          {TYPE_TABS.map(([k, l]) => {
             const off = specs[k].disabled;
             return (
               <button
@@ -763,15 +823,15 @@ export function Spc({ T }: { T: ChartTokens }) {
             {uniqueViolCount === 0 && (
               <div style={{ padding: '8px 0', fontSize: 12.5, color: '#2c8a45', fontWeight: 500 }}>✓ 未检出失控点，过程受控</div>
             )}
-            {allViolItems.slice(0, 12).map((o) => (
+            {violations.items.map((o) => (
               <div key={(o.chartLabel || 'main') + '-' + o.rule + '-' + o.i} style={{ padding: '8px 0', borderTop: '1px solid #f6eaea', fontSize: 12.5 }}>
                 <div style={{ color: '#c22f2f', fontWeight: 600 }}>{o.chartLabel ? `${o.chartLabel} 图 · ` : ''}{ptLab(o.i)}{spec.shewhart ? ` · 准则 ${o.rule}` : ''}</div>
                 <div style={{ color: '#8a929d', marginTop: 2 }}>{o.desc}</div>
               </div>
             ))}
-            {allViolItems.length > 0 && (
+            {violations.pointRuleHitCount > 0 && (
               <div style={{ padding: '8px 0', fontSize: 12, color: '#9aa2ad', borderTop: '1px solid #f6eaea' }}>
-                {allViolItems.length > 12 ? '… ' : ''}共 {uniqueViolCount} 个失控点 · {allViolItems.length} 个点-准则命中
+                {violations.pointRuleHitCount > SPC_PAGE_DETAIL_ROWS ? '… ' : ''}共 {uniqueViolCount} 个失控点 · {violations.pointRuleHitCount} 个点-准则命中
               </div>
             )}
           </div>
@@ -780,3 +840,6 @@ export function Spc({ T }: { T: ChartTokens }) {
     </div>
   );
 }
+
+/** 主题 tokens 按值比较:App 每次渲染新建 T 对象,不应因此让 SPC 页整页重算(GAP-10-23)。 */
+export const Spc = memo(SpcView, (previous, next) => sameChartTokens(previous.T, next.T));

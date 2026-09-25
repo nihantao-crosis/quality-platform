@@ -1,12 +1,13 @@
 /** 质量总览 — KPI / X̄ 趋势 / 帕累托 / 分析记录 / 告警，全部指标实时计算。 */
-import { useMemo } from 'react';
+import { memo, useMemo } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { useApp } from '../../store/appStore';
 import { useData, resolveCapabilityMeasurementData, isCapabilityWarningAcknowledged } from '../../store/dataStore';
 import {
   nf, DEFECTS, evalRules, evalLimitedRules, capabilityInputError, computeCapability, oneWayAnova, anovaGroups, andersonDarling,
   prepareSpcData, countCapabilityViolations, withSigmaMethod, spcChartFamilyFor,
 } from '../../core';
-import { STATUS_COLORS } from '../tokens';
+import { STATUS_COLORS, sameChartTokens } from '../tokens';
 import type { ChartTokens } from '../tokens';
 import { Card, Badge } from '../common';
 import { ControlChart } from '../charts/ControlChart';
@@ -14,12 +15,26 @@ import { ParetoChart } from '../charts/misc';
 import { useAnalyses } from '../../store/analyses';
 import { paretoReport } from '../reportData';
 
-export function Dashboard({ T }: { T: ChartTokens }) {
+/** 告警区只渲染前 N 条；总数仍按完整判异明细计。 */
+const DASHBOARD_ALERT_ROWS = 8;
+
+function DashboardView({ T }: { T: ChartTokens }) {
+  // GAP-10-22:按字段订阅(useShallow)。toast/openMenu/varOpen 等纯 UI 字段变化不再让本页重渲染;
+  // 与文件末尾的 React.memo 一起挡住 App 父级因这些字段重渲染时的连带重算。
   const {
     goTo, lsl, usl, tgt, lslOn, uslOn, spcType, spcRules, spcRuleK, spcDataLayout, spcValueCol, spcSubgroupCol, spcSigmaMethod,
     paretoThreshold, capSubgroupMode, capSubgroupSize, capValueCol, capSubgroupIdCol, capabilityWarningAcknowledgement,
-  } = useApp();
-  const { model: M, textCols, pendingCells } = useData();
+  } = useApp(useShallow((s) => ({
+    goTo: s.goTo, lsl: s.lsl, usl: s.usl, tgt: s.tgt, lslOn: s.lslOn, uslOn: s.uslOn,
+    spcType: s.spcType, spcRules: s.spcRules, spcRuleK: s.spcRuleK,
+    spcDataLayout: s.spcDataLayout, spcValueCol: s.spcValueCol, spcSubgroupCol: s.spcSubgroupCol, spcSigmaMethod: s.spcSigmaMethod,
+    paretoThreshold: s.paretoThreshold, capSubgroupMode: s.capSubgroupMode, capSubgroupSize: s.capSubgroupSize,
+    capValueCol: s.capValueCol, capSubgroupIdCol: s.capSubgroupIdCol,
+    capabilityWarningAcknowledgement: s.capabilityWarningAcknowledgement,
+  })));
+  const { model: M, textCols, pendingCells } = useData(useShallow((s) => ({
+    model: s.model, textCols: s.textCols, pendingCells: s.pendingCells,
+  })));
   // 记忆化(闭环审核 P2:与 App/Worksheet/SPC 同一约定,此前漏了本页与能力页)
   const prepared = useMemo(
     () => prepareSpcData(M, textCols, {
@@ -29,7 +44,10 @@ export function Dashboard({ T }: { T: ChartTokens }) {
     [M, textCols, pendingCells, spcDataLayout, spcValueCol, spcSubgroupCol],
   );
   // 审查修复(720):总览与 SPC 页同口径——σ 估计方法一并套用,R 判异中心线用 rCl(pooled 时 ≠ R̄)
-  const SM = prepared.model ? withSigmaMethod(prepared.model, spcSigmaMethod) : null;
+  const SM = useMemo(
+    () => prepared.model ? withSigmaMethod(prepared.model, spcSigmaMethod) : null,
+    [prepared, spcSigmaMethod],
+  );
   // 批次716-R3:Cpk/PPM 卡改走能力口径解析(resolveCapabilityMeasurementData),与能力页/
   // 保存记录/专项报告同源;趋势图与 SPC 告警仍属 SPC 口径,继续使用上面的 prepared/SM。
   // resolver 从 store 内部读取以下口径/角色字段,依赖需手工列全以便口径变化时失效。
@@ -38,66 +56,88 @@ export function Dashboard({ T }: { T: ChartTokens }) {
     [M, textCols, pendingCells, capSubgroupMode, capSubgroupSize, capValueCol, capSubgroupIdCol, spcDataLayout, spcValueCol, spcSubgroupCol], // eslint-disable-line react-hooks/exhaustive-deps
   );
   const CM = capPrepared.model;
-  const capSpec = { lsl: lslOn ? lsl : null, tgt, usl: uslOn ? usl : null };
-  const capWarningAcknowledged = CM != null && isCapabilityWarningAcknowledged(
-    M, textCols, CM, capSpec, capabilityWarningAcknowledgement,
-  );
-  const capError = CM
-    ? capabilityInputError(CM.all, CM.sigmaWithin, capSpec, { allowDistantSpec: capWarningAcknowledged })
-    : capPrepared.error ?? '能力数据角色有歧义';
-  const cap = CM && capError == null
-    ? computeCapability(CM.all, CM.sigmaWithin, capSpec, { allowDistantSpec: capWarningAcknowledged })
-    : null;
+  // GAP-10-22:确认指纹(内部再解析能力口径 + 全量指纹)与能力计算都是 O(N),一并记忆化;
+  // capPrepared 已随全部能力口径字段失效,依赖它即覆盖 resolver 从 store 读取的字段。
+  const { capError, cap } = useMemo(() => {
+    const capSpec = { lsl: lslOn ? lsl : null, tgt, usl: uslOn ? usl : null };
+    const capWarningAcknowledged = CM != null && isCapabilityWarningAcknowledged(
+      M, textCols, CM, capSpec, capabilityWarningAcknowledgement,
+    );
+    const capError = CM
+      ? capabilityInputError(CM.all, CM.sigmaWithin, capSpec, { allowDistantSpec: capWarningAcknowledged })
+      : capPrepared.error ?? '能力数据角色有歧义';
+    const cap = CM && capError == null
+      ? computeCapability(CM.all, CM.sigmaWithin, capSpec, { allowDistantSpec: capWarningAcknowledged })
+      : null;
+    return { capError, cap };
+  }, [M, textCols, capPrepared, CM, lsl, usl, tgt, lslOn, uslOn, capabilityWarningAcknowledgement]);
   const anova = useMemo(() => oneWayAnova(anovaGroups().map((g) => g.vals)), []);
 
   // 与 SPC 页共用数据角色和判异口径。离散图失控时先告警，不把均值图单独解释为“受控”。
-  const means = SM?.subs.map((s) => s.mean) ?? [];
-  const subgroupUsesS = Boolean(SM?.hasSubgroups && spcType === 'xbar-s');
-  const subgroupMainUcl = subgroupUsesS ? SM?.uclXs : SM?.uclX;
-  const subgroupMainLcl = subgroupUsesS ? SM?.lclXs : SM?.lclX;
-  const dispersionLabel = !SM?.hasSubgroups ? 'MR' : subgroupUsesS ? 'S' : 'R';
-  const dispersion = !SM ? null : SM.hasSubgroups
-    ? subgroupUsesS
-      ? evalLimitedRules(SM.svals, SM.sCl, SM.uclS, SM.lclS, spcRules, spcRuleK)
-      : evalLimitedRules(SM.subs.map((s) => s.range), SM.rCl, SM.uclR, SM.lclR, spcRules, spcRuleK)
-    : evalLimitedRules(SM.mr.slice(1) as number[], SM.mrbar, SM.mrUcl, 0, spcRules, spcRuleK);
-  const mainRules = !SM ? null : SM.hasSubgroups
-    ? evalRules(means, SM.xbarbar, (subgroupMainUcl! - SM.xbarbar) / 3, spcRules, spcRuleK)
-    // σ 用 (UCL−CL)/3:与页面/保存摘要/导出(assessSpcCharts)逐位同一浮点表达式,消除 ulp 级分裂
-    : evalRules(SM.indiv, SM.indMean, (SM.iUcl - SM.indMean) / 3, spcRules, spcRuleK);
-  const spcAlerts = (dispersion?.list.length
-    ? dispersion.list.map((v) => ({
-        color: STATUS_COLORS.bad,
-        title: `${dispersionLabel} 图点 ${v.i + (SM?.hasSubgroups ? 1 : 2)} 违反准则 ${v.rule}`,
-        desc: `${v.desc}；离散图未稳定，暂不解释${SM?.hasSubgroups ? ' X̄' : ' I'} 图。`,
-        page: 'spc' as const,
-      }))
-    : (mainRules?.list ?? []).map((v) => ({
-        color: STATUS_COLORS.bad,
-        title: `${SM?.hasSubgroups ? 'X̄ 图子组' : 'I 图观测'} ${v.i + 1} 违反准则 ${v.rule}`,
-        desc: v.desc,
-        page: 'spc' as const,
-      })));
-  // 设备 ANOVA 是随安装包提供的演示研究，只能在演示数据集上形成告警。
-  const anovaAlerts = M.isDemo && anova.significant
-    ? [{ color: STATUS_COLORS.warn, title: '演示研究：设备间均值差异显著', desc: `演示 ANOVA 显示设备间差异显著 (P=${nf(anova.pValue, 3)})`, page: 'anova' as const }]
-    : [];
-  const alerts = [
-    ...spcAlerts,
-    ...anovaAlerts,
-  ];
+  // GAP-10-22:判异(含明细)整体记忆化,只随数据/图型/准则/K 变化重跑。告警计数仍取完整
+  // 明细条数(口径不变),文案对象只构造实际渲染的前 8 条。
+  const { means, subgroupMainUcl, subgroupMainLcl, dispersionLabel, dispersion, mainRules } = useMemo(() => {
+    const means = SM?.subs.map((s) => s.mean) ?? [];
+    const subgroupUsesS = Boolean(SM?.hasSubgroups && spcType === 'xbar-s');
+    const subgroupMainUcl = subgroupUsesS ? SM?.uclXs : SM?.uclX;
+    const subgroupMainLcl = subgroupUsesS ? SM?.lclXs : SM?.lclX;
+    const dispersionLabel = !SM?.hasSubgroups ? 'MR' : subgroupUsesS ? 'S' : 'R';
+    const dispersion = !SM ? null : SM.hasSubgroups
+      ? subgroupUsesS
+        ? evalLimitedRules(SM.svals, SM.sCl, SM.uclS, SM.lclS, spcRules, spcRuleK)
+        : evalLimitedRules(SM.subs.map((s) => s.range), SM.rCl, SM.uclR, SM.lclR, spcRules, spcRuleK)
+      : evalLimitedRules(SM.mr.slice(1) as number[], SM.mrbar, SM.mrUcl, 0, spcRules, spcRuleK);
+    const mainRules = !SM ? null : SM.hasSubgroups
+      ? evalRules(means, SM.xbarbar, (subgroupMainUcl! - SM.xbarbar) / 3, spcRules, spcRuleK)
+      // σ 用 (UCL−CL)/3:与页面/保存摘要/导出(assessSpcCharts)逐位同一浮点表达式,消除 ulp 级分裂
+      : evalRules(SM.indiv, SM.indMean, (SM.iUcl - SM.indMean) / 3, spcRules, spcRuleK);
+    return { means, subgroupMainUcl, subgroupMainLcl, dispersionLabel, dispersion, mainRules };
+  }, [SM, spcType, spcRules, spcRuleK]);
+  const { alerts, alertCount, spcAlertCount, anovaAlertCount } = useMemo(() => {
+    const dispersionFirst = Boolean(dispersion?.list.length);
+    const spcSource = dispersionFirst ? dispersion!.list : mainRules?.list ?? [];
+    const spcAlerts = spcSource.slice(0, DASHBOARD_ALERT_ROWS).map((v) => (dispersionFirst
+      ? {
+          color: STATUS_COLORS.bad,
+          title: `${dispersionLabel} 图点 ${v.i + (SM?.hasSubgroups ? 1 : 2)} 违反准则 ${v.rule}`,
+          desc: `${v.desc}；离散图未稳定，暂不解释${SM?.hasSubgroups ? ' X̄' : ' I'} 图。`,
+          page: 'spc' as const,
+        }
+      : {
+          color: STATUS_COLORS.bad,
+          title: `${SM?.hasSubgroups ? 'X̄ 图子组' : 'I 图观测'} ${v.i + 1} 违反准则 ${v.rule}`,
+          desc: v.desc,
+          page: 'spc' as const,
+        }));
+    // 设备 ANOVA 是随安装包提供的演示研究，只能在演示数据集上形成告警。
+    const anovaAlerts = M.isDemo && anova.significant
+      ? [{ color: STATUS_COLORS.warn, title: '演示研究：设备间均值差异显著', desc: `演示 ANOVA 显示设备间差异显著 (P=${nf(anova.pValue, 3)})`, page: 'anova' as const }]
+      : [];
+    return {
+      alerts: [...spcAlerts, ...anovaAlerts].slice(0, DASHBOARD_ALERT_ROWS),
+      alertCount: spcSource.length + anovaAlerts.length,
+      spcAlertCount: spcSource.length,
+      anovaAlertCount: anovaAlerts.length,
+    };
+  }, [dispersion, mainRules, dispersionLabel, SM, M.isDemo, anova]);
 
   const cpkGood = cap != null && cap.cpk >= 1.33;
   // P0-4:过程失控/非正态时 Cpk 卡不得给绿色「达标」——与能力页/保存记录同一口径。
   // 716-R3:失控计数与正态性检验同步切到能力口径模型(countCapabilityViolations 与能力页/保存记录共用)。
   // 能力 Cpk 继续使用 resolver 的 sigmaWithin；稳定性则必须复用当前 SPC 的 σ̂ 方法，
   // 否则 pooled 控制限下看板会仍按 classic 计数而与能力页/导出分裂。
-  const capSpcModel = CM ? withSigmaMethod(CM, spcSigmaMethod) : null;
-  const dashSpcViol = capSpcModel
-    ? countCapabilityViolations(capSpcModel, spcRules, spcRuleK, spcChartFamilyFor(capSpcModel, spcType))
-    : 0;
+  const dashSpcViol = useMemo(() => {
+    const capSpcModel = CM ? withSigmaMethod(CM, spcSigmaMethod) : null;
+    return capSpcModel
+      ? countCapabilityViolations(capSpcModel, spcRules, spcRuleK, spcChartFamilyFor(capSpcModel, spcType))
+      : 0;
+  }, [CM, spcSigmaMethod, spcRules, spcRuleK, spcType]);
   const cpkStable = dashSpcViol === 0;
-  const dashAd = cap && CM && CM.all.length >= 8 ? andersonDarling(CM.all) : null;
+  const hasCap = cap != null;
+  const dashAd = useMemo(
+    () => hasCap && CM && CM.all.length >= 8 ? andersonDarling(CM.all) : null,
+    [hasCap, CM],
+  );
   const dashNonNormal = dashAd != null && !dashAd.normal;
   // 716-R3:能力口径与 SPC 口径不同时,小字注明当前口径,让用户知道这个 Cpk 属于哪份数据。
   const capCaliberNote = capSubgroupMode === 'const'
@@ -121,22 +161,22 @@ export function Dashboard({ T }: { T: ChartTokens }) {
       : { label: '一次合格率', value: '—', tag: '', color: STATUS_COLORS.muted, sub: '当前工作表没有批次一次合格数据' },
     { label: '不良 PPM', value: cap ? Math.round(cap.ppm.overall.total).toLocaleString() : '—', tag: '', color: cap ? STATUS_COLORS.bad : STATUS_COLORS.muted, sub: cap ? '预计缺陷率' : capError ?? '能力输入无效' },
     {
-      label: '未处理告警', value: String(alerts.length), tag: '', color: alerts.length > 0 ? STATUS_COLORS.warn : STATUS_COLORS.ok,
-      sub: alerts.length > 0
-        ? `${spcAlerts.length} SPC${anovaAlerts.length ? ` · ${anovaAlerts.length} 演示 ANOVA` : ''}`
+      label: '未处理告警', value: String(alertCount), tag: '', color: alertCount > 0 ? STATUS_COLORS.warn : STATUS_COLORS.ok,
+      sub: alertCount > 0
+        ? `${spcAlertCount} SPC${anovaAlertCount ? ` · ${anovaAlertCount} 演示 ANOVA` : ''}`
         : SM ? '过程受控' : 'SPC 未运行',
     },
   ];
 
   const saved = useAnalyses((s) => s.saved);
   const paretoModel = useData((s) => s.paretoModel);
-  const paretoRows = paretoModel && paretoModel.rows.length > 0
+  const paretoRows = useMemo(() => paretoModel && paretoModel.rows.length > 0
     ? paretoReport({
         rows: paretoModel.rows,
         mergeOther: false,
         threshold: paretoThreshold,
       }).rows.map((row) => ({ name: row.name, count: row.count }))
-    : null;
+    : null, [paretoModel, paretoThreshold]);
   const paretoName = paretoModel?.name ?? '';
   const restore = useAnalyses((s) => s.restore);
   const fmtTime = (t: number) => {
@@ -260,15 +300,15 @@ export function Dashboard({ T }: { T: ChartTokens }) {
         <Card>
           <div style={{ padding: '12px 16px', borderBottom: '1px solid #edf0f3', fontWeight: 600, color: '#33404f', fontSize: 13.5, display: 'flex', alignItems: 'center' }}>
             告警
-            <span className="mono" style={{ marginLeft: 8, background: alerts.length > 0 ? STATUS_COLORS.bad : STATUS_COLORS.ok, color: '#fff', fontSize: 11, padding: '1px 7px', borderRadius: 9 }}>{alerts.length}</span>
+            <span className="mono" style={{ marginLeft: 8, background: alertCount > 0 ? STATUS_COLORS.bad : STATUS_COLORS.ok, color: '#fff', fontSize: 11, padding: '1px 7px', borderRadius: 9 }}>{alertCount}</span>
           </div>
           <div style={{ padding: '6px 0' }}>
-            {alerts.length === 0 && (
+            {alertCount === 0 && (
               <div style={{ padding: '14px 16px', fontSize: 12.5, color: SM ? STATUS_COLORS.ok : STATUS_COLORS.muted, fontWeight: 500 }}>
                 {SM ? '✓ 过程受控，暂无告警' : '尚未运行 SPC；完成数据角色配置后再判断过程状态'}
               </div>
             )}
-            {alerts.slice(0, 8).map((a) => (
+            {alerts.map((a) => (
               <button type="button" key={a.title} className="hov-alert" onClick={() => goTo(a.page)} style={{ width: '100%', display: 'flex', gap: 11, padding: '10px 16px', border: 0, borderTop: '1px solid #f4f6f8', background: 'transparent', fontFamily: 'inherit', textAlign: 'left', cursor: 'pointer' }}>
                 <span style={{ width: 8, height: 8, borderRadius: '50%', background: a.color, marginTop: 5, flex: 'none' }} />
                 <div>
@@ -277,9 +317,9 @@ export function Dashboard({ T }: { T: ChartTokens }) {
                 </div>
               </button>
             ))}
-            {alerts.length > 8 && (
+            {alertCount > DASHBOARD_ALERT_ROWS && (
               <div style={{ padding: '9px 16px', fontSize: 11.5, color: STATUS_COLORS.muted, borderTop: '1px solid #f4f6f8' }}>
-                另有 {alerts.length - 8} 条告警，请进入控制图查看全部判异明细。
+                另有 {alertCount - DASHBOARD_ALERT_ROWS} 条告警，请进入控制图查看全部判异明细。
               </div>
             )}
           </div>
@@ -288,3 +328,6 @@ export function Dashboard({ T }: { T: ChartTokens }) {
     </div>
   );
 }
+
+/** 主题 tokens 按值比较:App 每次渲染新建 T 对象,不应因此让总览整页重算。 */
+export const Dashboard = memo(DashboardView, (previous, next) => sameChartTokens(previous.T, next.T));

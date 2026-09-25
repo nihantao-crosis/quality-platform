@@ -41,6 +41,17 @@ export function chartTokens(style: ChartStyle, showGrid: boolean): ChartTokens {
   return { name: style, classic: true, bg: '#ffffff', grid: 'transparent', frame: '#c4c9d0', axis: '#262626', text: '#1a1a1a', center: '#000000', limit: '#d21f26', limitDash: undefined, point: '#2A4B8D', line: '#2A4B8D', spec: '#c026a6', bar: '#7FA0C4', bar2: '#5b9bd5', bar3: '#a9c9ec', curve: '#d21f26', curve2: '#c026a6', sw: 1.6, r: 3.4, dash: '5 4' };
 }
 
+/**
+ * 主题 tokens 按值比较。App 每次渲染都会 chartTokens() 出新对象;大页面(总览/SPC)用
+ * React.memo(…, 本函数) 挡住与主题无关的父级重渲染(toast/菜单开合),
+ * 否则 20 万行下每条提示都会让整页重跑(GAP-10-22/23)。
+ */
+export function sameChartTokens(a: ChartTokens, b: ChartTokens): boolean {
+  if (a === b) return true;
+  const keys = Object.keys(a) as Array<keyof ChartTokens>;
+  return keys.length === Object.keys(b).length && keys.every((key) => Object.is(a[key], b[key]));
+}
+
 /** 帕累托柱色序;经典主题按 Minitab 统一钢蓝(排序信息由柱高与累积线表达) */
 export function paretoColors(T: ChartTokens): string[] {
   if (T.classic) return [T.bar];

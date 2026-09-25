@@ -3,7 +3,7 @@
  * X̄-R / X̄-S；其他形态仍可用于 I-MR，随后由 SPC 数据角色层转换。
  */
 import { CONTROL_CONSTANTS, c4Of } from './spc';
-import { mean, rootMeanSquare, stdev } from './basicMath';
+import { expansionSumFrom, mean, rootMeanSquare, stdev } from './basicMath';
 
 /**
  * Only move to a common coordinate system when ordinary arithmetic can approach
@@ -37,13 +37,14 @@ export function commonCoordinateScale(series: readonly number[][], additional?: 
 
 function flatCoordinateScale(values: readonly number[], additional?: readonly number[]): number {
   let maximum = 0;
-  for (const value of values) {
-    const magnitude = Math.abs(value);
+  // 索引循环:单格编辑热点(20 万行×多列每次扫全部值),比 for…of 快约 4×,取值与次序相同
+  for (let index = 0; index < values.length; index++) {
+    const magnitude = Math.abs(values[index]);
     if (magnitude > maximum) maximum = magnitude;
   }
   if (additional) {
-    for (const value of additional) {
-      const magnitude = Math.abs(value);
+    for (let index = 0; index < additional.length; index++) {
+      const magnitude = Math.abs(additional[index]);
       if (magnitude > maximum) maximum = magnitude;
     }
   }
@@ -69,40 +70,19 @@ function coordinateRange(values: readonly number[]): number {
   return hi - lo;
 }
 
-/** mean(xs.slice(start)) 的无中间数组版；展开求和次序与 basicMath.mean 一致。 */
+/** mean(xs.slice(start)) 的无中间数组版；与 basicMath.mean 共用同一展开求和内核,逐位一致。 */
 function finiteTailMean(values: readonly number[], start: number): number {
   const count = values.length - start;
   if (count <= 0) return Number.NaN;
-  const partials: number[] = [];
-  let maximum = 0;
-  const expansion = (scale: number): number => {
-    partials.length = 0;
-    for (let index = start; index < values.length; index++) {
-      let x = values[index] / scale;
-      if (scale === 1) {
-        const magnitude = Math.abs(x);
-        if (magnitude > maximum) maximum = magnitude;
-      }
-      let write = 0;
-      for (let read = 0; read < partials.length; read++) {
-        let y = partials[read];
-        if (Math.abs(x) < Math.abs(y)) [x, y] = [y, x];
-        const high = x + y;
-        const low = y - (high - x);
-        if (low !== 0) partials[write++] = low;
-        x = high;
-      }
-      partials.length = write;
-      partials.push(x);
-    }
-    let total = 0;
-    for (const partial of partials) total += partial;
-    return total;
-  };
-  const unscaled = expansion(1);
+  const unscaled = expansionSumFrom(values, start);
   if (Number.isFinite(unscaled)) return unscaled / count;
+  let maximum = 0;
+  for (let index = start; index < values.length; index++) {
+    const magnitude = Math.abs(values[index]);
+    if (magnitude > maximum) maximum = magnitude;
+  }
   if (maximum === 0) return 0;
-  const normalized = expansion(maximum);
+  const normalized = expansionSumFrom(values, start, maximum);
   const restored = normalized * maximum;
   return Number.isFinite(restored) ? restored / count : (normalized / count) * maximum;
 }
@@ -478,23 +458,13 @@ export function updateVarModelCell(
   const oMean = mean(all);
   const individual = resolveUpdatedIndividuals(model, all, flatIndex, options, oMean);
 
-  // n=1 是 20 万行手工编辑的主路径：子组均值就是 all，R/S 全为 0，
-  // 无需再为 20 万个单值行构造 rows/subgroupMeans/ranges 三份中间数组。
-  const scale = model.n === 1
-    ? flatCoordinateScale(
-        all,
-        individual.fields.indiv === all ? undefined : individual.fields.indiv,
-      )
-    : (() => {
-        const rows = model.subs.map((subgroup) => subgroup.vals);
-        const changed = [...rows[row]];
-        changed[col] = value;
-        rows[row] = changed;
-        return commonCoordinateScale(
-          rows,
-          individual.fields.indiv === all ? undefined : individual.fields.indiv,
-        );
-      })();
+  // 坐标尺度只取决于全部值的最大绝对值。all 就是编辑后按行展平的全部单元格,
+  // 与 rows 同一值集合,故对任意 n 都直接扫扁平 all(GAP-10-24:多列不再为
+  // 20 万个子组重建 rows 引用数组与被改行副本)。
+  const scale = flatCoordinateScale(
+    all,
+    individual.fields.indiv === all ? undefined : individual.fields.indiv,
+  );
 
   if (scale !== 1) {
     const rows = model.subs.map((subgroup) => subgroup.vals);

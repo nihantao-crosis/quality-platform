@@ -35,6 +35,10 @@ body {
 .rc-del { display: none; }
 div:hover > .rc-del { display: inline; }
 
+/* UI-05 列虚拟化:定宽列(table-layout: fixed)内容超宽时裁切；单元格 title 仍给出全值 */
+.ws-colvirtual th,
+.ws-colvirtual td { overflow: hidden; text-overflow: ellipsis; }
+
 /* 测量列删除按钮：列头和按钮都可聚焦，不能用 display:none 移出辅助技术树。 */
 .col-del {
   position: absolute;
