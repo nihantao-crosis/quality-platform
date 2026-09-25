@@ -122,7 +122,7 @@ describe('Box-Cox', () => {
     if ('error' in r) throw new Error(r.error);
     expect(Math.abs(r.lambda)).toBeLessThanOrEqual(0.3);
   });
-  it('负数据拒绝；λ<0 时规格限交换后仍 lsl<usl', () => {
+  it('负数据拒绝；λ<0 时变换保持单调,规格限次序天然保持 lsl<usl', () => {
     expect('error' in bestLambda([1, -2, 3])).toBe(true);
     const t = transformWithSpec([1, 2, 3], 0.5, 4, -1);
     if ('error' in t) throw new Error(t.error);
@@ -238,7 +238,8 @@ describe('Cpm 望目能力', () => {
     const D = buildData();
     const cap = computeCapability(D.all, D.sigmaWithin, { lsl: 24.9, tgt: D.oMean, usl: 25.1 });
     const tau = Math.sqrt(D.all.reduce((a, b) => a + (b - D.oMean) ** 2, 0) / D.all.length);
-    expect(cap.cpm).toBeCloseTo(0.2 / (6 * tau), 10);
+    // Minitab 口径(v1.43.0 双审整改):Cpm = min(USL−T, T−LSL)/(3τ);目标恰在中点时等于 (USL−LSL)/(6τ)
+    expect(cap.cpm).toBeCloseTo(Math.min(25.1 - D.oMean, D.oMean - 24.9) / (3 * tau), 10);
   });
   it('偏离目标越远 Cpm 越小', () => {
     const D = buildData();

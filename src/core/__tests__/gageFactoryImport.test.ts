@@ -6,14 +6,14 @@
  */
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { detectCsvBlocks, parseMatrix } from '../csv';
+import { csvBlockLabel, detectCsvBlocks, parseMatrix } from '../csv';
 import { computeVarModel } from '../model';
 import { prepareGageStudy } from '../gageData';
 import { computeGageRR, assessGage } from '../gage';
 import { xlsxBytesToCsv } from '../../platform/xlsxImport';
 
 const workbook = readFileSync(new URL('./fixtures/gage-factory-workbook-2026-07.xlsx', import.meta.url));
-const converted = xlsxBytesToCsv(new Uint8Array(workbook));
+const converted = await xlsxBytesToCsv(new Uint8Array(workbook));
 
 describe('工厂 5 案例工作簿端到端导入', () => {
   it('整表转 CSV 后检测到 5 个并排数据块,名称与行数与数据源一致', () => {
@@ -171,5 +171,30 @@ describe('工厂 5 案例工作簿端到端导入', () => {
     expect(blocks).toHaveLength(1);
     expect(blocks[0].headerRow).toBe(0);
     expect(blocks[0].rows).toBe(3);
+  });
+
+  it('空列分隔的单列组也作为候选，标签含稳定序号、源列和预览', () => {
+    const blocks = detectCsvBlocks('测量值,,测量值\n1,,10\n2,,20\n3,,30');
+    expect(blocks).toHaveLength(2);
+    expect(blocks.map((block) => [block.ordinal, block.colStart, block.colEnd, block.rows])).toEqual([
+      [1, 0, 0, 3],
+      [2, 2, 2, 3],
+    ]);
+    expect(blocks.map(csvBlockLabel)).toEqual([
+      '第 1 块 · 源列 C1 · 测量值',
+      '第 2 块 · 源列 C3 · 测量值',
+    ]);
+  });
+
+  it('中间不完整行不会截掉其后的完整行，并显式报告忽略数', () => {
+    const blocks = detectCsvBlocks('部件,测量值,,部件,测量值\n1,10,,1,20\n2,,,2,21\n3,12,,3,22');
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0].rows).toBe(2);
+    expect(blocks[0].omittedRows).toBe(1);
+    const parsed = parseMatrix(blocks[0].csv);
+    if ('error' in parsed) throw new Error(parsed.error);
+    expect(parsed.rows).toEqual([[1, 10], [3, 12]]);
+    expect(blocks[1].rows).toBe(3);
+    expect(blocks[1].omittedRows).toBe(0);
   });
 });

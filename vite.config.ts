@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
@@ -29,6 +30,14 @@ self.addEventListener('activate', (event) => event.waitUntil((async () => {
 }
 
 export default defineConfig({
+  test: {
+    // 测试基建(双审 P3):全局 RTL cleanup,防止用例间 DOM 泄漏;逐文件手动 cleanup 仍兼容
+    setupFiles: ['./src/testSetup.ts'],
+    // 复审:本套件含整 App 渲染与 13 万行导出等重用例,单跑 0.5~1s,并发跑在负载下会冲破
+    // vitest 默认的 5s——本机全量跑已出现 6.5s 的假红,CI 共享 runner 更慢。放宽到 20s
+    // 仍能拦住真正挂死的用例(正常用例与该上限相差一个数量级以上)。
+    testTimeout: 20_000,
+  },
   define: { __APP_VERSION__: JSON.stringify(pkg.version) },
   plugins: [
     devServiceWorkerCleanup(),

@@ -1,9 +1,13 @@
 /** 过程能力分析 ★深度实现 — 可编辑规格限实时重算 + 直方图 + PPM 性能表。 */
 import type React from 'react';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useApp } from '../../store/appStore';
-import { useData, suggestedSpec, rememberSpecForCapabilityMeasurement, resolveCapabilityMeasurementData, syncSpecForCapabilityMeasurement, capabilitySpecKey } from '../../store/dataStore';
-import { nf, fmtCap, capabilityInputError, computeCapability, andersonDarling, bestLambda, transformWithSpec, stdev, countCapabilityViolations, spcMeasurementColumnNames } from '../../core';
+import { useData, suggestedSpec, rememberSpecForCapabilityMeasurement, resolveCapabilityMeasurementData, syncSpecForCapabilityMeasurement, capabilitySpecKey, capabilitySubgroupSemantics } from '../../store/dataStore';
+import {
+  nf, fmtCap, capabilityInputError, capabilitySpecDistanceWarning, capabilityWarningFingerprint,
+  computeCapability, andersonDarling, bestLambda, transformWithSpec, stdev, countCapabilityViolations, withSigmaMethod,
+  spcMeasurementColumnNames, spcChartFamilyFor,
+} from '../../core';
 import { ReportCard } from '../ReportCard';
 import { capabilityReport } from '../reportData';
 import type { ChartTokens } from '../tokens';
@@ -29,11 +33,17 @@ function SubgroupSizeInput({ value, onCommit }: { value: number; onCommit: (z: n
 }
 
 export function Capability({ T }: { T: ChartTokens }) {
-  const { lsl, usl, tgt, lslOn, uslOn, toggleSide, setSpec: setSpecRaw, spcRules, spcRuleK, goTo, capabilityBins: bins, setCapabilityBins: setBins,
+  const { lsl, usl, tgt, lslOn, uslOn, toggleSide, setSpec: setSpecRaw, spcRules, spcRuleK, spcType, spcSigmaMethod, goTo, capabilityBins: bins, setCapabilityBins: setBins,
     capSubgroupMode, capSubgroupSize, capValueCol, capSubgroupIdCol, setCapabilitySubgroup, showToast } = useApp();
+  const capabilityWarningAcknowledgement = useApp((state) => state.capabilityWarningAcknowledgement);
+  const acknowledgeCapabilityWarning = useApp((state) => state.acknowledgeCapabilityWarning);
   const rawModel = useData((s) => s.model);
   const textCols = useData((s) => s.textCols);
-  const prepared = resolveCapabilityMeasurementData(rawModel, textCols);
+  // 记忆化(闭环审核 P2:与 App/Worksheet/SPC/Dashboard 同一约定)
+  const prepared = useMemo(
+    () => resolveCapabilityMeasurementData(rawModel, textCols),
+    [rawModel, textCols, capSubgroupMode, capSubgroupSize, capValueCol, capSubgroupIdCol], // eslint-disable-line react-hooks/exhaustive-deps
+  );
   const M = prepared.model;
   // 批次716-R2 P0:子组口径(模式/测量列/ID 列)变化 = 测量特性可能变化,规格必须跟随切换,
   // 否则沿用旧量纲规格会产出虚假 Cpk。有该特性的记忆规格用记忆,否则按新口径 μ±4σ 重建议。
@@ -164,7 +174,9 @@ export function Capability({ T }: { T: ChartTokens }) {
             disabled={!i.on}
             onChange={(e) => {
               const v = parseFloat(e.target.value);
-              if (!isNaN(v)) setSpec({ [i.key]: v });
+              // Number.isFinite 而非 !isNaN:1e999 → Infinity 落盘会让 prefs 被判「损坏」,
+              // 保存分析后整份历史在重启时被隔离(双审 P2)
+              if (Number.isFinite(v)) setSpec({ [i.key]: v });
             }}
             style={{ ...numInput, ...(i.on ? {} : { background: '#f4f6f8', color: '#b6bdc6' }) }}
           />
@@ -172,7 +184,7 @@ export function Capability({ T }: { T: ChartTokens }) {
       ))}
       {!(lslOn && uslOn) && (
         <span style={{ fontSize: 11.5, color: '#d98324', fontWeight: 600 }}>
-          单侧规格：Cpk = {lslOn ? 'CPL' : 'CPU'},双侧指标（Cp/Pp/Cpm）不适用
+          单侧规格：Cpk = {lslOn ? 'CPL' : 'CPU'},Cp/Pp 不适用;Cpm 按启用侧距离(Minitab 单侧式)计算
         </span>
       )}
       <button type="button"
@@ -184,7 +196,10 @@ export function Capability({ T }: { T: ChartTokens }) {
       </button>
     </Card>
   );
-  const inputError = capabilityInputError(M.all, M.sigmaWithin, { lsl: effLsl, tgt, usl: effUsl });
+  const spec = { lsl: effLsl, tgt, usl: effUsl };
+  // 1000σ 是可确认的强警告，不与真正的数学非法输入混在一起。确认字串绑定
+  // 数据集+测量/子组角色+规格+有序观测 hash；任一项变化后旧确认自动失效。
+  const inputError = capabilityInputError(M.all, M.sigmaWithin, spec, { allowDistantSpec: true });
   if (inputError) {
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -199,7 +214,45 @@ export function Capability({ T }: { T: ChartTokens }) {
       </div>
     );
   }
-  const cap = computeCapability(M.all, M.sigmaWithin, { lsl: effLsl, tgt, usl: effUsl });
+  const specWarning = capabilitySpecDistanceWarning(M.all, M.sigmaWithin, spec);
+  const warningFingerprint = capabilityWarningFingerprint(
+    capabilitySpecKey(rawModel, textCols) ?? `${rawModel.name}:${prepared.variableName}`,
+    M.all,
+    M.sigmaWithin,
+    spec,
+    capabilitySubgroupSemantics(rawModel, textCols) ?? '',
+  );
+  const warningAcknowledged = specWarning != null && warningFingerprint != null
+    && capabilityWarningAcknowledgement === warningFingerprint;
+  if (specWarning && !warningAcknowledged) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        {subgroupEditor}
+        <Card style={{ padding: '10px 16px', color: '#5b6472', fontSize: 12.5, lineHeight: 1.6 }}>
+          <b style={{ color: '#33404f' }}>能力数据口径：</b>{prepared.note}；变量：{prepared.variableName}；实际观测 N={M.all.length}。
+        </Card>
+        {specEditor}
+        <Card style={{ padding: '18px 20px', color: '#8a4f08', background: '#fff8e8', border: '1px solid #efc56f', lineHeight: 1.7 }}>
+          <b>过程能力分析未运行（等待确认）：强警告——规格与当前测量数据的量纲可能不一致。</b><br />
+          {specWarning.message}。系统在你确认前不会显示 Cpk/PPM，也不会把该结论导出到能力报告。
+          <div style={{ marginTop: 12, display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+            <button type="button" onClick={() => setSpec(suggestedSpec(M))}
+              style={{ padding: '6px 12px', border: '1px solid #d7a54e', borderRadius: 4, background: '#fff', color: '#8a4f08', cursor: 'pointer', fontWeight: 600 }}>
+              按当前数据重新建议规格
+            </button>
+            <button type="button" onClick={() => acknowledgeCapabilityWarning(warningFingerprint)}
+              style={{ padding: '6px 12px', border: 0, borderRadius: 4, background: '#b0620f', color: '#fff', cursor: 'pointer', fontWeight: 700 }}>
+              我已核对测量角色与规格，继续计算
+            </button>
+          </div>
+          <div style={{ marginTop: 9, fontSize: 11.5, color: '#9b6a2a' }}>
+            此确认只对当前数据集、测量口径和 LSL/Target/USL 有效；改列、改规格或数据变化都会要求重新确认。
+          </div>
+        </Card>
+      </div>
+    );
+  }
+  const cap = computeCapability(M.all, M.sigmaWithin, spec, { allowDistantSpec: warningAcknowledged });
   const good = cap.verdict === 'sufficient';
   const marginal = cap.verdict === 'marginal';
 
@@ -235,8 +288,8 @@ export function Capability({ T }: { T: ChartTokens }) {
         const tSpec = { lsl: tr.lsl, usl: tr.usl, tgt: (tr.lsl + tr.usl) / 2 };
         // 变换域也要先过输入闸门:负 λ 会把近零规格映射成巨值,量纲哨兵在变换域触发时
         // 只应跳过 Box-Cox 补充卡,不能让 computeCapability 抛异常炸掉整页(含规格编辑器)。
-        if (capabilityInputError(tr.data, tSd, tSpec) === null) {
-          const tCap = computeCapability(tr.data, tSd, tSpec);
+        if (capabilityInputError(tr.data, tSd, tSpec, { allowDistantSpec: warningAcknowledged }) === null) {
+          const tCap = computeCapability(tr.data, tSd, tSpec, { allowDistantSpec: warningAcknowledged });
           boxcox = { lambda: bl.lambda, ppk: tCap.ppk, adAfter: andersonDarling(tr.data).p };
         }
       }
@@ -249,7 +302,9 @@ export function Capability({ T }: { T: ChartTokens }) {
   ];
 
   // 能力结论必须先同时检查位置图与离散图;计数逻辑收敛在 countCapabilityViolations(与保存记录/专项报告共用)。
-  const spcViol = countCapabilityViolations(M, spcRules, spcRuleK);
+  // 能力指标仍使用 M.sigmaWithin（classic R̄/d₂）；只有控制图稳定性跟随用户选定 σ̂。
+  const capSpcModel = withSigmaMethod(M, spcSigmaMethod);
+  const spcViol = countCapabilityViolations(capSpcModel, spcRules, spcRuleK, spcChartFamilyFor(capSpcModel, spcType));
   const report = capabilityReport({
     cpk: cap.cpk, verdict: cap.verdict,
     adP: ad ? ad.p : null, n: M.all.length, spcViolations: spcViol,
@@ -263,8 +318,17 @@ export function Capability({ T }: { T: ChartTokens }) {
         <b style={{ color: '#33404f' }}>能力数据口径：</b>{prepared.note}；变量：{prepared.variableName}；实际观测 N={M.all.length}。
       </Card>
       {specEditor}
+      {specWarning && warningAcknowledged && (
+        <Card style={{ padding: '10px 16px', color: '#8a4f08', background: '#fff8e8', border: '1px solid #efc56f', fontSize: 12, lineHeight: 1.6 }}>
+          <b>已显式确认超 1000σ 规格：</b>{specWarning.message}。本页和能力专项报告会保留该披露；任一规格或测量口径变化后确认自动失效。
+          <button type="button" onClick={() => acknowledgeCapabilityWarning(null)}
+            style={{ marginLeft: 10, padding: '3px 9px', border: '1px solid #d7a54e', borderRadius: 4, background: '#fff', color: '#8a4f08', cursor: 'pointer' }}>
+            撤回确认
+          </button>
+        </Card>
+      )}
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 16 }}>
+      <div className="responsive-grid-2" style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 16 }}>
         <Card>
           <div style={{ display: 'flex', alignItems: 'center', padding: '11px 16px', borderBottom: '1px solid #edf0f3' }}>
             <div style={{ fontWeight: 600, color: '#33404f' }}>过程能力直方图 · {M.isDemo ? '直径 (mm)' : prepared.variableName}</div>
@@ -295,7 +359,7 @@ export function Capability({ T }: { T: ChartTokens }) {
                 {good ? '能力充足' : marginal ? '能力临界' : '能力不足'}
               </div>
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+            <div className="responsive-grid-2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
               {big.map((c) => (
                 <div key={c.k} style={{ background: '#f7f9fb', border: '1px solid #eaeef2', borderRadius: 4, padding: '10px 12px' }}>
                   <div style={{ fontSize: 11.5, color: '#8a929d' }}>{c.k}</div>
@@ -303,7 +367,7 @@ export function Capability({ T }: { T: ChartTokens }) {
                 </div>
               ))}
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 10 }}>
+            <div className="responsive-grid-2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 10 }}>
               {big2.map((c) => (
                 <div key={c.k} style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 10px', background: '#f7f9fb', border: '1px solid #eef1f4', borderRadius: 4, fontSize: 12.5 }}>
                   <span style={{ color: '#8a929d' }}>{c.k}</span>
@@ -328,7 +392,7 @@ export function Capability({ T }: { T: ChartTokens }) {
         </div>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 16 }}>
+      <div className="responsive-grid-2" style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 16 }}>
         <Card>
           <div style={{ display: 'flex', alignItems: 'center', padding: '11px 16px', borderBottom: '1px solid #edf0f3' }}>
             <div style={{ fontWeight: 600, color: '#33404f' }}>正态概率图</div>

@@ -1,11 +1,12 @@
 /** 质量总览 — KPI / X̄ 趋势 / 帕累托 / 分析记录 / 告警，全部指标实时计算。 */
 import { useMemo } from 'react';
 import { useApp } from '../../store/appStore';
-import { useData, resolveCapabilityMeasurementData } from '../../store/dataStore';
+import { useData, resolveCapabilityMeasurementData, isCapabilityWarningAcknowledged } from '../../store/dataStore';
 import {
   nf, DEFECTS, evalRules, evalLimitedRules, capabilityInputError, computeCapability, oneWayAnova, anovaGroups, andersonDarling,
-  prepareSpcData, countCapabilityViolations, withSigmaMethod,
+  prepareSpcData, countCapabilityViolations, withSigmaMethod, spcChartFamilyFor,
 } from '../../core';
+import { STATUS_COLORS } from '../tokens';
 import type { ChartTokens } from '../tokens';
 import { Card, Badge } from '../common';
 import { ControlChart } from '../charts/ControlChart';
@@ -15,14 +16,18 @@ import { paretoReport } from '../reportData';
 
 export function Dashboard({ T }: { T: ChartTokens }) {
   const {
-    goTo, lsl, usl, tgt, lslOn, uslOn, spcRules, spcRuleK, spcDataLayout, spcValueCol, spcSubgroupCol, spcSigmaMethod,
-    paretoThreshold, capSubgroupMode, capSubgroupSize, capValueCol, capSubgroupIdCol,
+    goTo, lsl, usl, tgt, lslOn, uslOn, spcType, spcRules, spcRuleK, spcDataLayout, spcValueCol, spcSubgroupCol, spcSigmaMethod,
+    paretoThreshold, capSubgroupMode, capSubgroupSize, capValueCol, capSubgroupIdCol, capabilityWarningAcknowledgement,
   } = useApp();
   const { model: M, textCols, pendingCells } = useData();
-  const prepared = prepareSpcData(M, textCols, {
-    layout: spcDataLayout, valueColumn: spcValueCol, subgroupColumn: spcSubgroupCol,
-    pendingCells,
-  });
+  // 记忆化(闭环审核 P2:与 App/Worksheet/SPC 同一约定,此前漏了本页与能力页)
+  const prepared = useMemo(
+    () => prepareSpcData(M, textCols, {
+      layout: spcDataLayout, valueColumn: spcValueCol, subgroupColumn: spcSubgroupCol,
+      pendingCells,
+    }),
+    [M, textCols, pendingCells, spcDataLayout, spcValueCol, spcSubgroupCol],
+  );
   // 审查修复(720):总览与 SPC 页同口径——σ 估计方法一并套用,R 判异中心线用 rCl(pooled 时 ≠ R̄)
   const SM = prepared.model ? withSigmaMethod(prepared.model, spcSigmaMethod) : null;
   // 批次716-R3:Cpk/PPM 卡改走能力口径解析(resolveCapabilityMeasurementData),与能力页/
@@ -34,34 +39,48 @@ export function Dashboard({ T }: { T: ChartTokens }) {
   );
   const CM = capPrepared.model;
   const capSpec = { lsl: lslOn ? lsl : null, tgt, usl: uslOn ? usl : null };
-  const capError = CM ? capabilityInputError(CM.all, CM.sigmaWithin, capSpec) : capPrepared.error ?? '能力数据角色有歧义';
-  const cap = CM && capError == null ? computeCapability(CM.all, CM.sigmaWithin, capSpec) : null;
+  const capWarningAcknowledged = CM != null && isCapabilityWarningAcknowledged(
+    M, textCols, CM, capSpec, capabilityWarningAcknowledgement,
+  );
+  const capError = CM
+    ? capabilityInputError(CM.all, CM.sigmaWithin, capSpec, { allowDistantSpec: capWarningAcknowledged })
+    : capPrepared.error ?? '能力数据角色有歧义';
+  const cap = CM && capError == null
+    ? computeCapability(CM.all, CM.sigmaWithin, capSpec, { allowDistantSpec: capWarningAcknowledged })
+    : null;
   const anova = useMemo(() => oneWayAnova(anovaGroups().map((g) => g.vals)), []);
 
   // 与 SPC 页共用数据角色和判异口径。离散图失控时先告警，不把均值图单独解释为“受控”。
   const means = SM?.subs.map((s) => s.mean) ?? [];
+  const subgroupUsesS = Boolean(SM?.hasSubgroups && spcType === 'xbar-s');
+  const subgroupMainUcl = subgroupUsesS ? SM?.uclXs : SM?.uclX;
+  const subgroupMainLcl = subgroupUsesS ? SM?.lclXs : SM?.lclX;
+  const dispersionLabel = !SM?.hasSubgroups ? 'MR' : subgroupUsesS ? 'S' : 'R';
   const dispersion = !SM ? null : SM.hasSubgroups
-    ? evalLimitedRules(SM.subs.map((s) => s.range), SM.rCl, SM.uclR, SM.lclR, spcRules, spcRuleK)
+    ? subgroupUsesS
+      ? evalLimitedRules(SM.svals, SM.sCl, SM.uclS, SM.lclS, spcRules, spcRuleK)
+      : evalLimitedRules(SM.subs.map((s) => s.range), SM.rCl, SM.uclR, SM.lclR, spcRules, spcRuleK)
     : evalLimitedRules(SM.mr.slice(1) as number[], SM.mrbar, SM.mrUcl, 0, spcRules, spcRuleK);
   const mainRules = !SM ? null : SM.hasSubgroups
-    ? evalRules(means, SM.xbarbar, (SM.uclX - SM.xbarbar) / 3, spcRules, spcRuleK)
-    : evalRules(SM.indiv, SM.indMean, SM.iSig, spcRules, spcRuleK);
+    ? evalRules(means, SM.xbarbar, (subgroupMainUcl! - SM.xbarbar) / 3, spcRules, spcRuleK)
+    // σ 用 (UCL−CL)/3:与页面/保存摘要/导出(assessSpcCharts)逐位同一浮点表达式,消除 ulp 级分裂
+    : evalRules(SM.indiv, SM.indMean, (SM.iUcl - SM.indMean) / 3, spcRules, spcRuleK);
   const spcAlerts = (dispersion?.list.length
     ? dispersion.list.map((v) => ({
-        color: '#c22f2f',
-        title: `${SM?.hasSubgroups ? 'R' : 'MR'} 图点 ${v.i + (SM?.hasSubgroups ? 1 : 2)} 违反准则 ${v.rule}`,
+        color: STATUS_COLORS.bad,
+        title: `${dispersionLabel} 图点 ${v.i + (SM?.hasSubgroups ? 1 : 2)} 违反准则 ${v.rule}`,
         desc: `${v.desc}；离散图未稳定，暂不解释${SM?.hasSubgroups ? ' X̄' : ' I'} 图。`,
         page: 'spc' as const,
       }))
     : (mainRules?.list ?? []).map((v) => ({
-        color: '#c22f2f',
+        color: STATUS_COLORS.bad,
         title: `${SM?.hasSubgroups ? 'X̄ 图子组' : 'I 图观测'} ${v.i + 1} 违反准则 ${v.rule}`,
         desc: v.desc,
         page: 'spc' as const,
       })));
   // 设备 ANOVA 是随安装包提供的演示研究，只能在演示数据集上形成告警。
   const anovaAlerts = M.isDemo && anova.significant
-    ? [{ color: '#e0902a', title: '演示研究：设备间均值差异显著', desc: `演示 ANOVA 显示设备间差异显著 (P=${nf(anova.pValue, 3)})`, page: 'anova' as const }]
+    ? [{ color: STATUS_COLORS.warn, title: '演示研究：设备间均值差异显著', desc: `演示 ANOVA 显示设备间差异显著 (P=${nf(anova.pValue, 3)})`, page: 'anova' as const }]
     : [];
   const alerts = [
     ...spcAlerts,
@@ -71,7 +90,12 @@ export function Dashboard({ T }: { T: ChartTokens }) {
   const cpkGood = cap != null && cap.cpk >= 1.33;
   // P0-4:过程失控/非正态时 Cpk 卡不得给绿色「达标」——与能力页/保存记录同一口径。
   // 716-R3:失控计数与正态性检验同步切到能力口径模型(countCapabilityViolations 与能力页/保存记录共用)。
-  const dashSpcViol = CM ? countCapabilityViolations(CM, spcRules, spcRuleK) : 0;
+  // 能力 Cpk 继续使用 resolver 的 sigmaWithin；稳定性则必须复用当前 SPC 的 σ̂ 方法，
+  // 否则 pooled 控制限下看板会仍按 classic 计数而与能力页/导出分裂。
+  const capSpcModel = CM ? withSigmaMethod(CM, spcSigmaMethod) : null;
+  const dashSpcViol = capSpcModel
+    ? countCapabilityViolations(capSpcModel, spcRules, spcRuleK, spcChartFamilyFor(capSpcModel, spcType))
+    : 0;
   const cpkStable = dashSpcViol === 0;
   const dashAd = cap && CM && CM.all.length >= 8 ? andersonDarling(CM.all) : null;
   const dashNonNormal = dashAd != null && !dashAd.normal;
@@ -87,17 +111,17 @@ export function Dashboard({ T }: { T: ChartTokens }) {
     {
       label: '过程能力 Cpk', value: cap ? nf(cap.cpk, 2) : '—',
       tag: cap ? (!cpkStable ? '不稳定' : dashNonNormal ? '非正态' : cpkGood ? '达标' : '预警') : '未运行',
-      color: cap ? (!cpkStable || dashNonNormal ? '#e0902a' : cpkGood ? '#2c8a45' : '#e0902a') : '#8a929d',
+      color: cap ? (!cpkStable || dashNonNormal ? STATUS_COLORS.warn : cpkGood ? STATUS_COLORS.ok : STATUS_COLORS.warn) : STATUS_COLORS.muted,
       sub: cap
         ? (capCaliberNote ? `${capStatusText} · ${capCaliberNote}` : capStatusText)
         : `${capError ?? '能力输入无效'}${capCaliberNote ? ` · ${capCaliberNote}` : ''}`,
     },
     M.isDemo
-      ? { label: '一次合格率', value: '98.6%', tag: '演示', color: '#2c8a45', sub: '内置看板示例，不代表当前生产批次' }
-      : { label: '一次合格率', value: '—', tag: '', color: '#8a929d', sub: '当前工作表没有批次一次合格数据' },
-    { label: '不良 PPM', value: cap ? Math.round(cap.ppm.overall.total).toLocaleString() : '—', tag: '', color: cap ? '#c22f2f' : '#8a929d', sub: cap ? '预计缺陷率' : capError ?? '能力输入无效' },
+      ? { label: '一次合格率', value: '98.6%', tag: '演示', color: STATUS_COLORS.ok, sub: '内置看板示例，不代表当前生产批次' }
+      : { label: '一次合格率', value: '—', tag: '', color: STATUS_COLORS.muted, sub: '当前工作表没有批次一次合格数据' },
+    { label: '不良 PPM', value: cap ? Math.round(cap.ppm.overall.total).toLocaleString() : '—', tag: '', color: cap ? STATUS_COLORS.bad : STATUS_COLORS.muted, sub: cap ? '预计缺陷率' : capError ?? '能力输入无效' },
     {
-      label: '未处理告警', value: String(alerts.length), tag: '', color: alerts.length > 0 ? '#e0902a' : '#2c8a45',
+      label: '未处理告警', value: String(alerts.length), tag: '', color: alerts.length > 0 ? STATUS_COLORS.warn : STATUS_COLORS.ok,
       sub: alerts.length > 0
         ? `${spcAlerts.length} SPC${anovaAlerts.length ? ` · ${anovaAlerts.length} 演示 ANOVA` : ''}`
         : SM ? '过程受控' : 'SPC 未运行',
@@ -126,10 +150,10 @@ export function Dashboard({ T }: { T: ChartTokens }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 14 }}>
+      <div className="responsive-grid-4" style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 14 }}>
         {kpis.map((k) => (
           <Card key={k.label} style={{ padding: '16px 18px' }}>
-            <div style={{ fontSize: 12.5, color: '#8a929d', fontWeight: 500 }}>{k.label}</div>
+            <div style={{ fontSize: 12.5, color: STATUS_COLORS.muted, fontWeight: 500 }}>{k.label}</div>
             <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 8 }}>
               <div className="mono" style={{ fontSize: 30, fontWeight: 700, color: k.color, letterSpacing: '-0.02em' }}>{k.value}</div>
               <div style={{ fontSize: 12, color: k.color, fontWeight: 600 }}>{k.tag}</div>
@@ -139,13 +163,13 @@ export function Dashboard({ T }: { T: ChartTokens }) {
         ))}
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1.55fr 1fr', gap: 16 }}>
+      <div className="responsive-grid-2" style={{ display: 'grid', gridTemplateColumns: '1.55fr 1fr', gap: 16 }}>
         <Card>
           <div style={{ display: 'flex', alignItems: 'center', padding: '12px 16px', borderBottom: '1px solid #edf0f3' }}>
             <div style={{ fontWeight: 600, color: '#33404f', fontSize: 13.5 }}>
               {SM?.hasSubgroups ? '过程均值趋势' : '过程单值趋势'} · {prepared.variableName}
             </div>
-            <div className="mono" style={{ marginLeft: 'auto', fontSize: 11.5, color: '#8a929d' }}>
+            <div className="mono" style={{ marginLeft: 'auto', fontSize: 11.5, color: STATUS_COLORS.muted }}>
               {SM ? `${SM.k} ${SM.hasSubgroups ? '子组' : '观测'}` : '待配置'}
             </div>
           </div>
@@ -157,12 +181,14 @@ export function Dashboard({ T }: { T: ChartTokens }) {
               </div>
             ) : SM.hasSubgroups ? (
               <ControlChart
-                T={T} data={means} cl={SM.xbarbar} ucl={SM.uclX} lcl={SM.lclX} clLabel="X̄" h={210}
+                T={T} data={means} cl={SM.xbarbar} ucl={subgroupMainUcl!} lcl={subgroupMainLcl!} clLabel="X̄" h={210}
+                violations={mainRules?.viol}
                 xLabel={prepared.xAxisLabel} yLabel={`${prepared.variableName} · 子组均值`} xLabels={prepared.subgroupLabels}
               />
             ) : (
               <ControlChart
                 T={T} data={SM.indiv} cl={SM.indMean} ucl={SM.iUcl} lcl={SM.iLcl} clLabel="X̄" h={210}
+                violations={mainRules?.viol}
                 xLabel={prepared.xAxisLabel} yLabel={`${prepared.variableName} · 单值`} xLabels={prepared.subgroupLabels}
               />
             )}
@@ -180,7 +206,7 @@ export function Dashboard({ T }: { T: ChartTokens }) {
         </Card>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1.55fr 1fr', gap: 16 }}>
+      <div className="responsive-grid-2" style={{ display: 'grid', gridTemplateColumns: '1.55fr 1fr', gap: 16 }}>
         <Card>
           <div style={{ padding: '12px 16px', borderBottom: '1px solid #edf0f3', fontWeight: 600, color: '#33404f', fontSize: 13.5, display: 'flex', alignItems: 'center' }}>
             近期分析记录
@@ -234,11 +260,11 @@ export function Dashboard({ T }: { T: ChartTokens }) {
         <Card>
           <div style={{ padding: '12px 16px', borderBottom: '1px solid #edf0f3', fontWeight: 600, color: '#33404f', fontSize: 13.5, display: 'flex', alignItems: 'center' }}>
             告警
-            <span className="mono" style={{ marginLeft: 8, background: alerts.length > 0 ? '#e23b3b' : '#2c8a45', color: '#fff', fontSize: 11, padding: '1px 7px', borderRadius: 9 }}>{alerts.length}</span>
+            <span className="mono" style={{ marginLeft: 8, background: alerts.length > 0 ? STATUS_COLORS.bad : STATUS_COLORS.ok, color: '#fff', fontSize: 11, padding: '1px 7px', borderRadius: 9 }}>{alerts.length}</span>
           </div>
           <div style={{ padding: '6px 0' }}>
             {alerts.length === 0 && (
-              <div style={{ padding: '14px 16px', fontSize: 12.5, color: SM ? '#2c8a45' : '#8a929d', fontWeight: 500 }}>
+              <div style={{ padding: '14px 16px', fontSize: 12.5, color: SM ? STATUS_COLORS.ok : STATUS_COLORS.muted, fontWeight: 500 }}>
                 {SM ? '✓ 过程受控，暂无告警' : '尚未运行 SPC；完成数据角色配置后再判断过程状态'}
               </div>
             )}
@@ -247,12 +273,12 @@ export function Dashboard({ T }: { T: ChartTokens }) {
                 <span style={{ width: 8, height: 8, borderRadius: '50%', background: a.color, marginTop: 5, flex: 'none' }} />
                 <div>
                   <div style={{ fontSize: 12.5, color: '#33404f', fontWeight: 500 }}>{a.title}</div>
-                  <div style={{ fontSize: 11.5, color: '#8a929d', marginTop: 2 }}>{a.desc}</div>
+                  <div style={{ fontSize: 11.5, color: STATUS_COLORS.muted, marginTop: 2 }}>{a.desc}</div>
                 </div>
               </button>
             ))}
             {alerts.length > 8 && (
-              <div style={{ padding: '9px 16px', fontSize: 11.5, color: '#8a929d', borderTop: '1px solid #f4f6f8' }}>
+              <div style={{ padding: '9px 16px', fontSize: 11.5, color: STATUS_COLORS.muted, borderTop: '1px solid #f4f6f8' }}>
                 另有 {alerts.length - 8} 条告警，请进入控制图查看全部判异明细。
               </div>
             )}

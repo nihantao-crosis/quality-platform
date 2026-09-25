@@ -6,7 +6,7 @@ import { ReportCard } from '../ReportCard';
 import { gageReport, anovaReport, tReport, regReport, paretoReport } from '../reportData';
 import {
   nf, anovaGroups, DEFECTS, gageStudyData, GAGE_TOLERANCE,
-  computeGageRR, oneWayAnova, anovaResiduals, anovaGroupSummaries, buildAnovaGroups, wideScaleDisparate, oneSampleT, twoSampleT, linearRegression,
+  computeGageRR, oneWayAnova, anovaResiduals, anovaGroupSummaries, buildAnovaInput, wideScaleDisparate, oneSampleT, twoSampleT, linearRegression,
   resolveAnovaMode, resolveAnovaNumericRoles, countAnovaPendingCells, isDoeAnalysisColumn, prepareGageStudy, listGageCategoryColumns, recommendGageRoles, effectiveGageSelection,
   GAGE_SINGLE_OPERATOR, assessGage, computeGagePanelData, CONTROL_CONSTANTS,
   type TTestResult, type AnovaMode, type AnovaGroup,
@@ -20,7 +20,7 @@ import { useData } from '../../store/dataStore';
 import type { ChartTokens } from '../tokens';
 import { paretoColors } from '../tokens';
 import { Card, CardHeader, KvRows, Badge, tabStyle, numInput, EmptyStateCard, DemoBadge } from '../common';
-import { ParetoChart, BoxPlot, IndividualValuePlot, IntervalPlot, MiniHist } from '../charts/misc';
+import { ParetoChart, BoxPlot, IndividualValuePlot, IntervalPlot, MiniHist, groupedPlotWindow, MAX_GROUPED_PLOT_GROUPS } from '../charts/misc';
 import { GageReportFigure, gageBarCategories } from '../charts/gagePanels';
 
 const selStyle: CSSProperties = {
@@ -269,7 +269,9 @@ function GageRRInner({ T }: { T: ChartTokens }) {
                       <td className="mono" style={{ padding: '6px 8px', textAlign: 'right' }}>{nf(row.result.totalGageRR, 2)}</td>
                       <td className="mono" style={{ padding: '6px 8px', textAlign: 'right' }}>{(() => {
                         const grr = row.result.components.find((c) => c.key === 'grr');
-                        return grr?.pctTolerance == null ? '未设' : nf(grr.pctTolerance, 2);
+                        return grr?.pctTolerance == null
+                          ? row.result.tolerance == null ? '未设' : '未计算'
+                          : nf(grr.pctTolerance, 2);
                       })()}</td>
                       <td className="mono" style={{ padding: '6px 8px', textAlign: 'right' }}>{Number.isFinite(row.result.ndc) ? String(row.result.ndc) : '∞'}</td>
                       <td style={{ padding: '6px 8px', color: batchGrade[row.assess.grade], fontWeight: 700 }}>{row.assess.label}</td>
@@ -356,7 +358,9 @@ function GageRRInner({ T }: { T: ChartTokens }) {
   const partLabels = realStudy ? realStudy.partLabels : Array.from({ length: panel.partCount }, (_, i) => String(i + 1));
   const operatorLabels = realStudy ? realStudy.operatorLabels : ['A', 'B', 'C'];
   const single = g.operatorCount === 1;
-  const fmtSig = (value: number) => (value === 0 ? '0' : Number(value.toPrecision(6)).toString());
+  const fmtSig = (value: number) => !Number.isFinite(value)
+    ? '—'
+    : value === 0 ? '0' : Number(value.toPrecision(6)).toString();
   const tolLabel = g.tolerance == null
     ? '未设置过程公差：%公差未计算'
     : g.tolerance.mode === 'width'
@@ -369,7 +373,7 @@ function GageRRInner({ T }: { T: ChartTokens }) {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <ReportCard data={gageReport({ primary, reference, ndc: g.ndc, grr: g.totalGageRR })} />
       {batchCard}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 16 }}>
+      <div className="responsive-grid-2" style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 16 }}>
       <Card>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 16px', borderBottom: '1px solid #edf0f3', flexWrap: 'wrap' }}>
           <div style={{ fontWeight: 600, color: '#33404f' }}>{single ? '量具 R&R (ANOVA 法 · 单操作员)' : '交叉 Gage R&R (ANOVA 法)'}</div>
@@ -450,7 +454,7 @@ function GageRRInner({ T }: { T: ChartTokens }) {
             {(gageTolMode === 'width' || gageTolMode === 'upper' || gageTolMode === 'lower') && (
               <input
                 type="number" aria-label="过程公差数值" value={gageTolValue ?? ''} placeholder={gageTolMode === 'width' ? '宽度' : '限值'}
-                onChange={(e) => setGageOptions({ gageTolValue: e.target.value.trim() === '' ? null : Number(e.target.value) })}
+                onChange={(e) => { const raw = e.target.value.trim(); const v = raw === '' ? null : Number(raw); if (v === null || Number.isFinite(v)) setGageOptions({ gageTolValue: v }); }}
                 style={{ width: 110, padding: '5px 8px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12 }}
               />
             )}
@@ -630,11 +634,12 @@ function RegressionPanel({ T }: { T: ChartTokens }) {
   } catch (e) {
     err = (e as Error).message;
   }
-  const sign = reg && reg.intercept >= 0 ? '+' : '−';
+  // 方程符号必须取斜率(双审 P1):取截距符号会把负斜率显示成正斜率,与导出报告(activeAnalysisReport)自相矛盾
+  const sign = reg && reg.slope >= 0 ? '+' : '−';
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       {reg && <ReportCard data={evidenceAwareRegReport({ r2: reg.r2, p: reg.p, significant: reg.significant, n: reg.n })} />}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: 16 }}>
+      <div className="responsive-grid-2" style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: 16 }}>
       <Card>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '11px 16px', borderBottom: '1px solid #edf0f3', flexWrap: 'wrap' }}>
           <div style={{ fontWeight: 600, color: '#33404f' }}>散点图与最小二乘回归</div>
@@ -739,7 +744,7 @@ function OneSampleTPanel({ T }: { T: ChartTokens }) {
         μ₀
         <input
           type="number" step="0.01" value={mu0} style={numInput}
-          onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) setHypothesisOptions({ t1Mu0: v }); }}
+          onChange={(e) => { const v = parseFloat(e.target.value); if (Number.isFinite(v)) setHypothesisOptions({ t1Mu0: v }); }}
         />
       </label>
     </div>
@@ -761,7 +766,7 @@ function OneSampleTPanel({ T }: { T: ChartTokens }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <ReportCard data={evidenceAwareTReport({ kind: 't1', p: r.p, significant: r.significant, n: xs.length })} />
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: 16 }}>
+      <div className="responsive-grid-2" style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: 16 }}>
       <Card>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '11px 16px', borderBottom: '1px solid #edf0f3', flexWrap: 'wrap' }}>
           <div style={{ fontWeight: 600, color: '#33404f' }}>单样本 t 检验 · 均值 vs 目标 μ₀</div>
@@ -831,7 +836,7 @@ function TwoSampleTPanel({ T }: { T: ChartTokens }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <ReportCard data={evidenceAwareTReport({ kind: 't2', p: r.p, significant: r.significant, n: Math.min(groups[0].vals.length, groups[1].vals.length) })} />
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: 16 }}>
+      <div className="responsive-grid-2" style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: 16 }}>
       <Card>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '11px 16px', borderBottom: '1px solid #edf0f3', flexWrap: 'wrap' }}>
           <div style={{ fontWeight: 600, color: '#33404f' }}>双样本 t 检验（Welch,不等方差）</div>
@@ -854,6 +859,7 @@ function AnovaInner({ T }: { T: ChartTokens }) {
     anovaShowDemo: showDemo, setAnovaShowDemo: setShowDemo,
   } = useApp();
   const [chartKind, setChartKind] = useState<'box' | 'individual' | 'interval'>('box');
+  const [groupStart, setGroupStart] = useState(0);
   // 残差诊断视图:四合一或四种单独图表(对标 Minitab「残差图」的单独视图选项)
   const [residView, setResidView] = useState<'four' | 'normal' | 'fits' | 'hist' | 'order'>('four');
 
@@ -873,9 +879,9 @@ function AnovaInner({ T }: { T: ChartTokens }) {
   const effMode: AnovaMode | null = isDemoDataset ? null
     : resolveAnovaMode(anovaMode, model.colNames, dataRows, eligibleTextCols.length, anovaRespName, anovaFactorName);
 
-  // 页面与项目汇总共用 buildAnovaGroups,保证界面/卡片一致
-  const builtGroups = useMemo(
-    () => (effMode === null ? null : buildAnovaGroups(effMode, model.colNames, dataRows, textCols, anovaRespName, anovaFactorName)),
+  // 分组和角色标签由同一次解析生成，避免模式切换后仍显示旧选择。
+  const input = useMemo(
+    () => (effMode === null ? null : buildAnovaInput(effMode, model.colNames, dataRows, textCols, anovaRespName, anovaFactorName)),
     [effMode, model.colNames, dataRows, textCols, anovaRespName, anovaFactorName],
   );
   const demoGroups = useMemo(() => anovaGroups(), []);
@@ -894,18 +900,13 @@ function AnovaInner({ T }: { T: ChartTokens }) {
   }
 
   const isDemo = effMode === null; // 含出厂演示集与「查看示例」
-  const groups: AnovaGroup[] | null = isDemo ? demoGroups : builtGroups;
+  const groups: AnovaGroup[] | null = isDemo ? demoGroups : input?.groups ?? null;
 
-  // 选择器解析索引(与 buildAnovaGroups 默认口径一致)
-  const factorNumIdx = numericRoles.factorIdx;
-  const respIdx = numericRoles.respIdx;
-  const grpTextIdx = Math.max(0, eligibleTextCols.findIndex((t) => t.name === anovaFactorName));
-
-  const factorName = isDemo ? '设备'
-    : effMode === 'stacked' ? (eligibleTextCols[grpTextIdx]?.name ?? '分组')
-    : effMode === 'numfactor' ? model.colNames[factorNumIdx]
-    : '测量列';
-  const respLabel = (effMode === 'stacked' || effMode === 'numfactor') ? model.colNames[respIdx] : '';
+  const factorNumIdx = input?.roles.factorIdx ?? numericRoles.factorIdx;
+  const respIdx = input?.roles.respIdx ?? numericRoles.respIdx;
+  const grpTextIdx = input?.roles.factorTextIdx ?? 0;
+  const factorName = isDemo ? '设备' : input!.roles.factorName;
+  const respLabel = isDemo ? '直径' : input!.roles.responseName;
 
   // 工具条:提为普通 JSX 变量(不作为组件类型),避免每次渲染重建导致 <select> 焦点丢失
   const tab = (m: AnovaMode, label: string, can: boolean, tip: string) => (
@@ -1019,6 +1020,7 @@ function AnovaInner({ T }: { T: ChartTokens }) {
     );
   }
   const groupStats = anovaGroupSummaries(groups, a);
+  const groupWindow = groupedPlotWindow(groups, groupStart);
   // 结论与描述统计表共用 core 的稳定组均值，避免大基准微扰数据被展示层朴素累加改写最高组。
   const hi = groupStats.reduce((highest, current) => current.mean > highest.mean ? current : highest).name;
   const rows = [
@@ -1047,7 +1049,7 @@ function AnovaInner({ T }: { T: ChartTokens }) {
           </button>
         </div>
       )}
-      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 430px', gap: 16 }}>
+      <div className="responsive-grid-2" style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 430px', gap: 16 }}>
       <Card>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 16px', borderBottom: '1px solid #edf0f3', flexWrap: 'wrap' }}>
           <div style={{ fontWeight: 600, color: '#33404f' }}>
@@ -1059,12 +1061,19 @@ function AnovaInner({ T }: { T: ChartTokens }) {
             <button type="button" aria-pressed={chartKind === 'interval'} style={tabStyle(chartKind === 'interval')} onClick={() => setChartKind('interval')}>区间图</button>
           </div>
         </div>
+        {groupWindow.note && (
+          <div style={{ padding: '8px 16px', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', fontSize: 12 }}>
+            <span style={{ flex: '1 1 320px', color: '#5b6472' }}>{groupWindow.note}下方描述统计表同步翻页。</span>
+            <button type="button" disabled={groupWindow.start === 0} onClick={() => setGroupStart(groupWindow.start - MAX_GROUPED_PLOT_GROUPS)}>上一组页</button>
+            <button type="button" disabled={groupWindow.end === groups.length} onClick={() => setGroupStart(groupWindow.end)}>下一组页</button>
+          </div>
+        )}
         <div style={{ padding: '14px 16px 6px' }}>
           {chartKind === 'box'
-            ? <BoxPlot T={T} groups={groups} />
+            ? <BoxPlot T={T} groups={groups} groupStart={groupWindow.start} />
             : chartKind === 'individual'
-              ? <IndividualValuePlot T={T} groups={groups} />
-              : <IntervalPlot T={T} groups={groups} pooledError={{ mse: a.errorSS / a.errorDf, df: a.errorDf }} />}
+              ? <IndividualValuePlot T={T} groups={groups} groupStart={groupWindow.start} />
+              : <IntervalPlot T={T} groups={groups} groupStart={groupWindow.start} pooledError={{ mse: a.errorSS / a.errorDf, df: a.errorDf }} />}
         </div>
       </Card>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -1115,7 +1124,7 @@ function AnovaInner({ T }: { T: ChartTokens }) {
               </tr>
             </thead>
             <tbody>
-              {groupStats.map((group) => (
+              {groupStats.slice(groupWindow.start, groupWindow.end).map((group) => (
                 <tr key={group.name} style={{ borderTop: '1px solid #f0f2f5', textAlign: 'right' }}>
                   <td style={{ padding: '8px 16px', textAlign: 'left', color: '#33404f', fontFamily: 'IBM Plex Sans' }}>{group.name}</td>
                   <td style={{ padding: '8px 12px', color: '#5b6472' }}>{group.n}</td>
@@ -1210,7 +1219,7 @@ function ParetoInner({ T }: { T: ChartTokens }) {
   const conclusion = analysis.conclusion;
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '1fr 300px', gap: 16 }}>
+    <div className="responsive-grid-2" style={{ display: 'grid', gridTemplateColumns: '1fr 300px', gap: 16 }}>
       <Card>
         <CardHeader
           title={isReal ? `缺陷帕累托图 · ${pareto!.name}` : '缺陷帕累托图 · 示例'}

@@ -36,10 +36,22 @@ export interface SpcReportData extends ReportData {
   };
 }
 
+/**
+ * 当明细只保留有界前缀时，报告结论仍使用引擎统计的完整口径。
+ * byRule 为去重后的「点×准则」命中数。
+ */
+export interface SpcViolationSummary {
+  pointRuleHitCount: number;
+  affectedPointCount: number;
+  byRule: Partial<Record<number, number>>;
+}
+
 const worst = (...ls: Level[]): Level => (ls.includes('bad') ? 'bad' : ls.includes('warn') ? 'warn' : 'ok');
 
 // ---------- SPC ----------
 export function spcReport(args: {
+  /** EWMA/CUSUM 图:结论卡不得沿用 Shewhart 文案(超限点不是「准则1」,也不该再建议「配合 EWMA/CUSUM」) */
+  advancedChart?: 'ewma' | 'cusum';
   violList: { i: number; rule: number; desc: string; chartLabel?: string }[];
   k: number;            // 点数(子组/观测)
   n: number | number[]; // 子组大小；P 图可为每批实际检验数
@@ -49,6 +61,10 @@ export function spcReport(args: {
   /** 配对图的离散图信号；X̄-R 先判 R、X̄-S 先判 S、I-MR 先判 MR。 */
   variationChartLabel?: string | null;
   variationViolations?: { i: number; rule: number; desc: string; chartLabel?: string }[];
+  /** 可选完整统计；传入后 violList 可以只是有界展示前缀。 */
+  violationSummary?: SpcViolationSummary;
+  /** 配对图的完整离散图统计。 */
+  variationSummary?: SpcViolationSummary;
   variableName?: string;
   dataRole?: string;
 }): SpcReportData {
@@ -61,16 +77,27 @@ export function spcReport(args: {
   const structure = args.structure ?? (hasSubgroups ? 'subgroup' : 'individual');
   // 按实际子组/观测点去重：同一点可在多张子图、多条准则上产生多条信号，
   // 但对现场调查而言仍是 1 个需追溯的实际点。
-  const nViol = new Set(violList.map((v) => v.i)).size;
+  const nViol = args.violationSummary?.affectedPointCount
+    ?? new Set(violList.map((v) => v.i)).size;
   const variationViol = args.variationViolations ?? [];
-  const nVariationViol = new Set(variationViol.map((v) => v.i)).size;
+  const nVariationViol = args.variationSummary?.affectedPointCount
+    ?? new Set(variationViol.map((v) => v.i)).size;
   const byRule = new Map<number, number>();
-  violList.forEach((v) => byRule.set(v.rule, (byRule.get(v.rule) ?? 0) + 1));
+  if (args.violationSummary) {
+    for (const [rawRule, count] of Object.entries(args.violationSummary.byRule)) {
+      if (count != null) byRule.set(Number(rawRule), count);
+    }
+  } else {
+    violList.forEach((v) => byRule.set(v.rule, (byRule.get(v.rule) ?? 0) + 1));
+  }
   const ruleTxt = [...byRule.entries()].sort((a, b) => a[0] - b[0]).map(([r, c]) => `准则${r}×${c}`).join('、');
+  const pointRuleHitCount = args.violationSummary?.pointRuleHitCount ?? violList.length;
 
   const stab: CheckItem = nViol === 0
     ? { name: '过程稳定性', level: 'ok', note: `全部 ${k} 点均在控制限内,无模式异常` }
-    : { name: '过程稳定性', level: 'bad', note: `${nViol} 个失控点(${violList.length} 个点-准则命中:${ruleTxt}),存在特殊原因变异` };
+    : args.advancedChart
+      ? { name: '过程稳定性', level: 'bad', note: `${nViol} 个点超出${args.advancedChart === 'ewma' ? 'EWMA 控制限' : 'CUSUM 决策限 H'},存在特殊原因变异(小漂移累积信号)` }
+      : { name: '过程稳定性', level: 'bad', note: `${nViol} 个失控点(${pointRuleHitCount} 个点-准则命中:${ruleTxt}),存在特殊原因变异` };
   const amount: CheckItem = k >= 20
     ? { name: '数据量', level: 'ok', note: `${k} 个点 ≥ 20,控制限估计可靠` }
     : { name: '数据量', level: 'warn', note: `仅 ${k} 个点,建议积累 ≥20 点后再固化控制限` };
@@ -80,7 +107,9 @@ export function spcReport(args: {
       ? { name: '计数结构', level: 'ok', note: '按单位缺陷数监控；各单位大小与检验机会应保持一致' }
       : structure === 'subgroup'
         ? { name: '子组结构', level: 'ok', note: `子组大小 n=${sampleSizeText},组内变异估计合理` }
-        : { name: '子组结构', level: 'warn', note: '单值数据,对小漂移的灵敏度低于子组图(可配合 EWMA/CUSUM)' };
+        : args.advancedChart
+          ? { name: '图形结构', level: 'ok', note: `${args.advancedChart === 'ewma' ? 'EWMA 加权' : 'CUSUM 累积'}统计已内建,对 ≤1.5σ 的小漂移比 Shewhart 图灵敏` }
+          : { name: '子组结构', level: 'warn', note: '单值数据,对小漂移的灵敏度低于子组图(可配合 EWMA/CUSUM)' };
 
   const variation: CheckItem | null = args.variationChartLabel
     ? nVariationViol === 0
@@ -113,8 +142,8 @@ export function spcReport(args: {
       readingOrder: args.variationChartLabel ? `先判 ${args.variationChartLabel} 图，再解释${args.variationChartLabel === 'MR' ? ' I ' : ' X̄ '}图` : undefined,
       variationChartLabel: args.variationChartLabel ?? undefined,
       variationStable: args.variationChartLabel ? nVariationViol === 0 : undefined,
-      pointRuleHitCount: violList.length,
-      signalCount: violList.length,
+      pointRuleHitCount,
+      signalCount: pointRuleHitCount,
       affectedPointCount: nViol,
     },
   };
@@ -350,8 +379,11 @@ export function tReport(args: {
   const amount: CheckItem = n >= 30
     ? { name: '样本量', level: 'ok', note: `n=${n} ≥ 30,对非正态较稳健` }
     : { name: '样本量', level: 'warn', note: `n=${n} < 30,小样本下结论依赖正态假设` };
+  // 第三轮 P3:t1 显著偏离目标 = 需要行动(headline 都写着「建议调整对中」),
+  // verdict 不得仍绿灯「通过」;t2 的显著差异是中性发现,保持既有口径
+  const sigLevel: Level = kind === 't1' && significant ? 'warn' : 'ok';
   return {
-    verdict: amount.level,
+    verdict: worst(amount.level, sigLevel),
     headline: kind === 't1'
       ? significant
         ? `均值与目标存在显著差异(${sigTxt})——过程中心可能偏移,建议调整对中。`
@@ -359,7 +391,7 @@ export function tReport(args: {
       : significant
         ? `两组均值差异显著(${sigTxt},Welch 校正)——两组不可视为同一总体。`
         : `两组均值无显著差异(${sigTxt},Welch 校正)。`,
-    checks: [{ name: '显著性', level: 'ok', note: `${sigTxt}(α=0.05)` }, amount],
+    checks: [{ name: '显著性', level: sigLevel, note: `${sigTxt}(α=0.05)${kind === 't1' && significant ? ' · 偏离目标,建议调整对中' : ''}` }, amount],
   };
 }
 

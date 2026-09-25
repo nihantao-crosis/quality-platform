@@ -6,7 +6,7 @@
  * 4) 完整交叉 3×10×2 推断 p/o/r 防回归。
  */
 import { describe, it, expect } from 'vitest';
-import { columnDisplayDp, prepareGageStudy, recommendGageRoles, GAGE_SINGLE_OPERATOR } from '../gageData';
+import { effectiveGageSelection, columnDisplayDp, prepareGageStudy, recommendGageRoles, GAGE_SINGLE_OPERATOR } from '../gageData';
 import type { GageTextColumn } from '../gageData';
 import { computeVarModel } from '../model';
 import { computeGageRR } from '../gage';
@@ -184,8 +184,10 @@ describe('prepareGageStudy — 完整交叉设计防回归', () => {
       }
     }
     const { model, textCols } = toStudyInputs(rows);
-    // 不显式指定角色列:验证默认推断(文本列在前 → 部件、操作员)仍成立
-    const result = prepareGageStudy(model, textCols, { valueColumn: null, partColumn: null, operatorColumn: null });
+    // 不显式指定角色列:经真实单源路径 effectiveGageSelection 注入推荐(v1.43.0 起
+    // prepareGageStudy 不再按列序兜底猜部件/操作员——推荐并列弃权时直接引导用户选择)
+    const eff = effectiveGageSelection(model, textCols, { value: null, part: null, operator: null });
+    const result = prepareGageStudy(model, textCols, { valueColumn: eff.valueColumn, partColumn: eff.partColumn, operatorColumn: eff.operatorColumn });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.study.partLabels).toHaveLength(10);

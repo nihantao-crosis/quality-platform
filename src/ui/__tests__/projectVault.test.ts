@@ -14,6 +14,8 @@ function fakeDb() {
     async get(name) { return store.get(name) ?? null; },
     async list() { return [...store.entries()].map(([name, json]) => ({ name, saved_at: 't', bytes: json.length })); },
     async remove(name) { return store.delete(name); },
+    async clear(opId) { const removed = store.size; store.clear(); return { opId, committed: true, removed }; },
+    async clearStatus() { return null; },
     async stats() { return { count: store.size, total_bytes: 0, path: ':memory:' }; },
   };
   return { db, store };

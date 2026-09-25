@@ -15,18 +15,47 @@ body {
 
 @keyframes qmPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
 
-/* 工作表行号：悬停时行号切换为删除按钮 */
-.ws-row .ws-del { display: none; }
-.ws-row:hover .ws-num { display: none; }
-.ws-row:hover .ws-del { display: inline; }
+/* 工作表行号：删除动作始终留在键盘顺序中，hover/focus 时显现。 */
+.ws-row .ws-del {
+  position: absolute;
+  inset: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+.ws-row:hover .ws-num,
+.ws-row:focus-within .ws-num { visibility: hidden; }
+.ws-row:hover .ws-del,
+.ws-row:focus-within .ws-del,
+.ws-row .ws-del:focus {
+  opacity: 1;
+  pointer-events: auto;
+}
 
 /* 最近数据集删除按钮:悬停行时显示 */
 .rc-del { display: none; }
 div:hover > .rc-del { display: inline; }
 
-/* 测量列删除按钮:悬停列头时显示 */
-.col-del { display: none; }
-.col-head:hover .col-del { display: inline; }
+/* 测量列删除按钮：列头和按钮都可聚焦，不能用 display:none 移出辅助技术树。 */
+.col-del {
+  position: absolute;
+  right: 7px;
+  top: 50%;
+  transform: translateY(-50%);
+  opacity: 0;
+  pointer-events: none;
+}
+.col-head:hover .col-del,
+.col-head:focus-within .col-del,
+.col-del:focus {
+  opacity: 1;
+  pointer-events: auto;
+}
+.mono[role="grid"] [data-grid-row]:focus-visible,
+.ws-del:focus-visible,
+.col-del:focus-visible {
+  outline: 2px solid #1f6fb2;
+  outline-offset: -2px;
+}
 
 /* 打印：只输出主内容区 */
 @media print {
@@ -50,3 +79,122 @@ div:hover > .rc-del { display: inline; }
 .hov-act-primary:hover { background: #1a5f9c !important; }
 .hov-card { transition: border-color .12s, box-shadow .12s, background .12s; }
 .hov-card:hover { border-color: #1f6fb2 !important; background: #f8fbfe; box-shadow: 0 1px 6px rgba(31,111,178,.12); }
+
+/* 弹窗统一视口包线：固定设计宽度只能是理想宽度，不能撑出手机视口；
+   标题/操作区固定，长内容在弹窗内部滚动。 */
+.modal-dialog,
+.modal-panel { max-width: 100%; max-height: 100%; }
+.modal-scroll-body { overscroll-behavior: contain; }
+.help-modal-body { min-height: min(340px, calc(100dvh - 92px)); }
+
+/* ────────────────────────────────────────────────────────────────
+   响应式(蜂群 P2-08):根节点此前固定 minWidth:1180 + overflow:hidden,
+   只有 Tauri 桌面壳的最小窗口能保证;Web/PWA、平板、高倍缩放、分屏下
+   核心操作会大面积移出视口且只能横向平移。
+   桌面壳(html.is-desktop)保留原约束;Web 端按断点降级。
+   ──────────────────────────────────────────────────────────────── */
+html.is-desktop .app-root { min-width: 1180px; }
+
+.side-nav-mobile-toggle,
+.side-nav-mobile-backdrop { display: none; }
+
+/* ≥1180px:与桌面壳一致 */
+@media (min-width: 1180px) {
+  .app-root { min-width: 1180px; }
+}
+
+/* 900–1180px:允许横向滚动,不再把内容裁掉 */
+@media (max-width: 1179px) {
+  html:not(.is-desktop) .app-root { min-width: 0; overflow-x: auto; }
+  html:not(.is-desktop) .app-root > div { min-width: 0; }
+}
+
+/* <900px:侧栏改为可关闭抽屉,右侧面板改为堆叠。项目/分析恢复入口
+   不能压进 56px 图标条，否则按钮会变成 0 宽。 */
+@media (max-width: 899px) {
+  html:not(.is-desktop) .app-body { min-width: 0; }
+  html:not(.is-desktop) .side-nav {
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 120;
+    width: min(86vw, 300px) !important;
+    max-width: 300px;
+    visibility: hidden;
+    transform: translateX(-102%);
+    transition: transform .16s ease;
+    box-shadow: 8px 0 28px rgba(20,30,50,.18);
+  }
+  html:not(.is-desktop) .side-nav.mobile-open {
+    visibility: visible;
+    transform: translateX(0);
+  }
+  html:not(.is-desktop) .side-nav-mobile-toggle {
+    display: block;
+    position: fixed;
+    left: 12px;
+    bottom: 12px;
+    z-index: 130;
+    min-width: 104px;
+    min-height: 42px;
+    padding: 8px 12px;
+    border: 1px solid #1f6fb2;
+    border-radius: 21px;
+    background: #1f6fb2;
+    color: #fff;
+    box-shadow: 0 4px 18px rgba(20,30,50,.24);
+    font: 600 12px/1.2 inherit;
+  }
+  html:not(.is-desktop) .side-nav-mobile-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 110;
+    border: 0;
+    background: rgba(20,28,40,.34);
+  }
+  html:not(.is-desktop) .responsive-grid-2,
+  html:not(.is-desktop) .responsive-grid-2 { grid-template-columns: minmax(0, 1fr) !important; }
+  html:not(.is-desktop) .responsive-grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+  html:not(.is-desktop) .responsive-card { min-width: 0 !important; }
+  html:not(.is-desktop) .page-header { padding-inline: 14px !important; gap: 8px; flex-wrap: wrap; }
+  html:not(.is-desktop) .page-content { padding: 14px 12px 72px !important; }
+}
+
+/* <680px:菜单栏允许换行,工具条横向滚动 */
+@media (max-width: 679px) {
+  html:not(.is-desktop) .menu-bar { flex-wrap: wrap; height: auto !important; }
+  html:not(.is-desktop) .toolbar { overflow-x: auto; }
+  html:not(.is-desktop) .responsive-grid-4 { grid-template-columns: minmax(0, 1fr) !important; }
+  html:not(.is-desktop) .menu-popup {
+    width: min(236px, calc(100vw - 16px)) !important;
+    min-width: 0 !important;
+  }
+  .modal-panel { border-radius: 8px !important; }
+  .modal-panel > :first-child { padding: 12px 14px !important; }
+  .modal-frame-body > div { padding-left: 14px !important; padding-right: 14px !important; }
+  .help-modal-body {
+    flex-direction: column;
+    min-height: 0;
+  }
+  .help-modal-topics {
+    width: 100% !important;
+    max-height: 112px;
+    display: flex;
+    flex-wrap: nowrap;
+    overflow-x: auto !important;
+    overflow-y: hidden !important;
+    border-right: 0 !important;
+    border-bottom: 1px solid #edf0f3;
+    padding: 6px !important;
+  }
+  .help-modal-topics > button {
+    width: auto !important;
+    flex: none;
+    white-space: nowrap;
+    padding: 7px 10px !important;
+    border-left-width: 0 !important;
+    border-bottom: 3px solid transparent !important;
+  }
+  .help-modal-content { padding: 12px 14px !important; }
+  .options-modal-actions { flex-direction: column; }
+}

@@ -1,5 +1,5 @@
 /** 左侧导航 — 分组导航 + 徽标 + 项目管理器（可命名项目 + 最近数据集 + 已保存分析）。 */
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useApp } from '../../store/appStore';
 import { useData } from '../../store/dataStore';
 import { useAnalyses } from '../../store/analyses';
@@ -17,13 +17,88 @@ export function SideNav() {
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState('');
   const [focusedRow, setFocusedRow] = useState<string | null>(null);
+  const [mobileOpen, setMobileOpen] = useState(false);
+  const mobileToggleRef = useRef<HTMLButtonElement>(null);
+  const navRef = useRef<HTMLElement>(null);
+  const wasMobileOpenRef = useRef(false);
   const startEditingName = () => { setNameDraft(projectName); setEditingName(true); };
+  const closeMobileNav = () => setMobileOpen(false);
+
+  useEffect(() => {
+    if (!mobileOpen) {
+      if (wasMobileOpenRef.current) {
+        wasMobileOpenRef.current = false;
+        mobileToggleRef.current?.focus();
+      }
+      return undefined;
+    }
+    wasMobileOpenRef.current = true;
+    const nav = navRef.current;
+    const focusable = () => nav
+      ? Array.from(nav.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'))
+        .filter((element) => element.tabIndex >= 0 && element.getAttribute('aria-hidden') !== 'true')
+      : [];
+    (nav?.querySelector<HTMLElement>('[aria-current="page"]') ?? focusable()[0] ?? nav)?.focus();
+
+    const keepFocusInDrawer = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setMobileOpen(false);
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const items = focusable();
+      if (items.length === 0) {
+        event.preventDefault();
+        nav?.focus();
+        return;
+      }
+      const first = items[0];
+      const last = items[items.length - 1];
+      const active = document.activeElement;
+      if (event.shiftKey && (active === first || !nav?.contains(active))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (active === last || !nav?.contains(active))) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener('keydown', keepFocusInDrawer);
+    return () => window.removeEventListener('keydown', keepFocusInDrawer);
+  }, [mobileOpen]);
+
+  useEffect(() => useApp.subscribe((state, previous) => {
+    if (state.modal && !previous.modal) setMobileOpen(false);
+  }), []);
+
+  useEffect(() => {
+    const closeWhenDesktop = () => {
+      if (window.innerWidth >= 900 || document.documentElement.classList.contains('is-desktop')) {
+        setMobileOpen(false);
+      }
+    };
+    window.addEventListener('resize', closeWhenDesktop);
+    return () => window.removeEventListener('resize', closeWhenDesktop);
+  }, []);
 
   return (
-    <aside style={{ width: 242, flex: 'none', background: '#fbfcfd', borderRight: '1px solid #dadee4', overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
+    <>
+      <button
+        ref={mobileToggleRef}
+        type="button"
+        className="side-nav-mobile-toggle no-print"
+        aria-controls="quality-platform-side-nav"
+        aria-expanded={mobileOpen}
+        onClick={() => setMobileOpen((open) => !open)}
+      >
+        {mobileOpen ? '关闭导航' : '导航与项目'}
+      </button>
+      {mobileOpen && <button type="button" className="side-nav-mobile-backdrop no-print" aria-label="关闭导航" onClick={closeMobileNav} />}
+      <aside ref={navRef} id="quality-platform-side-nav" tabIndex={-1} className={`side-nav${mobileOpen ? ' mobile-open' : ''}`} style={{ width: 242, flex: 'none', background: '#fbfcfd', borderRight: '1px solid #dadee4', overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
       {GROUPS.map((g, gi) => (
         <div key={g}>
-          <div style={{ padding: gi === 0 ? '14px 16px 8px' : '10px 16px 5px', fontSize: 11, letterSpacing: '0.06em', color: '#98a1ac', fontWeight: 600 }}>{g}</div>
+          <div className="side-nav-section-label" style={{ padding: gi === 0 ? '14px 16px 8px' : '10px 16px 5px', fontSize: 11, letterSpacing: '0.06em', color: '#98a1ac', fontWeight: 600 }}>{g}</div>
           {PAGES.filter((p) => p.group === g).map((p) => {
             const active = page === p.key;
             return (
@@ -32,7 +107,7 @@ export function SideNav() {
                 key={p.key}
                 className={active ? 'hov-nav-active' : 'hov-nav'}
                 aria-current={active ? 'page' : undefined}
-                onClick={() => goTo(p.key)}
+                onClick={() => { goTo(p.key); closeMobileNav(); }}
                 style={{
                   width: 'calc(100% - 16px)', display: 'flex', alignItems: 'center', gap: 10, margin: '1px 8px', padding: '8px 10px',
                   border: 0, borderRadius: 5, cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left', fontSize: 13,
@@ -44,13 +119,13 @@ export function SideNav() {
                 <span style={{ display: 'inline-flex', width: 18, justifyContent: 'center', opacity: 0.9 }}>
                   <Icon name={p.icon} color={active ? '#1f6fb2' : '#7a828d'} />
                 </span>
-                <span style={{ flex: 1 }}>{p.label}</span>
+                <span className="side-nav-label" style={{ flex: 1 }}>{p.label}</span>
               </button>
             );
           })}
         </div>
       ))}
-      <div style={{ marginTop: 'auto', borderTop: '1px solid #e6e9ee', padding: '12px 16px' }}>
+      <div className="side-nav-project" style={{ marginTop: 'auto', borderTop: '1px solid #e6e9ee', padding: '12px 16px' }}>
         <div style={{ fontSize: 11, letterSpacing: '0.06em', color: '#98a1ac', fontWeight: 600, marginBottom: 8 }}>项目管理器</div>
         <div style={{ fontSize: 12, color: '#5b6472', lineHeight: 1.9 }}>
           {editingName ? (
@@ -94,6 +169,7 @@ export function SideNav() {
                       const loaded = await loadRecent(r.name);
                       if (loaded) {
                         goTo('worksheet');
+                        closeMobileNav();
                         showToast('已加载数据集 ' + r.name);
                       } else {
                         showToast('数据集加载失败或已被更新的加载请求取代：' + r.name);
@@ -135,7 +211,7 @@ export function SideNav() {
               <button
                 type="button"
                 title={`${a.title} · ${a.metric} · ${a.datasetName}\n${a.kind === 'aql' ? `保存于 ${new Date(a.createdAt).toLocaleString('zh-CN')}；点击返回当前 AQL，不回滚连续检验流` : '点击恢复此分析的数据集与参数'}`}
-                onClick={() => restore(a.id)}
+                onClick={() => { void restore(a.id); closeMobileNav(); }}
                 style={{ minWidth: 0, flex: 1, display: 'flex', alignItems: 'center', overflow: 'hidden', border: 0, padding: 0, background: 'transparent', color: 'inherit', cursor: 'pointer', fontFamily: 'inherit', fontSize: 'inherit', lineHeight: 'inherit', textAlign: 'left' }}
               >
                 <span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: '50%', background: a.statusColor, flex: 'none', marginRight: 6 }} />
@@ -159,6 +235,7 @@ export function SideNav() {
           ))}
         </div>
       </div>
-    </aside>
+      </aside>
+    </>
   );
 }

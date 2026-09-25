@@ -2,6 +2,7 @@
  * UI 全局状态（交接文档 §6）。派生数据一律由 /core 纯函数实时计算，不入 store。
  */
 import { create } from 'zustand';
+import { markLocalWrite, watchExternalWrite } from './crossTab';
 import { createJSONStorage, persist } from 'zustand/middleware';
 import type { NelsonRules, NelsonRuleK, InspectionLevel, CalcState, AnovaMode, AqlMethod, AqlAcMethod, AqlRegime, SwitchStatus, SpcDataLayout, SpcSigmaMethod, GageStandard, GageToleranceSpec } from '../core';
 import {
@@ -30,19 +31,34 @@ export type ChartStyle = '经典' | '现代' | '高对比';
 /** 批量研究最多 64 个响应；公差记忆还必须额外容纳当前明细列（它可能不在批量集合中）。 */
 export const GAGE_BATCH_COL_CAP = 64;
 export const GAGE_TOL_MEMORY_CAP = GAGE_BATCH_COL_CAP + 1;
+function emptyStringKeyedMap<T>(): Record<string, T> {
+  return Object.create(null) as Record<string, T>;
+}
+
 function clampGageTolMemory<T>(map: Record<string, T>, protectedKeys: Array<string | null | undefined> = []): Record<string, T> {
   const keys = Object.keys(map);
-  if (keys.length <= GAGE_TOL_MEMORY_CAP) return map;
+  const out = emptyStringKeyedMap<T>();
+  if (keys.length <= GAGE_TOL_MEMORY_CAP) {
+    for (const key of keys) out[key] = map[key];
+    return out;
+  }
   // 批量列和当前/目标明细列优先保留；其余位置再按插入序保留最近使用项。
   const kept = new Set<string>();
   for (const key of protectedKeys) {
     if (key && Object.prototype.hasOwnProperty.call(map, key) && kept.size < GAGE_TOL_MEMORY_CAP) kept.add(key);
   }
   for (let index = keys.length - 1; index >= 0 && kept.size < GAGE_TOL_MEMORY_CAP; index -= 1) kept.add(keys[index]);
-  const out: Record<string, T> = {};
   // 沿用原插入序，后续“最近使用”截断仍有稳定语义。
   for (const key of keys) if (kept.has(key)) out[key] = map[key];
   return out;
+}
+
+/** 外部回放边界也必须把任意列名映射收口为无原型对象。 */
+export function normalizeGageTolMemory<T>(
+  map: Record<string, T>,
+  protectedKeys: Array<string | null | undefined> = [],
+): Record<string, T> {
+  return clampGageTolMemory(map, protectedKeys);
 }
 
 export function normalizeGageBatchCols(cols: string[] | null): string[] | null {
@@ -97,6 +113,8 @@ interface AppState {
   capSubgroupSize: number;
   capValueCol: string | null;
   capSubgroupIdCol: string | null;
+  /** 超 1000σ 规格强警告的显式确认；内容是绑定测量角色/规格/数据摘要的 fingerprint。 */
+  capabilityWarningAcknowledgement: string | null;
   gageUseReal: boolean;
   gageValueName: string | null;
   gagePartName: string | null;
@@ -181,6 +199,7 @@ interface AppState {
   toggleSide(side: 'lslOn' | 'uslOn'): void;
   setCapabilityBins(v: number): void;
   setCapabilitySubgroup(patch: Partial<Pick<AppState, 'capSubgroupMode' | 'capSubgroupSize' | 'capValueCol' | 'capSubgroupIdCol'>>): void;
+  acknowledgeCapabilityWarning(fingerprint: string | null): void;
   setGageOptions(patch: Partial<Pick<AppState,
     'gageUseReal' | 'gageValueName' | 'gagePartName' | 'gageOperatorName'
     | 'gageGaugeName' | 'gageReportBy' | 'gageStudyDate' | 'gageNotes'
@@ -307,6 +326,7 @@ function persistedPrefsOf(s: AppState) {
     capSubgroupSize: s.capSubgroupSize,
     capValueCol: s.capValueCol,
     capSubgroupIdCol: s.capSubgroupIdCol,
+    capabilityWarningAcknowledgement: s.capabilityWarningAcknowledgement,
     gageUseReal: s.gageUseReal,
     gageValueName: s.gageValueName,
     gagePartName: s.gagePartName,
@@ -417,6 +437,7 @@ export const useApp = create<AppState>()(persist((set, get) => ({
   capSubgroupSize: 5,
   capValueCol: null,
   capSubgroupIdCol: null,
+  capabilityWarningAcknowledgement: null,
   gageUseReal: true,
   gageValueName: null,
   gagePartName: null,
@@ -429,7 +450,7 @@ export const useApp = create<AppState>()(persist((set, get) => ({
   gageTolValue: null,
   gageStandard: 'factory',
   gageBatchCols: null,
-  gageTolByCol: {},
+  gageTolByCol: emptyStringKeyedMap(),
   doeView: 'main',
   doeTab: 'analyze',
   doeFactorCols: null,
@@ -489,25 +510,51 @@ export const useApp = create<AppState>()(persist((set, get) => ({
   toggleRule: (r) => set((s) => ({ spcRules: { ...s.spcRules, [r]: !s.spcRules[r] } })),
   // 越界/非法字段由 normalizeRuleK 回落标准值;UI 依据回写后的 store 值回弹输入框
   setSpcRuleK: (patch) => set((s) => ({ spcRuleK: normalizeRuleK({ ...s.spcRuleK, ...patch }) })),
-  setSpcRoles: (patch) => set({ ...patch, selSub: null, spcStageCol: null }),
+  setSpcRoles: (patch) => set({ ...patch, selSub: null, spcStageCol: null, capabilityWarningAcknowledgement: null }),
   setSpcStageCol: (spcStageCol) => set({ spcStageCol, selSub: null }),
-  setSpcSigmaMethod: (spcSigmaMethod) => set({ spcSigmaMethod, selSub: null }),
+  setSpcSigmaMethod: (spcSigmaMethod) => set({ spcSigmaMethod, selSub: null, capabilityWarningAcknowledgement: null }),
   toggleSpcZones: () => set((s) => ({ spcShowZones: !s.spcShowZones })),
   setSelSub: (selSub) => set({ selSub }),
-  setSpec: (patch) => set(patch),
+  setSpec: (patch) => {
+    // 写入口守卫(双审 P2):规格必须有限,非法值静默丢弃而非落盘后被读取侧整店隔离
+    const safe = Object.fromEntries(Object.entries(patch).filter(([, v]) => Number.isFinite(v)));
+    if (Object.keys(safe).length) set({ ...(safe as Partial<AppState>), capabilityWarningAcknowledgement: null });
+  },
   setProjectName: (projectName) => set({ projectName: projectName.trim() || '未命名项目' }),
   toggleSide: (side) => set((s) => {
     const next = { ...s, [side]: !s[side] };
     // 至少保留一侧
     if (!next.lslOn && !next.uslOn) return s;
-    return { [side]: next[side] } as Partial<AppState>;
+    return { [side]: next[side], capabilityWarningAcknowledgement: null } as Partial<AppState>;
   }),
-  setCapabilityBins: (value) => set({ capabilityBins: Math.max(5, Math.min(40, Math.round(value))) }),
-  setCapabilitySubgroup: (patch) => set(patch),
-  setGageOptions: (patch) => set(patch),
+  setCapabilityBins: (value) => {
+    if (!Number.isFinite(value)) return; // 非有限值不落盘(闭环审核 P2)
+    set({ capabilityBins: Math.max(5, Math.min(40, Math.round(value))) });
+  },
+  setCapabilitySubgroup: (patch) => set({ ...patch, capabilityWarningAcknowledgement: null }),
+  acknowledgeCapabilityWarning: (fingerprint) => set({
+    capabilityWarningAcknowledgement: typeof fingerprint === 'string' && fingerprint.length <= 4096 ? fingerprint : null,
+  }),
+  setGageOptions: (patch) => {
+    // 写入口守卫(审查 P3,与 setSpec 同纪律):数值字段必须有限或 null,Infinity 不落盘
+    const safe = { ...patch };
+    if (safe.gageTolValue != null && !Number.isFinite(safe.gageTolValue)) delete safe.gageTolValue;
+    // 第三轮 P2:研究日期必须为空串或真日历日期——非法日期落盘会先阻断项目导出,
+    // 再让整份分析历史在重启时被读取侧校验器整店隔离(type=date 输入只发完整值,不影响输入过程)
+    if (typeof safe.gageStudyDate === 'string' && safe.gageStudyDate !== '' && !isIsoCalendarDate(safe.gageStudyDate)) {
+      delete safe.gageStudyDate;
+    }
+    // 长度钳位(闭环审核 P2):DOM maxLength 只挡键入,粘贴/程序化写入越界会阻断项目导出
+    for (const [key, max] of [['gageGaugeName', 80], ['gageReportBy', 80], ['gageNotes', 200]] as const) {
+      const value = safe[key];
+      if (typeof value === 'string' && value.length > max) safe[key] = value.slice(0, max);
+    }
+    set(safe);
+  },
   switchGageMeasurement: (prev, next) => set((s) => {
     if (prev === next) return {};
-    const memory = { ...s.gageTolByCol };
+    // 列名可合法地叫 __proto__/constructor；始终使用无原型映射，避免把列名解释成对象语义。
+    const memory = clampGageTolMemory(s.gageTolByCol, [...(s.gageBatchCols ?? []), next, prev]);
     // 必须在截断前读取目标列；否则满容量时，最旧的目标项会先被逐出并错误恢复为“未设置”。
     const restored = next ? memory[next] : undefined;
     // 触碰过的列移到插入序末尾，截断语义才是真正的“保留最近使用”。
@@ -526,7 +573,7 @@ export const useApp = create<AppState>()(persist((set, get) => ({
   }),
   setGageBatchCols: (gageBatchCols) => set({ gageBatchCols: normalizeGageBatchCols(gageBatchCols) }),
   applyGageTolToCols: (cols) => set((s) => {
-    const gageTolByCol = { ...s.gageTolByCol };
+    const gageTolByCol = clampGageTolMemory(s.gageTolByCol, [...(s.gageBatchCols ?? []), s.gageValueName]);
     const normalized = normalizeGageBatchCols(cols) ?? [];
     for (const col of normalized) {
       delete gageTolByCol[col];
@@ -541,7 +588,11 @@ export const useApp = create<AppState>()(persist((set, get) => ({
   setHypoTab: (hypoTab) => set({ hypoTab }),
   setAnovaSel: (patch) => set(patch),
   setAnovaShowDemo: (anovaShowDemo) => set({ anovaShowDemo }),
-  setHypothesisOptions: (patch) => set(patch),
+  setHypothesisOptions: (patch) => {
+    const safe = { ...patch };
+    if (safe.t1Mu0 != null && !Number.isFinite(safe.t1Mu0)) delete safe.t1Mu0;
+    set(safe);
+  },
   setParetoView: (paretoView) => set({ paretoView }),
   setParetoOptions: (patch) => set((s) => {
     const raw = patch.paretoThreshold;
@@ -663,6 +714,10 @@ export const useApp = create<AppState>()(persist((set, get) => ({
       : current.capSubgroupSize;
     merged.capValueCol = stringOrNull(p.capValueCol, current.capValueCol);
     merged.capSubgroupIdCol = stringOrNull(p.capSubgroupIdCol, current.capSubgroupIdCol);
+    merged.capabilityWarningAcknowledgement = p.capabilityWarningAcknowledgement === null
+      || (typeof p.capabilityWarningAcknowledgement === 'string' && p.capabilityWarningAcknowledgement.length <= 4096)
+      ? p.capabilityWarningAcknowledgement as string | null
+      : current.capabilityWarningAcknowledgement;
     merged.gageUseReal = typeof p.gageUseReal === 'boolean' ? p.gageUseReal : current.gageUseReal;
     merged.gageValueName = stringOrNull(p.gageValueName, current.gageValueName);
     merged.gagePartName = stringOrNull(p.gagePartName, current.gagePartName);
@@ -690,8 +745,10 @@ export const useApp = create<AppState>()(persist((set, get) => ({
       : current.gageBatchCols;
     merged.gageTolByCol = (() => {
       const raw = p.gageTolByCol;
-      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return current.gageTolByCol;
-      const out: Record<string, { mode: GageTolMode; value: number | null }> = {};
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+        return clampGageTolMemory(current.gageTolByCol, [...(merged.gageBatchCols ?? []), merged.gageValueName]);
+      }
+      const out = emptyStringKeyedMap<{ mode: GageTolMode; value: number | null }>();
       for (const [key, entry] of Object.entries(raw as Record<string, unknown>)) {
         if (!entry || typeof entry !== 'object') continue;
         const mode = (entry as { mode?: unknown }).mode;
@@ -780,13 +837,37 @@ function persistedAqlOf(state: AppState): PersistedAqlState {
 
 let aqlPersistenceDirty = false;
 
+/** 盲审 P2:AQL 账本被另一标签页改写时,先把最新账本水合回内存再让本地修改叠加,
+ * 避免「标签 A 改一个无关字段就把标签 B 的批次追溯记录整键抹掉」。 */
+function rehydrateAqlFromStorage(): void {
+  if (aqlStateCorrupt) return;
+  const fresh = loadPersistedAqlState();
+  if (!fresh) return;
+  const app = useApp.getState();
+  const incomingRecords = fresh.aqlSwitch?.records?.length ?? 0;
+  const localRecords = app.aqlSwitch?.records?.length ?? 0;
+  useApp.setState({
+    aqlLot: fresh.aqlLot ?? app.aqlLot,
+    aqlLevel: fresh.aqlLevel ?? app.aqlLevel,
+    aqlAQL: fresh.aqlAQL ?? app.aqlAQL,
+    aqlRegime: fresh.aqlRegime ?? app.aqlRegime,
+    aqlSwitch: fresh.aqlSwitch ?? app.aqlSwitch,
+  });
+  if (incomingRecords !== localRecords) {
+    app.showToast(`另一窗口更新了 AQL 责任账本（${incomingRecords} 条批次记录），已同步到本窗口`);
+  }
+}
+
 function savePersistedAqlState(state: AppState): boolean {
   if (aqlStateCorrupt) {
     aqlPersistenceDirty = true;
     return false;
   }
   try {
-    localStorage.setItem(AQL_STATE_STORAGE_KEY, JSON.stringify(persistedAqlOf(state)));
+    const encoded = JSON.stringify(persistedAqlOf(state));
+    localStorage.setItem(AQL_STATE_STORAGE_KEY, encoded);
+    // 登记自己的写,避免浏览器把本标签页的写回投成「外部写」触发无谓水合
+    markLocalWrite(AQL_STATE_STORAGE_KEY, encoded);
     aqlPersistenceDirty = false;
     return true;
   } catch {
@@ -806,6 +887,9 @@ useApp.subscribe((state, previous) => {
     }
   }
 });
+
+// 盲审 P2:监听其它标签页对责任账本的写入(此前全仓零 storage 监听 → 静默互相覆盖)
+watchExternalWrite(AQL_STATE_STORAGE_KEY, rehydrateAqlFromStorage);
 
 // 首次加载即把旧 qp-prefs-v1 中的 AQL 业务状态迁出；损坏的新账本必须原样保留以便恢复。
 if (!aqlStateCorrupt) savePersistedAqlState(useApp.getState());
@@ -852,10 +936,11 @@ export function resetUiPreferences(): void {
   useApp.setState({
     chartStyle: '经典', showGrid: true, projectName: '质检项目 2026-Q2',
     lsl: 24.9, usl: 25.1, tgt: 25, lslOn: true, uslOn: true, capabilityBins: 13,
+    capabilityWarningAcknowledgement: null,
     gageUseReal: true, gageValueName: null, gagePartName: null, gageOperatorName: null,
     gageGaugeName: '', gageReportBy: '', gageStudyDate: '', gageNotes: '',
     gageTolMode: 'auto', gageTolValue: null, gageStandard: 'factory',
-    gageBatchCols: null, gageTolByCol: {},
+    gageBatchCols: null, gageTolByCol: emptyStringKeyedMap(),
     spcRules: { ...DEFAULT_SPC_RULES }, spcRuleK: { ...DEFAULT_RULE_K },
     spcDataLayout: 'auto', spcValueCol: null, spcSubgroupCol: null, spcStageCol: null,
     spcSigmaMethod: 'classic', spcShowZones: true,

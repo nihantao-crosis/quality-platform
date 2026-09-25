@@ -281,6 +281,36 @@ export function countAnovaPendingCells(
   return pendingCells.filter((cell) => cell.row >= 0 && cell.row < rows.length && relevant.has(cell.col)).length;
 }
 
+export interface AnovaRoles extends AnovaNumericRoles {
+  /** 在排除 DOE 元数据后的文本候选列中的索引。 */
+  factorTextIdx: number;
+  responseName: string;
+  factorName: string;
+}
+
+/** 解析实际角色；跨模式残留的列名只能作为选择提示，不能直接成为结果标签。 */
+export function resolveAnovaRoles(
+  mode: AnovaMode,
+  colNames: string[],
+  rows: number[][],
+  textCols: { name: string; values: string[] }[],
+  respName: string | null,
+  factorName: string | null,
+): AnovaRoles {
+  const numeric = resolveAnovaNumericRoles(colNames, rows, respName, factorName);
+  const eligibleText = textCols.filter((column) => isDoeAnalysisColumn(column.name));
+  const namedTextIdx = eligibleText.findIndex((column) => column.name === factorName);
+  const factorTextIdx = namedTextIdx >= 0 ? namedTextIdx : eligibleText.length ? 0 : -1;
+  return {
+    ...numeric,
+    factorTextIdx,
+    responseName: mode === 'wide' ? '测量值' : colNames[numeric.respIdx] ?? '响应',
+    factorName: mode === 'wide' ? '测量列'
+      : mode === 'stacked' ? eligibleText[factorTextIdx]?.name ?? '分组'
+        : colNames[numeric.factorIdx] ?? '因子',
+  };
+}
+
 /** 按模式从数据集构造 ANOVA 分组——页面与项目汇总共用同一逻辑,保证界面与卡片一致。
  *  - stacked  : factorName 为文本分组列,respName 为数值响应列;按标签分组。
  *  - numfactor: factorName 为数值因子列(按其取值分组),respName 为数值响应列。
@@ -294,12 +324,30 @@ export function buildAnovaGroups(
   respName: string | null,
   factorName: string | null,
 ): AnovaGroup[] | null {
-  const roles = resolveAnovaNumericRoles(colNames, rows, respName, factorName);
+  return buildAnovaInput(mode, colNames, rows, textCols, respName, factorName).groups;
+}
+
+/** 实际列角色、名称和观测分组一次解析，所有展示/导出消费者共用此输入。 */
+export function buildAnovaInput(
+  mode: AnovaMode,
+  colNames: string[],
+  rows: number[][],
+  textCols: { name: string; values: string[] }[],
+  respName: string | null,
+  factorName: string | null,
+): { roles: AnovaRoles; groups: AnovaGroup[] | null } {
+  const roles = resolveAnovaRoles(mode, colNames, rows, textCols, respName, factorName);
+  return { roles, groups: groupsForAnovaRoles(mode, colNames, rows, textCols, roles) };
+}
+
+function groupsForAnovaRoles(
+  mode: AnovaMode,
+  colNames: string[],
+  rows: number[][],
+  textCols: { name: string; values: string[] }[],
+  roles: AnovaRoles,
+): AnovaGroup[] | null {
   const nCol = roles.eligibleIdx.length;
-  const idxOf = (name: string | null, fallback: number) => {
-    const i = name ? colNames.indexOf(name) : -1;
-    return i >= 0 ? i : fallback;
-  };
   if (mode === 'wide') {
     if (nCol < 2) return null;
     return roles.eligibleIdx.map((j) => ({
@@ -310,9 +358,9 @@ export function buildAnovaGroups(
   }
   if (mode === 'stacked') {
     const eligibleTextCols = textCols.filter((column) => isDoeAnalysisColumn(column.name));
-    const tc = (factorName ? eligibleTextCols.find((t) => t.name === factorName) : eligibleTextCols[0]) ?? eligibleTextCols[0];
+    const tc = eligibleTextCols[roles.factorTextIdx];
     if (!tc || nCol < 1) return null;
-    const rIdx = roles.respIdx >= 0 ? roles.respIdx : idxOf(respName, 0);
+    const rIdx = roles.respIdx;
     const byLabel = new Map<string, { vals: number[]; rowIndices: number[] }>();
     tc.values.forEach((l, i) => {
       if (!byLabel.has(l)) byLabel.set(l, { vals: [], rowIndices: [] });

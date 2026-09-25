@@ -4,20 +4,22 @@
  * 可在仪表盘 / 项目管理器回看(切回数据集 + 还原参数 + 跳页),可删除,纳入 .qproj 备份。
  */
 import { create } from 'zustand';
+import { markLocalWrite, watchExternalWrite } from './crossTab';
+import { errText } from '../platform/adapter';
 import {
   nf, capabilityInputError, computeCapability, evalRules, evalLimitedRules, prepareSpcData, computeGageRR, gageStudyData, GAGE_TOLERANCE,
   andersonDarling, assessCapability, countCapabilityViolations,
   prepareGageStudy, effectiveGageSelection, listGageCategoryColumns, resolveNumericColumn,
-  oneWayAnova, oneSampleT, twoSampleT, linearRegression, anovaGroups, buildAnovaGroups, wideScaleDisparate, resolveAnovaMode, countAnovaPendingCells, isDoeAnalysisColumn, analyzeDoe, detectFactorial, analyzeFactorial, detectGeneralFactorial, analyzeGeneralFactorial, detectFractionalFactorial, analyzeFractionalFactorial, resolveDoeColumnsWide, MAX_FRACTIONAL_FACTORS, factorialModelTerms, resolveDoeBlockValues, plansByState, computeDescriptive,
-  ewmaSeries, cusumSeries, stagedXbar, stagedRange, stageValidationError, normalizeSwitchStatus,
-  normalizeRuleK, assessGage, withSigmaMethod,
+  oneWayAnova, oneSampleT, twoSampleT, linearRegression, anovaGroups, buildAnovaInput, resolveAnovaRoles, wideScaleDisparate, resolveAnovaMode, countAnovaPendingCells, isDoeAnalysisColumn, analyzeDoe, detectFactorial, analyzeFactorial, detectGeneralFactorial, analyzeGeneralFactorial, detectFractionalFactorial, analyzeFractionalFactorial, resolveDoeColumnsWide, MAX_FRACTIONAL_FACTORS, factorialModelTerms, factorialHierarchyClosure, resolveDoeBlockValues, plansByState, computeDescriptive,
+  ewmaSeries, cusumSeries, stagedXbar, stagedRange, stageValidationError, normalizeSwitchStatus, spcChartFamilyFor,
+  normalizeRuleK, assessGage, withSigmaMethod, MAX_SAVED_ANALYSES,
   type InspectionLevel, type AnovaMode, type AqlMethod, type AqlAcMethod, type AqlRegime, type GageStandard, type NelsonRules, type NelsonRuleK, type SwitchStatus, type SpcDataLayout, type SpcSigmaMethod,
 } from '../core';
-import { useApp, resolveGageTolerance, DEFAULT_SPC_RULES, GAGE_TOL_MEMORY_CAP, normalizeGageBatchCols, type SpcType, type DoeView, type DoeTab, type HypoTab, type ParetoView } from './appStore';
-import { syncSpecForActiveMeasurement, useData, resolveCapabilityMeasurementData, type ParetoModel } from './dataStore';
+import { useApp, resolveGageTolerance, DEFAULT_SPC_RULES, GAGE_TOL_MEMORY_CAP, normalizeGageBatchCols, normalizeGageTolMemory, type SpcType, type DoeView, type DoeTab, type HypoTab, type ParetoView } from './appStore';
+import { syncSpecForActiveMeasurement, useData, resolveCapabilityMeasurementData, isCapabilityWarningAcknowledged, type ParetoModel } from './dataStore';
 import { loadFishboneState, saveFishboneState, type FishboneData } from './fishboneStore';
 import { sessionLog } from './sessionLog';
-import { projectStoreValidationError, registerProjectLifecycleHooks } from '../platform/project';
+import { projectStoreValidationError, registerProjectLifecycleHooks, spcPayloadContractError } from '../platform/project';
 import { preserveCorruptStore } from './quarantine';
 
 export type AnalysisKind = 'spc' | 'capability' | 'gagerr' | 'anova' | 'pareto' | 'doe' | 'aql' | 'summary';
@@ -58,6 +60,8 @@ export interface AnalysisSnapshot {
   capSubgroupSize?: number;
   capValueCol?: string | null;
   capSubgroupIdCol?: string | null;
+  /** 用户已确认的能力口径风险指纹；必须随记录固化，旧记录回落 null。 */
+  capabilityWarningAcknowledgement?: string | null;
   gageUseReal?: boolean;
   /** 批次720-B:批量选中列与逐列公差记忆;缺失即旧记录(单列),回放清空批量态。 */
   gageBatchCols?: string[] | null;
@@ -115,7 +119,6 @@ export interface SavedAnalysis {
 
 const LS_KEY = 'qp-analyses-v1';
 const LS_ANALYSIS_DATA = 'qp-analysis-data-v1';
-const MAX_SAVED = 40;
 const protectedCorruptAnalysisStores = new Map<string, { raw: string; detail: string }>();
 
 function quarantineAnalysisStore(key: string, raw: string, detail: string): boolean {
@@ -287,16 +290,23 @@ function buildSummary(kind: AnalysisKind): Omit<SavedAnalysis, 'id' | 'createdAt
         : app.spcType;
       const rows = SM.subs.map((s) => s.vals);
       const means = SM.subs.map((s) => s.mean);
-      const ruleItems = (data: number[], cl: number, sigma: number, chartLabel: string) => {
-        const r = evalRules(data, cl, sigma, app.spcRules, app.spcRuleK);
-        return expandSpcRuleItems(r.viol, r.list, chartLabel, app.spcRuleK);
+      const ruleViolations = (data: number[], cl: number, sigma: number) => {
+        return evalRules(data, cl, sigma, app.spcRules, app.spcRuleK, { collectDetails: false }).viol;
       };
-      const limitedItems = (data: number[], cl: number, ucl: number | number[], lcl: number | number[], chartLabel: string, indexOffset = 0, sigmas?: number | number[]) => {
+      const limitedViolations = (data: number[], cl: number, ucl: number | number[], lcl: number | number[], indexOffset = 0, sigmas?: number | number[]) => {
         // P/C 图限值有钳位:与 SPC 页/专项报告同口径直传真 σ(新增参数必须查全消费路径,716-R3 自查)
-        const r = evalLimitedRules(data, cl, ucl, lcl, app.spcRules, app.spcRuleK, sigmas);
-        return expandSpcRuleItems(r.viol, r.list, chartLabel, app.spcRuleK).map((item) => ({ ...item, i: item.i + indexOffset }));
+        const evaluated = evalLimitedRules(
+          data, cl, ucl, lcl, app.spcRules, app.spcRuleK, sigmas, { collectDetails: false },
+        );
+        if (indexOffset === 0) return evaluated.viol;
+        return new Set([...evaluated.viol].map((index) => index + indexOffset));
       };
-      let items: SpcViolationItem[];
+      const mergeViolations = (...sets: ReadonlySet<number>[]): Set<number> => {
+        const merged = new Set<number>();
+        for (const set of sets) set.forEach((index) => merged.add(index));
+        return merged;
+      };
+      let violations: Set<number>;
       let stageCount = 0;
 
       if (effType === 'xbar-r') {
@@ -316,52 +326,50 @@ function buildSummary(kind: AnalysisKind): Omit<SavedAnalysis, 'id' | 'createdAt
         }
         const canUseStages = Boolean(stageLabels);
         if (canUseStages && stageLabels) {
-          const x = stagedXbar(rows, stageLabels, app.spcRules, app.spcSigmaMethod, app.spcRuleK);
-          const r = stagedRange(rows, stageLabels, app.spcRules, app.spcSigmaMethod, app.spcRuleK);
-          items = [
-            ...expandSpcRuleItems(x.viol, x.list, 'X̄', app.spcRuleK),
-            ...expandSpcRuleItems(r.viol, r.list, 'R', app.spcRuleK),
-          ];
+          const countOnly = { collectDetails: false } as const;
+          const x = stagedXbar(rows, stageLabels, app.spcRules, app.spcSigmaMethod, app.spcRuleK, countOnly);
+          const r = stagedRange(rows, stageLabels, app.spcRules, app.spcSigmaMethod, app.spcRuleK, countOnly);
+          violations = mergeViolations(x.viol, r.viol);
           stageCount = x.segments.length;
         } else {
-          items = [
-            ...ruleItems(means, SM.xbarbar, (SM.uclX - SM.xbarbar) / 3, 'X̄'),
+          violations = mergeViolations(
+            ruleViolations(means, SM.xbarbar, (SM.uclX - SM.xbarbar) / 3),
             // 判异中心线与图表同口径(pooled 时 R 图 CL=d2σ̂ 而非 R̄,批次720)
-            ...limitedItems(SM.subs.map((s) => s.range), SM.rCl, SM.uclR, SM.lclR, 'R'),
-          ];
+            limitedViolations(SM.subs.map((s) => s.range), SM.rCl, SM.uclR, SM.lclR),
+          );
         }
       } else if (effType === 'xbar-s') {
-        items = [
-          ...ruleItems(means, SM.xbarbar, (SM.uclXs - SM.xbarbar) / 3, 'X̄'),
-          ...limitedItems(SM.svals, SM.sCl, SM.uclS, SM.lclS, 'S'),
-        ];
+        violations = mergeViolations(
+          ruleViolations(means, SM.xbarbar, (SM.uclXs - SM.xbarbar) / 3),
+          limitedViolations(SM.svals, SM.sCl, SM.uclS, SM.lclS),
+        );
       } else if (effType === 'i-mr') {
-        items = [
-          ...ruleItems(SM.indiv, SM.indMean, (SM.iUcl - SM.indMean) / 3, 'I'),
+        violations = mergeViolations(
+          ruleViolations(SM.indiv, SM.indMean, (SM.iUcl - SM.indMean) / 3),
           // MR[0] 无定义，图上第 1 个 MR 对应原始观测 2，故全局点索引 +1。
-          ...limitedItems(SM.mr.slice(1) as number[], SM.mrbar, SM.mrUcl, 0, 'MR', 1),
-        ];
+          limitedViolations(SM.mr.slice(1) as number[], SM.mrbar, SM.mrUcl, 0, 1),
+        );
       } else if (effType === 'ewma') {
         const data = SM.hasSubgroups ? means : SM.indiv;
         const mu = SM.hasSubgroups ? SM.xbarbar : SM.indMean;
         const sigma = SM.hasSubgroups ? SM.sigmaChart / Math.sqrt(SM.n) : SM.iSig;
         const r = ewmaSeries(data, mu, sigma);
-        items = [...r.viol].map((i) => ({ i, rule: 1, desc: 'EWMA 超出时变控制限', chartLabel: 'EWMA' }));
+        violations = r.viol;
       } else if (effType === 'cusum') {
         const data = SM.hasSubgroups ? means : SM.indiv;
         const mu = SM.hasSubgroups ? SM.xbarbar : SM.indMean;
         const sigma = SM.hasSubgroups ? SM.sigmaChart / Math.sqrt(SM.n) : SM.iSig;
         const r = cusumSeries(data, mu, sigma, 0.5, SM.hasSubgroups ? 4 : 5);
-        items = [...r.viol].map((i) => ({ i, rule: 1, desc: '累积和超出判定限 H', chartLabel: 'CUSUM' }));
+        violations = r.viol;
       } else if (effType === 'p') {
-        items = limitedItems(pModel.pprop, pModel.pbar, pModel.pUcls, pModel.pLcls, 'P', 0,
+        violations = limitedViolations(pModel.pprop, pModel.pbar, pModel.pUcls, pModel.pLcls, 0,
           pModel.pNs.map((n) => Math.sqrt(pModel.pbar * (1 - pModel.pbar) / n)));
       } else {
-        items = limitedItems(cModel.cdata, cModel.cbar, cModel.cUcl, cModel.cLcl, 'C', 0, Math.sqrt(cModel.cbar));
+        violations = limitedViolations(cModel.cdata, cModel.cbar, cModel.cUcl, cModel.cLcl, 0, Math.sqrt(cModel.cbar));
       }
 
       // 不同准则、不同子图命中同一子组/观测时，依然只是 1 个实际失控点。
-      const n = uniqueSpcPointCount(items);
+      const n = violations.size;
       const stagePrefix = stageCount > 0 ? `${stageCount} 阶段 · ` : '';
       return {
         kind, title: `${SPC_TITLE[effType]}${stageCount > 0 ? ' · 分阶段' : ''}`,
@@ -379,19 +387,24 @@ function buildSummary(kind: AnalysisKind): Omit<SavedAnalysis, 'id' | 'createdAt
         };
       }
       const CM = prepared.model;
+      // 保存的能力判定须以当前 SPC σ̂ 方法评估稳定性；Cpk 仍使用 CM.sigmaWithin。
+      const capabilitySpcModel = withSigmaMethod(CM, app.spcSigmaMethod);
       const spec = {
         lsl: app.lslOn ? app.lsl : null, tgt: app.tgt, usl: app.uslOn ? app.usl : null,
       };
-      const inputError = capabilityInputError(CM.all, CM.sigmaWithin, spec);
+      const warningAcknowledged = isCapabilityWarningAcknowledged(
+        M, dataState.textCols, CM, spec, app.capabilityWarningAcknowledgement,
+      );
+      const inputError = capabilityInputError(CM.all, CM.sigmaWithin, spec, { allowDistantSpec: warningAcknowledged });
       if (inputError) {
         return { kind, title: '过程能力分析', metric: inputError, status: '未分析', ...pick(WARN) };
       }
-      const cap = computeCapability(CM.all, CM.sigmaWithin, spec);
+      const cap = computeCapability(CM.all, CM.sigmaWithin, spec, { allowDistantSpec: warningAcknowledged });
       // P0-4:与能力页/专项报告共用唯一判定器——过程失控时保存记录不得给绿色「能力充足」。
       const ad = CM.all.length >= 8 ? andersonDarling(CM.all) : null;
       const assessment = assessCapability({
         cpk: cap.cpk, verdict: cap.verdict, adP: ad ? ad.p : null, n: CM.all.length,
-        spcViolations: countCapabilityViolations(CM, app.spcRules, app.spcRuleK),
+        spcViolations: countCapabilityViolations(capabilitySpcModel, app.spcRules, app.spcRuleK, spcChartFamilyFor(capabilitySpcModel, app.spcType)),
       });
       return {
         kind, title: '过程能力分析', metric: `Cpk ${nf(cap.cpk, 2)}`,
@@ -422,7 +435,7 @@ function buildSummary(kind: AnalysisKind): Omit<SavedAnalysis, 'id' | 'createdAt
     case 'anova': {
       const tab = app.hypoTab;
       if (tab === 'anova') {
-        // 与 ANOVA 页共用 buildAnovaGroups + store 选择,保证摘要=页面所见;真实数据不回落演示
+        // 与 ANOVA 页共用实际角色和分组，真实数据不回落演示。
         const { textCols, pendingCells } = useData.getState();
         const rows = M.subs.map((s) => s.vals);
         const eligibleTextCount = textCols.filter((column) => isDoeAnalysisColumn(column.name)).length;
@@ -433,7 +446,8 @@ function buildSummary(kind: AnalysisKind): Omit<SavedAnalysis, 'id' | 'createdAt
           const a = oneWayAnova(anovaGroups().map((x) => x.vals));
           return { kind, title: `${HYPO_TITLE.anova}(示例)`, metric: `P ${nf(a.pValue, 3)}`, status: '演示', ...pick(INFO) };
         }
-        const groups = effMode ? buildAnovaGroups(effMode, M.colNames, rows, textCols, app.anovaRespName, app.anovaFactorName) : null;
+        const input = effMode ? buildAnovaInput(effMode, M.colNames, rows, textCols, app.anovaRespName, app.anovaFactorName) : null;
+        const groups = input?.groups;
         if (!groups || !effMode) {
           return { kind, title: HYPO_TITLE.anova, metric: '数据不足(无有效分组)', status: '未分析', ...pick(WARN) };
         }
@@ -575,9 +589,12 @@ function buildSummary(kind: AnalysisKind): Omit<SavedAnalysis, 'id' | 'createdAt
         const availableTerms = det.design.factorNames.length > 4
           ? allTerms.filter((term) => term.split('×').length <= 2)
           : allTerms;
-        const selectedTerms = app.doeModelTerms?.filter((term) => availableTerms.includes(term));
+        const storedTerms = app.doeModelTerms?.filter((term) => availableTerms.includes(term));
+        const selectedTerms = storedTerms?.length
+          ? factorialHierarchyClosure(det.design.factorNames, storedTerms, availableTerms)
+          : availableTerms;
         const fr = (det.design.factorNames.length <= 4 ? analyzeFactorial : analyzeFractionalFactorial)(det.design, {
-          terms: selectedTerms && selectedTerms.length > 0 ? selectedTerms : availableTerms,
+          terms: selectedTerms,
           includeCurvature: app.doeIncludeCurvature,
         });
         if (fr.terms.length === 0) {
@@ -668,12 +685,22 @@ function snapshotOf(kind: AnalysisKind): AnalysisSnapshot {
     }
   }
   if (kind === 'capability') {
+    // 双审 P2:能力判定消费「当前判异准则」计数,必须随快照固化——否则历史回放用
+    // 现在的 spcRules/spcRuleK 重算受控性,与保存时的卡片结论可分裂
+    snap.spcRules = { ...a.spcRules };
+    snap.spcRuleK = { ...a.spcRuleK };
+    // 能力结论也依赖稳定性计数；不固化 σ̂ 方法会使回放的状态徽章改变。
+    snap.spcSigmaMethod = a.spcSigmaMethod;
+    // 稳定性计数经 spcChartFamilyFor(model, spcType) 取 R 图(X̄-R)或 S 图(X̄-S),
+    // 两族失控数可不同；不固化 spcType 会让回放沿用当前页面口径,与保存卡结论翻转。
+    snap.spcType = a.spcType;
     snap.lsl = a.lsl; snap.usl = a.usl; snap.tgt = a.tgt; snap.lslOn = a.lslOn; snap.uslOn = a.uslOn;
     snap.capabilityBins = a.capabilityBins;
     snap.capSubgroupMode = a.capSubgroupMode;
     snap.capSubgroupSize = a.capSubgroupSize;
     snap.capValueCol = a.capValueCol;
     snap.capSubgroupIdCol = a.capSubgroupIdCol;
+    snap.capabilityWarningAcknowledgement = a.capabilityWarningAcknowledgement;
   }
   if (kind === 'gagerr') {
     // %公差直接依赖规格宽度；历史研究若只恢复列角色而不恢复当时的规格，
@@ -700,7 +727,9 @@ function snapshotOf(kind: AnalysisKind): AnalysisSnapshot {
     snap.gageStandard = a.gageStandard;
     snap.gageBatchCols = normalizeGageBatchCols(a.gageBatchCols);
     // 逐列公差记忆连同当前列的在用值一起固化,批量摘要回放不依赖此后的页面操作
-    const toleranceMemory = { ...a.gageTolByCol };
+    const toleranceMemory = normalizeGageTolMemory(a.gageTolByCol, [
+      ...(snap.gageBatchCols ?? []), snap.gageValueName,
+    ]);
     // 当前列必须作为最新条目保留；若先前已有同名键，先删再追加，避免 64 列截断时误删正在使用的公差。
     if (snap.gageValueName) {
       delete toleranceMemory[snap.gageValueName];
@@ -715,7 +744,10 @@ function snapshotOf(kind: AnalysisKind): AnalysisSnapshot {
     const recentOther = remaining > 0
       ? entries.filter(([name]) => !selectedNames.has(name)).slice(-remaining)
       : [];
-    snap.gageTolByCol = Object.fromEntries([...recentOther, ...selected]);
+    snap.gageTolByCol = normalizeGageTolMemory(
+      Object.fromEntries([...recentOther, ...selected]),
+      [...(snap.gageBatchCols ?? []), snap.gageValueName],
+    );
   }
   if (kind === 'aql') {
     snap.aqlLot = a.aqlLot; snap.aqlLevel = a.aqlLevel; snap.aqlAQL = a.aqlAQL; snap.aqlRegime = a.aqlRegime;
@@ -728,7 +760,43 @@ function snapshotOf(kind: AnalysisKind): AnalysisSnapshot {
     snap.doeTab = a.doeTab;
     snap.doeFactorCols = a.doeFactorCols;
     snap.doeRespCol = a.doeRespCol;
-    snap.doeModelTerms = a.doeModelTerms ? [...a.doeModelTerms] : null;
+    if (a.doeModelTerms) {
+      // Persist the exact same strong-hierarchy model shown on the page and
+      // consumed by summaries/reports.  This also upgrades an old loaded
+      // snapshot that selected an interaction without its parent terms.
+      const data = useData.getState();
+      const { factorIdx, respIdx } = resolveDoeColumnsWide(
+        data.model.colNames, a.doeFactorCols, a.doeRespCol, MAX_FRACTIONAL_FACTORS,
+      );
+      const factors = factorIdx.map((index) => ({
+        name: data.model.colNames[index],
+        values: data.model.subs.map((subgroup) => subgroup.vals[index]),
+      }));
+      const response = data.model.subs.map((subgroup) => subgroup.vals[respIdx]);
+      const blocks = resolveDoeBlockValues(
+        data.model.colNames,
+        data.model.subs.map((subgroup) => subgroup.vals),
+        data.textCols,
+      );
+      const detected = factors.length <= 4
+        ? detectFactorial(factors, response, { blocks })
+        : detectFractionalFactorial(factors, response, { blocks });
+      if (detected.ok) {
+        const all = factorialModelTerms(detected.design.factorNames);
+        const available = detected.design.factorNames.length > 4
+          ? all.filter((term) => term.split('×').length <= 2)
+          : all;
+        snap.doeModelTerms = factorialHierarchyClosure(
+          detected.design.factorNames,
+          a.doeModelTerms,
+          available,
+        );
+      } else {
+        snap.doeModelTerms = [...a.doeModelTerms];
+      }
+    } else {
+      snap.doeModelTerms = null;
+    }
     snap.doeIncludeCurvature = a.doeIncludeCurvature;
   }
   if (kind === 'anova') {
@@ -737,6 +805,24 @@ function snapshotOf(kind: AnalysisKind): AnalysisSnapshot {
     snap.anovaRespName = a.anovaRespName;
     snap.anovaFactorName = a.anovaFactorName;
     snap.anovaShowDemo = a.anovaShowDemo;
+    // 固化保存时实际分析的列，不把跨模式失效的旧选择带入历史快照。
+    if (a.hypoTab === 'anova') {
+      const data = useData.getState();
+      const rows = data.model.subs.map((sub) => sub.vals);
+      const textCols = data.textCols.filter((column) => isDoeAnalysisColumn(column.name));
+      const mode = data.model.isDemo ? null : resolveAnovaMode(
+        a.anovaMode, data.model.colNames, rows, textCols.length, a.anovaRespName, a.anovaFactorName,
+      );
+      if (mode) {
+        const roles = resolveAnovaRoles(mode, data.model.colNames, rows, textCols, a.anovaRespName, a.anovaFactorName);
+        snap.anovaMode = mode;
+        // 宽表没有单独的因子/响应列，保留原选择以便切回其他模式。
+        if (mode !== 'wide') {
+          snap.anovaRespName = roles.responseName;
+          snap.anovaFactorName = roles.factorName;
+        }
+      }
+    }
     snap.t1ColName = a.t1ColName;
     snap.t1Mu0 = a.t1Mu0;
     snap.t2ColAName = a.t2ColAName;
@@ -812,7 +898,9 @@ function load(): SavedAnalysis[] {
 function persist(saved: SavedAnalysis[]): boolean {
   if (!canReplaceAnalysisStore(LS_KEY)) return false;
   try {
-    localStorage.setItem(LS_KEY, JSON.stringify(saved));
+    const encoded = JSON.stringify(saved);
+    localStorage.setItem(LS_KEY, encoded);
+    markLocalWrite(LS_KEY, encoded);
     return true;
   } catch {
     return false;
@@ -838,6 +926,21 @@ interface AnalysesState {
   remove(id: string): boolean;
   /** 精确恢复历史分析；异步数据集读取失败时返回 false，且不回放参数或跳页。 */
   restore(id: string): Promise<boolean>;
+}
+
+/** 生成不与已有记录碰撞的分析 ID(蜂群 P3-05:毫秒戳 + 4 位 base36 无唯一性校验,
+ * 碰撞后 remove(id) 会一次删掉全部同 ID 记录、restore(id) 只取第一条)。 */
+function nextAnalysisId(existing: ReadonlyArray<{ id: string }>): string {
+  const taken = new Set(existing.map((a) => a.id));
+  const uuid = globalThis.crypto?.randomUUID?.bind(globalThis.crypto);
+  for (let attempt = 0; attempt < 64; attempt++) {
+    const id = uuid ? `a${uuid()}` : `a${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    if (!taken.has(id)) return id;
+  }
+  // 极端情况下退回带序号的确定性 ID,仍保证不碰撞
+  let seq = 0;
+  while (taken.has(`a${Date.now().toString(36)}-${seq}`)) seq += 1;
+  return `a${Date.now().toString(36)}-${seq}`;
 }
 
 export const useAnalyses = create<AnalysesState>((set, get) => ({
@@ -882,12 +985,12 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
           : data.model.name;
     const entry: SavedAnalysis = {
       ...summary,
-      id: 'a' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+      id: nextAnalysisId(get().saved),
       createdAt: Date.now(),
       datasetName,
       snapshot: snapshotOf(kind),
     };
-    const saved = [entry, ...get().saved].slice(0, MAX_SAVED);
+    const saved = [entry, ...get().saved].slice(0, MAX_SAVED_ANALYSES);
     if (!persist(saved)) {
       // snapshotOf 可能已先写入去重数据；主索引写入失败时必须移除这份孤儿载荷。
       pruneAnalysisDataLibrary(get().saved);
@@ -919,13 +1022,82 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
   restore: async (id) => {
     const a = get().saved.find((x) => x.id === id);
     if (!a) return false;
+    // 导入/启动校验不是唯一信任边界：运行期内存或旧代码仍可能提供未经
+    // load() 的记录。在 stash、计数序列复制和任何页面参数回放前重跑联合契约。
+    const restorePayloadError = spcPayloadContractError(a.kind, a.snapshot);
+    if (restorePayloadError) {
+      useApp.getState().showToast(`回看失败：分析快照损坏（${restorePayloadError}）；当前数据未作更改，分析参数也未回放`);
+      sessionLog(`无法回看分析 ${a.title} · 快照契约校验失败：${restorePayloadError}`);
+      return false;
+    }
+    // 审查 P2:回看会替换活动数据集(可能同名,tick 名称守卫失守)——必须停掉模拟采集。
+    // 复审 P3:此处曾手写 setMesRunning(false),且停在所有中止分支之前——那些分支明确
+    // 宣称「当前数据未作更改」却把用户采集掐掉。现改为依赖下方 importMatrix/importCounts
+    // 的 beginDatasetReplacement 单一闸门:只有真正替换数据时才停,且顺带清掉 interval。
     const s = a.snapshot;
     let restoredEmbeddedData = false;
+    let stashedName: string | null = null; // 自审 P3:失败文案不能说「未作更改」——stash 已发生
     const usesWorksheet = analysisUsesWorksheet(a.kind, s);
     const source = usesWorksheet ? resolveSnapshotSourceData(s) : null;
     if (source) {
+      // 双审 P1:回看快照会覆盖同名活动工作表的全部持久副本(qp-dataset-v1/recents)并清空撤销栈。
+      // 若当前同名工作表已有后续编辑,先自动另存为副本再回放,否则用户数据不可恢复地丢失。
+      const dataState = useData.getState();
+      const current = dataState.model;
+      const sig = (rows: number[][], cols: string[], text: { name: string; values: string[] }[], pending: { row: number; col: number }[]) =>
+        JSON.stringify({ rows, cols, text: text.map((tc) => ({ n: tc.name, v: tc.values })), pending });
+      const currentSig = sig(current.subs.map((x) => x.vals), current.colNames, dataState.textCols, dataState.pendingCells);
+      const sourceSig = sig(source.rows, source.colNames, source.textCols, source.pendingCells ?? []);
+      // 上一次副本写库失败后，活动表已是异名内存副本。再次点击回看时
+      // 也必须继续 fail-closed，不能因「已异名」绕过安全副本闸门。
+      const mustStash = dataState.activeUnpersisted
+        || (current.name === source.name && currentSig !== sourceSig);
+      if (mustStash) {
+        // 蜂群 P1-01:副本必须**确认落盘**才能覆盖当前编辑。此前只取名字、丢弃
+        // PersistOutcome,配额满时照样提示「已另存」并回放,用户的后续编辑静默丢失。
+        const stash = dataState.saveAsCopy();
+        if (!stash.outcome.persisted && (!stash.outcome.archiving || !stash.outcome.durability)) {
+          useApp.getState().showToast(
+            `当前「${current.name}」与快照内容不同，但副本未能保存（${stash.outcome.rejected ?? '存储空间不足'}）；`
+            + '为避免丢失当前编辑，已取消回看。请先导出项目或清理存储后重试',
+          );
+          return false;
+        }
+        if (!stash.outcome.persisted) {
+          // archiving 只是「已发起」，不是数据安全证明。只有 SQLite put 真正
+          // resolve 后才允许快照覆盖当前编辑；失败则 fail-closed。
+          try {
+            await stash.outcome.durability!;
+          } catch (error) {
+            useApp.getState().showToast(
+              `当前「${current.name}」与快照内容不同，但副本「${stash.name}」未能写入本机数据库（${errText(error)}）；`
+              + '为避免丢失当前编辑，已取消回看。当前编辑仍保留在内存中，请先导出项目或清理存储后重试',
+            );
+            return false;
+          }
+          // 用户可能在等待大副本落库时又做了新操作。不得用旧 restore 请求
+          // 覆盖这个更新的意图。
+          const afterArchive = useData.getState();
+          const archivedSig = sig(
+            afterArchive.model.subs.map((x) => x.vals), afterArchive.model.colNames,
+            afterArchive.textCols, afterArchive.pendingCells,
+          );
+          const expectedCopySig = sig(
+            current.subs.map((x) => x.vals), current.colNames, dataState.textCols, dataState.pendingCells,
+          );
+          if (afterArchive.model.name !== stash.name || archivedSig !== expectedCopySig) {
+            useApp.getState().showToast('副本已安全写入本机数据库，但等待期间工作表已发生新变更；为避免覆盖新操作，已取消本次回看');
+            return false;
+          }
+        }
+        stashedName = stash.name;
+        useApp.getState().showToast(
+          `当前「${current.name}」与快照内容不同，已先安全另存为「${stashedName}」再回放`,
+        );
+      }
       const restoredRows = source.rows.map((row) => [...row]);
-      useData.getState().importMatrix(
+      try {
+        useData.getState().importMatrix(
         source.name,
         [...source.colNames],
         restoredRows,
@@ -936,16 +1108,34 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
           indivSeries: source.indivSeries?.map((value) => value),
           preserveSpecs: true,
         },
-      );
+        );
+      } catch (error) {
+        // 复审 P3:导入写入口的有限性屏障会抛,而 SideNav/Dashboard 的 onClick 不接 promise,
+        // 旧快照含非有限值时会变成未捕获 rejection
+        useApp.getState().showToast(`回看失败:${errText(error)}${stashedName ? `；当前工作表已另存为「${stashedName}」` : "；当前数据未作更改"}`);
+        return false;
+      }
       restoredEmbeddedData = true;
-    } else if (a.kind === 'spc' && s.pChartData) {
-      useData.getState().importCounts(
-        'p', s.pChartData.name, [...s.pChartData.counts],
-        s.pChartData.sampleSizes ? [...s.pChartData.sampleSizes] : s.pChartData.sampleSize,
-      );
+    } else if (a.kind === 'spc' && s.spcType === 'p' && s.pChartData !== undefined) {
+      // 自审 P3:此前只给 importMatrix 包了 try/catch,computePChart/computeCChart
+      // 同样会抛(计数非法),而调用方 onClick 不接 promise → 未捕获 rejection
+      try {
+        useData.getState().importCounts(
+          'p', s.pChartData.name, [...s.pChartData.counts],
+          s.pChartData.sampleSizes ? [...s.pChartData.sampleSizes] : s.pChartData.sampleSize,
+        );
+      } catch (error) {
+        useApp.getState().showToast(`回看失败:${errText(error)}${stashedName ? `；当前工作表已另存为「${stashedName}」` : "；当前数据未作更改"}`);
+        return false;
+      }
       restoredEmbeddedData = true;
-    } else if (a.kind === 'spc' && s.cChartData) {
-      useData.getState().importCounts('c', s.cChartData.name, [...s.cChartData.counts]);
+    } else if (a.kind === 'spc' && s.spcType === 'c' && s.cChartData !== undefined) {
+      try {
+        useData.getState().importCounts('c', s.cChartData.name, [...s.cChartData.counts]);
+      } catch (error) {
+        useApp.getState().showToast(`回看失败:${errText(error)}${stashedName ? `；当前工作表已另存为「${stashedName}」` : "；当前数据未作更改"}`);
+        return false;
+      }
       restoredEmbeddedData = true;
     }
     if (a.kind === 'spc' && (s.spcType === 'p' || s.spcType === 'c') && !restoredEmbeddedData) {
@@ -1026,10 +1216,17 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
     for (const key of appKeys) if (s[key] !== undefined) patch[key] = s[key];
     // 能力子组口径随记录还原;旧记录无字段时回落默认「沿用 SPC 角色」,不继承当前页面配置。
     if (a.kind === 'capability') {
+      // 旧能力快照未保存 σ̂ 方法，保存时唯一可用的控制图口径是 classic；
+      // 不得泄漏当前页面的 pooled 选择而改写历史结论。
+      if (s.spcSigmaMethod === undefined) patch.spcSigmaMethod = 'classic';
+      // 同理，旧能力快照未固化 spcType：回落到子组图族的历史默认 X̄-R，
+      // 不继承当前页面可能是的 X̄-S,否则回看会改写受控性结论。
+      if (s.spcType === undefined) patch.spcType = 'xbar-r';
       patch.capSubgroupMode = s.capSubgroupMode ?? 'spc';
       patch.capSubgroupSize = typeof s.capSubgroupSize === 'number' && s.capSubgroupSize >= 2 && s.capSubgroupSize <= 10 ? Math.round(s.capSubgroupSize) : 5;
       patch.capValueCol = s.capValueCol ?? null;
       patch.capSubgroupIdCol = s.capSubgroupIdCol ?? null;
+      patch.capabilityWarningAcknowledgement = s.capabilityWarningAcknowledgement ?? null;
     }
     // v1.40 以前的 gage 快照没有公差口径/判定标准:按保存时行为固化(双侧宽度或不设 + AIAG),不继承当前设置。
     if (a.kind === 'gagerr' && s.gageTolMode === undefined) {
@@ -1050,11 +1247,20 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
     // 批次720 以前的 gage 记录没有批量态:回放清空批量选择与逐列记忆,不继承当前页面
     if (a.kind === 'gagerr' && s.gageBatchCols === undefined) patch.gageBatchCols = null;
     if (a.kind === 'gagerr' && s.gageBatchCols !== undefined) patch.gageBatchCols = normalizeGageBatchCols(s.gageBatchCols);
-    if (a.kind === 'gagerr' && s.gageTolByCol === undefined) patch.gageTolByCol = {};
+    if (a.kind === 'gagerr') {
+      patch.gageTolByCol = s.gageTolByCol === undefined
+        ? normalizeGageTolMemory({})
+        : normalizeGageTolMemory(s.gageTolByCol, [
+          ...(normalizeGageBatchCols(s.gageBatchCols ?? null) ?? []),
+          typeof patch.gageValueName === 'string' ? patch.gageValueName : s.gageValueName,
+        ]);
+    }
     // v1.30 以前的 SPC 记录没有规则/阶段快照：采用当时的产品默认，而非继承当前页面条件。
-    if (a.kind === 'spc' && !s.spcRules) patch.spcRules = { ...DEFAULT_SPC_RULES };
+    // v1.43.0 起能力快照同样固化判异准则(受控性计数口径),回放规则与 SPC 一致。
+    if ((a.kind === 'spc' || a.kind === 'capability') && !s.spcRules) patch.spcRules = { ...DEFAULT_SPC_RULES };
+    if (a.kind === 'capability' && s.spcRules) patch.spcRules = { ...s.spcRules };
     // K 值随记录还原;旧记录无该字段时回到 Nelson/Minitab 标准值,不继承当前页面设置。
-    if (a.kind === 'spc') patch.spcRuleK = normalizeRuleK(s.spcRuleK);
+    if (a.kind === 'spc' || a.kind === 'capability') patch.spcRuleK = normalizeRuleK(s.spcRuleK);
     if (a.kind === 'spc' && s.spcStageCol === undefined) patch.spcStageCol = null;
     // 批次720 以前的 SPC 记录没有 σ 估计方法:保存时限值即 A2R̄/D3D4R̄(classic),回放固化该口径,不继承当前设置。
     if (a.kind === 'spc' && s.spcSigmaMethod === undefined) patch.spcSigmaMethod = 'classic';
@@ -1127,6 +1333,18 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
     return true;
   },
 }));
+
+// 盲审 P2:另一标签页保存/删除分析后重新水合,避免本标签用内存旧数组整键覆盖
+watchExternalWrite(LS_KEY, () => {
+  const fresh = load();
+  const before = useAnalyses.getState().saved.length;
+  useAnalyses.setState({ saved: fresh });
+  if (fresh.length !== before) {
+    try {
+      useApp.getState().showToast(`另一窗口更新了已保存分析（${fresh.length} 条），已同步到本窗口`);
+    } catch { /* 非浏览器环境忽略 */ }
+  }
+});
 
 /** .qproj 恢复后重新加载分析记录（供 reload 前调用无意义,reload 会重建;此处供测试/内部） */
 export function reloadAnalyses() {

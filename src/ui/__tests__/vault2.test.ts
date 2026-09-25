@@ -5,7 +5,7 @@
  * @vitest-environment jsdom
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { useData, hydrateActiveFromVault } from '../../store/dataStore';
+import { cancelPendingDatasetWork, useData, hydrateActiveFromVault } from '../../store/dataStore';
 import { platform, type DatasetDb } from '../../platform/adapter';
 import { buildProjectJsonFull } from '../../platform/project';
 
@@ -22,6 +22,8 @@ function fakeDb() {
     async get(name) { return store.get(name) ?? null; },
     async list() { return [...store.entries()].map(([name, json]) => ({ name, saved_at: 't', bytes: json.length })); },
     async remove(name) { return store.delete(name); },
+    async clear(opId) { const removed = store.size; store.clear(); return { opId, committed: true, removed }; },
+    async clearStatus() { return null; },
     async stats() { return { count: store.size, total_bytes: 0, path: ':memory:' }; },
   };
   return { db, store };
@@ -34,6 +36,7 @@ let fake: ReturnType<typeof fakeDb>;
 let origSetItem: typeof Storage.prototype.setItem;
 
 beforeEach(() => {
+  cancelPendingDatasetWork();
   localStorage.clear();
   vi.useFakeTimers();
   fake = fakeDb();

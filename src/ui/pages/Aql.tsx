@@ -223,7 +223,7 @@ export function Aql({ T }: { T: ChartTokens }) {
         )}
       </Card>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 12 }}>
+      <div className="responsive-grid-4" style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 12 }}>
         {[
           { k: plan.fullInspect ? '参考字码' : '样本字码', v: plan.code },
           { k: plan.fullInspect ? '全检数量 N' : '样本量 n', v: String(plan.n) },
@@ -245,7 +245,7 @@ export function Aql({ T }: { T: ChartTokens }) {
       )}
 
       {!plan.fullInspect && (
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 16 }}>
+        <div className="responsive-grid-2" style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 16 }}>
           <Card>
             <CardHeader title={per100 ? 'OC 特性曲线 · 接收概率 vs 每百单位不合格数 λ' : 'OC 特性曲线 · 接收概率 vs 批质量'} />
             <div style={{ padding: '14px 16px 6px' }}>
@@ -281,7 +281,7 @@ export function Aql({ T }: { T: ChartTokens }) {
         </div>
       )}
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+      <div className="responsive-grid-2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
         <Card>
           <div style={{ display: 'flex', alignItems: 'center', padding: '11px 16px', borderBottom: '1px solid #edf0f3' }}>
             <div style={{ fontWeight: 600, color: '#33404f' }}>批次判定与正式转移规则</div>
@@ -353,7 +353,7 @@ export function Aql({ T }: { T: ChartTokens }) {
               </>
             )}
 
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 14 }}>
+            <div className="responsive-grid-2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 14 }}>
               <div style={{ padding: '8px 10px', border: '1px solid #edf0f3', borderRadius: 4, fontSize: 11.5, color: '#6b7480' }}>转移得分 <b className="mono" style={{ float: 'right', color: '#33404f' }}>{sw.switchingScore}/30</b></div>
               <div style={{ padding: '8px 10px', border: '1px solid #edf0f3', borderRadius: 4, fontSize: 11.5, color: '#6b7480' }}>加严不接收 <b className="mono" style={{ float: 'right', color: '#33404f' }}>{sw.tightenedRejections}/5</b></div>
             </div>

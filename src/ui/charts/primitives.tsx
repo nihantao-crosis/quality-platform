@@ -1,9 +1,19 @@
 /** SVG 基元 — 对应原型 svg/line/txt 辅助函数。 */
 import type { ReactNode } from 'react';
 
-export function Svg({ w, h, children }: { w: number; h: number; children: ReactNode }) {
+export function Svg({ w, h, children, label, interactive }: { w: number; h: number; children: ReactNode; label?: string; interactive?: boolean }) {
+  // 无障碍(双审 P3):有具名 label 的图作为单一图像呈现(role="img" + 名称)。
+  // interactive:图内含 role="button" 的可点击元素时必须用 role="group" —— role="img"
+  // 会把整棵子树压成 presentational,可点击点对辅助技术直接消失(自审 P2)。
+  // 自审 P1:**没有具名 label 时不得加 role="img"** —— 它会把整张图变成原子图像,
+  // 图内的刻度/UCL 文字与 ControlChart 的可点击点对辅助技术全部消失,而换来的
+  // 只是一句无信息量的「统计图表」。无名时保持默认语义,图内文字仍可被读到。
   return (
-    <svg viewBox={`0 0 ${w} ${h}`} style={{ width: '100%', height: 'auto', display: 'block' }}>
+    <svg
+      viewBox={`0 0 ${w} ${h}`}
+      {...(label ? { role: interactive ? 'group' : 'img', 'aria-label': label } : {})}
+      style={{ width: '100%', height: 'auto', display: 'block' }}
+    >
       {children}
     </svg>
   );

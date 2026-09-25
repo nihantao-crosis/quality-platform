@@ -4,12 +4,80 @@
  */
 import * as XLSX from 'xlsx';
 import {
-  nf, computeCapability, capabilityInputError, type VarModel, type SpcAssessment,
-  assessCapability, evaluateAndersonDarling,
+  nf, computeCapability, capabilityInputError, evaluateAndersonDarling, type VarModel, type SpcAssessment, type CapabilityInputOptions,
+  assessCapability,
 } from '../core';
 import type { ReportSpec } from './report';
-import { safeSheetName, type AnalysisReportPayload } from './analysisReportModel';
-import { reportSpecText, withinSigmaLabel, MAX_XLSX_VIOLATION_ROWS, violationTruncationNote } from './reportLabels';
+import { analysisTableTotalRows, safeSheetName, type AnalysisReportPayload } from './analysisReportModel';
+import {
+  timestampText, appVersionText, reportSpecText, withinSigmaLabel,
+  MAX_XLSX_SHEET_ROWS, MAX_XLSX_VIOLATION_ROWS, tableTruncationNote, violationTruncationNote,
+} from './reportLabels';
+
+type XlsxCell = string | number;
+
+/**
+ * 专项报告单表装配：生产始终使用 Excel 硬上限；可注入更小预算仅用于
+ * 无需构造百万行的边界测试。最后一行预留给容量截断说明。
+ */
+export function buildAnalysisXlsxRows(
+  analysis: AnalysisReportPayload,
+  requestedRowLimit = MAX_XLSX_SHEET_ROWS,
+): XlsxCell[][] {
+  const rowLimit = Number.isSafeInteger(requestedRowLimit) && requestedRowLimit > 0
+    ? Math.min(requestedRowLimit, MAX_XLSX_SHEET_ROWS)
+    : 1;
+  const rows: XlsxCell[][] = [];
+  let capacityTruncated = false;
+  const append = (row: XlsxCell[], reserveNotice = true): boolean => {
+    const limit = rowLimit - (reserveNotice ? 1 : 0);
+    if (rows.length >= limit) {
+      capacityTruncated = true;
+      return false;
+    }
+    rows.push(row);
+    return true;
+  };
+  append([analysis.title]);
+  append([analysis.subtitle]);
+  append(['生成时间', analysis.generatedAt]);
+  append(['软件版本', appVersionText()]);
+  append([]);
+  append(['结论']);
+  for (const line of analysis.summary) append([line]);
+  if (analysis.warnings.length > 0) {
+    append([]);
+    append(['注意事项']);
+    for (const line of analysis.warnings) append([line]);
+  }
+  for (const table of analysis.tables) {
+    if (!append([]) || !append([table.title]) || !append(table.headers)) break;
+    const totalRows = analysisTableTotalRows(table);
+    let shownRows = 0;
+    // 循环追加而非 push(...spread):13 万行以上的专项表会超出实参上限直接 RangeError。
+    for (const row of table.rows) {
+      if (!append(row)) break;
+      shownRows++;
+    }
+    if (totalRows > shownRows) {
+      append([tableTruncationNote(totalRows, shownRows, 'Excel', false)]);
+    }
+    if (table.note) append([table.note]);
+    if (capacityTruncated) break;
+  }
+  if (analysis.charts.length > 0) {
+    append([]);
+    append(['图形清单']);
+    for (const chart of analysis.charts) append([chart.title, chart.note ?? '见 HTML/Word/PPT 图文报告']);
+  }
+  if (capacityTruncated) {
+    append([
+      `已截断：Excel 单工作表最多 ${rowLimit.toLocaleString()} 行；`
+      + '未导出的明细请缩小数据范围或减少启用的判异准则。',
+    ], false);
+  }
+  return rows;
+}
 
 export function buildXlsx(
   M: VarModel,
@@ -18,16 +86,18 @@ export function buildXlsx(
   analysis?: AnalysisReportPayload,
   capabilityModel: VarModel = M,
   capabilitySpcViolations?: number | null,
+  capabilityOptions: CapabilityInputOptions = {},
 ): Uint8Array {
   const wb = XLSX.utils.book_new();
 
   const appendDataSheet = () => {
     const showDerived = M.hasSubgroups;
-    const head = [M.hasSubgroups ? '子组' : '观测', ...M.colNames, ...(showDerived ? ['均值', '极差'] : [])];
+    const dispersionHeader = assessment?.family === 'xbar-s' ? '标准差' : '极差';
+    const head = [M.hasSubgroups ? '子组' : '观测', ...M.colNames, ...(showDerived ? ['均值', dispersionHeader] : [])];
     const dataRows = M.subs.map((s) => [
       s.i,
       ...s.vals,
-      ...(showDerived ? [Number(nf(s.mean, 4)), Number(nf(s.range, 4))] : []),
+      ...(showDerived ? [Number(nf(s.mean, 4)), Number(nf(assessment?.family === 'xbar-s' ? M.svals[s.i - 1] : s.range, 4))] : []),
     ]);
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([head, ...dataRows]), '数据');
   };
@@ -35,24 +105,7 @@ export function buildXlsx(
   // 当前页面有专项分析时，Excel 只导出与该分析有关的数据与结果。
   // 尤其 AQL / Pareto / P / C 图不得夹带当前连续型工作表的能力摘要。
   if (analysis) {
-    const rows: Array<Array<string | number>> = [
-      [analysis.title],
-      [analysis.subtitle],
-      ['生成时间', analysis.generatedAt],
-      [],
-      ['结论'],
-      ...analysis.summary.map((line) => [line]),
-    ];
-    if (analysis.warnings.length > 0) {
-      rows.push([], ['注意事项'], ...analysis.warnings.map((line) => [line]));
-    }
-    for (const table of analysis.tables) {
-      rows.push([], [table.title], table.headers, ...table.rows);
-      if (table.note) rows.push([table.note]);
-    }
-    if (analysis.charts.length > 0) {
-      rows.push([], ['图形清单'], ...analysis.charts.map((chart) => [chart.title, chart.note ?? '见 HTML/Word/PPT 图文报告']));
-    }
+    const rows = buildAnalysisXlsxRows(analysis);
     XLSX.utils.book_append_sheet(
       wb,
       XLSX.utils.aoa_to_sheet(rows),
@@ -68,8 +121,8 @@ export function buildXlsx(
   appendDataSheet();
 
   // Sheet 2: 统计摘要(能力输入闸门:规格不匹配等情况写「未运行」,数据 sheet 与其余章节照常导出)
-  const capError = capabilityInputError(C.all, C.sigmaWithin, spec);
-  const cap = capError ? null : computeCapability(C.all, C.sigmaWithin, spec);
+  const capError = capabilityInputError(C.all, C.sigmaWithin, spec, capabilityOptions);
+  const cap = capError ? null : computeCapability(C.all, C.sigmaWithin, spec, capabilityOptions);
   const xlsxAd = evaluateAndersonDarling(C.all).result;
   const capAssessment = cap ? assessCapability({
     cpk: cap.cpk, verdict: cap.verdict, adP: xlsxAd ? xlsxAd.p : null, n: C.all.length,
@@ -81,6 +134,8 @@ export function buildXlsx(
     ['Pp', cap.pp == null ? '—' : Number(nf(cap.pp, 3))],
     ['Ppk', Number(nf(cap.ppk, 3))],
     ['Cpm', cap.cpm == null ? '—' : Number(nf(cap.cpm, 3))],
+    ['CPU', cap.cpu == null ? '—' : Number(nf(cap.cpu, 3))],
+    ['CPL', cap.cpl == null ? '—' : Number(nf(cap.cpl, 3))],
     ['Z.bench', Number(nf(cap.zBench, 3))],
     ['西格玛水平', Number(nf(cap.sigmaLevel, 3))],
     ['PPM 合计（整体）', Math.round(cap.ppm.overall.total)],
@@ -95,8 +150,15 @@ export function buildXlsx(
       ? `各图累计 ${assessment.chartPointCount} 个失控点（${assessment.locationLabel} 图 ${assessment.locationPoints} 个 + ${assessment.dispersionLabel} 图 ${assessment.dispersionPoints} 个）；去重${assessment.analysisUnitLabel} ${assessment.uniqueAnalysisUnitCount} 个${cap ? '——能力值仅描述当前样本' : '——过程不稳定'}`
       : '控制图无失控信号',
   ];
+  const adEval = evaluateAndersonDarling(C.all);
+  const adRow = adEval.result
+    ? `A²*=${nf(adEval.result.a2star, 3)}, P ${adEval.result.p < 0.005 ? '< 0.005' : '= ' + nf(adEval.result.p, 3)} → ${adEval.result.normal ? '未拒绝正态假设' : '显著偏离正态'}`
+    : (adEval.unavailableReason ?? '不可判定');
   const summary: (string | number)[][] = [
     ['质量分析平台 · 统计摘要', ''],
+    // 与其余三格式同口径的元数据(双审 P3:此前 Excel 缺生成时间/正态性/CPU/CPL,四格式均缺版本号)
+    ['软件版本', appVersionText()],
+    ['生成时间', timestampText()],
     ['工作表', M.name],
     ['数据结构', M.hasSubgroups ? '子组数据' : '单值观测（I-MR）'],
     ...(M.hasSubgroups ? [['子组数 k', M.k], ['子组大小 n', M.n]] : []),
@@ -111,6 +173,8 @@ export function buildXlsx(
     ['σ 整体', Number(nf(C.oSd, 5))],
     ['', ''],
     ['规格 LSL / 目标 / USL', reportSpecText(spec)],
+    ['正态性 (Anderson-Darling)', adRow],
+    ...(capabilityOptions.allowDistantSpec ? [['规格风险确认', '用户已核对当前测量角色与规格，并显式确认继续计算远距离规格']] : []),
     ...capRows,
     stabilityRow,
   ];

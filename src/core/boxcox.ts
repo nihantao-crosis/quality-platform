@@ -26,7 +26,9 @@ export function bestLambda(xs: number[]): { lambda: number; logLik: number } | {
   return best;
 }
 
-/** 变换数据与规格限（λ<0 时变换单调递减，需交换上下限） */
+/** 变换数据与规格限。Box-Cox (x^λ−1)/λ 对任意 λ 单调递增(λ<0 时 x^λ 递减、
+ * 除以负 λ 再度反向),规格上下限次序天然保持——旧注释「λ<0 需交换上下限」是错的,
+ * 对应 swap 分支为不可达死代码,已移除(第三轮 P3)。 */
 export function transformWithSpec(
   xs: number[],
   lsl: number,
@@ -35,8 +37,7 @@ export function transformWithSpec(
 ): { data: number[]; lsl: number; usl: number } | { error: string } {
   if (xs.some((x) => x <= 0) || lsl <= 0 || usl <= 0) return { error: '数据与规格限必须为正' };
   const data = xs.map((x) => boxCoxTransform(x, lambda));
-  let tl = boxCoxTransform(lsl, lambda);
-  let tu = boxCoxTransform(usl, lambda);
-  if (tl > tu) [tl, tu] = [tu, tl];
+  const tl = boxCoxTransform(lsl, lambda);
+  const tu = boxCoxTransform(usl, lambda);
   return { data, lsl: tl, usl: tu };
 }

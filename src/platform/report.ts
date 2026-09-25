@@ -7,9 +7,9 @@ import {
   nf, fmtCap, computeCapability, capabilityInputError, oneWayAnova, computeGageRR,
   anovaGroups, gageStudyData, GAGE_TOLERANCE, type VarModel,
   assessCapability, evaluateAndersonDarling,
-  type SpcAssessment, type SpecLimits,
+  type SpcAssessment, type SpecLimits, type CapabilityInputOptions,
 } from '../core';
-import { reportContextText, reportSpecText, withinSigmaLabel } from './reportLabels';
+import { localDateStamp, sanitizeFileName, timestampText, appVersionText, reportContextText, reportSpecText, withinSigmaLabel } from './reportLabels';
 
 const OPS = ['张伟', '李娜', '王强'];
 const SHIFTS = ['早班', '中班', '夜班'];
@@ -37,19 +37,20 @@ export function textReport(
   assessment: SpcAssessment,
   capabilityModel: VarModel = M,
   capabilitySpcViolations: number = assessment.chartPointCount,
+  capabilityOptions: CapabilityInputOptions = {},
 ): string {
   const C = capabilityModel;
   // 能力输入闸门:规格与数据量纲不匹配(1000σ 哨兵)等情况下,能力章节写「未运行」而非让整份导出失败
-  const capError = capabilityInputError(C.all, C.sigmaWithin, spec);
-  const cap = capError ? null : computeCapability(C.all, C.sigmaWithin, spec);
+  const capError = capabilityInputError(C.all, C.sigmaWithin, spec, capabilityOptions);
+  const cap = capError ? null : computeCapability(C.all, C.sigmaWithin, spec, capabilityOptions);
   const violationEvents = assessment.events;
   const anova = M.isDemo ? oneWayAnova(anovaGroups().map((g) => g.vals)) : null;
   const gage = M.isDemo ? computeGageRR(gageStudyData(), { mode: 'width', value: GAGE_TOLERANCE }) : null;
   const L: string[] = [];
   L.push('════════════════════════════════════════');
   L.push('  质量分析报告 · ' + M.name);
-  L.push('  质量分析平台 Quality Analytics Platform v' + (typeof __APP_VERSION__ === 'undefined' ? '开发版' : __APP_VERSION__));
-  L.push('  生成时间: ' + new Date().toLocaleString('zh-CN'));
+  L.push('  质量分析平台 Quality Analytics Platform v' + (appVersionText()));
+  L.push('  生成时间: ' + timestampText());
   L.push('════════════════════════════════════════');
   L.push('');
   L.push('【数据集】');
@@ -75,6 +76,7 @@ export function textReport(
   if (!cap) {
     L.push(`  能力分析未运行: ${capError}`);
   } else {
+    if (capabilityOptions.allowDistantSpec) L.push('  ⚠ 用户已核对当前测量角色与规格，并显式确认继续计算远距离规格');
     L.push(`  Cp ${fmtCap(cap.cp)} · Cpk ${nf(cap.cpk, 2)} · Pp ${fmtCap(cap.pp)} · Ppk ${nf(cap.ppk, 2)}`);
     L.push(`  CPU ${fmtCap(cap.cpu)} · CPL ${fmtCap(cap.cpl)} · Z.bench ${nf(cap.zBench, 2)} · 西格玛水平 ${nf(cap.sigmaLevel, 2)}σ`);
     L.push(`  PPM 合计（整体）${Math.round(cap.ppm.overall.total).toLocaleString()}`);
@@ -117,17 +119,19 @@ export async function buildExportJob(
   analysis?: AnalysisReportPayload,
   capabilityModel: VarModel = M,
   capabilitySpcViolations: number | null = assessment?.chartPointCount ?? null,
+  capabilityOptions: CapabilityInputOptions = {},
 ): Promise<ExportJob> {
   if (!analysis && !assessment) throw new Error('通用报告必须提供当前 SPC 判异结果');
-  const stamp = new Date().toISOString().slice(0, 10);
-  const base = analysis?.title.replace(/[\\/:*?"<>|]/g, '_') || M.name.replace(/\.[^.]+$/, '');
+  const stamp = localDateStamp();
+  // 工作表名同样来自外部文件,与专项标题同一清洗口径
+  const base = sanitizeFileName(analysis?.title || M.name.replace(/\.[^.]+$/, ''));
   if (fmt === 'excel') {
     const { buildXlsx } = await import('./xlsxExport');
     return {
       defaultName: `${base}_${stamp}`,
       ext: 'xlsx',
       filterLabel: 'Excel 工作簿',
-      bytes: buildXlsx(M, spec, assessment, analysis, capabilityModel, capabilitySpcViolations),
+      bytes: buildXlsx(M, spec, assessment, analysis, capabilityModel, capabilitySpcViolations, capabilityOptions),
     };
   }
   if (fmt === 'pdf') {
@@ -137,7 +141,7 @@ export async function buildExportJob(
       defaultName: `${base}_${stamp}`,
       ext: 'html',
       filterLabel: '图文报告 (打开后打印为 PDF)',
-      text: buildHtmlReport(M, spec, assessment, analysis, capabilityModel, capabilitySpcViolations),
+      text: buildHtmlReport(M, spec, assessment, analysis, capabilityModel, capabilitySpcViolations, capabilityOptions),
     };
   }
   // Office 真渲染：图表位图化失败(无 canvas 环境)时降级为纯表格文档
@@ -151,13 +155,13 @@ export async function buildExportJob(
       defaultName: `${base}_${stamp}`,
       ext: 'pptx',
       filterLabel: 'PowerPoint 演示文稿',
-      bytes: await office.buildPptx(M, spec, images, assessment, analysis, capabilityModel, capabilitySpcViolations),
+      bytes: await office.buildPptx(M, spec, images, assessment, analysis, capabilityModel, capabilitySpcViolations, capabilityOptions),
     };
   }
   return {
     defaultName: `${base}_${stamp}`,
     ext: 'docx',
     filterLabel: 'Word 文档',
-    bytes: await office.buildDocx(M, spec, images, assessment, analysis, capabilityModel, capabilitySpcViolations),
+    bytes: await office.buildDocx(M, spec, images, assessment, analysis, capabilityModel, capabilitySpcViolations, capabilityOptions),
   };
 }

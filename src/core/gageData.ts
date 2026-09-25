@@ -367,20 +367,25 @@ export function prepareGageStudy(
       ? '真实 Gage R&R 除测量列外还需要 1 个部件类别列；类别可以是数字 ID 或文本'
       : '真实 Gage R&R 除测量列外还需要 2 个类别列（部件、操作员）；类别可以是数字 ID 或文本，单操作员研究可将操作员选为「无（单操作员）」' };
   }
-  const resolveCategory = (requested: string | null, fallback: number) => {
-    if (!requested) return categories[fallback] ?? null;
+  // 双审 P1:推荐并列弃权且用户未手选时,禁止按列序兜底猜部件/操作员——两角色装反会把
+  // 部件间变异与再现性对调,GRR 判定完全翻转且界面毫无提示。与测量列「并列不猜」同一纪律。
+  const resolveCategory = (requested: string | null) => {
+    if (!requested) return null;
     const found = categories.find((column) => column.name === requested) ?? null;
     if (!found && requested === model.colNames[valueIndex]) return null;
     return found;
   };
-  const partColumn = resolveCategory(selection.partColumn, 0);
-  const operatorColumn = singleOperator ? null : resolveCategory(selection.operatorColumn, 1);
+  const partColumn = resolveCategory(selection.partColumn);
+  const operatorColumn = singleOperator ? null : resolveCategory(selection.operatorColumn);
   if (!partColumn || (!singleOperator && !operatorColumn)) {
     const role = !partColumn ? '部件' : '操作员';
     const requested = !partColumn ? selection.partColumn : selection.operatorColumn;
-    return { ok: false, reason: requested === model.colNames[valueIndex]
-      ? `测量列不能同时作为${role}列`
-      : `已选${role}列“${requested ?? ''}”已不存在` };
+    if (requested) {
+      return { ok: false, reason: requested === model.colNames[valueIndex]
+        ? `测量列不能同时作为${role}列`
+        : `已选${role}列“${requested}”已不存在` };
+    }
+    return { ok: false, reason: `请选择${role}列：类别列结构并列，系统无法判断哪列是部件、哪列是操作员，不会按列序默认` };
   }
   if (operatorColumn && partColumn.name === operatorColumn.name) return { ok: false, reason: '部件列与操作员列不能相同' };
 

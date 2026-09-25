@@ -64,7 +64,7 @@ describe('数据集命令', () => {
   });
   it('另存为副本:数据一致,名称加后缀,进最近列表', () => {
     const before = useData.getState().model;
-    const name = useData.getState().saveAsCopy();
+    const name = useData.getState().saveAsCopy().name;
     const after = useData.getState().model;
     expect(name).toContain('(副本');
     expect(after.name).toBe(name);
@@ -74,16 +74,29 @@ describe('数据集命令', () => {
   it('另存为副本:最近列表截断后仍不复用已发放名称', () => {
     const base = '副本截断源.csv';
     useData.getState().importMatrix(base, ['x'], [[1], [2], [3]]);
-    const issued = Array.from({ length: 8 }, () => useData.getState().saveAsCopy());
+    const issued = Array.from({ length: 8 }, () => useData.getState().saveAsCopy().name);
     expect(new Set(issued).size).toBe(issued.length);
     expect(useData.getState().recents).toHaveLength(5);
 
     // 回到源数据集再保存；早期副本已不在 recents，但高水位必须防止重名。
     useData.getState().importMatrix(base, ['x'], [[1], [2], [3]]);
-    const next = useData.getState().saveAsCopy();
+    const next = useData.getState().saveAsCopy().name;
     expect(issued).not.toContain(next);
     const sequences = JSON.parse(localStorage.getItem('qp-copy-sequences-v1') ?? '{}');
-    expect(sequences[base]).toBeGreaterThanOrEqual(9);
+    // v1.43.0 闭环:副本基名统一剥离扩展名(编辑路径与另存为路径此前口径不同)
+    expect(sequences['副本截断源']).toBeGreaterThanOrEqual(9);
+    expect(sequences[base]).toBeUndefined();
+    expect(issued.every((n) => n.startsWith('副本截断源 (副本'))).toBe(true);
+  });
+
+  it('副本基名两条路径一致:编辑演示集与另存为副本用同一基名口径', () => {
+    useData.getState().importMatrix('口径.csv', ['x'], [[1], [2], [3]]);
+    const viaSaveAs = useData.getState().saveAsCopy().name;
+    expect(viaSaveAs.startsWith('口径 (副本')).toBe(true);
+    useData.getState().resetDemo();
+    useData.getState().updateCell(0, 0, 42);
+    // 演示集编辑路径同样剥扩展名(质检数据.mtw → 质检数据 (副本))
+    expect(useData.getState().model.name.startsWith('质检数据 (副本')).toBe(true);
   });
   it('标准化:各列均值≈0 标准差≈1', () => {
     const name = useData.getState().standardize();

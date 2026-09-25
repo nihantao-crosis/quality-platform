@@ -1,6 +1,6 @@
 /** 批次J(P0-4/P1-7):能力唯一判定器 + 页面报告卡与判定器口径一致。 */
 import { describe, it, expect } from 'vitest';
-import { assessCapability, assessSpcCharts, countCapabilityViolations } from '../capabilityAssessment';
+import { assessCapability, assessSpcCharts, countCapabilityViolations, spcChartFamilyFor } from '../capabilityAssessment';
 import { computeVarModel } from '../model';
 import { DEFAULT_RULE_K, DEFAULT_RULES, evalLimitedRules, type NelsonRules } from '../spc';
 import { capabilityReport } from '../../ui/reportData';
@@ -31,10 +31,10 @@ describe('assessCapability 唯一判定器(P0-4)', () => {
   it('countCapabilityViolations:含 3σ 外子组的模型必检出失控;平稳模型为 0', () => {
     const stableRows = Array.from({ length: 30 }, (_, i) => Array.from({ length: 5 }, (_, j) => 25 + Math.sin(i * 5 + j) * 0.01));
     const stable = computeVarModel('稳', ['a', 'b', 'c', 'd', 'e'], stableRows);
-    expect(countCapabilityViolations(stable, DEFAULT_RULES, DEFAULT_RULE_K)).toBe(0);
+    expect(countCapabilityViolations(stable, DEFAULT_RULES, DEFAULT_RULE_K, 'xbar-r')).toBe(0);
     const shifted = stableRows.map((r, i) => (i === 15 ? r.map((v) => v + 1) : [...r]));
     const unstable = computeVarModel('漂', ['a', 'b', 'c', 'd', 'e'], shifted);
-    expect(countCapabilityViolations(unstable, DEFAULT_RULES, DEFAULT_RULE_K)).toBeGreaterThan(0);
+    expect(countCapabilityViolations(unstable, DEFAULT_RULES, DEFAULT_RULE_K, 'xbar-r')).toBeGreaterThan(0);
   });
 
   it('页面报告卡(capabilityReport)的 verdict/headline 与判定器逐字一致(防口径分叉回归)', () => {
@@ -65,9 +65,17 @@ describe('assessSpcCharts 结构化点明细', () => {
     r5: false, r6: false, r7: false, r8: false,
   };
 
+  it('chart family 由模型结构与当前 SPC 类型显式决定，不存在默认回退', () => {
+    const subgroup = computeVarModel('子组.csv', ['a', 'b'], [[1, 2], [2, 3]]);
+    const individual = computeVarModel('单值.csv', ['a'], [[1], [2], [3]]);
+    expect(spcChartFamilyFor(subgroup, 'xbar-s')).toBe('xbar-s');
+    expect(spcChartFamilyFor(subgroup, 'xbar-r')).toBe('xbar-r');
+    expect(spcChartFamilyFor(individual, 'xbar-s')).toBe('i-mr');
+  });
+
   it('漏传 ruleK 立即失败，不静默回落标准值', () => {
     const M = computeVarModel('漏传K.csv', ['x'], [[1], [2], [1], [2]]);
-    expect(() => assessSpcCharts(M, OFF, undefined as never)).toThrow('必须显式传入 ruleK');
+    expect(() => assessSpcCharts(M, OFF, undefined as never, 'i-mr')).toThrow('必须显式传入 ruleK');
   });
 
   it('K2=12 的连续 24 点输出 24 条点×准则明细，不退化为窗口触发终点', () => {
@@ -77,7 +85,7 @@ describe('assessSpcCharts 结构化点明细', () => {
     const assessment = assessSpcCharts(
       M,
       { ...OFF, r2: true },
-      { ...DEFAULT_RULE_K, k2: 12 },
+      { ...DEFAULT_RULE_K, k2: 12 }, 'xbar-r',
     );
 
     expect(assessment.locationViolIndexes.size).toBe(24);
@@ -94,7 +102,7 @@ describe('assessSpcCharts 结构化点明细', () => {
     const rows: number[][] = [[10], [30], [10]];
     for (let i = 0; i < 17; i++) rows.push([i % 2 === 0 ? 10.05 : 10]);
     const M = computeVarModel('跨图重合.csv', ['x'], rows);
-    const assessment = assessSpcCharts(M, { ...OFF, r1: true }, DEFAULT_RULE_K);
+    const assessment = assessSpcCharts(M, { ...OFF, r1: true }, DEFAULT_RULE_K, 'i-mr');
 
     expect([...assessment.locationViolIndexes]).toEqual([1]);
     // MR 图本地 0 基：MR[0]/MR[1] 分别对应原始观测索引 1/2。
@@ -111,9 +119,9 @@ describe('assessSpcCharts 结构化点明细', () => {
     const rows = [...Array.from({ length: 18 }, () => [1, 1]), [-18, -18]];
     const M = computeVarModel('非法K.csv', ['a', 'b'], rows);
     const rules = { ...OFF, r2: true };
-    const expected = assessSpcCharts(M, rules, DEFAULT_RULE_K);
+    const expected = assessSpcCharts(M, rules, DEFAULT_RULE_K, 'xbar-r');
     for (const raw of [{}, { k2: Number.NaN }]) {
-      const actual = assessSpcCharts(M, rules, raw as never);
+      const actual = assessSpcCharts(M, rules, raw as never, 'xbar-r');
       expect(actual.chartPointCount).toBe(expected.chartPointCount);
       expect(actual.events).toEqual(expected.events);
       expect(actual.events).toHaveLength(actual.chartPointCount);
@@ -141,7 +149,7 @@ describe('assessSpcCharts 结构化点明细', () => {
       ['x'],
       Array.from({ length: n }, (_, index) => [index % 2]),
     );
-    const count = countCapabilityViolations(M, { ...OFF, r4: true }, DEFAULT_RULE_K);
+    const count = countCapabilityViolations(M, { ...OFF, r4: true }, DEFAULT_RULE_K, 'i-mr');
     expect(count).toBeGreaterThan(n - DEFAULT_RULE_K.k4);
     expect(count).toBeLessThanOrEqual(n * 2);
   });
@@ -153,7 +161,7 @@ describe('assessSpcCharts 结构化点明细', () => {
       Array.from({ length: 2_000 }, (_, index) => [index % 2 ? 2 : 0]),
     );
     const rules = { ...OFF, r2: true, r4: true };
-    expect(countCapabilityViolations(M, rules, DEFAULT_RULE_K))
-      .toBe(assessSpcCharts(M, rules, DEFAULT_RULE_K).chartPointCount);
+    expect(countCapabilityViolations(M, rules, DEFAULT_RULE_K, 'i-mr'))
+      .toBe(assessSpcCharts(M, rules, DEFAULT_RULE_K, 'i-mr').chartPointCount);
   });
 });

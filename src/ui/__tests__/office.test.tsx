@@ -7,6 +7,7 @@ import { DEFAULT_SPC_RULES } from '../../store/appStore';
 import { describe, it, expect } from 'vitest';
 import { assessSpcCharts, DEFAULT_RULE_K, type NelsonRules } from '../../core';
 import { buildDocx, buildPptx } from '../../platform/officeExport';
+import { MAX_XLSX_VIOLATION_ROWS } from '../../platform/reportLabels';
 import { buildData, computeVarModel } from '../../core';
 
 const D = buildData();
@@ -33,18 +34,18 @@ const isZip = (b: Uint8Array) => b[0] === 0x50 && b[1] === 0x4b; // 'PK'
 
 describe('Office 真渲染导出（无图降级）', () => {
   it('Word .docx 为合法 ZIP 且非空', async () => {
-    const bytes = await buildDocx(M, SPEC, {}, assessSpcCharts(M, DEFAULT_SPC_RULES, DEFAULT_RULE_K));
+    const bytes = await buildDocx(M, SPEC, {}, assessSpcCharts(M, DEFAULT_SPC_RULES, DEFAULT_RULE_K, 'xbar-r'));
     expect(isZip(bytes)).toBe(true);
     expect(bytes.length).toBeGreaterThan(2000);
   });
   it('PowerPoint .pptx 为合法 ZIP 且非空', async () => {
-    const bytes = await buildPptx(M, SPEC, {}, assessSpcCharts(M, DEFAULT_SPC_RULES, DEFAULT_RULE_K));
+    const bytes = await buildPptx(M, SPEC, {}, assessSpcCharts(M, DEFAULT_SPC_RULES, DEFAULT_RULE_K, 'xbar-r'));
     expect(isZip(bytes)).toBe(true);
     expect(bytes.length).toBeGreaterThan(10000);
   });
 
   it('Word 通用报告 OOXML 含 R 图标题且实际嵌入两张 SPC 图', async () => {
-    const assessment = assessSpcCharts(R_ONLY, R1_ONLY, DEFAULT_RULE_K);
+    const assessment = assessSpcCharts(R_ONLY, R1_ONLY, DEFAULT_RULE_K, 'xbar-r');
     expect(assessment.locationPoints).toBe(0);
     expect(assessment.dispersionPoints).toBe(1);
     const bytes = await buildDocx(R_ONLY, { lsl: 0, tgt: 10, usl: 20 }, { xbar: PNG_A, dispersion: PNG_B }, assessment);
@@ -60,7 +61,7 @@ describe('Office 真渲染导出（无图降级）', () => {
   });
 
   it('PowerPoint 通用报告 OOXML 含独立 R 图 slide 且实际嵌入两张 SPC 图', async () => {
-    const assessment = assessSpcCharts(R_ONLY, R1_ONLY, DEFAULT_RULE_K);
+    const assessment = assessSpcCharts(R_ONLY, R1_ONLY, DEFAULT_RULE_K, 'xbar-r');
     const bytes = await buildPptx(R_ONLY, { lsl: 0, tgt: 10, usl: 20 }, { xbar: PNG_A, dispersion: PNG_B }, assessment);
     const zip = await JSZip.loadAsync(bytes);
     const slideNames = Object.keys(zip.files).filter((name) => /^ppt\/slides\/slide\d+\.xml$/.test(name));
@@ -81,7 +82,7 @@ describe('Office 真渲染导出（无图降级）', () => {
   });
 
   it('K2=12 的 Word/PPT 摘要显式声明截断，总数仍与 24 条完整明细一致', async () => {
-    const assessment = assessSpcCharts(K12, { ...RULES_OFF, r2: true }, { ...DEFAULT_RULE_K, k2: 12 });
+    const assessment = assessSpcCharts(K12, { ...RULES_OFF, r2: true }, { ...DEFAULT_RULE_K, k2: 12 }, 'xbar-r');
     expect(assessment.events).toHaveLength(24);
     const [docxBytes, pptxBytes] = await Promise.all([
       buildDocx(K12, { lsl: -30, tgt: 0, usl: 30 }, {}, assessment),
@@ -102,9 +103,41 @@ describe('Office 真渲染导出（无图降级）', () => {
     expect(locationSlideXml).toContain('normAutofit');
   });
 
+  it('判异事件超过 Excel 上限时，Word/PPT 不再误称 Excel 提供完整明细', async () => {
+    const base = assessSpcCharts(K12, { ...RULES_OFF, r2: true }, { ...DEFAULT_RULE_K, k2: 12 }, 'xbar-r');
+    const total = MAX_XLSX_VIOLATION_ROWS + 3;
+    const assessment = {
+      ...base,
+      events: Array.from({ length: total }, (_, index) => ({
+        i: index % K12.k,
+        chart: 'X̄',
+        rule: 2,
+        desc: '连续点位于中心线同一侧',
+      })),
+      chartPointCount: total,
+      locationPoints: total,
+      dispersionPoints: 0,
+      uniqueAnalysisUnitCount: K12.k,
+    };
+    const [docxBytes, pptxBytes] = await Promise.all([
+      buildDocx(K12, { lsl: -30, tgt: 0, usl: 30 }, {}, assessment),
+      buildPptx(K12, { lsl: -30, tgt: 0, usl: 30 }, {}, assessment),
+    ]);
+    const [docx, pptx] = await Promise.all([JSZip.loadAsync(docxBytes), JSZip.loadAsync(pptxBytes)]);
+    const wordXml = await docx.file('word/document.xml')!.async('string');
+    const slideNames = Object.keys(pptx.files).filter((name) => /^ppt\/slides\/slide\d+\.xml$/.test(name));
+    const slideXml = (await Promise.all(slideNames.map((name) => pptx.file(name)!.async('string')))).join('\n');
+
+    for (const content of [wordXml, slideXml]) {
+      expect(content).toContain(`Excel 同样最多列前 ${MAX_XLSX_VIOLATION_ROWS} 项`);
+      expect(content).toContain('请缩小数据范围或减少启用的判异准则');
+      expect(content).not.toContain(`共 ${total} 项，完整明细请导出 Excel`);
+    }
+  });
+
   it('常量数据时 Word/PPT 不因 AD 不可计算失败，且保留能力、SPC 与正态性说明', async () => {
     const constant = computeVarModel('常量.csv', ['a', 'b'], Array.from({ length: 20 }, () => [1, 1]));
-    const assessment = assessSpcCharts(constant, RULES_OFF, DEFAULT_RULE_K);
+    const assessment = assessSpcCharts(constant, RULES_OFF, DEFAULT_RULE_K, 'xbar-r');
     const [docxBytes, pptxBytes] = await Promise.all([
       buildDocx(constant, { lsl: 0, tgt: 1, usl: 2 }, {}, assessment),
       buildPptx(constant, { lsl: 0, tgt: 1, usl: 2 }, {}, assessment),
@@ -123,7 +156,7 @@ describe('Office 真渲染导出（无图降级）', () => {
 
   it('I-MR 的 Word/PPT 把 n=1 数据称为单值观测，并标明 MR̄/d₂(2)', async () => {
     const model = computeVarModel('单值.csv', ['x'], Array.from({ length: 20 }, (_, index) => [10 + (index % 3) * 0.1]));
-    const assessment = assessSpcCharts(model, RULES_OFF, DEFAULT_RULE_K);
+    const assessment = assessSpcCharts(model, RULES_OFF, DEFAULT_RULE_K, 'i-mr');
     const [docxBytes, pptxBytes] = await Promise.all([
       buildDocx(model, { lsl: 9, tgt: 10, usl: 11 }, {}, assessment),
       buildPptx(model, { lsl: 9, tgt: 10, usl: 11 }, {}, assessment),

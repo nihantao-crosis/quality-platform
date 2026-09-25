@@ -10,7 +10,7 @@
  * 每行独立求值;聚合函数对「其参数在所有行上的取值」做一次归约并缓存。
  */
 
-import { arrMin, arrMax, mean, stableSum, stdev } from './basicMath';
+import { median, arrMin, arrMax, mean, stableSum, stdev } from './basicMath';
 
 export interface FormulaCtx {
   /** 各列的数值数组，columns[j] 为第 j 列(0 基) */
@@ -128,13 +128,19 @@ type Node =
 
 export class FormulaError extends Error {}
 
-const CONSTS: Record<string, number> = { pi: Math.PI, e: Math.E };
-const ELEM: Record<string, (x: number) => number> = {
+// 盲审 P3:`t.s in CONSTS` / `t.s in ELEM` 走原型链,`constructor`/`__proto__`/`toString`
+// 会被当成合法函数名或常量名通过词法检查,进而在求值处返回非 number(values 的
+// `number[]` 类型声明因此是假的)。表本身用 null 原型,判定改 Object.hasOwn。
+const CONSTS: Record<string, number> = Object.assign(Object.create(null) as Record<string, number>, { pi: Math.PI, e: Math.E });
+const ELEM: Record<string, (x: number) => number> = Object.assign(
+  Object.create(null) as Record<string, (x: number) => number>,
+  {
   abs: Math.abs, sqrt: Math.sqrt, exp: Math.exp,
   ln: Math.log, log: Math.log, log10: Math.log10,
   sin: Math.sin, cos: Math.cos, tan: Math.tan,
   round: Math.round, sq: (x) => x * x,
-};
+  } as Record<string, (x: number) => number>,
+);
 const AGG_NAMES = new Set(['mean', 'avg', 'std', 'sd', 'var', 'min', 'max', 'sum', 'median', 'range', 'n', 'count']);
 
 const CMP = new Set(['>', '<', '>=', '<=', '==', '!=', '<>']);
@@ -187,23 +193,25 @@ class Parser {
     }
   }
   private mul(): Node { // * /
-    let a = this.pow();
+    let a = this.unary();
     for (;;) {
       const t = this.peek();
-      if (t?.t === 'op' && (t.s === '*' || t.s === '/')) { this.next(); a = { k: 'bin', op: t.s, a, b: this.pow() }; }
+      if (t?.t === 'op' && (t.s === '*' || t.s === '/')) { this.next(); a = { k: 'bin', op: t.s, a, b: this.unary() }; }
       else return a;
     }
   }
-  private pow(): Node { // ^ 右结合
-    const a = this.unary();
-    const t = this.peek();
-    if (t?.t === 'op' && t.s === '^') { this.next(); return { k: 'bin', op: '^', a, b: this.pow() }; }
-    return a;
-  }
   private unary(): Node {
+    // 一元 ± 弱于 ^(双审 P2 整改):−C1^2 = −(C1²),与 Minitab 计算器/数学惯例一致;
+    // 此前 unary 在 pow 之下,−C1^0.5 被解析成 (−C1)^0.5,正数列直接得 NaN。
     const t = this.peek();
     if (t?.t === 'op' && (t.s === '-' || t.s === '+')) { this.next(); const a = this.unary(); return t.s === '-' ? { k: 'neg', a } : a; }
-    return this.primary();
+    return this.pow();
+  }
+  private pow(): Node { // ^ 右结合;指数位置允许一元符号(2^-3、C1^-2)
+    const a = this.primary();
+    const t = this.peek();
+    if (t?.t === 'op' && t.s === '^') { this.next(); return { k: 'bin', op: '^', a, b: this.unary() }; }
+    return a;
   }
   private primary(): Node {
     const t = this.next();
@@ -218,11 +226,11 @@ class Parser {
         const arg = this.orE();
         const r = this.next();
         if (r?.t !== 'rp') throw new FormulaError(`函数 ${t.s}(…) 括号不匹配`);
-        if (t.s in ELEM) return { k: 'elem', fn: t.s, a: arg };
+        if (Object.prototype.hasOwnProperty.call(ELEM, t.s)) return { k: 'elem', fn: t.s, a: arg };
         if (AGG_NAMES.has(t.s)) return { k: 'agg', fn: t.s, a: arg };
         throw new FormulaError(`未知函数「${t.s}」`);
       }
-      if (t.s in CONSTS) return { k: 'const', v: CONSTS[t.s] };
+      if (Object.prototype.hasOwnProperty.call(CONSTS, t.s)) return { k: 'const', v: CONSTS[t.s] };
       throw new FormulaError(`未知名称「${t.s}」(函数需带括号,常量仅支持 pi/e)`);
     }
     throw new FormulaError('表达式语法错误');
@@ -251,9 +259,9 @@ function aggregate(fn: string, xs: number[]): number {
     case 'var': return n > 1 ? stdev(finite) ** 2 : 0;
     case 'std': case 'sd': return n > 1 ? stdev(finite) : 0;
     case 'median': {
-      const s = [...finite].sort((a, b) => a - b);
-      const mid = Math.floor(s.length / 2);
-      return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+      // 自审 P3:此处曾是全项目第三份 median 实现,与 core median 有可复现的 1ulp 分歧
+      // (同一列数据「描述统计的中位数」与工作表公式 median() 结果不同)。统一委托。
+      return median(finite);
     }
     default: throw new FormulaError(`未知聚合函数「${fn}」`);
   }

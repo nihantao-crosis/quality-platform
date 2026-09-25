@@ -7,6 +7,7 @@ import type { CSSProperties } from 'react';
 import { useApp } from '../../store/appStore';
 import {
   FISHBONE_DEFAULT,
+  fishboneWriteValidationError,
   loadFishboneState,
   saveFishboneState,
   type FishboneData,
@@ -92,20 +93,26 @@ export function Fishbone({ T }: { T: ChartTokens }) {
   const [catIdx, setCatIdx] = useState(0);
   const [draft, setDraft] = useState('');
 
-  const update = (next: FishboneData, nextIsDemo = false) => {
+  const update = (next: FishboneData, nextIsDemo = false): boolean => {
+    const validationError = fishboneWriteValidationError(next, nextIsDemo);
+    if (validationError) {
+      showToast(`鱼骨图更新失败：${validationError}`);
+      return false;
+    }
     setState({ data: next, isDemo: nextIsDemo });
     try {
       saveFishboneState(next, nextIsDemo);
-    } catch {
-      showToast('鱼骨图未能保存到本机，请检查本地存储空间');
+    } catch (error) {
+      const detail = error instanceof Error && error.message ? `：${error.message}` : '';
+      showToast(`鱼骨图未能保存到本机${detail}；请检查本地存储空间`);
     }
+    return true;
   };
   const addCause = () => {
     const cause = draft.trim();
     if (!cause) return;
     const categories = data.categories.map((c, i) => (i === catIdx ? { ...c, causes: [...c.causes, cause] } : c));
-    update({ ...data, categories });
-    setDraft('');
+    if (update({ ...data, categories })) setDraft('');
   };
   const removeCause = (ci: number) => {
     const categories = data.categories.map((c, i) => (i === catIdx ? { ...c, causes: c.causes.filter((_, j) => j !== ci) } : c));
@@ -114,7 +121,7 @@ export function Fishbone({ T }: { T: ChartTokens }) {
   const cat = data.categories[catIdx];
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '1fr 300px', gap: 16 }}>
+    <div className="responsive-grid-2" style={{ display: 'grid', gridTemplateColumns: '1fr 300px', gap: 16 }}>
       <Card>
         <div style={{ display: 'flex', alignItems: 'center', padding: '11px 16px', borderBottom: '1px solid #edf0f3' }}>
           <div style={{ fontWeight: 600, color: '#33404f' }}>因果图（鱼骨图）· 6M 分析</div>

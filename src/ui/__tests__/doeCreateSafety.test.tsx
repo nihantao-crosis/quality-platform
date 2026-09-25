@@ -13,6 +13,36 @@ beforeEach(() => {
 });
 
 describe('DOE 创建安全闸门', () => {
+  it('重复因子字段、种子和分数设计 radio 都有唯一可访问名称', () => {
+    render(<App />);
+    for (let factor = 1; factor <= 2; factor++) {
+      expect(screen.getByLabelText(`两水平全因子因子 ${factor} 名称`)).toBeTruthy();
+      expect(screen.getByLabelText(`两水平全因子因子 ${factor} 低水平`)).toBeTruthy();
+      expect(screen.getByLabelText(`两水平全因子因子 ${factor} 高水平`)).toBeTruthy();
+    }
+    expect(screen.getByLabelText('随机化种子模式')).toBeTruthy();
+    expect(screen.getByLabelText('随机化种子数值')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: '一般全因子' }));
+    for (let factor = 1; factor <= 2; factor++) {
+      expect(screen.getByLabelText(`一般全因子因子 ${factor} 名称`)).toBeTruthy();
+      expect(screen.getByLabelText(`一般全因子因子 ${factor} 水平数`)).toBeTruthy();
+      for (let level = 1; level <= 3; level++) {
+        expect(screen.getByLabelText(`一般全因子因子 ${factor} 水平 ${level} 数值`)).toBeTruthy();
+      }
+    }
+
+    fireEvent.click(screen.getByRole('button', { name: '分数因子 2^(k−p)' }));
+    for (let factor = 1; factor <= 4; factor++) {
+      expect(screen.getByLabelText(`分数因子因子 ${factor} 名称`)).toBeTruthy();
+      expect(screen.getByLabelText(`分数因子因子 ${factor} 低水平`)).toBeTruthy();
+      expect(screen.getByLabelText(`分数因子因子 ${factor} 高水平`)).toBeTruthy();
+    }
+    const radioNames = screen.getAllByRole('radio').map((radio) => radio.getAttribute('aria-label'));
+    expect(radioNames.every(Boolean)).toBe(true);
+    expect(new Set(radioNames).size).toBe(radioNames.length);
+  });
+
   it('2^(4-1) 无效全折叠被禁用；指定因子折叠显示实际分辨率并支持互补分部', () => {
     render(<App />);
     fireEvent.click(screen.getByRole('button', { name: '分数因子 2^(k−p)' }));
@@ -42,5 +72,19 @@ describe('DOE 创建安全闸门', () => {
     expect(screen.getAllByText(/未写入工作表/).length).toBeGreaterThan(0);
     expect(useData.getState().model.name).toBe(beforeName);
     expect(useApp.getState().page).toBe('doe');
+  });
+
+  it('三因子交互图的两个因子选择器名称可区分', () => {
+    useData.getState().importMatrix('DOE', ['A', 'B', 'C', 'Y'], [
+      [-1, -1, -1, 10], [1, -1, -1, 12], [-1, 1, -1, 11], [1, 1, -1, 15],
+      [-1, -1, 1, 13], [1, -1, 1, 17], [-1, 1, 1, 14], [1, 1, 1, 20],
+    ]);
+    useApp.setState({
+      page: 'doe', doeTab: 'analyze', doeView: 'interact',
+      doeFactorCols: ['A', 'B', 'C'], doeRespCol: 'Y',
+    });
+    render(<App />);
+    expect(screen.getByLabelText('交互作用图第一个因子')).toBeTruthy();
+    expect(screen.getByLabelText('交互作用图第二个因子')).toBeTruthy();
   });
 });

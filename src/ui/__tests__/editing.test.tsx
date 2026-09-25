@@ -59,7 +59,7 @@ describe('工作表手工录入', () => {
 describe('图文报告 (HTML)', () => {
   it('内嵌四张 SVG 图表与关键统计', () => {
     const M = useData.getState().model;
-    const html = buildHtmlReport(M, { lsl: 24.9, tgt: 25.0, usl: 25.1 }, assessSpcCharts(M, DEFAULT_SPC_RULES, DEFAULT_RULE_K));
+    const html = buildHtmlReport(M, { lsl: 24.9, tgt: 25.0, usl: 25.1 }, assessSpcCharts(M, DEFAULT_SPC_RULES, DEFAULT_RULE_K, 'xbar-r'));
     // 通用报告必须同时给出位置图、离散图、直方图和正态概率图。
     expect((html.match(/<svg/g) ?? []).length).toBe(4);
     expect(html).toContain('质量分析报告');

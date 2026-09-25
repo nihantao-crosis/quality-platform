@@ -91,7 +91,8 @@ export const SWITCH_INIT: SwitchStatus = {
 
 const INSPECTION_LEVELS = new Set<InspectionLevel>(['S-1', 'S-2', 'S-3', 'S-4', 'I', 'II', 'III']);
 const INSPECTION_STATES = new Set<InspState>(['normal', 'tightened', 'reduced']);
-const SAMPLE_CODES = new Set(['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'J', 'K', 'L', 'M', 'N', 'P', 'Q', 'R']);
+// S 只在加严表 2-B 的 0.025 列出现(aql.ts 表数据实际含 S/3150);白名单缺 S 会让这类批次记录被静默丢弃
+const SAMPLE_CODES = new Set(['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'J', 'K', 'L', 'M', 'N', 'P', 'Q', 'R', 'S']);
 const DISPOSITIONS = new Set<NonconformingDisposition>(['none', 'unrecorded', 'pending', 'reworked', 'replaced', 'scrapped', 'concession']);
 const MAX_STATUS_HISTORY = 200;
 

@@ -3,7 +3,7 @@
  * @vitest-environment jsdom
  */
 import { describe, it, expect, beforeEach } from 'vitest';
-import { render, screen, fireEvent, cleanup, act } from '@testing-library/react';
+import { render, screen, fireEvent, cleanup, act, waitFor } from '@testing-library/react';
 import App from '../../App';
 import { useApp } from '../../store/appStore';
 import { useData } from '../../store/dataStore';
@@ -40,7 +40,7 @@ describe('九页渲染冒烟', () => {
 });
 
 describe('数据流冒烟', () => {
-  it('剪贴板导入成功后自动关闭弹窗并显示新工作表', () => {
+  it('剪贴板导入成功后自动关闭弹窗并显示新工作表', async () => {
     render(<App />);
     fireEvent.click(screen.getByText('导入 CSV/Excel'));
     fireEvent.click(screen.getByText('剪贴板粘贴'));
@@ -48,6 +48,7 @@ describe('数据流冒烟', () => {
       target: { value: '子组,测量1,测量2\n1,10,11\n2,12,13\n3,14,15' },
     });
     fireEvent.click(screen.getByText('导入', { exact: true }));
+    await waitFor(() => expect(useApp.getState().modal).toBeNull());
     expect(useApp.getState()).toMatchObject({ modal: null, page: 'worksheet' });
     expect(useData.getState().model.name).toBe('剪贴板数据');
     expect(screen.queryByText('导入数据')).toBeNull();
@@ -79,7 +80,7 @@ describe('数据流冒烟', () => {
       counts: [1, 2, 3], sampleSizes: [10, 20, 30],
     });
   });
-  it('P 图剪贴板两列导入按“不良数,每批样本量”解释', () => {
+  it('P 图剪贴板两列导入按“不良数,每批样本量”解释', async () => {
     render(<App />);
     fireEvent.click(screen.getByText('导入 CSV/Excel'));
     fireEvent.click(screen.getByText('剪贴板粘贴'));
@@ -88,6 +89,7 @@ describe('数据流冒烟', () => {
       target: { value: '不良数,每批样本量\n1,10\n4,40\n2,20' },
     });
     fireEvent.click(screen.getByText('导入', { exact: true }));
+    await waitFor(() => expect(useApp.getState().modal).toBeNull());
     expect(useApp.getState()).toMatchObject({ modal: null, page: 'spc', spcType: 'p' });
     expect(useData.getState().pModel.pdef).toEqual([1, 4, 2]);
     expect(useData.getState().pModel.pNs).toEqual([10, 40, 20]);

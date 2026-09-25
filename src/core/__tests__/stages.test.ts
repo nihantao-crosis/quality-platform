@@ -2,7 +2,7 @@
  * 分阶段控制图对拍 — 段切分/段内限值/段内判异。
  */
 import { describe, it, expect } from 'vitest';
-import { splitStages, stagedXbar, stagedRange, stageValidationError } from '../stages';
+import { MAX_SPC_STAGE_SEGMENTS, splitStages, stagedXbar, stagedRange, stageValidationError } from '../stages';
 import { DEFAULT_RULES } from '../spc';
 
 const RULES = DEFAULT_RULES;
@@ -27,6 +27,15 @@ describe('splitStages', () => {
     expect(stageValidationError(['A', 'A'], 3)).toContain('2 行');
     expect(stageValidationError(['A', '', 'B', 'B'])).toContain('为空');
     expect(stageValidationError(['A', 'A'])).toContain('只有 1 个连续段');
+  });
+
+  it('在统计计算前拒绝过多连续阶段，避免图形与报告资源放大', () => {
+    const labels = Array.from(
+      { length: (MAX_SPC_STAGE_SEGMENTS + 1) * 2 },
+      (_, index) => `S${Math.floor(index / 2)}`,
+    );
+    expect(stageValidationError(labels)).toContain(`超过上限 ${MAX_SPC_STAGE_SEGMENTS.toLocaleString()}`);
+    expect(() => stagedXbar(labels.map(() => [1, 2]), labels, RULES)).toThrow(/超过上限/);
   });
 });
 

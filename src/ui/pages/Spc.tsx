@@ -1,7 +1,7 @@
 /** SPC 控制图 ★深度实现 — 七种图型（X̄-R/X̄-S/I-MR/EWMA/CUSUM/P/C），
  * Nelson 判异（Shewhart 图）/ 限值判异（EWMA/CUSUM）/ 点选明细 /
  * 分阶段控制限（按分组列分段,Minitab Stages 语义）。 */
-import { useState, type CSSProperties } from 'react';
+import { useMemo, useState, type CSSProperties } from 'react';
 import { useApp, type SpcType } from '../../store/appStore';
 import { syncSpecForActiveMeasurement, useData } from '../../store/dataStore';
 import { expandSpcRuleItems, uniqueSpcPointCount, type SpcViolationItem } from '../../store/analyses';
@@ -130,10 +130,14 @@ export function Spc({ T }: { T: ChartTokens }) {
     spcSigmaMethod, setSpcSigmaMethod, spcShowZones, toggleSpcZones,
   } = useApp();
   const { model: rawModel, textCols: rawTextCols, pendingCells, pModel, cModel, mesRunning, transposeDataset } = useData();
-  const prepared = prepareSpcData(rawModel, rawTextCols, {
-    layout: spcDataLayout, valueColumn: spcValueCol, subgroupColumn: spcSubgroupCol,
-    pendingCells,
-  });
+  // 第三轮 P2:O(N) 角色解析不得在每次交互(含 toast 出现/消失)重跑——与 App/Worksheet 同纪律
+  const prepared = useMemo(
+    () => prepareSpcData(rawModel, rawTextCols, {
+      layout: spcDataLayout, valueColumn: spcValueCol, subgroupColumn: spcSubgroupCol,
+      pendingCells,
+    }),
+    [rawModel, rawTextCols, pendingCells, spcDataLayout, spcValueCol, spcSubgroupCol],
+  );
   const setRolesAndSyncSpec = (patch: Partial<{
     spcDataLayout: SpcDataLayout; spcValueCol: string | null; spcSubgroupCol: string | null;
   }>) => {
@@ -354,17 +358,18 @@ export function Spc({ T }: { T: ChartTokens }) {
       if (ch.main) continue;
       const chartLabel = effType === 'xbar-r' ? 'R' : effType === 'xbar-s' ? 'S' : effType === 'i-mr' ? 'MR' : ch.props.clLabel ?? '离散';
       if (staged && effType === 'xbar-r') {
-        // 分阶段极差图:采用段内准则判异(否则整段被跳过、极差失控不显示)
+        // 分阶段极差图:段内判异是唯一权威——0 失控也必须显式传空集,否则 ControlChart
+        // 会回退到「点超全局固定限值」自算红点,图上标红与结论/明细/导出全矛盾(双审 P2)
+        dispViolByChart.set(ch.t, staged.r.viol);
         if (staged.r.viol.size) {
-          dispViolByChart.set(ch.t, staged.r.viol);
           expandSpcRuleItems(staged.r.viol, staged.r.list, chartLabel, spcRuleK).forEach((o) =>
             dispItems.push({ ...o, desc: `${chartLabel} 图：${o.desc}` }));
         }
       } else if (!spec.coreViol && ch.props.ucl != null) {
         const { ucl, lcl, data: cdata } = ch.props;
         const dr = evalLimitedRules(cdata as number[], ch.props.cl, ucl, lcl, spcRules, spcRuleK);
+        dispViolByChart.set(ch.t, dr.viol); // 空集也传,同上:禁止图表回退自算
         if (dr.viol.size) {
-          dispViolByChart.set(ch.t, dr.viol);
           expandSpcRuleItems(dr.viol, dr.list, chartLabel, spcRuleK).forEach((item) => {
             // MR 图数组索引 0 对应原始观测 2；结果列表统一映射回原观测索引。
             const i = effType === 'i-mr' ? item.i + 1 : item.i;
@@ -497,6 +502,7 @@ export function Spc({ T }: { T: ChartTokens }) {
     hasSubgroups: effType === 'p' || effType === 'c' ? false : M.hasSubgroups,
     structure: effType === 'p' ? 'attribute-p' : effType === 'c' ? 'attribute-c' : M.hasSubgroups ? 'subgroup' : 'individual',
     typeLabel: typeTabs.find(([k]) => k === effType)?.[1] ?? effType,
+    advancedChart: effType === 'ewma' || effType === 'cusum' ? effType : undefined,
     variationChartLabel,
     variationViolations: dispItems,
     variableName: effType === 'p' || effType === 'c' ? undefined : variableName,
@@ -669,7 +675,7 @@ export function Spc({ T }: { T: ChartTokens }) {
         </div>
       )}
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 300px', gap: 16 }}>
+      <div className="responsive-grid-2" style={{ display: 'grid', gridTemplateColumns: '1fr 300px', gap: 16 }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           {(() => {
             const renderChart = (ch: (typeof spec.charts)[number], hideXAxis: boolean) => {

@@ -4,15 +4,15 @@
  */
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
-  nf, fmtCap, computeCapability, capabilityInputError, evaluateAndersonDarling, type VarModel, type SpcAssessment,
+  nf, fmtCap, computeCapability, capabilityInputError, evaluateAndersonDarling, type VarModel, type SpcAssessment, type CapabilityInputOptions,
   assessCapability, } from '../core';
 import { chartTokens } from '../ui/tokens';
 import { ControlChart } from '../ui/charts/ControlChart';
 import { Histogram } from '../ui/charts/Histogram';
 import { NormalProbPlot } from '../ui/charts/NormalProbPlot';
 import type { ReportSpec } from './report';
-import { analysisUsesWorksheet, type AnalysisReportPayload } from './analysisReportModel';
-import { reportContextText, reportSpecText, withinSigmaLabel, MAX_HTML_VIOLATION_ROWS, violationTruncationNote } from './reportLabels';
+import { analysisTableTotalRows, analysisUsesWorksheet, type AnalysisReportPayload } from './analysisReportModel';
+import { MAX_REPORT_TABLE_ROWS, tableTruncationNote, escapeHtml, timestampText, appVersionText, reportContextText, reportSpecText, withinSigmaLabel, MAX_HTML_VIOLATION_ROWS, violationTruncationNote } from './reportLabels';
 
 const CSS = `
   body { font-family: "IBM Plex Sans", "PingFang SC", "Microsoft YaHei", sans-serif; color: #2a333f; margin: 0; padding: 32px 40px; }
@@ -35,7 +35,8 @@ const CSS = `
   @media print { body { padding: 0; } .chart { break-inside: avoid; } h2 { break-after: avoid; } }
 `;
 
-const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+// HTML 转义唯一实现下沉 reportLabels(第三轮 P3:两份逐字相同的实现合一),此处仅留短别名
+const esc = escapeHtml;
 
 function buildAnalysisHtml(M: VarModel, analysis: AnalysisReportPayload): string {
   const sourceContext = analysisUsesWorksheet(analysis) ? ` · 工作表 ${esc(M.name)}` : '';
@@ -43,14 +44,21 @@ function buildAnalysisHtml(M: VarModel, analysis: AnalysisReportPayload): string
   const warnings = analysis.warnings.length
     ? `<div class="warning"><b>使用与解释注意事项</b>${analysis.warnings.map((line) => `<p>${esc(line)}</p>`).join('')}</div>`
     : '';
-  const tables = analysis.tables.map((table, index) => `
+  const tables = analysis.tables.map((table, index) => {
+    const totalRows = analysisTableTotalRows(table);
+    const shownRows = Math.min(table.rows.length, MAX_REPORT_TABLE_ROWS);
+    return `
     <h2>${index + 2}. ${esc(table.title)}</h2>
     <table>
       <tr>${table.headers.map((header) => `<th>${esc(header)}</th>`).join('')}</tr>
-      ${table.rows.map((row) => `<tr>${row.map((value) => `<td>${esc(String(value))}</td>`).join('')}</tr>`).join('')}
+      ${table.rows.slice(0, shownRows).map((row) => `<tr>${row.map((value) => `<td>${esc(String(value))}</td>`).join('')}</tr>`).join('')}
+      ${totalRows > shownRows
+        ? `<tr><td colspan="${Math.max(1, table.headers.length)}">${esc(tableTruncationNote(totalRows, shownRows, '图文报告', totalRows === table.rows.length))}</td></tr>`
+        : ''}
     </table>
     ${table.note ? `<p class="sub">${esc(table.note)}</p>` : ''}
-  `).join('');
+  `;
+  }).join('');
   const chartBase = analysis.tables.length + 2;
   const charts = analysis.charts.map((chart, index) => `
     <h2>${chartBase + index}. ${esc(chart.title)}</h2>
@@ -62,7 +70,7 @@ function buildAnalysisHtml(M: VarModel, analysis: AnalysisReportPayload): string
 <head><meta charset="utf-8"><title>${esc(analysis.title)}</title><style>${CSS}</style></head>
 <body>
 <h1>${esc(analysis.title)}</h1>
-<div class="sub">${esc(analysis.subtitle)}${sourceContext} · 生成于 ${esc(analysis.generatedAt)} · 质量分析平台</div>
+<div class="sub">${esc(analysis.subtitle)}${sourceContext} · 生成于 ${esc(analysis.generatedAt)} · 质量分析平台 v${appVersionText()}</div>
 <h2>1. 分析结论</h2>
 ${summary}
 ${warnings}
@@ -79,6 +87,7 @@ export function buildHtmlReport(
   analysis?: AnalysisReportPayload,
   capabilityModel: VarModel = M,
   capabilitySpcViolations?: number | null,
+  capabilityOptions: CapabilityInputOptions = {},
 ): string {
   // 专项分析自带表格/图形，按原有专项载荷直接导出；下方双 SPC 图只属于通用质量报告。
   if (analysis) return buildAnalysisHtml(M, analysis);
@@ -87,19 +96,15 @@ export function buildHtmlReport(
   const capSpcCount = capabilitySpcViolations ?? assessment.chartPointCount;
   const T = chartTokens('经典', true);
   // 能力输入闸门:规格与数据量纲不匹配(1000σ 哨兵)等情况写「未运行」,其余章节照常导出
-  const capError = capabilityInputError(C.all, C.sigmaWithin, spec);
-  const cap = capError ? null : computeCapability(C.all, C.sigmaWithin, spec);
-  const spc = M.hasSubgroups
-    ? { data: M.subs.map((s) => s.mean), cl: M.xbarbar, ucl: M.uclX, lcl: M.lclX, label: 'X̄' }
-    : { data: M.indiv, cl: M.indMean, ucl: M.iUcl, lcl: M.iLcl, label: 'I' };
-  const dispersion = M.hasSubgroups
-    ? { data: M.subs.map((s) => s.range), cl: M.rCl, ucl: M.uclR, lcl: M.lclR, label: 'R', clLabel: 'R̄', xIndexOffset: 0 }
-    : { data: M.mr.slice(1) as number[], cl: M.mrbar, ucl: M.mrUcl, lcl: 0, label: 'MR', clLabel: 'MR̄', xIndexOffset: 1 };
+  const capError = capabilityInputError(C.all, C.sigmaWithin, spec, capabilityOptions);
+  const cap = capError ? null : computeCapability(C.all, C.sigmaWithin, spec, capabilityOptions);
+  const spc = assessment.location;
+  const dispersion = assessment.dispersion;
   const adEvaluation = evaluateAndersonDarling(C.all);
   const ad = adEvaluation.result;
 
   const xbarSvg = renderToStaticMarkup(
-    <ControlChart T={T} data={spc.data} cl={spc.cl} ucl={spc.ucl} lcl={spc.lcl} clLabel={spc.label} h={250} zones violations={assessment.locationViolIndexes} />,
+    <ControlChart T={T} data={spc.data} cl={spc.cl} ucl={spc.ucl} lcl={spc.lcl} clLabel={spc.clLabel} h={250} zones violations={assessment.locationViolIndexes} />,
   );
   const dispersionSvg = renderToStaticMarkup(
     <ControlChart
@@ -159,7 +164,7 @@ export function buildHtmlReport(
 </head>
 <body>
 <h1>质量分析报告</h1>
-<div class="sub">工作表 ${esc(M.name)} · ${reportContextText(M, C)} · 生成于 ${new Date().toLocaleString('zh-CN')} · 质量分析平台</div>
+<div class="sub">工作表 ${esc(M.name)} · ${reportContextText(M, C)} · 生成于 ${timestampText()} · 质量分析平台 v${appVersionText()}</div>
 
 <h2>1. 过程概览</h2>
 <table>
@@ -182,6 +187,7 @@ ${violHtml}
 
 <h2>3. 过程能力</h2>
 <div class="chart">${histSvg}</div>
+${capabilityOptions.allowDistantSpec ? '<p class="verdict-warn">⚠ 用户已核对当前测量角色与规格，并显式确认继续计算远距离规格。</p>' : ''}
 <table>
   <tr>${capRows.map(([k]) => `<th>${k}</th>`).join('')}</tr>
   <tr>${capRows.map(([, v]) => `<td class="num">${v}</td>`).join('')}</tr>

@@ -15,6 +15,7 @@
  */
 import { Fragment } from 'react';
 import type { ReactNode } from 'react';
+import { decimateUniform, minitabQuantile } from '../../core';
 import type { GagePanelData, GageResult, GageComponentKey } from '../../core';
 import type { ChartTokens } from '../tokens';
 import { Ln, Svg, Txt } from './primitives';
@@ -46,13 +47,81 @@ const MTB = {
   barStudy: '#c74542',
   barTol: '#ffec48',
   box: '#7da7d9',
-  series: ['#0054a6', '#931313', '#00841f'],
 };
 
+export type GageInteractionMarker = 'circle' | 'square' | 'diamond' | 'triangle'
+  | 'triangle-down' | 'cross' | 'plus' | 'hexagon';
+export interface GageInteractionSeriesStyle {
+  color: string;
+  marker: GageInteractionMarker;
+  /** undefined 表示实线；其余为 SVG stroke-dasharray。 */
+  dash?: string;
+}
+
+const INTERACTION_MARKERS: readonly GageInteractionMarker[] = [
+  'circle', 'square', 'diamond', 'triangle', 'triangle-down', 'cross', 'plus', 'hexagon',
+];
+const INTERACTION_DASHES: ReadonlyArray<string | undefined> = [
+  undefined, '8 3', '2 2', '9 3 2 3', '5 2', '10 2 2 2', '1 3', '6 2 1 2',
+];
+const INTERACTION_COLORS = [
+  '#0054a6', '#931313', '#00841f', '#6f42a8', '#b35c00', '#007a78', '#a51f6f', '#4d5d00',
+] as const;
+
+/** 数据线和图例共用的操作员视觉编码；前 8 人的颜色/形状/线型均不重复。 */
+export function gageInteractionSeriesStyle(operator: number): GageInteractionSeriesStyle {
+  const index = Math.max(0, Math.trunc(operator));
+  return {
+    color: INTERACTION_COLORS[index]
+      ?? `hsl(${Math.round((index * 137.508) % 360)} 62% 36%)`,
+    marker: INTERACTION_MARKERS[index % INTERACTION_MARKERS.length],
+    dash: INTERACTION_DASHES[index % INTERACTION_DASHES.length],
+  };
+}
+
+const GAGE_AXIS_EXTREME_THRESHOLD = Number.MAX_VALUE / 16;
+
+function gageAxisScale(lo: number, hi: number): number {
+  const maximum = Math.max(Math.abs(lo), Math.abs(hi));
+  if (!Number.isFinite(maximum) || maximum <= GAGE_AXIS_EXTREME_THRESHOLD) return 1;
+  return 2 ** Math.min(1023, Math.floor(Math.log2(maximum)));
+}
+
+function restoreGageAxisCoordinate(value: number, scale: number): number {
+  if (Number.isNaN(value)) return Number.NaN;
+  if (value === 0) return value;
+  const restored = value * scale;
+  if (Number.isFinite(restored)) return restored;
+  return value < 0 ? -Number.MAX_VALUE : Number.MAX_VALUE;
+}
+
 function niceRange(lo: number, hi: number): [number, number] {
-  if (!(hi > lo)) return [lo - 1, hi + 1];
-  const pad = (hi - lo) * 0.12;
-  return [lo - pad, hi + pad];
+  const ordinarySpan = hi - lo;
+  if (
+    hi > lo
+    && Number.isFinite(ordinarySpan)
+    && Math.max(Math.abs(lo), Math.abs(hi)) <= GAGE_AXIS_EXTREME_THRESHOLD
+  ) {
+    const pad = ordinarySpan * 0.12;
+    return [lo - pad, hi + pad];
+  }
+  if (!(hi > lo)) {
+    if (Number.isFinite(lo) && Math.abs(lo) <= GAGE_AXIS_EXTREME_THRESHOLD) return [lo - 1, hi + 1];
+    const scale = gageAxisScale(lo, hi);
+    const center = lo / scale;
+    return [
+      restoreGageAxisCoordinate(center - 0.12, scale),
+      restoreGageAxisCoordinate(center + 0.12, scale),
+    ];
+  }
+  const scale = gageAxisScale(lo, hi);
+  const loCoordinate = lo / scale;
+  const hiCoordinate = hi / scale;
+  const pad = (hiCoordinate - loCoordinate) * 0.12;
+  return [
+    restoreGageAxisCoordinate(loCoordinate - pad, scale),
+    restoreGageAxisCoordinate(hiCoordinate + pad, scale),
+  ];
 }
 
 /** 循环求 [min,max]:不用 Math.min(...展开)——十万行级观测在 Web V8 会栈溢出(parseMatrix 同教训)。 */
@@ -73,10 +142,31 @@ const fmtTick = (value: number, span: number) =>
 function panelFrame(T: ChartTokens, yLo: number, yHi: number, yTitle?: string, xTitle?: string) {
   const pw = PW - M.l - M.r;
   const ph = PH - M.t - M.b;
-  const Y = (value: number) => M.t + ((yHi - value) / (yHi - yLo)) * ph;
+  const coordinateScale = gageAxisScale(yLo, yHi);
+  let loCoordinate = yLo / coordinateScale;
+  let hiCoordinate = yHi / coordinateScale;
+  // 饱和回原单位后可能吃掉超出 ±MAX 的外边距，在坐标域补一层
+  // 小留白，保证端点不贴边，同时不生成不可表示的 SVG 属性。
+  if (coordinateScale !== 1) {
+    const extra = (hiCoordinate - loCoordinate) * 0.02 || 0.02;
+    loCoordinate -= extra;
+    hiCoordinate += extra;
+  }
+  if (!(hiCoordinate > loCoordinate)) {
+    const center = Number.isFinite(loCoordinate) ? loCoordinate : 0;
+    loCoordinate = center - 1;
+    hiCoordinate = center + 1;
+  }
+  const coordinateSpan = hiCoordinate - loCoordinate;
+  const YCoordinate = (value: number) => M.t + ((hiCoordinate - value) / coordinateSpan) * ph;
+  const Y = (value: number) => YCoordinate(value / coordinateScale);
   const grid = Array.from({ length: 5 }, (_, index) => {
-    const value = yLo + ((yHi - yLo) * index) / 4;
-    return { y: Y(value), label: fmtTick(value, yHi - yLo) };
+    const coordinate = loCoordinate + (coordinateSpan * index) / 4;
+    const value = restoreGageAxisCoordinate(coordinate, coordinateScale);
+    return {
+      y: YCoordinate(coordinate),
+      label: fmtTick(value, restoreGageAxisCoordinate(coordinateSpan, coordinateScale)),
+    };
   });
   const frame = (
     <Fragment>
@@ -124,12 +214,17 @@ export interface GageBarCategory {
 export function gageBarCategories(result: GageResult): GageBarCategory[] {
   const find = (key: GageComponentKey) => result.components.find((component) => component.key === key);
   const grr = find('grr');
-  const hasTol = grr?.pctTolerance != null;
+  // 防御旧快照/外部调用方：SVG 坐标永不消费非有限百分比。
+  // 新引擎会将无法表示的 %Tol fail-closed 为 null，此处再保证图形不被污染。
+  const finitePercent = (value: number | null | undefined): number => (
+    value != null && Number.isFinite(value) && value >= 0 ? value : 0
+  );
+  const hasTol = grr?.pctTolerance != null && Number.isFinite(grr.pctTolerance);
   const rowOf = (name: string, component: ReturnType<typeof find>): GageBarCategory => ({
     name,
-    contrib: component?.pctContribution ?? 0,
-    study: component?.pctStudyVar ?? 0,
-    tol: hasTol ? (component?.pctTolerance ?? 0) : null,
+    contrib: finitePercent(component?.pctContribution),
+    study: finitePercent(component?.pctStudyVar),
+    tol: hasTol ? finitePercent(component?.pctTolerance) : null,
   });
   return [
     rowOf('量具 R&R', grr),
@@ -270,19 +365,8 @@ function byPartBody(T: ChartTokens, panel: GagePanelData, partLabels: string[], 
 
 // ---------- 箱线:空心箱 + ⊕ 均值 + 均值连线(Minitab 1.5×IQR 规则) ----------
 
-function quantileOf(sorted: number[], q: number): number {
-  if (!sorted.length) return Number.NaN;
-  // Minitab 箱线图四分位数：位置=(n+1)p（1-based），相邻次序统计量间线性插值；
-  // 超出首尾时钳到最小/最大值。不得使用常见的 (n-1)p 浏览器/NumPy 默认口径。
-  const position = (sorted.length + 1) * q;
-  if (position <= 1) return sorted[0];
-  if (position >= sorted.length) return sorted[sorted.length - 1];
-  const lowerPosition = Math.floor(position);
-  const fraction = position - lowerPosition;
-  const lower = sorted[lowerPosition - 1];
-  const upper = sorted[lowerPosition];
-  return lower + (upper - lower) * fraction;
-}
+// v1.43.0:四分位数实现下沉 core.minitabQuantile 单源(双审:口径三分裂收口),此处仅留薄别名
+const quantileOf = (sorted: number[], q: number): number => minitabQuantile(sorted, q, true); // 入参已排序
 
 export interface BoxplotStats {
   q1: number;
@@ -298,6 +382,9 @@ export interface BoxplotStats {
 /** Minitab 默认箱线规则:箱须只延伸到 Q1−1.5·IQR / Q3+1.5·IQR 栅栏内的相邻值,
  * 栅栏外的点单独画星号——工厂案例5 的原始图即有多个星号离群点,不能被箱须吸收。 */
 export function boxplotStats(values: number[]): BoxplotStats {
+  // 闭环 P3:入口统一过滤非有限值——此前 Summary 传原数组、misc 传已过滤数组,
+  // 同一份含 NaN 的数据两处画出不同的箱须。
+  values = values.filter(Number.isFinite);
   const sorted = values.slice().sort((a, b) => a - b);
   const q1 = quantileOf(sorted, 0.25);
   const median = quantileOf(sorted, 0.5);
@@ -316,6 +403,28 @@ export function boxplotStats(values: number[]): BoxplotStats {
     }
   }
   return { q1, median, q3, whiskerLo, whiskerHi, outliers };
+}
+
+/** 离群点抽稀:与 ControlChart 的失控点同口径(均匀抽稀 + 最小/最大必留),
+ * 返回 {shown, total};total>shown 时调用方须写明「共 N 个,图上显示 M 个」。
+ * 自审 P2:此前 Summary 用 slice(0,500) 直接砍前 500 个——按值排序后这是方向性偏倚,
+ * 只保留最小的一批,最大的离群点全部消失;misc.BoxPlot 则完全没有上限。 */
+export function sampleOutliers(outliers: number[], cap = 500): { shown: number[]; total: number } {
+  // 闭环 P3:两条分支必须同口径——都返回**已排序**的数组,否则未超限时给原序、
+  // 超限时给升序,消费方(圆圈绘制顺序、极值判断)行为随数据量突变。
+  const sorted = [...outliers].sort((a, b) => a - b);
+  const total = sorted.length;
+  // 两条分支同口径:都按升序返回、都**保留重数**。
+  // 自审 P1:曾为消除 cap 边界的「一侧去重一侧不去重」而给两侧都加去重,结果把
+  // 「重复离群值的密集程度」这一视觉信息整块抹掉(同一个值出现 200 次只画 1 个圈),
+  // 而且未超限时也报「抽样显示」是谎报。正确做法是两侧都不去重。
+  if (total <= cap) return { shown: sorted, total };
+  const picked = decimateUniform(sorted.length, cap).map((k) => sorted[k]);
+  // 极值必留:仅在首末缺席时补,不对中间抽样结果去重
+  const shown = picked.slice();
+  if (shown[0] !== sorted[0]) shown.unshift(sorted[0]);
+  if (shown[shown.length - 1] !== sorted[sorted.length - 1]) shown.push(sorted[sorted.length - 1]);
+  return { shown, total };
 }
 
 function byOperatorBody(T: ChartTokens, panel: GagePanelData, operatorLabels: string[], operatorName = '测试人'): ReactNode {
@@ -357,11 +466,25 @@ function byOperatorBody(T: ChartTokens, panel: GagePanelData, operatorLabels: st
 
 // ---------- 交互:●/□/◇ 标记 + 带框图例(Minitab 样式) ----------
 
-function interactionMarker(shape: number, x: number, y: number, color: string): ReactNode {
-  // Minitab:实心标记 ●/■/◆(自工厂 EMF:蓝圆/深红方/绿菱)
-  if (shape === 0) return <circle cx={x} cy={y} r={3.2} fill={color} />;
-  if (shape === 1) return <rect x={x - 3.2} y={y - 3.2} width={6.4} height={6.4} fill={color} />;
-  return <polygon points={`${x},${y - 4.4} ${x + 4.4},${y} ${x},${y + 4.4} ${x - 4.4},${y}`} fill={color} />;
+function interactionMarker(shape: GageInteractionMarker, x: number, y: number, color: string): ReactNode {
+  if (shape === 'circle') return <circle cx={x} cy={y} r={3.2} fill={color} />;
+  if (shape === 'square') return <rect x={x - 3.2} y={y - 3.2} width={6.4} height={6.4} fill={color} />;
+  if (shape === 'diamond') {
+    return <polygon points={`${x},${y - 4.4} ${x + 4.4},${y} ${x},${y + 4.4} ${x - 4.4},${y}`} fill={color} />;
+  }
+  if (shape === 'triangle') {
+    return <polygon points={`${x},${y - 4.5} ${x + 4.2},${y + 3.5} ${x - 4.2},${y + 3.5}`} fill={color} />;
+  }
+  if (shape === 'triangle-down') {
+    return <polygon points={`${x - 4.2},${y - 3.5} ${x + 4.2},${y - 3.5} ${x},${y + 4.5}`} fill={color} />;
+  }
+  if (shape === 'hexagon') {
+    return <polygon points={`${x - 4},${y} ${x - 2},${y - 3.6} ${x + 2},${y - 3.6} ${x + 4},${y} ${x + 2},${y + 3.6} ${x - 2},${y + 3.6}`} fill={color} />;
+  }
+  if (shape === 'cross') {
+    return <path d={`M ${x - 3.5} ${y - 3.5} L ${x + 3.5} ${y + 3.5} M ${x + 3.5} ${y - 3.5} L ${x - 3.5} ${y + 3.5}`} fill="none" stroke={color} strokeWidth={1.8} />;
+  }
+  return <path d={`M ${x - 4} ${y} L ${x + 4} ${y} M ${x} ${y - 4} L ${x} ${y + 4}`} fill="none" stroke={color} strokeWidth={1.8} />;
 }
 
 function interactionBody(T: ChartTokens, panel: GagePanelData, partLabels: string[], operatorLabels: string[], partName = '部件'): ReactNode {
@@ -371,8 +494,8 @@ function interactionBody(T: ChartTokens, panel: GagePanelData, partLabels: strin
   const [yLo, yHi] = niceRange(flatLo, flatHi);
   const { pw, Y, frame } = panelFrame(T, yLo, yHi, '平均', partName);
   const X = (part: number) => M.l + ((part + 0.5) / p) * pw;
-  const colors = MTB.series;
-  const legendW = 96;
+  const styles = panel.cellMeans.map((_, operator) => gageInteractionSeriesStyle(operator));
+  const legendW = 112;
   return (
     <Fragment>
       {frame}
@@ -380,10 +503,11 @@ function interactionBody(T: ChartTokens, panel: GagePanelData, partLabels: strin
         <Fragment key={operator}>
           <polyline
             points={byPart.map((mean, part) => `${X(part)},${Y(mean)}`).join(' ')}
-            fill="none" stroke={colors[operator % colors.length]} strokeWidth={1.3}
+            fill="none" stroke={styles[operator].color} strokeWidth={1.3}
+            strokeDasharray={styles[operator].dash}
           />
           {byPart.map((mean, part) => (
-            <Fragment key={part}>{interactionMarker(operator % 3, X(part), Y(mean), colors[operator % colors.length])}</Fragment>
+            <Fragment key={part}>{interactionMarker(styles[operator].marker, X(part), Y(mean), styles[operator].color)}</Fragment>
           ))}
         </Fragment>
       ))}
@@ -394,8 +518,11 @@ function interactionBody(T: ChartTokens, panel: GagePanelData, partLabels: strin
       <rect x={PW - M.r - legendW} y={M.t + 6} width={legendW} height={panel.operatorCount * 16 + 10} fill="#fff" stroke={T.axis} strokeWidth={0.8} />
       {panel.cellMeans.map((_, operator) => (
         <Fragment key={operator}>
-          {interactionMarker(operator % 3, PW - M.r - legendW + 13, M.t + 17 + operator * 16, colors[operator % colors.length])}
-          <Txt x={PW - M.r - legendW + 24} y={M.t + 18 + operator * 16} s={operatorLabels[operator] ?? `操作员${operator + 1}`} fill={T.text} size={9} />
+          <Ln x1={PW - M.r - legendW + 7} y1={M.t + 17 + operator * 16}
+            x2={PW - M.r - legendW + 29} y2={M.t + 17 + operator * 16}
+            stroke={styles[operator].color} sw={1.3} dash={styles[operator].dash} />
+          {interactionMarker(styles[operator].marker, PW - M.r - legendW + 18, M.t + 17 + operator * 16, styles[operator].color)}
+          <Txt x={PW - M.r - legendW + 34} y={M.t + 18 + operator * 16} s={operatorLabels[operator] ?? `操作员${operator + 1}`} fill={T.text} size={9} />
         </Fragment>
       ))}
     </Fragment>

@@ -1,7 +1,8 @@
 /** 菜单栏 — 10 个菜单 + 下拉，行为（导航/弹窗/通知/图表风格）与原型一致。 */
 import { useApp, type Page, type Modal, type ChartStyle } from '../../store/appStore';
+import { appVersionText, localDateStamp, sanitizeFileName } from '../../platform/reportLabels';
 import { useData } from '../../store/dataStore';
-import { platform } from '../../platform/adapter';
+import { errText, platform } from '../../platform/adapter';
 
 /** 桌面端经 tauri-plugin-updater 检查 GitHub Releases；Web 端不适用。 */
 async function checkForUpdate(toast: (m: string) => void) {
@@ -184,26 +185,39 @@ export function MenuBar({ wsName }: { wsName: string }) {
       Promise.all([import('../../platform/projectSummary'), import('../../platform/adapter'), import('../../store/analyses')]).then(([sum, ad, an]) => {
         const app = useApp.getState();
         const html = sum.buildProjectSummary(app.projectName, an.useAnalyses.getState().saved);
-        const stamp = new Date().toISOString().slice(0, 10);
-        const safe = app.projectName.replace(/[\\/:*?"<>|]/g, '_').trim() || '项目';
+        const stamp = localDateStamp();
+        const safe = sanitizeFileName(app.projectName).trim() || '项目';
         return ad.platform.exportFile({ defaultName: `${safe}_汇总_${stamp}`, ext: 'html', filterLabel: '项目汇总报告 (打开后打印为 PDF)', text: html });
       }).then((dest) => {
         if (dest) showToast('项目汇总已导出: ' + dest);
-      }).catch((error) => showToast(`项目汇总导出失败：${(error as Error).message}`));
+      }).catch((error) => showToast(`项目汇总导出失败：${errText(error)}`));
       return;
     }
     if (act.saveProject) {
       setOpenMenu(null);
       import('../../platform/project').then((m) =>
-        m.exportProject(__APP_VERSION__, useApp.getState().projectName).then((dest) => {
+        m.exportProject(appVersionText(), useApp.getState().projectName).then((dest) => {
           if (dest) showToast('项目已保存: ' + dest);
         }),
-      ).catch((error) => showToast(`项目保存失败：${(error as Error).message}`));
+      ).catch((error) => showToast(`项目保存失败：${errText(error)}`));
       return;
     }
     if (act.saveAs) {
-      const name = useData.getState().saveAsCopy();
-      showToast('已另存为 ' + name);
+      // 蜂群 P1-01:未落盘不得声称「已另存」
+      const copy = useData.getState().saveAsCopy();
+      const { outcome } = copy;
+      if (!outcome.persisted && !outcome.archiving) {
+        showToast(`另存失败（${outcome.rejected ?? '存储空间不足'}）：副本未能保存，请先导出项目或清理存储`);
+      } else {
+        // 盲审 P3:archiving 只是「已提交异步归档」,失败时界面此前永远停在
+        // 「正在归档到本机库」而没有回执。落盘确认后补一条终态提示。
+        showToast(outcome.archiving ? '正在安全创建副本，请等待本机库确认' : `已另存为 ${copy.name}`);
+        if (outcome.archiving) {
+          void outcome.durability?.then(() => {
+            showToast(`「${copy.name}」已归档到本机数据集库`);
+          }).catch((error: unknown) => showToast(`另存副本未完成：${errText(error)}`));
+        }
+      }
       return;
     }
     if (act.standardize) {
@@ -212,7 +226,9 @@ export function MenuBar({ wsName }: { wsName: string }) {
         showToast(`仍有 ${data.pendingCells.length} 个单元格待录入，完成后才能标准化`);
         return;
       }
-      const name = data.standardize();
+      // 有限性屏障可能抛出(闭环终审 P3:极值数据标准化时曾是未捕获异常)
+      let name: string | null;
+      try { name = data.standardize(); } catch (error) { showToast(errText(error)); return; }
       if (name) {
         goTo('worksheet');
         showToast('已标准化为新数据集 ' + name);
@@ -254,7 +270,7 @@ export function MenuBar({ wsName }: { wsName: string }) {
         goTo('worksheet');
         showToast(act.transpose ? '已生成转置数据集' : '已生成堆叠数据集（含「来源列」分组,可直接做 ANOVA）');
       } catch (e) {
-        showToast('操作失败：' + (e as Error).message);
+        showToast('操作失败：' + errText(e));
       }
     } else if (act.session) {
       setOpenMenu(null);
@@ -268,16 +284,20 @@ export function MenuBar({ wsName }: { wsName: string }) {
   };
 
   return (
-    <div style={{ display: 'flex', alignItems: 'center', height: 30, background: 'linear-gradient(#ffffff,#f6f7f9)', borderBottom: '1px solid #dadee4', padding: '0 10px', flex: 'none', userSelect: 'none', position: 'relative', zIndex: 60 }}>
+    <div className="menu-bar" style={{ display: 'flex', alignItems: 'center', height: 30, background: 'linear-gradient(#ffffff,#f6f7f9)', borderBottom: '1px solid #dadee4', padding: '0 10px', flex: 'none', userSelect: 'none', position: 'relative', zIndex: 60 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 2, fontSize: 12.5 }}>
-        {MENUS.map((mu) => {
+        {MENUS.map((mu, menuIndex) => {
           const open = openMenu === mu.name;
+          const alignRight = menuIndex >= MENUS.length - 2;
           return (
             <div key={mu.name} style={{ position: 'relative' }}>
               <button
                 type="button"
                 className={open ? undefined : 'hov-menu-title'}
-                aria-haspopup="menu"
+                // 蜂群 P3-02:曾声明 menu/menuitem 复合控件角色,但没有实现 ARIA 要求的
+                // 键盘模型(打开后聚焦、Arrow/Home/End/Escape、roving focus),
+                // 屏幕阅读器会按 menu 语义给出错误的操作预期。改用 disclosure:
+                // aria-expanded + 普通 button,与 Tab/Enter 的真实行为一致。
                 aria-expanded={open}
                 onClick={() => setOpenMenu(open ? null : mu.name)}
                 onMouseEnter={() => { if (openMenu && openMenu !== mu.name) setOpenMenu(mu.name); }}
@@ -286,14 +306,22 @@ export function MenuBar({ wsName }: { wsName: string }) {
                 {mu.name}
               </button>
               {open && (
-                <div role="menu" style={{ position: 'absolute', top: 'calc(100% + 3px)', left: 0, minWidth: 236, background: '#fff', border: '1px solid #d7dbe1', borderRadius: 6, boxShadow: '0 12px 32px rgba(20,30,50,0.17)', padding: 5, zIndex: 200 }}>
+                <div
+                  className="menu-popup"
+                  style={{
+                    position: 'absolute', top: 'calc(100% + 3px)',
+                    left: alignRight ? 'auto' : 0, right: alignRight ? 0 : 'auto',
+                    width: 236, maxWidth: 'calc(100vw - 16px)',
+                    background: '#fff', border: '1px solid #d7dbe1', borderRadius: 6,
+                    boxShadow: '0 12px 32px rgba(20,30,50,0.17)', padding: 5, zIndex: 200,
+                  }}
+                >
                   {mu.items.map((it, i) =>
                     it.sep ? (
                       <div role="separator" key={i} style={{ height: 1, background: '#eef0f3', margin: '5px 8px' }} />
                     ) : (
                       <button
                         type="button"
-                        role="menuitem"
                         key={i}
                         className={it.unavailable ? undefined : 'hov-menu-item'}
                         onClick={() => {

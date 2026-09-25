@@ -3,8 +3,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   MAX_QPROJ_IMPORT_BYTES,
   MAX_TEXT_DATA_IMPORT_BYTES,
+  MAX_CLIPBOARD_IMPORT_CHARS,
   assertQprojExportByteLength,
   assertTextImportSize,
+  assertClipboardImportText,
   qprojExportByteLength,
   textImportLimit,
   utf8ByteLength,
@@ -71,5 +73,14 @@ describe('文本与项目文件导入上限', () => {
     expect(() => assertExportJobSize({
       defaultName: 'report', ext: 'txt', filterLabel: '报告', bytes: oversizedBytes,
     })).not.toThrow();
+  });
+});
+
+describe('剪贴板导入预算', () => {
+  it('在解析前同时限制总字符与 UTF-8 字节', () => {
+    expect(() => assertClipboardImportText('a'.repeat(1024))).not.toThrow();
+    expect(() => assertClipboardImportText('a'.repeat(MAX_CLIPBOARD_IMPORT_CHARS + 1))).toThrow(/字符上限/);
+    expect(() => assertClipboardImportText('汉'.repeat(Math.floor(MAX_TEXT_DATA_IMPORT_BYTES / 3) + 1)))
+      .toThrow(/UTF-8.*20 MB/);
   });
 });

@@ -21,7 +21,16 @@ export function calcKey(state: CalcState, k: string): CalcState {
     if (o === '÷' && b === 0) return null;
     return o === '+' ? a + b : o === '−' ? a - b : o === '×' ? a * b : o === '÷' ? a / b : b;
   };
-  const fmt = (x: number) => nf(x, 6).replace(/\.?0+$/, '');
+  // 第三轮 P2:裸剪尾零会把 1e20 的整数尾零一并剪掉(显示成「1」并进入连算)。
+  // 大/小量级用指数显示,常规量级只剪小数部分的尾零。
+  // 闭环审核:1e12 指数阈值把 1e12~2^53 之间的精确整数显示打掉(9999999×9999999
+  // 应显示 99999980000001)。大数交给 nf/toFixed(超 1e21 时 JS 自动转指数),
+  // 只有极小量级需要指数显示;尾零修剪只作用于小数部分,不再吃掉整数尾零。
+  const fmt = (x: number) => {
+    if (!Number.isFinite(x)) return 'Error';
+    if (x !== 0 && Math.abs(x) < 1e-6) return x.toExponential(6).replace(/\.?0+e/, 'e');
+    return nf(x, 6).replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '');
+  };
   // 错误态下运算键不再把 "Error" 转成 NaN；C 清除，数字或小数点开始新一轮输入。
   if (c.error) {
     if (k === 'C') return { ...CALC_INIT };

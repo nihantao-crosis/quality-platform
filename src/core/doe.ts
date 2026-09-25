@@ -1,7 +1,7 @@
 /**
  * DOE 2³ 全因子 — 效应/系数/Lenth 检验，从原型 doe 页逻辑逐字迁移（交接文档 §8.5）。
  */
-import { fCdf, mean, median } from './basicMath';
+import { fCdf, mean, median, stableSum } from './basicMath';
 import { tCdf, tInv } from './ttest';
 
 export interface DoeTerm {
@@ -66,6 +66,55 @@ function relativeNumericTolerance(rows: number, columns: number): number {
   return Number.EPSILON * 64 * Math.max(1, rows, columns);
 }
 
+/** Restore a response-space coordinate without exposing an infinite display value. */
+function restoreResponseScale(value: number, responseScale: number): number {
+  if (Number.isNaN(value)) return Number.NaN;
+  if (value === 0 || responseScale === 0) return value === 0 ? value : 0;
+  const restored = value * responseScale;
+  if (Number.isFinite(restored)) return restored;
+  return value < 0 ? -Number.MAX_VALUE : Number.MAX_VALUE;
+}
+
+/** Add the response centre only after the fitted coordinate has been formed safely. */
+function restoreCenteredResponse(center: number, value: number, responseScale: number): number {
+  if (responseScale === 0) return center;
+  const direct = center + value * responseScale;
+  if (Number.isFinite(direct)) return direct;
+  return restoreResponseScale(center / responseScale + value, responseScale);
+}
+
+/** Preserve the historical left-to-right sum when finite; normalize only on overflow. */
+function finiteDerivedSum(values: readonly number[]): number {
+  let direct = 0;
+  for (const value of values) direct += value;
+  if (Number.isFinite(direct)) return direct;
+
+  let scale = 0;
+  for (const value of values) scale = Math.max(scale, Math.abs(value));
+  if (!(scale > 0) || !Number.isFinite(scale)) return 0;
+  const coordinate = stableSum(values.map((value) => value / scale));
+  return restoreResponseScale(coordinate, scale);
+}
+
+/**
+ * Restore a non-negative normalized sum of squares to response² units for display.
+ * Inferential ratios never consume this bounded value. If the true display value is
+ * outside IEEE-754's finite range, saturate at the nearest positive finite endpoint
+ * instead of leaking NaN/Infinity back into tables and downstream conclusions.
+ */
+function restoreSquaredResponseScale(value: number, responseScale: number): number {
+  if (!(value > 0) || !(responseScale > 0)) return 0;
+  const candidates = [
+    value * responseScale * responseScale,
+    value * (responseScale * responseScale),
+    Math.pow(Math.sqrt(value) * responseScale, 2),
+  ];
+  const finitePositive = candidates.find((candidate) => Number.isFinite(candidate) && candidate > 0);
+  if (finitePositive !== undefined) return finitePositive;
+  const logMagnitude = Math.log(value) + 2 * Math.log(responseScale);
+  return logMagnitude > Math.log(Number.MAX_VALUE) ? Number.MAX_VALUE : Number.MIN_VALUE;
+}
+
 function lenthScale(absEffects: number[]): { pse: number; me: number } {
   if (!absEffects.length) return { pse: 0, me: 0 };
   const s0 = 1.5 * median(absEffects);
@@ -102,8 +151,8 @@ export function analyzeDoe(responses: number[] = DOE_DESIGN.map((d) => d[3])): D
   const pseNormalized = candidate > 0 ? candidate : s0 / 1.5;
   const meNormalized = 2.57 * pseNormalized;
   const zeroTolerance = relativeNumericTolerance(responses.length, 7);
-  const pse = pseNormalized * normalized.scale;
-  const me = meNormalized * normalized.scale;
+  const pse = restoreResponseScale(pseNormalized, normalized.scale);
+  const me = restoreResponseScale(meNormalized, normalized.scale);
   const terms = [
     { name: 'A 温度', v: EA },
     { name: 'B 压力', v: EB },
@@ -113,13 +162,13 @@ export function analyzeDoe(responses: number[] = DOE_DESIGN.map((d) => d[3])): D
     { name: 'B×C', v: EBC },
   ]
     .map((t) => {
-      const v = t.v * normalized.scale;
+      const v = restoreResponseScale(t.v, normalized.scale);
       const absNormalized = Math.abs(t.v);
       return {
         name: t.name,
         v,
         abs: Math.abs(v),
-        coef: v / 2,
+        coef: restoreResponseScale(t.v / 2, normalized.scale),
         // PSE=0 时零效应不能因“0 >= 0”被标成显著；非零效应仍可识别。
         sig: absNormalized > zeroTolerance && absNormalized + zeroTolerance >= meNormalized,
       };
@@ -134,8 +183,8 @@ export function mainEffectMeans(responses: number[] = DOE_DESIGN.map((d) => d[3]
     const lo = responses.filter((_, i) => s[i] < 0);
     const hi = responses.filter((_, i) => s[i] > 0);
     return {
-      lo: lo.reduce((a, b) => a + b, 0) / lo.length,
-      hi: hi.reduce((a, b) => a + b, 0) / hi.length,
+      lo: mean(lo),
+      hi: mean(hi),
     };
   };
   return [
@@ -149,7 +198,7 @@ export function mainEffectMeans(responses: number[] = DOE_DESIGN.map((d) => d[3]
 export function interactionMeans(responses: number[] = DOE_DESIGN.map((d) => d[3])) {
   const cell = (a: number, b: number) => {
     const vals = responses.filter((_, i) => SG.A[i] === a && SG.B[i] === b);
-    return vals.reduce((x, y) => x + y, 0) / vals.length;
+    return mean(vals);
   };
   return { c00: cell(-1, -1), c10: cell(1, -1), c01: cell(-1, 1), c11: cell(1, 1) };
 }
@@ -177,6 +226,16 @@ export interface FactorialTerm {
   tStat?: number;
 }
 
+export type FactorialAlias = { term: string; with: string; relation: 'same' | 'opposite' | 'linear-dependent' };
+
+/** 与区组/别名结构混杂而被剔除的交互项提示(闭环审核 P1:页面与导出报告必须同源)。
+ * 这些项根本没有被检验,任何界面都不得据此宣称「未检出显著交互」。 */
+export function confoundedInteractionNote(aliases: FactorialAlias[] | undefined): string | null {
+  const terms = (aliases ?? []).filter((alias) => alias.term.includes('×')).map((alias) => alias.term);
+  if (!terms.length) return null;
+  return `注意:交互项 ${terms.join('、')} 与区组/别名结构混杂,本设计无法检验其显著性,不能据此认为无交互;如需检验请减少区组数或提高设计分辨率。`;
+}
+
 export interface FactorialResult {
   terms: FactorialTerm[];        // 按 |effect| 降序
   method: 'lenth' | 'ttest';
@@ -194,6 +253,22 @@ export interface FactorialResult {
   factorNames: string[];
   nRuns: number;
 }
+
+/**
+ * Internal response coordinates retained for downstream LS means and corner
+ * predictions. Keeping this in a WeakMap avoids changing the serialized public
+ * result while preventing saturated display coefficients from feeding later math.
+ */
+interface StableFactorialCoordinates {
+  center: number;
+  scale: number;
+  intercept: number;
+  termCoefficients: Map<string, number>;
+  blockCoefficients: number[];
+  blockLevelCount: number;
+}
+
+const stableFactorialCoordinates = new WeakMap<FactorialResult, StableFactorialCoordinates>();
 
 export interface FactorialModelOptions {
   /** 精确项名；省略时包含所有主效应及交互作用。 */
@@ -234,9 +309,9 @@ function detectTwoLevelCore(
 ): { ok: true; design: CodedDesign } | { ok: false; reason: string } {
   if (factors.length < 2) return { ok: false, reason: 'DOE 至少需要 2 个因子列' };
   if (factors.length > maxFactors) return { ok: false, reason: `DOE 因子最多支持 ${maxFactors} 个` };
-  const factorNames = factors.map((factor) => factor.name.trim());
-  if (factorNames.some((name) => !name)) return { ok: false, reason: '因子名不能为空' };
-  if (new Set(factorNames).size !== factorNames.length) return { ok: false, reason: '因子名不能重复' };
+  const nameValidation = validateDoeFactorNames(factors.map((factor) => factor.name));
+  if (!nameValidation.ok) return nameValidation;
+  const factorNames = nameValidation.names;
   const N = response.length;
   if (N < 4) return { ok: false, reason: '至少需要 4 行数据' };
   if (response.some((value) => !Number.isFinite(value))) return { ok: false, reason: '响应列包含空值或非有限数值' };
@@ -308,6 +383,63 @@ export function factorialModelTerms(factorNames: string[]): string[] {
   return termSubsets(factorNames.length).map((sub) => termName(sub, factorNames));
 }
 
+/**
+ * Enforce strong hierarchy for a two-level factorial model.  Selecting an
+ * interaction requires every non-empty lower-order subset of that interaction
+ * to be present as well.  `availableTerms` lets the 5--7 factor UI keep its
+ * deliberate "main effects + two-factor interactions" ceiling without
+ * re-introducing unavailable high-order terms.
+ *
+ * The returned order is the canonical low-order-first order from
+ * `factorialModelTerms`, so the page, saved-analysis summary and report can all
+ * consume exactly the same normalized selection.
+ */
+export function factorialHierarchyClosure(
+  factorNames: string[],
+  selectedTerms: readonly string[],
+  availableTerms: readonly string[] = factorialModelTerms(factorNames),
+): string[] {
+  const allSubsets = termSubsets(factorNames.length);
+  const subsetByName = new Map(allSubsets.map((subset) => [termName(subset, factorNames), subset]));
+  const available = new Set(availableTerms.filter((name) => subsetByName.has(name)));
+  const keep = new Set<string>();
+  for (const selected of selectedTerms) {
+    const subset = subsetByName.get(selected);
+    if (!subset || !available.has(selected)) continue;
+    for (const [name, candidate] of subsetByName) {
+      if (available.has(name) && candidate.every((index) => subset.includes(index))) keep.add(name);
+    }
+  }
+  return factorialModelTerms(factorNames).filter((name) => keep.has(name));
+}
+
+/**
+ * Apply one model-term checkbox transition while preserving strong hierarchy.
+ * Adding a high-order term closes over all parents; removing a parent cascades
+ * to every selected interaction that depends on it.
+ */
+export function toggleFactorialHierarchyTerm(
+  factorNames: string[],
+  selectedTerms: readonly string[],
+  term: string,
+  checked: boolean,
+  availableTerms: readonly string[] = factorialModelTerms(factorNames),
+): string[] {
+  const normalized = factorialHierarchyClosure(factorNames, selectedTerms, availableTerms);
+  if (checked) return factorialHierarchyClosure(factorNames, [...normalized, term], availableTerms);
+
+  const subsets = new Map(termSubsets(factorNames.length)
+    .map((subset) => [termName(subset, factorNames), subset]));
+  const removed = subsets.get(term);
+  if (!removed) return normalized;
+  return normalized.filter((name) => {
+    const candidate = subsets.get(name);
+    // Removing A must also remove A×B / A×B×C, while removing A×B
+    // leaves its parents A and B in place.
+    return !candidate || !removed.every((index) => candidate.includes(index));
+  });
+}
+
 /** 满秩方阵求逆(高斯-约当 + 部分主元)。 */
 function invertMatrix(m: number[][]): number[][] {
   const n = m.length;
@@ -350,6 +482,7 @@ interface OlsFit {
   /** 无量纲响应上的系数/残差，专供显著性与标准化残差计算。 */
   normalizedBeta: number[];
   normalizedResiduals: number[];
+  responseCenter: number;
   responseScale: number;
   invDiag: number[];
   rank: number;
@@ -389,11 +522,11 @@ function olsFit(X: number[][], y: number[]): OlsFit {
   });
   const normalizedFits = X.map((xi) => xi.reduce((sum, value, column) => sum + value * normalizedBeta[column], 0));
   const normalizedResiduals = normalized.values.map((value, row) => value - normalizedFits[row]);
-  const beta = normalizedBeta.map((value) => value * normalized.scale);
+  const beta = normalizedBeta.map((value) => restoreResponseScale(value, normalized.scale));
   // 第一列由调用端保证是截距；响应中心只加回截距，不污染任何效应。
-  beta[0] += normalized.center;
-  const fits = normalizedFits.map((value) => normalized.center + value * normalized.scale);
-  const residuals = normalizedResiduals.map((value) => value * normalized.scale);
+  beta[0] = restoreCenteredResponse(normalized.center, normalizedBeta[0], normalized.scale);
+  const fits = normalizedFits.map((value) => restoreCenteredResponse(normalized.center, value, normalized.scale));
+  const residuals = normalizedResiduals.map((value) => restoreResponseScale(value, normalized.scale));
   // 杠杆值 h_ii = x_i·(XᵀX)⁻¹·x_iᵀ(仅取可估计列),用于标准化残差
   const leverage = X.map((xi) => {
     const xk = kept.map((c) => xi[c]);
@@ -402,7 +535,8 @@ function olsFit(X: number[][], y: number[]): OlsFit {
     return h;
   });
   return {
-    beta, normalizedBeta, normalizedResiduals, responseScale: normalized.scale,
+    beta, normalizedBeta, normalizedResiduals,
+    responseCenter: normalized.center, responseScale: normalized.scale,
     invDiag, rank: kept.length, fits, residuals, leverage,
   };
 }
@@ -424,17 +558,13 @@ export function analyzeFractionalFactorial(design: CodedDesign, options: Factori
 }
 
 function analyzeTwoLevelCore(design: CodedDesign, options: FactorialModelOptions, maxFactors: number): FactorialResult {
-  const { coded, response: y, factorNames } = design;
+  const { coded, response: y } = design;
   const N = y.length;
-  const k = factorNames.length;
-  if (k < 2 || k > maxFactors || factorNames.length !== design.levels.length) {
+  const k = design.factorNames.length;
+  if (k < 2 || k > maxFactors || design.factorNames.length !== design.levels.length) {
     throw new Error(`DOE 编码设计必须包含 2–${maxFactors} 个因子及对应水平定义`);
   }
-  const trimmedNames = factorNames.map((name) => name.trim());
-  if (trimmedNames.some((name, index) => !name || name !== factorNames[index])
-    || new Set(trimmedNames).size !== trimmedNames.length) {
-    throw new Error('DOE 因子名必须非空且不能重复');
-  }
+  const factorNames = requireDoeFactorNames(design.factorNames);
   if (design.levels.some((level) => !Number.isFinite(level.low) || !Number.isFinite(level.high) || !(level.low < level.high))) {
     throw new Error('DOE 因子水平必须是有限数值且满足低水平 < 高水平');
   }
@@ -495,7 +625,7 @@ function analyzeTwoLevelCore(design: CodedDesign, options: FactorialModelOptions
   ];
   const X = y.map((_, i) => colX.map((c) => c[i]));
   const {
-    beta, normalizedBeta, normalizedResiduals, responseScale,
+    beta, normalizedBeta, normalizedResiduals, responseCenter, responseScale,
     invDiag, rank, fits, residuals, leverage,
   } = olsFit(X, y);
   const grand = beta[0];
@@ -510,7 +640,10 @@ function analyzeTwoLevelCore(design: CodedDesign, options: FactorialModelOptions
     if (meta.kind !== 'term') return;
     if (!Number.isFinite(invDiag[j])) { dropped.push(meta.name); return; }
     estTerms.push({
-      j, name: meta.name, coef: beta[j], effect: 2 * beta[j],
+      j,
+      name: meta.name,
+      coef: restoreResponseScale(normalizedBeta[j], responseScale),
+      effect: restoreResponseScale(2 * normalizedBeta[j], responseScale),
       normalizedEffect: 2 * normalizedBeta[j],
     });
   });
@@ -542,7 +675,7 @@ function analyzeTwoLevelCore(design: CodedDesign, options: FactorialModelOptions
     const mseNormalizedRaw = normalizedResiduals.reduce((sum, residual) => sum + residual * residual, 0) / dfResid;
     const zeroMseThreshold = inferenceTolerance * inferenceTolerance;
     const mseNormalized = mseNormalizedRaw <= zeroMseThreshold ? 0 : mseNormalizedRaw;
-    mse = mseNormalizedRaw * responseScale * responseScale;
+    mse = restoreSquaredResponseScale(mseNormalizedRaw, responseScale);
     if (mseNormalized > 0) {
       const s = Math.sqrt(mseNormalized);
       stdResiduals = normalizedResiduals.map((residual, i) => {
@@ -571,8 +704,8 @@ function analyzeTwoLevelCore(design: CodedDesign, options: FactorialModelOptions
     method = 'lenth';
     const absNormalized = estTerms.map((term) => Math.abs(term.normalizedEffect));
     const lenth = lenthScale(absNormalized);
-    pse = lenth.pse * responseScale;
-    me = lenth.me * responseScale;
+    pse = restoreResponseScale(lenth.pse, responseScale);
+    me = restoreResponseScale(lenth.me, responseScale);
     for (const t of estTerms) {
       const absEffect = Math.abs(t.normalizedEffect);
       terms.push({
@@ -583,7 +716,7 @@ function analyzeTwoLevelCore(design: CodedDesign, options: FactorialModelOptions
     if (curvJ >= 0) curvature = { coef: beta[curvJ], sig: false }; // 无残差自由度,曲率不可检验
   }
   terms.sort((a, b) => Math.abs(b.effect) - Math.abs(a.effect));
-  return {
+  const result: FactorialResult = {
     terms, method, me, pse, mse, dfResid, curvature,
     droppedTerms: dropped.length ? dropped : undefined,
     aliases: aliases.length ? aliases : undefined,
@@ -596,6 +729,17 @@ function analyzeTwoLevelCore(design: CodedDesign, options: FactorialModelOptions
     } : undefined,
     fits, residuals, stdResiduals, grand, factorNames, nRuns: N,
   };
+  stableFactorialCoordinates.set(result, {
+    center: responseCenter,
+    scale: responseScale,
+    intercept: normalizedBeta[0],
+    termCoefficients: new Map(estTerms.map((term) => [term.name, normalizedBeta[term.j]])),
+    blockCoefficients: colMeta.flatMap((meta, index) => (
+      meta.kind === 'block' && Number.isFinite(invDiag[index]) ? [normalizedBeta[index]] : []
+    )),
+    blockLevelCount: blockLevels.length,
+  });
+  return result;
 }
 
 /** 主效应图数据(各因子低/高水平均值),基于编码设计的真实响应 */
@@ -605,8 +749,8 @@ export function mainEffectMeansFrom(design: CodedDesign): { name: string; lo: nu
     const hi = design.response.filter((_, i) => design.coded[i][j] > 0);
     return {
       name,
-      lo: lo.length ? lo.reduce((a, b) => a + b, 0) / lo.length : 0,
-      hi: hi.length ? hi.reduce((a, b) => a + b, 0) / hi.length : 0,
+      lo: lo.length ? mean(lo) : 0,
+      hi: hi.length ? mean(hi) : 0,
     };
   });
 }
@@ -631,14 +775,103 @@ export interface FactorialOptimizationDecision {
   fixedCoded?: Array<-1 | 1 | null>;
 }
 
-function factorialCornerContrast(result: FactorialResult, design: CodedDesign, coded: number[]): number {
+/**
+ * 角点对比度。蜂群 P2-05:**只用有推断支持的项**——不显著项的微小非零估计本质是噪声,
+ * 让它参与角点评分会由随机噪声决定没有统计证据的因子方向,并把结论固化进导出审计。
+ * 按层级原则(hierarchy):显著项的全部低阶父项一并保留,否则模型不可解释。
+ */
+function supportedTermNames(result: FactorialResult, design: CodedDesign): Set<string> {
   const subsetByName = new Map(termSubsets(design.factorNames.length)
     .map((subset) => [termName(subset, design.factorNames), subset]));
-  return result.terms.reduce((sum, term) => {
+  const keep = new Set<string>();
+  for (const term of result.terms) {
+    if (!term.sig) continue;
+    keep.add(term.name);
+    // 层级原则:保留该项的所有真子集(低阶父项)
     const subset = subsetByName.get(term.name);
-    if (!subset) return sum;
-    return sum + term.coef * subset.reduce((product, index) => product * coded[index], 1);
-  }, 0);
+    if (!subset) continue;
+    for (const [name, other] of subsetByName) {
+      if (other.length > 0 && other.length < subset.length && other.every((i) => subset.includes(i))) keep.add(name);
+    }
+  }
+  return keep;
+}
+
+/**
+ * DOE 优化的决策模型项。拟合值仍由完整模型给出，但角点排序只使用
+ * “显著项 + 显著高阶项的低阶父项”，避免不显著噪声决定所谓最优方向。
+ */
+export function factorialOptimizationTerms(
+  result: FactorialResult,
+  design: CodedDesign,
+): { significantTerms: string[]; decisionTerms: string[]; hierarchyParentTerms: string[] } {
+  const significantTerms = result.terms.filter((term) => term.sig).map((term) => term.name);
+  const supported = supportedTermNames(result, design);
+  const decisionTerms = result.terms.map((term) => term.name).filter((name) => supported.has(name));
+  const significant = new Set(significantTerms);
+  return {
+    significantTerms,
+    decisionTerms,
+    hierarchyParentTerms: decisionTerms.filter((name) => !significant.has(name)),
+  };
+}
+
+function factorialCornerContrast(
+  result: FactorialResult,
+  design: CodedDesign,
+  coded: number[],
+  supported?: ReadonlySet<string>,
+): number {
+  const subsetByName = new Map(termSubsets(design.factorNames.length)
+    .map((subset) => [termName(subset, design.factorNames), subset]));
+  const stable = stableFactorialCoordinates.get(result);
+  const useStableCoordinates = stable != null && stable.scale > Number.MAX_VALUE / 16;
+  const contributions = result.terms.flatMap((term) => {
+    const subset = subsetByName.get(term.name);
+    if (!subset || (supported && !supported.has(term.name))) return []; // 无推断支持 → 不参与评分
+    const coefficient = useStableCoordinates
+      ? stable.termCoefficients.get(term.name) ?? 0
+      : term.coef;
+    return [coefficient * subset.reduce((product, index) => product * coded[index], 1)];
+  });
+  return finiteDerivedSum(contributions);
+}
+
+interface StableCornerCoordinate {
+  coded: number[];
+  coordinate: number;
+}
+
+function stableCornerCoordinates(
+  result: FactorialResult,
+  design: CodedDesign,
+): { model: StableFactorialCoordinates; corners: StableCornerCoordinate[] } | null {
+  const model = stableFactorialCoordinates.get(result);
+  if (!model) return null;
+  const subsetByName = new Map(termSubsets(design.factorNames.length)
+    .map((subset) => [termName(subset, design.factorNames), subset]));
+  const blockOffset = model.blockLevelCount > 0
+    ? finiteDerivedSum(model.blockCoefficients) / model.blockLevelCount
+    : 0;
+  const corners = Array.from({ length: 1 << design.factorNames.length }, (_, mask) => {
+    const coded = design.factorNames.map((_, index) => mask & (1 << index) ? 1 : -1);
+    const contributions = [model.intercept, blockOffset];
+    for (const term of result.terms) {
+      const subset = subsetByName.get(term.name);
+      if (!subset) continue;
+      const sign = subset.reduce((product, index) => product * coded[index], 1);
+      contributions.push((model.termCoefficients.get(term.name) ?? 0) * sign);
+    }
+    return { coded, coordinate: finiteDerivedSum(contributions) };
+  });
+  return { model, corners };
+}
+
+function finiteMeanPreservingOrdinary(values: number[]): number {
+  if (!values.length) return Number.NaN;
+  let total = 0;
+  for (const value of values) total += value;
+  return Number.isFinite(total) ? total / values.length : mean(values);
 }
 
 /**
@@ -649,13 +882,27 @@ export function factorialCornerPredictions(
   result: FactorialResult,
   design: CodedDesign,
 ): FactorialCornerPrediction[] {
+  const stable = stableCornerCoordinates(result, design);
+  if (stable && stable.model.scale > Number.MAX_VALUE / 16) {
+    return stable.corners.map(({ coded, coordinate }) => ({
+      coded,
+      factorValues: coded.map((level, index) => level > 0 ? design.levels[index].high : design.levels[index].low),
+      predicted: restoreCenteredResponse(stable.model.center, coordinate, stable.model.scale),
+    }));
+  }
   const averageBlockOffset = result.block
-    ? result.block.coefficients.reduce((sum, block) => sum + block.coef, 0) / result.block.levels.length
+    ? finiteDerivedSum(result.block.coefficients.map((block) => block.coef)) / result.block.levels.length
     : 0;
   return Array.from({ length: 1 << design.factorNames.length }, (_, mask) => {
     const coded = design.factorNames.map((_, index) => mask & (1 << index) ? 1 : -1);
     const contrast = factorialCornerContrast(result, design, coded);
-    const predicted = result.grand + averageBlockOffset + contrast;
+    const direct = result.grand + averageBlockOffset + contrast;
+    const fallback = stable?.corners[mask];
+    const predicted = Number.isFinite(direct)
+      ? direct
+      : fallback
+        ? restoreCenteredResponse(stable.model.center, fallback.coordinate, stable.model.scale)
+        : finiteDerivedSum([result.grand, averageBlockOffset, contrast]);
     return {
       coded,
       factorValues: coded.map((level, index) => level > 0 ? design.levels[index].high : design.levels[index].low),
@@ -669,12 +916,27 @@ export function factorialAdjustedMainMeans(
   result: FactorialResult,
   design: CodedDesign,
 ): { name: string; lo: number; hi: number }[] {
+  const stable = stableCornerCoordinates(result, design);
+  if (stable && stable.model.scale > Number.MAX_VALUE / 16) {
+    return design.factorNames.map((name, index) => ({
+      name,
+      lo: restoreCenteredResponse(
+        stable.model.center,
+        finiteMeanPreservingOrdinary(stable.corners.filter((corner) => corner.coded[index] < 0).map((corner) => corner.coordinate)),
+        stable.model.scale,
+      ),
+      hi: restoreCenteredResponse(
+        stable.model.center,
+        finiteMeanPreservingOrdinary(stable.corners.filter((corner) => corner.coded[index] > 0).map((corner) => corner.coordinate)),
+        stable.model.scale,
+      ),
+    }));
+  }
   const corners = factorialCornerPredictions(result, design);
-  const average = (values: number[]) => values.reduce((sum, value) => sum + value, 0) / values.length;
   return design.factorNames.map((name, index) => ({
     name,
-    lo: average(corners.filter((corner) => corner.coded[index] < 0).map((corner) => corner.predicted)),
-    hi: average(corners.filter((corner) => corner.coded[index] > 0).map((corner) => corner.predicted)),
+    lo: finiteMeanPreservingOrdinary(corners.filter((corner) => corner.coded[index] < 0).map((corner) => corner.predicted)),
+    hi: finiteMeanPreservingOrdinary(corners.filter((corner) => corner.coded[index] > 0).map((corner) => corner.predicted)),
   }));
 }
 
@@ -688,10 +950,21 @@ export function factorialAdjustedInteractionMeans(
   if (i === j || i < 0 || j < 0 || i >= design.factorNames.length || j >= design.factorNames.length) {
     throw new Error('交互作用图需要两个不同的有效因子');
   }
+  const stable = stableCornerCoordinates(result, design);
+  if (stable && stable.model.scale > Number.MAX_VALUE / 16) {
+    const cell = (a: number, b: number) => restoreCenteredResponse(
+      stable.model.center,
+      finiteMeanPreservingOrdinary(stable.corners
+        .filter((corner) => corner.coded[i] === a && corner.coded[j] === b)
+        .map((corner) => corner.coordinate)),
+      stable.model.scale,
+    );
+    return { c00: cell(-1, -1), c10: cell(1, -1), c01: cell(-1, 1), c11: cell(1, 1) };
+  }
   const corners = factorialCornerPredictions(result, design);
   const cell = (a: number, b: number) => {
     const values = corners.filter((corner) => corner.coded[i] === a && corner.coded[j] === b).map((corner) => corner.predicted);
-    return values.reduce((sum, value) => sum + value, 0) / values.length;
+    return finiteMeanPreservingOrdinary(values);
   };
   return { c00: cell(-1, -1), c10: cell(1, -1), c01: cell(-1, 1), c11: cell(1, 1) };
 }
@@ -706,9 +979,13 @@ export function factorialCornerOptimum(
   const corners = factorialCornerPredictions(result, design);
   // 截距（以及响应整体平移）对角点排序没有意义。用模型对比项直接比较，避免
   // “响应加了一个大基准值 → 1e-9×基准值把不同角点全判成并列”的单位依赖。
+  // 蜂群 P2-05:**排序只用有推断支持的项**。不显著项的微小非零估计是噪声,
+  // 让它参与排序会让随机噪声决定没有统计证据的因子方向,并把「唯一最优」固化进导出。
+  // 预测值(corner.predicted)仍用完整拟合模型——那是拟合值,不是决策依据。
+  const supported = supportedTermNames(result, design);
   const scored = corners.map((corner) => ({
     corner,
-    score: factorialCornerContrast(result, design, corner.coded),
+    score: factorialCornerContrast(result, design, corner.coded, supported),
   }));
   const bestScored = scored.reduce((current, candidate) =>
     objective === 'maximize'
@@ -729,8 +1006,9 @@ export function factorialOptimizationDecision(
   design: CodedDesign,
   objective: 'maximize' | 'minimize' = 'maximize',
 ): FactorialOptimizationDecision {
+  const terms = factorialOptimizationTerms(result, design);
   if (result.curvature?.sig) return { status: 'significant-curvature' };
-  if (!result.terms.some((term) => term.sig)) return { status: 'no-significant-effect' };
+  if (!terms.significantTerms.length) return { status: 'no-significant-effect' };
   const optimum = factorialCornerOptimum(result, design, objective);
   if (optimum.unique) return { status: 'unique', optimum, fixedCoded: optimum.coded.map((value) => value as -1 | 1) };
   const fixedCoded = design.factorNames.map((_, index) => {
@@ -744,7 +1022,7 @@ export function factorialOptimizationDecision(
 export function interactionMeansFrom(design: CodedDesign, i: number, j: number) {
   const cell = (a: number, b: number) => {
     const vals = design.response.filter((_, r) => design.coded[r][i] === a && design.coded[r][j] === b);
-    return vals.length ? vals.reduce((x, y) => x + y, 0) / vals.length : NaN;
+    return vals.length ? mean(vals) : NaN;
   };
   return { c00: cell(-1, -1), c10: cell(1, -1), c01: cell(-1, 1), c11: cell(1, 1) };
 }
@@ -893,6 +1171,50 @@ export function isDoeAnalysisColumn(name: string): boolean {
   return !isDoeMetadataColumn(name) && !isDoeOutputColumn(name);
 }
 
+export type DoeFactorNameValidation =
+  | { ok: true; names: string[] }
+  | { ok: false; reason: string };
+
+/**
+ * DOE 因子名的单一核心契约。项名目前以「×」作结构分隔符，工作表又以
+ * 列名识别设计元数据和已存储输出；在引入长期结构 ID 之前，这些名称必须明确
+ * 拒绝，否则创建时显示的 3+因子会在分析列解析时被静默少算。
+ */
+export function validateDoeFactorNames(rawNames: readonly string[]): DoeFactorNameValidation {
+  const names = rawNames.map((name) => name.trim());
+  const emptyIndex = names.findIndex((name) => !name);
+  if (emptyIndex >= 0) return { ok: false, reason: `因子 ${emptyIndex + 1} 的名称不能为空` };
+
+  const structural = names.find((name) => name.includes('×'));
+  if (structural) {
+    return {
+      ok: false,
+      reason: `因子名「${structural}」不能包含「×」；该字符保留用于 DOE 交互项，请改用其他名称`,
+    };
+  }
+
+  const reserved = names.find((name) => (
+    isDoeMetadataColumn(name)
+    || isDoeOutputColumn(name)
+    || normalizeDoeColumnName(name) === normalizeDoeColumnName('响应(待录入)')
+  ));
+  if (reserved) {
+    return {
+      ok: false,
+      reason: `因子名「${reserved}」是 DOE 元数据/输出保留名（如 Block、区组、点类型、DOE拟合值、Fits1），请改用其他名称`,
+    };
+  }
+
+  if (new Set(names).size !== names.length) return { ok: false, reason: '因子名不能重复（已忽略首尾空格）' };
+  return { ok: true, names };
+}
+
+function requireDoeFactorNames(rawNames: readonly string[]): string[] {
+  const validation = validateDoeFactorNames(rawNames);
+  if (!validation.ok) throw new Error(validation.reason);
+  return validation.names;
+}
+
 /** 从工作表解析 DOE 区组标识；同时支持数值元数据列和文本元数据列。 */
 export function resolveDoeBlockValues(
   colNames: string[],
@@ -912,6 +1234,8 @@ export interface GeneratedFactorialDesign {
   textCols: { name: string; values: string[] }[];
   responseCol: number;
   blockCount: number;
+  /** 区组构造的可审计说明，与实际分组使用同一份生成元表。 */
+  blockPlan?: FactorialBlockPlan;
 }
 
 interface GeneratedRun {
@@ -922,17 +1246,131 @@ interface GeneratedRun {
 }
 
 /** 生成 2^k 全因子设计并显式保存标准序、运行序、区组及点类型。
- * 区组数须为 2 的幂且不超过 2^(k−1)；区组生成元使用 A×B、A×C…，确保主效应不与区组混杂。
+ * 区组数须为 2 的幂。能由完整仿行构成的区组优先用仿行分区，剩余区组位才用
+ * Minitab 默认的最高分辨率生成元(见 STANDARD_BLOCK_GENERATORS)。
  * centerPoints 表示「每区组」中心点数；末列为待录入响应(占位 0)。 */
+function popcount(v: number): number {
+  let c = 0;
+  let x = v;
+  while (x) { x &= x - 1; c += 1; }
+  return c;
+}
+
+/** Minitab 公开的默认区组生成元表；位掩码 bit j = 第 j 个因子，bit0=A。 */
+const STANDARD_BLOCK_GENERATORS: Record<string, number[]> = {
+  '2/2': [0b11],                       // AB
+  '3/2': [0b111],                      // ABC
+  '3/4': [0b0011, 0b0101],              // AB, AC
+  '4/2': [0b1111],                     // ABCD
+  '4/4': [0b0110, 0b1011],             // BC, ABD
+  '4/8': [0b0011, 0b0110, 0b1100],     // AB, BC, CD
+};
+
+export interface FactorialBlockPlan {
+  factorCount: number;
+  blockCount: number;
+  replicates: number;
+  /** 直接用完整仿行分区提供的区组数。 */
+  replicateBlocks: number;
+  /** 每个仿行区组内再由处理效应生成元划分的区组数。 */
+  generatedBlocks: number;
+  generatorLabels: string[];
+  /** 处理效应与区组混杂的完整定义对比（含广义交互）。 */
+  definingContrasts: string[];
+  /** 带区组伪因子 L₁…Lₚ 的完整定义字。 */
+  definingWords: string[];
+  description: string;
+}
+
+function factorMaskLabel(mask: number, k: number): string {
+  return Array.from({ length: k }, (_, index) => mask & (1 << index) ? String.fromCharCode(65 + index) : '').join('');
+}
+
+/** 返回与 generateFactorialDesign 完全同源的区组生成元、定义对比和定义字。 */
+export function factorialBlockPlan(k: number, blocks: number, replicates = 1): FactorialBlockPlan {
+  if (!Number.isInteger(k) || k < 2 || k > 4) throw new Error('两水平全因子设计支持 2–4 个因子');
+  if (!Number.isSafeInteger(blocks) || blocks < 1 || !Number.isInteger(Math.log2(blocks))) {
+    throw new Error('区组数须为 2 的幂');
+  }
+  if (!Number.isSafeInteger(replicates) || replicates < 1) throw new Error('仿行数必须是不小于 1 的整数');
+  const gcd = (a: number, b: number): number => {
+    let x = a;
+    let y = b;
+    while (y !== 0) [x, y] = [y, x % y];
+    return x;
+  };
+  const replicateBlocks = gcd(replicates, blocks);
+  const generatedBlocks = blocks / replicateBlocks;
+  const maxGeneratedBlocks = 1 << (k - 1);
+  if (generatedBlocks > maxGeneratedBlocks) {
+    throw new Error(`区组数过多：完整仿行分区后，每个仿行内最多可分 ${maxGeneratedBlocks} 个区组`);
+  }
+  const masks = chooseBlockGenerators(k, Math.log2(generatedBlocks));
+  const generatorLabels = masks.map((mask) => factorMaskLabel(mask, k));
+  const definingContrasts: string[] = [];
+  const definingWords: string[] = [];
+  for (let subset = 1; subset < (1 << masks.length); subset += 1) {
+    let treatmentMask = 0;
+    const blockFactors: string[] = [];
+    for (let index = 0; index < masks.length; index += 1) {
+      if (subset & (1 << index)) {
+        treatmentMask ^= masks[index];
+        blockFactors.push(`L${index + 1}`);
+      }
+    }
+    const treatment = factorMaskLabel(treatmentMask, k);
+    definingContrasts.push(treatment);
+    definingWords.push(`I=${treatment}·${blockFactors.join('·')}`);
+  }
+  const description = generatorLabels.length
+    ? `${replicateBlocks > 1 ? `先由 ${replicateBlocks} 个完整仿行分区；` : ''}仿行区组内生成元 ${generatorLabels.join('、')}；定义对比 ${definingContrasts.join('、')}（定义字 ${definingWords.join('，')}）`
+    : blocks > 1
+      ? `由 ${replicateBlocks} 个完整仿行直接分区，无处理效应生成元`
+      : '单区组，无区组生成元';
+  return {
+    factorCount: k, blockCount: blocks, replicates, replicateBlocks, generatedBlocks,
+    generatorLabels, definingContrasts, definingWords, description,
+  };
+}
+
+/**
+ * Every legal power-of-two block count for the current factor/replicate
+ * combination.  Replicate blocking matters: for example 2^2 with two complete
+ * replicates legitimately supports four blocks (two replicate blocks × two
+ * treatment-generator blocks), which a fixed 2^(k-1) UI ceiling would hide.
+ */
+export function factorialBlockOptions(k: number, replicates = 1): number[] {
+  if (!Number.isInteger(k) || k < 2 || k > 4) throw new Error('两水平全因子设计支持 2–4 个因子');
+  if (!Number.isSafeInteger(replicates) || replicates < 1) throw new Error('仿行数必须是不小于 1 的整数');
+  // No valid block count can exceed the number of factorial points.  Enumerate
+  // powers of two and let the same planner used by generation be the authority.
+  const maximumCandidate = (1 << k) * replicates;
+  const options: number[] = [];
+  for (let blocks = 1; blocks <= maximumCandidate; blocks *= 2) {
+    try {
+      factorialBlockPlan(k, blocks, replicates);
+      options.push(blocks);
+    } catch {
+      // This power of two needs more treatment generators than the design has.
+    }
+  }
+  return options;
+}
+
+function chooseBlockGenerators(k: number, g: number): number[] {
+  if (g <= 0) return [];
+  const generators = STANDARD_BLOCK_GENERATORS[`${k}/${1 << g}`];
+  if (!generators) throw new Error(`不支持的区组组合:${k} 因子 / ${1 << g} 区组`);
+  return generators;
+}
+
 export function generateFactorialDesign(
   factors: FactorDef[],
   opts: { centerPoints?: number; replicates?: number; blocks?: number; randomize?: boolean; seed?: number } = {},
 ): GeneratedFactorialDesign {
   const k = factors.length;
   if (k < 2 || k > 4) throw new Error('两水平全因子设计支持 2–4 个因子');
-  const names = factors.map((factor) => factor.name.trim());
-  if (names.some((name) => !name)) throw new Error('因子名不能为空');
-  if (new Set(names).size !== names.length) throw new Error('因子名不能重复');
+  const names = requireDoeFactorNames(factors.map((factor) => factor.name));
   if (factors.some((factor) => !Number.isFinite(factor.low) || !Number.isFinite(factor.high))) {
     throw new Error('因子上下限必须是有限数值');
   }
@@ -945,28 +1383,31 @@ export function generateFactorialDesign(
   const reps = integerOption(opts.replicates, 1, '重复数', 1);
   const centers = integerOption(opts.centerPoints, 0, '每区组中心点数', 0);
   const blocks = integerOption(opts.blocks, 1, '区组数', 1);
-  const maxBlocks = 1 << (k - 1);
-  if ((blocks & (blocks - 1)) !== 0 || blocks > maxBlocks) {
-    throw new Error(`区组数须为 1、2${maxBlocks >= 4 ? '、4' : ''}${maxBlocks >= 8 ? '、8' : ''}，且不超过 ${maxBlocks}`);
+  if (!Number.isSafeInteger(blocks) || !Number.isInteger(Math.log2(blocks))) {
+    throw new Error('区组数须为 2 的幂');
   }
 
-  const blockBits = Math.log2(blocks);
+  // 区组说明与实际分组共用同一解析器，避免页面示例与真实分组再次分叉。
+  const blockPlan = factorialBlockPlan(k, blocks, reps);
+  const { replicateBlocks, generatedBlocks } = blockPlan;
+  const blockBits = Math.log2(generatedBlocks);
+  const generators = chooseBlockGenerators(k, blockBits);
+  const replicatesPerBlockGroup = reps / replicateBlocks;
   const blockFor = (combo: number): number => {
     let blockCode = 0;
     for (let bit = 0; bit < blockBits; bit++) {
-      // A×B、A×C、A×D… 作为独立区组生成元；每个主效应在各区组内保持平衡。
-      const parity = ((combo >> 0) & 1) ^ ((combo >> (bit + 1)) & 1);
-      blockCode |= parity << bit;
+      blockCode |= (popcount(combo & generators[bit]) & 1) << bit;
     }
     return blockCode + 1;
   };
 
   const generated: GeneratedRun[] = [];
   for (let r = 0; r < reps; r++) {
+    const replicateBlock = Math.floor(r / replicatesPerBlockGroup);
     for (let combo = 0; combo < (1 << k); combo++) {
       generated.push({
         standardOrder: 0,
-        block: blockFor(combo),
+        block: replicateBlock * generatedBlocks + blockFor(combo),
         pointType: '因子点',
         factorValues: factors.map((factor, j) => (combo & (1 << j) ? factor.high : factor.low)),
       });
@@ -1016,6 +1457,7 @@ export function generateFactorialDesign(
     textCols: [{ name: '点类型', values: finalRuns.map((run) => run.pointType) }],
     responseCol: colNames.length - 1,
     blockCount: blocks,
+    blockPlan,
   };
 }
 
@@ -1222,9 +1664,9 @@ export function detectGeneralFactorial(
 ): { ok: true; design: GeneralFactorialDesign } | { ok: false; reason: string } {
   if (factors.length < 2) return { ok: false, reason: '一般全因子至少需要 2 个因子列' };
   if (factors.length > GENERAL_MAX_FACTORS) return { ok: false, reason: `一般全因子最多支持 ${GENERAL_MAX_FACTORS} 个因子` };
-  const factorNames = factors.map((factor) => factor.name.trim());
-  if (factorNames.some((name) => !name)) return { ok: false, reason: '因子名不能为空' };
-  if (new Set(factorNames).size !== factorNames.length) return { ok: false, reason: '因子名不能重复' };
+  const nameValidation = validateDoeFactorNames(factors.map((factor) => factor.name));
+  if (!nameValidation.ok) return nameValidation;
+  const factorNames = nameValidation.names;
   const N = response.length;
   if (N < 4) return { ok: false, reason: '至少需要 4 行数据' };
   if (response.some((value) => !Number.isFinite(value))) return { ok: false, reason: '响应列包含空值或非有限数值' };
@@ -1279,16 +1721,16 @@ export interface GeneralFactorialResult {
 /** 各因子按水平分组的响应均值(主效应图数据,均值按水平算)。 */
 export function generalLevelMeans(design: GeneralFactorialDesign): GeneralFactorialResult['levelMeans'] {
   return design.factorNames.map((name, f) => {
-    const sums = design.levels[f].map(() => 0);
+    const observations = design.levels[f].map(() => [] as number[]);
     const counts = design.levels[f].map(() => 0);
     design.levelIndex.forEach((row, r) => {
-      sums[row[f]] += design.response[r];
+      observations[row[f]].push(design.response[r]);
       counts[row[f]] += 1;
     });
     return {
       name,
       levels: [...design.levels[f]],
-      means: sums.map((sum, j) => (counts[j] ? sum / counts[j] : NaN)),
+      means: observations.map((values) => (values.length ? mean(values) : NaN)),
       counts,
     };
   });
@@ -1319,16 +1761,13 @@ export function analyzeGeneralFactorial(
   design: GeneralFactorialDesign,
   options: { includeInteractions?: boolean } = {},
 ): GeneralFactorialResult {
-  const { factorNames, levels, levelIndex, response: y } = design;
-  const k = factorNames.length;
+  const { levels, levelIndex, response: y } = design;
+  const k = design.factorNames.length;
   const N = y.length;
   if (k < 2 || k > GENERAL_MAX_FACTORS || levels.length !== k) {
     throw new Error(`一般全因子设计必须包含 2–${GENERAL_MAX_FACTORS} 个因子及对应水平定义`);
   }
-  const trimmed = factorNames.map((name) => name.trim());
-  if (trimmed.some((name, index) => !name || name !== factorNames[index]) || new Set(trimmed).size !== k) {
-    throw new Error('一般全因子因子名必须非空且不能重复');
-  }
+  const factorNames = requireDoeFactorNames(design.factorNames);
   if (levels.some((ls) => ls.length < GENERAL_MIN_LEVELS || ls.length > GENERAL_MAX_LEVELS
     || ls.some((value) => !Number.isFinite(value)) || new Set(ls).size !== ls.length)) {
     throw new Error(`一般全因子每因子需要 ${GENERAL_MIN_LEVELS}–${GENERAL_MAX_LEVELS} 个互不相同的有限水平值`);
@@ -1374,14 +1813,20 @@ export function analyzeGeneralFactorial(
     : undefined;
 
   const grand = mean(y);
-  const sst = y.reduce((sum, value) => sum + (value - grand) * (value - grand), 0);
-  const sse = sseOf(fitFull.residuals);
+  const normalizedResponse = normalizeResponse(y);
+  const normalizedGrand = mean(normalizedResponse.values);
+  const normalizedSst = normalizedResponse.values.reduce(
+    (sum, value) => sum + (value - normalizedGrand) * (value - normalizedGrand),
+    0,
+  );
+  const normalizedSse = sseOf(fitFull.normalizedResiduals);
   const columnCount = 1 + chosen.reduce((sum, term) => sum + term.cols.length, 0);
-  // 平方和的「等效零」阈值:与总平方和同尺度的浮点舍入界,避免把纯舍入残渣当成非零 SS 参与 F=∞ 判定。
-  const ssTol = sst * Number.EPSILON * 64 * Math.max(N, columnCount);
+  // 平方和的「等效零」阈值只在无量纲空间定义，因此不随响应单位变化。
+  const ssTol = normalizedSst * Number.EPSILON * 64 * Math.max(N, columnCount);
   const dfError = N - fitFull.rank;
-  const mse = dfError > 0 ? sse / dfError : null;
-  const mseIsZero = dfError > 0 && sse <= ssTol;
+  const normalizedMse = dfError > 0 ? normalizedSse / dfError : null;
+  const mseIsZero = dfError > 0 && normalizedSse <= ssTol;
+  const responseScale = fitFull.responseScale;
 
   const rows: GeneralAnovaTermRow[] = [];
   const inestimable: string[] = [];
@@ -1395,17 +1840,19 @@ export function analyzeGeneralFactorial(
       rows.push({ name: term.name, kind: term.kind, df: 0, adjSS: 0, adjMS: null, f: null, p: null, sig: false });
       continue;
     }
-    const adjSS = Math.max(0, sseOf(fitReduced.residuals) - sse);
-    const adjMS = adjSS / df;
+    const normalizedAdjSS = Math.max(0, sseOf(fitReduced.normalizedResiduals) - normalizedSse);
+    const normalizedAdjMS = normalizedAdjSS / df;
+    const adjSS = restoreSquaredResponseScale(normalizedAdjSS, responseScale);
+    const adjMS = restoreSquaredResponseScale(normalizedAdjMS, responseScale);
     let f: number | null = null;
     let p: number | null = null;
     if (dfError > 0) {
       if (mseIsZero) {
         // 完美拟合:非零 SS → 无穷显著(p=0);零 SS → 无信息(p=1)。与 oneWayAnova 口径一致。
-        f = adjSS <= ssTol ? 0 : Infinity;
-        p = adjSS <= ssTol ? 1 : 0;
+        f = normalizedAdjSS <= ssTol ? 0 : Infinity;
+        p = normalizedAdjSS <= ssTol ? 1 : 0;
       } else {
-        f = adjMS / mse!;
+        f = normalizedAdjMS / normalizedMse!;
         p = 1 - fCdf(f, df, dfError);
       }
     }
@@ -1414,16 +1861,20 @@ export function analyzeGeneralFactorial(
 
   return {
     rows,
-    error: { df: dfError, adjSS: sse, adjMS: mse },
-    total: { df: N - 1, adjSS: sst },
+    error: {
+      df: dfError,
+      adjSS: restoreSquaredResponseScale(normalizedSse, responseScale),
+      adjMS: normalizedMse == null ? null : restoreSquaredResponseScale(normalizedMse, responseScale),
+    },
+    total: { df: N - 1, adjSS: restoreSquaredResponseScale(normalizedSst, responseScale) },
     includeInteractions,
     interactionNote,
     inestimableTerms: inestimable.length ? inestimable : undefined,
     fits: fitFull.fits,
     residuals: fitFull.residuals,
     grand,
-    r2: sst > 0 ? 1 - sse / sst : 0,
-    r2Adj: dfError > 0 ? 1 - (sse / dfError) / (sst / (N - 1)) : null,
+    r2: normalizedSst > 0 ? 1 - normalizedSse / normalizedSst : 0,
+    r2Adj: dfError > 0 ? 1 - (normalizedSse / dfError) / (normalizedSst / (N - 1)) : null,
     factorNames: [...factorNames],
     nRuns: N,
     levelMeans: generalLevelMeans(design),
@@ -1460,9 +1911,7 @@ export function generateGeneralFactorialDesign(
 ): GeneratedFactorialDesign {
   const k = factors.length;
   if (k < 2 || k > GENERAL_MAX_FACTORS) throw new Error(`一般全因子设计支持 2–${GENERAL_MAX_FACTORS} 个因子`);
-  const names = factors.map((factor) => factor.name.trim());
-  if (names.some((name) => !name)) throw new Error('因子名不能为空');
-  if (new Set(names).size !== names.length) throw new Error('因子名不能重复');
+  const names = requireDoeFactorNames(factors.map((factor) => factor.name));
   for (const factor of factors) {
     if (factor.levels.length < GENERAL_MIN_LEVELS || factor.levels.length > GENERAL_MAX_LEVELS) {
       throw new Error(`因子「${factor.name}」的水平数必须在 ${GENERAL_MIN_LEVELS}–${GENERAL_MAX_LEVELS} 之间`);
@@ -1704,9 +2153,7 @@ export function generateFractionalFactorialDesign(
 ): GeneratedFractionalDesign {
   const k = factors.length;
   if (k < 3 || k > MAX_FRACTIONAL_FACTORS) throw new Error(`分数因子设计支持 3–${MAX_FRACTIONAL_FACTORS} 个因子`);
-  const names = factors.map((factor) => factor.name.trim());
-  if (names.some((name) => !name)) throw new Error('因子名不能为空');
-  if (new Set(names).size !== names.length) throw new Error('因子名不能重复');
+  const names = requireDoeFactorNames(factors.map((factor) => factor.name));
   if (factors.some((factor) => !Number.isFinite(factor.low) || !Number.isFinite(factor.high))) {
     throw new Error('因子上下限必须是有限数值');
   }
@@ -1756,4 +2203,53 @@ export function generateFractionalFactorialDesign(
     folded: fold !== 'none',
     fraction,
   };
+}
+
+
+/** DOE 结论文本的四个分支(自审 P2:此前只能靠源码切片守护,保形重写一律绕过;
+ * 抽成纯函数后可直接构造四种 status 断言输出文本)。 */
+export interface DoeConclusionInput {
+  status: 'no-significant-effect' | 'significant-curvature' | 'tied' | 'unique';
+  aliases?: FactorialAlias[] | null;
+  hasSignificantInteraction: boolean;
+  sigTermNames: string[];
+  detail: string;
+  factorCount: number;
+  respName: string;
+  settings: string;
+  tieCount?: number;
+  fixedSettings?: string;
+  /** 因层级原则进入决策评分、但本身未达显著的低阶父项。 */
+  hierarchyParentNames?: string[];
+}
+
+/** 显著交互时不按主效应独立推荐;否则给出混杂提示或确认试验建议。 */
+export function doeInteractionNote(input: Pick<DoeConclusionInput, 'hasSignificantInteraction' | 'aliases'>): string {
+  // 自审 P3:显著交互与「部分交互被区组混杂」可以同时成立(2^4 分 4 区组时 BD 与区组
+  // 混杂,而 AB/AC/BC 可估且可能显著)。此前 hasSignificantInteraction 分支直接 return,
+  // 把混杂提示整条吞掉,页面与专项报告因此分裂。两句都要给。
+  const confound = confoundedInteractionNote(input.aliases ?? undefined);
+  if (input.hasSignificantInteraction) {
+    return `已综合显著交互作用，不按主效应符号独立推荐。${confound ?? ''}`;
+  }
+  return confound ?? '当前未检出显著交互，仍建议用确认试验验证。';
+}
+
+export function buildDoeConclusion(input: DoeConclusionInput): string {
+  const note = doeInteractionNote(input);
+  const confound = confoundedInteractionNote(input.aliases ?? undefined) ?? '';
+  const terms = input.sigTermNames.join('、');
+  const decisionModel = input.hierarchyParentNames?.length
+    ? `决策评分使用上述显著项，并按层级原则保留未显著父项 ${input.hierarchyParentNames.join('、')}；表中预测值仍由完整拟合模型给出。`
+    : '决策评分只使用有推断支持的显著项；表中预测值仍由完整拟合模型给出。';
+  switch (input.status) {
+    case 'no-significant-effect':
+      return `在当前数据下未发现显著的因子或交互作用(${input.detail})。可增加重复或中心点以提高检验功效。${confound}`;
+    case 'significant-curvature':
+      return `${input.sigTermNames.length ? `显著工艺项:${terms}；同时` : ''}中心点曲率显著；两水平线性模型不能可靠给出最优角点，暂不推荐设置，应升级为响应曲面设计。${confound}`;
+    case 'tied':
+      return `显著项:${terms}。${decisionModel}当前决策模型有 ${input.tieCount ?? 0} 个并列最大角点，无唯一最优组合；共同设置为:${input.fixedSettings || '无（所有因子均存在并列设置）'}。并列组合:${input.settings}。${note}`;
+    default:
+      return `显著项:${terms}。${decisionModel}枚举 2^${input.factorCount} 个角点后，「${input.respName}」的决策评分唯一最大设置为:${input.settings}。${note}`;
+  }
 }

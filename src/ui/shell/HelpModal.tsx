@@ -27,9 +27,9 @@ const TOPICS: Topic[] = [
     key: 'capability', title: '过程能力',
     lines: [
       'Cp=(USL−LSL)/6σ组内;Cpk=min(CPU,CPL);Pp/Ppk 用 σ整体。',
-      'Cpm=(USL−LSL)/6τ,τ²=Σ(x−T)²/n(惩罚偏离目标)。',
+      'Cpm=min(USL−T, T−LSL)/3τ,τ²=Σ(x−T)²/n(惩罚偏离目标;目标居中时等于 (USL−LSL)/6τ)。',
       '判定:Cpk ≥ 1.33 充足;1.0–1.33 临界;< 1.0 不足。',
-      '单侧规格:仅有一侧限值时 Cpk 取可用侧,Cp/Pp/Cpm 不适用。',
+      '单侧规格:仅有一侧限值时 Cpk 取可用侧,Cp/Pp 不适用;Cpm 用启用侧距离 (USL−T 或 T−LSL)/3τ。',
       'Z.bench = Φ⁻¹(1−PPM整体/10⁶);西格玛水平 = Z.bench + 1.5。',
       '前提:数据近似正态——先看 Anderson-Darling 检验与概率图;非正态用 Box-Cox。',
     ],
@@ -41,7 +41,7 @@ const TOPICS: Topic[] = [
       '单操作员研究:操作员列可为同一人或选「无(单操作员)」,按单因子退化模型计算,GRR=重复性,不估计再现性;图形报告为 4 联(多人 6 联)。',
       '过程公差:双侧宽度 %公差=6×SD/宽度;仅上限/下限按 Minitab 单边口径 %公差=3×SD/|限值−总均值|;「联动规格限」自动取全局 LSL/USL。',
       '判定标准可选:工厂标准(主要 %研究变异 与 次要 %公差 均 ≤10% 理想、≤20% 可接受,取较差);AIAG(GRR<10% 可接受,10–30% 临界,>30% 不可接受)。',
-      '可区分的类别数 ndc=⌊√(2σ²部件/σ²GRR)⌋(下限 1),AIAG 建议 ≥5。',
+      '可区分的类别数 ndc=⌊1.41×σ部件/σGRR⌋(AIAG/Minitab 公布常数 1.41,非精确 √2;下限 1),AIAG 建议 ≥5。',
       '导入数据需含 1 个数值测量列与 部件 类别列(多人另需操作员列),类别可使用文本编码或数值 ID;每个组合须有相同且 ≥2 次重复。并排多案例工作簿导入时可直接选择数据块。',
     ],
   },
@@ -121,7 +121,7 @@ const TOPICS: Topic[] = [
     lines: [
       '统计 → 描述性统计/图形化摘要:直方图+正态曲线、箱线图与完整统计表一屏呈现。',
       '统计量:N/均值/SE/标准差/方差/CV/偏度/峰度/五数概括/极差/IQR/总和。',
-      '95% 置信区间:均值(t 分布)、中位数(次序统计)、标准差(χ² 近似)。',
+      '95% 置信区间:均值(t 分布)、中位数(n≤1000 用次序统计量二项精确秩,n>1000 用带连续性校正的保守正态近似;n<6 时退回全距,实际覆盖不足 95%)、标准差(χ² 分位)。',
       'Anderson-Darling 正态检验:P ≥ 0.05 可用正态方法;偏态建议 Box-Cox。',
       '任何深入分析前先看图形化摘要,是了解数据分布最稳妥的第一步。',
     ],
@@ -143,13 +143,13 @@ export function HelpModal({ onClose }: { onClose: () => void }) {
   const cur = TOPICS.find((t) => t.key === topic)!;
   const goTo = useApp((s) => s.goTo);
   return (
-    <div style={{ position: 'relative', width: 720, background: '#fff', borderRadius: 10, boxShadow: '0 24px 60px rgba(10,20,40,0.32)', overflow: 'hidden' }}>
+    <div className="modal-panel help-modal" style={{ position: 'relative', width: 720, maxWidth: 'calc(100vw - 24px)', maxHeight: 'calc(100dvh - 24px)', display: 'flex', flexDirection: 'column', background: '#fff', borderRadius: 10, boxShadow: '0 24px 60px rgba(10,20,40,0.32)', overflow: 'hidden' }}>
       <div style={{ display: 'flex', alignItems: 'center', padding: '16px 20px', borderBottom: '1px solid #edf0f3' }}>
         <div style={{ fontSize: 15, fontWeight: 600, color: '#26303c' }}>帮助中心 · 统计指南</div>
         <button type="button" aria-label="关闭帮助中心" onClick={onClose} style={{ marginLeft: 'auto', padding: 0, border: 0, background: 'transparent', cursor: 'pointer', color: '#9aa2ad', fontSize: 17 }}>✕</button>
       </div>
-      <div style={{ display: 'flex', minHeight: 340 }}>
-        <div style={{ width: 168, borderRight: '1px solid #edf0f3', padding: '10px 0', background: '#fbfcfd' }}>
+      <div className="help-modal-body" style={{ display: 'flex', minHeight: 0, flex: 1, overflow: 'hidden' }}>
+        <div className="help-modal-topics" style={{ width: 168, flex: 'none', borderRight: '1px solid #edf0f3', padding: '10px 0', background: '#fbfcfd', overflowY: 'auto' }}>
           {TOPICS.map((t) => (
             <button type="button"
               key={t.key}
@@ -167,7 +167,7 @@ export function HelpModal({ onClose }: { onClose: () => void }) {
             </button>
           ))}
         </div>
-        <div style={{ flex: 1, padding: '16px 22px' }}>
+        <div className="help-modal-content" style={{ flex: 1, minWidth: 0, padding: '16px 22px', overflowY: 'auto' }}>
           <div style={{ fontWeight: 700, color: '#26303c', marginBottom: 10 }}>{cur.title}</div>
           {cur.lines.map((l, i) => (
             <div key={i} style={{ display: 'flex', gap: 8, padding: '5px 0', fontSize: 12.5, color: '#3a4350', lineHeight: 1.6 }}>

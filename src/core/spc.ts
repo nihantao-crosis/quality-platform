@@ -95,6 +95,86 @@ export interface RuleViolation {
 export interface RuleEvalOptions {
   /** false 时只维护违例点 Set，不构建/去重/排序文字明细；供看板与能力卡同步计数。 */
   collectDetails?: boolean;
+  /**
+   * 需要导出「点×准则」明细时，只物化按点号/准则排序的前 N 条，
+   * 同时在 pointRuleSummary 中保留真实总数、受影响点数和按准则计数。
+   * 未指定时完全保持历史返回形制与成本。
+   */
+  pointRuleDetailLimit?: number;
+}
+
+/** 有界明细与完整统计的双轨结果；items 只是前缀，total 才是真实命中数。 */
+export interface PointRuleSummary {
+  items: RuleViolation[];
+  total: number;
+  affectedCount: number;
+  byRule: Partial<Record<RuleNo, number>>;
+  truncated: boolean;
+}
+
+export interface RuleEvaluationResult {
+  viol: Set<number>;
+  list: RuleViolation[];
+  pointRuleSummary?: PointRuleSummary;
+}
+
+function normalizedPointRuleLimit(options: RuleEvalOptions): number | null {
+  if (options.pointRuleDetailLimit == null) return null;
+  const value = options.pointRuleDetailLimit;
+  return Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
+}
+
+/**
+ * 每点 1 byte 的 bit mask 记录 8 条准则：20 万点仅需 200KB，不随重叠滑窗
+ * 命中数增长。最后一次线性扫描即可得到去重的点×准则总数与有界前缀。
+ */
+function pointRuleCollector(pointCount: number, limit: number | null) {
+  if (limit == null) return null;
+  const masks = new Uint8Array(pointCount);
+  return {
+    mark(index: number, rule: RuleNo) {
+      masks[index] |= 1 << (rule - 1);
+    },
+    finish(affectedCount: number, description: (rule: RuleNo) => string): PointRuleSummary {
+      const items: RuleViolation[] = [];
+      const byRule: Partial<Record<RuleNo, number>> = {};
+      let total = 0;
+      for (let index = 0; index < masks.length; index++) {
+        const mask = masks[index];
+        if (mask === 0) continue;
+        for (let rule = 1 as RuleNo; rule <= 8; rule = (rule + 1) as RuleNo) {
+          if ((mask & (1 << (rule - 1))) === 0) continue;
+          total++;
+          byRule[rule] = (byRule[rule] ?? 0) + 1;
+          if (items.length < limit) items.push({ i: index, rule, desc: description(rule) });
+        }
+      }
+      return { items, total, affectedCount, byRule, truncated: total > items.length };
+    },
+  };
+}
+
+function mergePointRuleSummaries(
+  summaries: Array<PointRuleSummary | undefined>,
+  affectedCount: number,
+  limit: number | null,
+): PointRuleSummary | undefined {
+  if (limit == null) return undefined;
+  const byRule: Partial<Record<RuleNo, number>> = {};
+  let total = 0;
+  const candidates: RuleViolation[] = [];
+  for (const summary of summaries) {
+    if (!summary) continue;
+    total += summary.total;
+    for (const [rawRule, count] of Object.entries(summary.byRule)) {
+      const rule = Number(rawRule) as RuleNo;
+      byRule[rule] = (byRule[rule] ?? 0) + (count ?? 0);
+    }
+    for (const item of summary.items) candidates.push(item);
+  }
+  candidates.sort((a, b) => a.i - b.i || a.rule - b.rule);
+  const items = candidates.length > limit ? candidates.slice(0, limit) : candidates;
+  return { items, total, affectedCount, byRule, truncated: total > items.length };
 }
 
 /** 判异描述:K 为标准值时逐字沿用 RULE_DEFS(向后兼容),自定义时如实写出实际参数。
@@ -121,7 +201,7 @@ export function evalLimitedRules(
    * 双侧同时截断时仍会低估(Codex v1.37 P2-1);P/C 图调用方应直接传入真 σ。 */
   sigmas?: number | number[],
   options: RuleEvalOptions = {},
-): { viol: Set<number>; list: RuleViolation[] } {
+): RuleEvaluationResult {
   const ucls = Array.isArray(ucl) ? ucl : Array.from({ length: data.length }, () => ucl);
   const lcls = Array.isArray(lcl) ? lcl : Array.from({ length: data.length }, () => lcl);
   if (ucls.length !== data.length || lcls.length !== data.length) {
@@ -131,7 +211,11 @@ export function evalLimitedRules(
     throw new Error('控制限必须为有限数且 LCL ≤ UCL');
   }
   const K = normalizeRuleK({ ...DEFAULT_RULE_K, ...k });
-  const collectDetails = options.collectDetails !== false;
+  const pointRuleLimit = normalizedPointRuleLimit(options);
+  // 有界统计模式下禁止同时构建无界的历史触发 list；
+  // 需要展示的点×准则前缀在 pointRuleSummary.items 中。
+  const collectDetails = options.collectDetails !== false && pointRuleLimit == null;
+  const ruleOneCollector = pointRuleCollector(data.length, pointRuleLimit);
   const viol = new Set<number>();
   const list: RuleViolation[] = [];
   if (rules.r1) {
@@ -154,6 +238,7 @@ export function evalLimitedRules(
         : v - cl > kSigma || cl - v > kSigma;
       if (out) {
         viol.add(i);
+        ruleOneCollector?.mark(i, 1);
         if (collectDetails) list.push({ i, rule: 1, desc: `1 点超出该图的 ${K.k1}σ 控制限` });
       }
     });
@@ -171,7 +256,17 @@ export function evalLimitedRules(
   // 不能用 list.push(...pattern.list)：高命中长序列（正式支持到 20 万行）会因
   // 展开十几万个函数实参触发 Maximum call stack size exceeded。
   if (collectDetails) for (const item of pattern.list) list.push(item);
-  return { viol, list: collectDetails ? list.sort((a, b) => a.i - b.i || a.rule - b.rule) : [] };
+  const ruleOneSummary = ruleOneCollector?.finish(viol.size, () => `1 点超出该图的 ${K.k1}σ 控制限`);
+  const pointRuleSummary = mergePointRuleSummaries(
+    [ruleOneSummary, pattern.pointRuleSummary],
+    viol.size,
+    pointRuleLimit,
+  );
+  return {
+    viol,
+    list: collectDetails ? list.sort((a, b) => a.i - b.i || a.rule - b.rule) : [],
+    ...(pointRuleSummary ? { pointRuleSummary } : {}),
+  };
 }
 
 export interface ControlConstants {
@@ -249,10 +344,12 @@ export function evalRules(
   rules: NelsonRules,
   k: Partial<NelsonRuleK> = DEFAULT_RULE_K,
   options: RuleEvalOptions = {},
-): { viol: Set<number>; list: RuleViolation[] } {
+): RuleEvaluationResult {
   // 可选 K 值:省略即 Nelson/Minitab 标准参数,行为与旧签名逐位一致。
   const K = normalizeRuleK({ ...DEFAULT_RULE_K, ...k });
-  const collectDetails = options.collectDetails !== false;
+  const pointRuleLimit = normalizedPointRuleLimit(options);
+  const collectDetails = options.collectDetails !== false && pointRuleLimit == null;
+  const collector = pointRuleCollector(data.length, pointRuleLimit);
   const viol = new Set<number>();
   const list: RuleViolation[] = [];
   if (rules.r1)
@@ -260,6 +357,7 @@ export function evalRules(
       // k1 只改判异检测阈(K1σ),不改动控制限 UCL/LCL 本身
       if (Math.abs(v - cl) > K.k1 * sigma) {
         viol.add(i);
+        collector?.mark(i, 1);
         if (collectDetails) list.push({ i, rule: 1, desc: ruleKDesc(1, K) });
       }
     });
@@ -274,7 +372,10 @@ export function evalRules(
         sign = s;
       }
       if (run >= K.k2) {
-        for (let q = i - (K.k2 - 1); q <= i; q++) viol.add(q);
+        for (let q = i - (K.k2 - 1); q <= i; q++) {
+          viol.add(q);
+          collector?.mark(q, 2);
+        }
         if (collectDetails) list.push({ i, rule: 2, desc: ruleKDesc(2, K) });
       }
     });
@@ -294,7 +395,10 @@ export function evalRules(
         dec = 1;
       }
       if (inc >= K.k3 || dec >= K.k3) {
-        for (let q = i - (K.k3 - 1); q <= i; q++) viol.add(q);
+        for (let q = i - (K.k3 - 1); q <= i; q++) {
+          viol.add(q);
+          collector?.mark(q, 3);
+        }
         if (collectDetails) list.push({ i, rule: 3, desc: ruleKDesc(3, K) });
       }
     }
@@ -309,7 +413,10 @@ export function evalRules(
       run = prevDir !== 0 && d === -prevDir ? run + 1 : 2;
       prevDir = d;
       if (run >= K.k4) {
-        for (let q = i - (K.k4 - 1); q <= i; q++) viol.add(q);
+        for (let q = i - (K.k4 - 1); q <= i; q++) {
+          viol.add(q);
+          collector?.mark(q, 4);
+        }
         if (collectDetails) list.push({ i, rule: 4, desc: ruleKDesc(4, K) });
       }
     }
@@ -326,6 +433,7 @@ export function evalRules(
           w.forEach((q) => {
             if (!side(q)) return;
             viol.add(q);
+            collector?.mark(q, rule);
             if (collectDetails) list.push({ i: q, rule, desc: ruleKDesc(rule, K) });
           });
         }
@@ -341,7 +449,10 @@ export function evalRules(
     for (let i = 0; i < data.length; i++) {
       run = Math.abs(data[i] - cl) < sigma ? run + 1 : 0;
       if (run >= K.k7) {
-        for (let q = i - (K.k7 - 1); q <= i; q++) viol.add(q);
+        for (let q = i - (K.k7 - 1); q <= i; q++) {
+          viol.add(q);
+          collector?.mark(q, 7);
+        }
         if (collectDetails) list.push({ i, rule: 7, desc: ruleKDesc(7, K) });
       }
     }
@@ -352,22 +463,32 @@ export function evalRules(
     for (let i = 0; i < data.length; i++) {
       run = Math.abs(data[i] - cl) > sigma ? run + 1 : 0;
       if (run >= K.k8) {
-        for (let q = i - (K.k8 - 1); q <= i; q++) viol.add(q);
+        for (let q = i - (K.k8 - 1); q <= i; q++) {
+          viol.add(q);
+          collector?.mark(q, 8);
+        }
         if (collectDetails) list.push({ i, rule: 8, desc: ruleKDesc(8, K) });
       }
     }
   }
-  if (!collectDetails) return { viol, list: [] };
-  const seen = new Set<string>();
-  const out = list
-    .filter((x) => {
-      const k = x.rule + '-' + x.i;
-      if (seen.has(k)) return false;
-      seen.add(k);
-      return true;
-    })
-    .sort((a, b) => a.i - b.i);
-  return { viol, list: out };
+  let out: RuleViolation[] = [];
+  if (collectDetails) {
+    const seen = new Set<string>();
+    out = list
+      .filter((x) => {
+        const key = x.rule + '-' + x.i;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .sort((a, b) => a.i - b.i);
+  }
+  const pointRuleSummary = collector?.finish(viol.size, (rule) => ruleKDesc(rule, K));
+  return {
+    viol,
+    list: out,
+    ...(pointRuleSummary ? { pointRuleSummary } : {}),
+  };
 }
 
 /**

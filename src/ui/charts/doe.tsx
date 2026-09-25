@@ -5,6 +5,7 @@
 import { memo, Fragment } from 'react';
 import { nf } from '../../core';
 import type { ChartTokens } from '../tokens';
+import { tickFormatter } from '../tokens';
 import { Svg, Ln, Txt } from './primitives';
 
 // ---------- 主效应图 ----------
@@ -32,8 +33,13 @@ function MainEffectsImpl({ T, factors }: { T: ChartTokens; factors: { name: stri
   const ph = H - m.t - m.b;
   const grand = allMeans.reduce((a, b) => a + b, 0) / allMeans.length;
   const Y = (v: number) => m.t + (1 - (v - lo) / (hi - lo)) * ph;
+  const accessibleSummary = factors
+    .map((factor) => `${factor.name}：低水平均值 ${nf(factor.lo, 6)}，高水平均值 ${nf(factor.hi, 6)}`)
+    .join('；');
   return (
-    <Svg w={W} h={H}>
+    <Svg w={W} h={H} label={`DOE 主效应图。${accessibleSummary}`}>
+      <title>DOE 主效应图</title>
+      <desc>{accessibleSummary}</desc>
       <rect x={0} y={0} width={W} height={H} fill={T.bg} />
       {factors.map((f, i) => {
         const x0 = pad + i * (panelW + gap);
@@ -84,15 +90,24 @@ function InteractionPlotImpl({ T, c00, c10, c01, c11, labelA = 'A', labelB = 'B'
   const dots: Array<[number, number, string]> = [
     [xL, c00, T.point], [xH, c10, T.point], [xL, c01, T.curve2], [xH, c11, T.curve2],
   ];
+  const accessibleSummary = [
+    `${labelA}低×${labelB}低 ${nf(c00, 6)}`,
+    `${labelA}高×${labelB}低 ${nf(c10, 6)}`,
+    `${labelA}低×${labelB}高 ${nf(c01, 6)}`,
+    `${labelA}高×${labelB}高 ${nf(c11, 6)}`,
+  ].join('；');
+  const chartTitle = `DOE 交互作用图：${labelA} 与 ${labelB}`;
   return (
-    <Svg w={W} h={H}>
+    <Svg w={W} h={H} label={`${chartTitle}。${accessibleSummary}`}>
+      <title>{chartTitle}</title>
+      <desc>{accessibleSummary}</desc>
       <rect x={0} y={0} width={W} height={H} fill={T.bg} />
       {Array.from({ length: 5 }, (_, g) => {
         const yy = m.t + (g / 4) * ph;
         return (
           <Fragment key={'g' + g}>
             <Ln x1={m.l} y1={yy} x2={m.l + pw} y2={yy} stroke={T.grid} sw={1} />
-            <Txt x={m.l - 8} y={yy} s={nf(hi - ((hi - lo) * g) / 4, 1)} fill={T.axis} size={10} anchor="end" />
+            <Txt x={m.l - 8} y={yy} s={tickFormatter(Array.from({ length: 5 }, (_, gg) => hi - ((hi - lo) * gg) / 4))(hi - ((hi - lo) * g) / 4)} fill={T.axis} size={10} anchor="end" />
           </Fragment>
         );
       })}

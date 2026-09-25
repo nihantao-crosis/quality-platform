@@ -1,7 +1,7 @@
 {
   "name": "quality-platform",
   "private": true,
-  "version": "1.42.4",
+  "version": "1.43.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -11,7 +11,11 @@
     "lint": "eslint .",
     "format": "prettier --write src",
     "tauri": "tauri",
-    "build:portable": "vite build -c vite.portable.config.ts"
+    "build:portable": "vite build -c vite.portable.config.ts",
+    "build:office-browser-gate": "vite build -c vite.release-gates.config.ts",
+    "test:portable-browser-gate": "node .github/scripts/run_browser_gate.mjs portable dist-portable/index.html",
+    "test:office-browser-gate": "npm run build:office-browser-gate && node .github/scripts/run_browser_gate.mjs office dist/release-gates/index.html",
+    "test:release-gates": "python3 .github/scripts/release_gates_test.py"
   },
   "dependencies": {
     "@fontsource/ibm-plex-mono": "^5.2.7",

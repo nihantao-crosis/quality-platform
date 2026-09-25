@@ -50,6 +50,14 @@ jobs:
           package_lock = json.loads((root / 'package-lock.json').read_text(encoding='utf-8'))
           cargo = tomllib.loads((root / 'src-tauri/Cargo.toml').read_text(encoding='utf-8'))
           tauri = json.loads((root / 'src-tauri/tauri.conf.json').read_text(encoding='utf-8'))
+          # 自审:Cargo.lock 里 quality-platform 包自身的版本此前不在版本门内,
+          # 六处一致的声称少了一处(改版本时最容易漏更新的恰恰是 lock)
+          cargo_lock = tomllib.loads((root / 'src-tauri/Cargo.lock').read_text(encoding='utf-8'))
+          lock_self = next(
+              (pkg.get('version') for pkg in cargo_lock.get('package', [])
+               if pkg.get('name') == cargo.get('package', {}).get('name')),
+              None,
+          )
 
           tag = os.environ['TAG']
           # latest.json 只能指向正式版；beta/rc 或带前导零的非标准 tag 必须在构建前失败。
@@ -63,6 +71,7 @@ jobs:
               'package-lock.json packages[""]': package_lock.get('packages', {}).get('', {}).get('version'),
               'Cargo.toml': cargo.get('package', {}).get('version'),
               'tauri.conf.json': tauri.get('version'),
+              'Cargo.lock (self)': lock_self,
           }
           mismatches = {name: value for name, value in versions.items() if value != expected}
           if mismatches:
@@ -87,9 +96,16 @@ jobs:
 
           print(f'release metadata verified for {tag}')
           PY
+      - name: Test repository release gate scripts
+        run: npm run test:release-gates
 
   build:
     needs: validate-release
+    # 仅 tag push 可进入签名 environment。远端还必须为该 environment 配置
+    # required reviewers / deployment tag policy，并把新密钥只存为 environment secret。
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    environment:
+      name: release-signing
     permissions:
       contents: write
     strategy:
@@ -122,7 +138,7 @@ jobs:
         env:
           EXPECTED_RUST_HOST: ${{ matrix.rust_host }}
           EXPECTED_UPDATER_PLATFORM: ${{ matrix.updater_platform }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.RELEASE_TAURI_SIGNING_PRIVATE_KEY }}
         run: |
           set -euo pipefail
           ACTUAL_RUST_HOST=$(rustc -vV | sed -n 's/^host: //p' | tr -d '\r')
@@ -141,7 +157,7 @@ jobs:
       - uses: tauri-apps/tauri-action@42e9df6c59070d114bf90dcd3943a1b8f138b113 # v0.5.20
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.RELEASE_TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
         with:
           tagName: ${{ github.ref_name }}
@@ -152,6 +168,32 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+      - name: Capture immutable digests of this runner's release assets
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+          UPDATER_PLATFORM: ${{ matrix.updater_platform }}
+        run: |
+          set -euo pipefail
+          case "$UPDATER_PLATFORM" in
+            windows-x86_64) KIND=windows ;;
+            darwin-aarch64) KIND=macos ;;
+            *) echo "unsupported release platform: $UPDATER_PLATFORM" >&2; exit 1 ;;
+          esac
+          mkdir -p release-digests
+          PYTHON=python3
+          command -v "$PYTHON" >/dev/null 2>&1 || PYTHON=python
+          "$PYTHON" .github/scripts/release_asset_manifest.py create \
+            --root src-tauri/target/release/bundle \
+            --tag "$TAG" \
+            --kind "$KIND" \
+            --output "release-digests/${KIND}.json"
+      - name: Preserve trusted build digests outside the mutable draft release
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-digests-${{ matrix.updater_platform }}
+          if-no-files-found: error
+          path: release-digests/*.json
 
   # tauri-action 对 Tauri v2 的 latest.json 生成不可靠（Signature not found），自行构建
   updater-json:
@@ -160,6 +202,7 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Build and upload latest.json
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -236,6 +279,21 @@ jobs:
           mkdir uploaded
           gh release download "$TAG" -R "$REPO" --pattern latest.json -D uploaded
           cmp latest.json uploaded/latest.json
+      - name: Capture immutable latest.json digest
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-digests
+          python3 .github/scripts/release_asset_manifest.py create \
+            --root uploaded --tag "$TAG" --kind latest \
+            --output release-digests/latest.json
+      - name: Preserve trusted latest.json digest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-digests-latest
+          if-no-files-found: error
+          path: release-digests/latest.json
 
   # 单文件便携版:一个 HTML,任意机器浏览器打开即用(零安装零网络)
   portable:
@@ -250,13 +308,35 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Gate Office SVG rasterization and OOXML relationships in real Chrome
+        run: npm run test:office-browser-gate
       - run: npm run build:portable
+      - name: Verify portable artifact is a single self-contained offline HTML file
+        run: python3 .github/scripts/verify_portable_artifact.py dist-portable
+      - name: Smoke-test the portable file offline in real Chrome
+        run: npm run test:portable-browser-gate
       - name: Upload portable html
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           mv dist-portable/index.html "quality-platform-portable-${GITHUB_REF_NAME#v}.html"
           gh release upload "$GITHUB_REF_NAME" quality-platform-portable-*.html -R "$GITHUB_REPOSITORY" --clobber
+      - name: Capture immutable portable digest
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-digests
+          python3 .github/scripts/release_asset_manifest.py create \
+            --root . --tag "$TAG" --kind portable \
+            --output release-digests/portable.json
+      - name: Preserve trusted portable digest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-digests-portable
+          if-no-files-found: error
+          path: release-digests/portable.json
 
   publish-release:
     needs: [updater-json, portable]
@@ -264,7 +344,52 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Publish only after every artifact and updater check passes
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Download immutable digests from this workflow's build jobs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: release-digests-*
+          path: trusted-release-digests
+          merge-multiple: true
+      - name: Install updater signature verifier
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends minisign
+      - name: Download the exact draft assets that will be published
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir verified-assets
+          gh release view "$TAG" -R "$REPO" --json assets > verified-assets/assets.json
+          gh release download "$TAG" -R "$REPO" -D verified-assets
+      - name: Verify updater payloads and latest.json with the embedded public key
+        env:
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/verify_updater_assets.py \
+            --assets-dir verified-assets \
+            --assets-json verified-assets/assets.json \
+            --tauri-config src-tauri/tauri.conf.json \
+            --tag "$TAG" \
+            --repo "$REPO"
+      - name: Verify the exact draft bytes against immutable build digests
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/release_asset_manifest.py verify \
+            --assets-dir verified-assets \
+            --assets-json verified-assets/assets.json \
+            --manifests-dir trusted-release-digests \
+            --tag "$TAG" \
+            --portable-verifier .github/scripts/verify_portable_artifact.py
+      - name: Publish only after every artifact and cryptographic updater check passes
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}

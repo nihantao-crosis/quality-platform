@@ -236,18 +236,37 @@ export function rootMeanSquare(xs: number[]): number {
   return scale === 0 ? 0 : scale * Math.sqrt(sumSquares / xs.length);
 }
 
-export function median(xs: number[]): number {
-  const s = [...xs].sort((a, b) => a - b);
-  const n = s.length;
-  return n % 2 ? s[(n - 1) / 2] : (s[n / 2 - 1] + s[n / 2]) / 2;
+/** 中位数 = minitabQuantile(·, 0.5) 的薄封装(复审 P3:此前是第二份 p=0.5 实现,
+ * 与唯一分位数口径有 1 ulp 分歧,「全项目唯一分位数实现」的收口只做了一半)。 */
+export function median(xs: number[], presorted = false): number {
+  // 自审 P3:minitabQuantile 内部已排序,外层再排一次是纯浪费(已排序输入上慢 2.6×)
+  return minitabQuantile(xs, 0.5, presorted);
 }
 
-/** 分位数（线性插值），f ∈ [0,1] */
-export function quantile(xs: number[], f: number): number {
-  const s = [...xs].sort((a, b) => a - b);
-  const idx = (s.length - 1) * f;
-  const b = Math.floor(idx);
-  return s[b] + ((s[b + 1] - s[b]) || 0) * (idx - b);
+/**
+ * Minitab 分位数口径:位置 (n+1)p(1 基),相邻次序统计量线性插值,越界钳到端点。
+ * 契约(闭环 P3):空数组 → NaN;含 ±Infinity 时按次序统计量语义返回端点值而非 NaN;
+ * 含 NaN 的输入由调用方负责过滤(descriptive/formula 的入口已过滤)。
+ */
+export function minitabQuantile(xs: number[], p: number, presorted = false): number {
+  // presorted:调用方已排序时跳过拷贝+排序(descriptive 对同一列要取 q1/median/q3 三次)
+  const s = presorted ? xs : [...xs].sort((a, b) => a - b);
+  if (!s.length) return Number.NaN;
+  const position = (s.length + 1) * p;
+  if (position <= 1) return s[0];
+  if (position >= s.length) return s[s.length - 1];
+  const lower = Math.floor(position);
+  const fraction = position - lower;
+  const a = s[lower - 1];
+  const b = s[lower];
+  // 差值式在两种输入上失效:[Inf,Inf] 得 Inf-Inf=NaN;异号极值([-1e308,1e308])的差值上溢。
+  // 两道防护缺一不可(自审教训:曾以「与下一条重叠、变异测试检不出」为由删掉相等短路,
+  // 结果 n=3 这类**位置落在整数位次**的输入 fraction=0,加权式的 Inf*0 又是 NaN):
+  //   ① 两端相等 → 直接返回该值(覆盖 fraction=0/1 与 ±Infinity)
+  //   ② 差值非有限 → 两端加权(覆盖异号极值上溢)
+  if (a === b) return a;
+  if (!Number.isFinite(b - a)) return a * (1 - fraction) + b * fraction;
+  return a + (b - a) * fraction;
 }
 
 

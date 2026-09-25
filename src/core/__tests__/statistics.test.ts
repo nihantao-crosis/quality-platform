@@ -3,7 +3,7 @@
  * 与原型内置样本数据（种子 20260601）。
  */
 import { describe, it, expect } from 'vitest';
-import { phi, invNorm, binomCdf, mean, median, quantile } from '../basicMath';
+import { phi, invNorm, binomCdf, mean, median, minitabQuantile } from '../basicMath';
 import { evalRules, DEFAULT_RULES } from '../spc';
 import { capabilityInputError, computeCapability } from '../capability';
 import { analyzeDoe, mainEffectMeans, interactionMeans } from '../doe';
@@ -37,7 +37,10 @@ describe('基础数学', () => {
   it('median / quantile', () => {
     expect(median([3, 1, 2])).toBe(2);
     expect(median([4, 1, 3, 2])).toBe(2.5);
-    expect(quantile([1, 2, 3, 4], 0.5)).toBe(2.5);
+    expect(minitabQuantile([1, 2, 3, 4], 0.5)).toBe(2.5);
+    // Minitab (n+1)p 口径:1..10 的 Q1 位置 = 11×0.25 = 2.75
+    expect(minitabQuantile([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 0.25)).toBe(2.75);
+    expect(minitabQuantile([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 0.75)).toBe(8.25);
   });
 });
 

@@ -8,8 +8,8 @@ export const card: CSSProperties = {
   boxShadow: '0 1px 2px rgba(20,30,50,0.04)',
 };
 
-export function Card({ style, children }: { style?: CSSProperties; children: ReactNode }) {
-  return <div style={{ ...card, ...style }}>{children}</div>;
+export function Card({ className, style, children }: { className?: string; style?: CSSProperties; children: ReactNode }) {
+  return <div className={className} style={{ ...card, ...style }}>{children}</div>;
 }
 
 export function CardHeader({ title, right }: { title: ReactNode; right?: ReactNode }) {

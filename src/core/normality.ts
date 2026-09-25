@@ -17,14 +17,15 @@ export interface AdEvaluation {
   unavailableReason: string | null;
 }
 
-export function andersonDarling(xs: number[]): AdResult {
+export function andersonDarling(xs: number[], presorted = false): AdResult {
   const n = xs.length;
   if (n < 8) throw new Error('Anderson-Darling 检验至少需要 8 个观测');
   if (xs.some((value) => !Number.isFinite(value))) throw new Error('Anderson-Darling 检验只接受有限数值');
   const m = mean(xs);
   const s = stdev(xs, true);
   if (!(s > 0) || !Number.isFinite(s)) throw new Error('Anderson-Darling 检验要求数据具有正的有限标准差');
-  const z = [...xs].sort((a, b) => a - b).map((x) => (x - m) / s);
+  // presorted:调用方(computeDescriptive)已排序时跳过重复排序
+  const z = (presorted ? xs : [...xs].sort((a, b) => a - b)).map((x) => (x - m) / s);
   const EPS = 1e-12;
   let sum = 0;
   for (let i = 0; i < n; i++) {
@@ -73,9 +74,10 @@ export function evaluateAndersonDarling(xs: number[]): AdEvaluation {
 export function probPlotPoints(xs: number[]): Array<{ x: number; z: number }> {
   const n = xs.length;
   const sorted = [...xs].sort((a, b) => a - b);
-  // 中位秩（Benard 近似）
+  // 中位秩(Benard 近似 (i−0.3)/(n+0.4),与 Minitab 概率图默认一致)。
+  // 第三轮 P3:此前公式实为 Blom (i−3/8)/(n+1/4),与注释/图注「中位秩」不符
   return sorted.map((x, i) => {
-    const pp = (i + 1 - 0.375) / (n + 0.25);
+    const pp = (i + 1 - 0.3) / (n + 0.4);
     return { x, z: invNorm(pp) };
   });
 }

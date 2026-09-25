@@ -1,12 +1,12 @@
 /** 应用外壳 — 菜单栏 → 工具栏 → (左导航 + 主内容) → 状态栏 + 弹窗/Toast + 全局快捷键。 */
 import { useEffect, useMemo } from 'react';
 import { useApp, resolveGageTolerance } from './store/appStore';
-import { useData, resolveCapabilityMeasurementData } from './store/dataStore';
+import { useData, resolveCapabilityMeasurementData, isCapabilityWarningAcknowledged } from './store/dataStore';
 import {
   capabilityInputError, computeCapability, computeGageRR, gageStudyData, GAGE_TOLERANCE, nf,
   effectiveGageSelection, prepareGageStudy, prepareSpcData, resolveNumericColumn,
 } from './core';
-import { platform } from './platform/adapter';
+import { errText, platform } from './platform/adapter';
 import { exportProject } from './platform/project';
 import { useAnalyses } from './store/analyses';
 import { chartTokens } from './ui/tokens';
@@ -28,20 +28,38 @@ import { GageRR, Anova, Pareto } from './ui/pages/SimplePages';
 import { Doe } from './ui/pages/Doe';
 import { Aql } from './ui/pages/Aql';
 
+const APPLICATION_SHORTCUT_KEYS = new Set(['n', 'z', 'y', 's', 'o', 'p', 'f']);
+
+/**
+ * 全局命令不得吞掉编辑器自身的撤销/重做等按键。closest 同时覆盖事件落在
+ * input 内图标/包装节点、或 contenteditable 的任意后代节点这两类情况。
+ */
+function isEditingTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false;
+  const editor = target.closest('input, textarea, select, [contenteditable]');
+  if (!editor) return false;
+  return !editor.hasAttribute('contenteditable') || editor.getAttribute('contenteditable') !== 'false';
+}
+
 export default function App() {
   const {
     page, openMenu, varOpen, setOpenMenu, setVarOpen, openModal, showToast, chartStyle, showGrid, lsl, usl, tgt, lslOn, busyOverlay, uslOn,
     spcType, spcDataLayout, spcValueCol, spcSubgroupCol, hypoTab, aqlLevel, aqlAQL, aqlRegime,
     gageUseReal, gageValueName, gagePartName, gageOperatorName, gageTolMode, gageTolValue, activeVar,
-    capSubgroupMode, capSubgroupSize, capValueCol, capSubgroupIdCol,
+    capSubgroupMode, capSubgroupSize, capValueCol, capSubgroupIdCol, capabilityWarningAcknowledgement,
   } = useApp();
   const { model: M, textCols, pendingCells } = useData();
   const T = chartTokens(chartStyle, showGrid);
   const cur = PAGES.find((p) => p.key === page) ?? PAGES[0];
-  const preparedSpc = prepareSpcData(M, textCols, {
-    layout: spcDataLayout, valueColumn: spcValueCol, subgroupColumn: spcSubgroupCol,
-    pendingCells,
-  });
+  // 记忆化(双审 P2):O(N) 解析不得在每次任意 UI 状态变化时全量重跑(20 万行下每帧数百毫秒)。
+  // 同函数体内 preparedCap 早已 useMemo,此处对齐同一纪律。
+  const preparedSpc = useMemo(
+    () => prepareSpcData(M, textCols, {
+      layout: spcDataLayout, valueColumn: spcValueCol, subgroupColumn: spcSubgroupCol,
+      pendingCells,
+    }),
+    [M, textCols, pendingCells, spcDataLayout, spcValueCol, spcSubgroupCol],
+  );
   // 批次716-R3:壳层能力指标(能力页副标题/状态栏 Cpk)改走能力口径解析,与能力页/
   // 保存记录/专项报告完全同源;SPC 副标题与工作表列数仍使用上面的 preparedSpc,互不串扰。
   // resolver 内部含 prepareSpcData 成本,按口径输入记忆化,避免每次渲染重复解析;
@@ -52,14 +70,20 @@ export default function App() {
   );
   const capModel = preparedCap.model;
   const capSpec = { lsl: lslOn ? lsl : null, tgt, usl: uslOn ? usl : null };
-  const cap = capModel && capabilityInputError(capModel.all, capModel.sigmaWithin, capSpec) == null
-    ? computeCapability(capModel.all, capModel.sigmaWithin, capSpec)
+  const capWarningAcknowledged = capModel != null && isCapabilityWarningAcknowledged(
+    M, textCols, capModel, capSpec, capabilityWarningAcknowledgement,
+  );
+  const cap = capModel && capabilityInputError(capModel.all, capModel.sigmaWithin, capSpec, { allowDistantSpec: capWarningAcknowledged }) == null
+    ? computeCapability(capModel.all, capModel.sigmaWithin, capSpec, { allowDistantSpec: capWarningAcknowledged })
     : null;
   // Gage 角色经 effectiveGageSelection 与 MSA 页同源(未手选时用推荐,不再按列序猜)
-  const preparedGage = prepareGageStudy(M, textCols, {
-    ...effectiveGageSelection(M, textCols, { value: gageValueName, part: gagePartName, operator: gageOperatorName }),
-    pendingCells,
-  });
+  const preparedGage = useMemo(
+    () => prepareGageStudy(M, textCols, {
+      ...effectiveGageSelection(M, textCols, { value: gageValueName, part: gagePartName, operator: gageOperatorName }),
+      pendingCells,
+    }),
+    [M, textCols, pendingCells, gageValueName, gagePartName, gageOperatorName],
+  );
   const requestedRealGage = !M.isDemo && gageUseReal;
   let gageRR: number | null = null;
   if (!requestedRealGage) {
@@ -73,22 +97,32 @@ export default function App() {
   // 全局快捷键（菜单栏标注的 Ctrl+S/O/P/N;输入控件聚焦时不劫持）
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (useApp.getState().busyOverlay) { e.preventDefault(); return; } // 事务遮罩期间禁用全部快捷键
-      if (e.key === 'F1') {
-        e.preventDefault();
-        useApp.getState().openModal('help');
+      const s = useApp.getState();
+      if (s.busyOverlay) { e.preventDefault(); return; } // 事务遮罩期间禁用全部快捷键
+      const modifier = e.metaKey || e.ctrlKey;
+      const key = e.key.toLowerCase();
+      const editingTarget = isEditingTarget(e.target);
+
+      // 对话框是独立交互上下文：应用壳快捷键绝不能穿透到被遮住的工作表。
+      // 文本编辑器内的撤销/重做仍交给浏览器，其余壳命令同时阻止浏览器默认动作。
+      if (s.modal) {
+        if (e.key === 'F1' || (modifier && APPLICATION_SHORTCUT_KEYS.has(key))) {
+          if (!editingTarget || (key !== 'z' && key !== 'y')) e.preventDefault();
+        }
         return;
       }
-      if (!(e.metaKey || e.ctrlKey)) return;
-      const tag = (e.target as HTMLElement)?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-      const s = useApp.getState();
-      const k = e.key.toLowerCase();
+      if (e.key === 'F1') {
+        e.preventDefault();
+        s.openModal('help');
+        return;
+      }
+      if (!modifier || editingTarget) return;
+      const k = key;
       if (k === 's') {
         e.preventDefault();
-        exportProject(__APP_VERSION__, useApp.getState().projectName).then((dest) => {
+        exportProject(__APP_VERSION__, s.projectName).then((dest) => {
           if (dest) s.showToast('项目已保存: ' + dest);
-        }).catch((error) => s.showToast(`项目保存失败：${(error as Error).message}`));
+        }).catch((error) => s.showToast(`项目保存失败：${errText(error)}`));
       } else if (k === 'o') {
         e.preventDefault();
         s.openModal('import');
@@ -164,14 +198,23 @@ export default function App() {
   const analysisPage = page !== 'dashboard' && page !== 'assistant' && page !== 'worksheet';
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', minWidth: 1180, background: '#eef0f3', fontSize: 13, overflow: 'hidden' }}>
+    // 蜂群 P2-08:固定 minWidth:1180 + overflow:hidden 只有桌面壳(Tauri 最小窗口)能保证,
+    // Web/PWA、平板、高倍缩放、分屏下核心操作会大面积移出视口,只能靠横向平移。
+    // 桌面壳保留原约束;Web 端改为允许横向滚动 + 由 CSS 断点折叠侧栏(见 index.css)。
+    <div
+      className="app-root"
+      style={{
+        display: 'flex', flexDirection: 'column', height: '100vh',
+        background: '#eef0f3', fontSize: 13, overflow: 'hidden',
+      }}
+    >
       <MenuBar wsName={M.name} />
       <Toolbar />
 
-      <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
+      <div className="app-body" style={{ display: 'flex', flex: 1, minHeight: 0 }}>
         <SideNav />
         <main style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', background: '#eef0f3' }}>
-          <div style={{ display: 'flex', alignItems: 'center', padding: '14px 22px', background: '#fff', borderBottom: '1px solid #e0e4ea', flex: 'none' }}>
+          <div className="page-header" style={{ display: 'flex', alignItems: 'center', padding: '14px 22px', background: '#fff', borderBottom: '1px solid #e0e4ea', flex: 'none' }}>
             <div>
               <div style={{ fontSize: 17, fontWeight: 600, color: '#26303c', letterSpacing: '-0.01em' }}>{title}</div>
               <div style={{ fontSize: 12.5, color: '#8a929d', marginTop: 2 }}>{subtitle}</div>
@@ -196,7 +239,7 @@ export default function App() {
             </div>
           </div>
 
-          <div style={{ flex: 1, overflowY: 'auto', padding: '20px 22px 40px' }}>
+          <div className="page-content" style={{ flex: 1, overflowY: 'auto', padding: '20px 22px 40px' }}>
             <ErrorBoundary resetKey={page + '|' + M.name}>
               {page === 'dashboard' && <Dashboard T={T} />}
               {page === 'assistant' && <Assistant />}

@@ -4,15 +4,19 @@
  * 这里刻意复用页面相同的角色解析与 core 结构化报告，导出不得重新猜变量或回落演示。
  */
 import { renderToStaticMarkup } from 'react-dom/server';
+import { MAX_SPC_REPORT_DETAIL_ROWS, timestampText, reportSpecDetailText } from './reportLabels';
 import {
   analyzeFactorial,
   analyzeDoe,
   anovaGroups,
-  buildAnovaGroups,
+  buildAnovaInput,
   buildAnovaStructuredReport,
   buildAqlReportData,
+  buildDoeConclusion,
   buildDoeStructuredReport,
   capabilityInputError,
+  capabilitySpecDistanceWarning,
+  capabilityWarningFingerprint,
   computeCapability,
   computeDescriptive,
   computeVarModel,
@@ -27,7 +31,9 @@ import {
   ewmaSeries,
   factorialAdjustedMainMeans,
   factorialOptimizationDecision,
+  factorialOptimizationTerms,
   factorialModelTerms,
+  factorialHierarchyClosure,
   GAGE_TOLERANCE,
   gageStudyData,
   mainEffectMeans,
@@ -38,7 +44,6 @@ import {
   prepareGageStudy, effectiveGageSelection,
   prepareSpcData,
   resolveAnovaMode,
-  resolveAnovaNumericRoles,
   resolveDoeBlockValues,
   resolveNumericColumn,
   stageValidationError,
@@ -50,17 +55,19 @@ import {
   andersonDarling,
   type AnovaGroup,
   type DoeRunMetadata,
-  type VarModel,
+  type PointRuleSummary,
+  type RuleEvaluationResult,
+  type RuleNo,
+  type VarModel, type SpcChartFamily, spcChartFamilyFor,
   assessCapability, countCapabilityViolations,
 } from '../core';
 import { useApp, resolveGageTolerance, normalizeGageBatchCols } from '../store/appStore';
-import { resolveCapabilityMeasurementData, useData } from '../store/dataStore';
-import { expandSpcRuleItems } from '../store/analyses';
-import { paretoReport, spcReport } from '../ui/reportData';
+import { capabilitySpecKey, capabilitySubgroupSemantics, resolveCapabilityMeasurementData, useData } from '../store/dataStore';
+import { paretoReport, spcReport, type SpcViolationSummary } from '../ui/reportData';
 import { chartTokens } from '../ui/tokens';
 import { ControlChart } from '../ui/charts/ControlChart';
 import { NormalProbPlot, residualAxisScale } from '../ui/charts/NormalProbPlot';
-import { BoxPlot, IndividualValuePlot, IntervalPlot, ParetoChart, MiniHist } from '../ui/charts/misc';
+import { BoxPlot, IndividualValuePlot, IntervalPlot, ParetoChart, MiniHist, groupedPlotWindow } from '../ui/charts/misc';
 import { GageReportFigure, gageBarCategories } from '../ui/charts/gagePanels';
 import { ScatterPlot } from '../ui/charts/ScatterPlot';
 import { Histogram } from '../ui/charts/Histogram';
@@ -72,10 +79,14 @@ import { loadFishboneState } from '../store/fishboneStore';
 import type { AnalysisReportChart, AnalysisReportPayload } from './analysisReportModel';
 
 const T = chartTokens('经典', true);
-const now = () => new Date().toLocaleString('zh-CN', { hour12: false });
+const now = timestampText; // 合一:与四格式同一时间戳实现
+// 第三轮 P2:图表标题/轴标签里的用户文本可携带 XML 非法控制字符,SVG 非良构会让
+// Word/PPT 位图化整体失败并静默降级为占位文案——在唯一序列化出口统一剥离
+// eslint-disable-next-line no-control-regex -- 目标正是剥离 XML 非法控制字符
+const cleanSvgMarkup = (markup: string): string => markup.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\uFFFE\uFFFF]/g, '');
 const svgChart = (title: string, element: React.ReactElement, width: number, height: number, note?: string): AnalysisReportChart => ({
   title,
-  svg: renderToStaticMarkup(element),
+  svg: cleanSvgMarkup(renderToStaticMarkup(element)),
   width,
   height,
   note,
@@ -86,6 +97,180 @@ const fmt = (value: number | null | undefined, digits = 4) => {
   if (value === -Infinity) return '−∞';
   return nf(value, digits);
 };
+
+/**
+ * 专项报告的判异路径不构建滑窗触发 list；引擎用 1 byte/点的 bit mask
+ * 统计完整的点×准则命中，只将前 2 万条交给格式层。
+ */
+const SPC_REPORT_RULE_OPTIONS = {
+  collectDetails: false,
+  pointRuleDetailLimit: MAX_SPC_REPORT_DETAIL_ROWS,
+} as const;
+
+type ReportRuleEvaluation = Pick<RuleEvaluationResult, 'viol' | 'pointRuleSummary'>;
+
+function requirePointRuleSummary(evaluation: ReportRuleEvaluation): PointRuleSummary {
+  if (!evaluation.pointRuleSummary) throw new Error('SPC 专项报告缺少有界判异统计');
+  return evaluation.pointRuleSummary;
+}
+
+function reportRuleItems(
+  evaluation: ReportRuleEvaluation,
+  chartLabel: string,
+  indexOffset = 0,
+) {
+  return requirePointRuleSummary(evaluation).items.map((item) => ({
+    ...item,
+    i: item.i + indexOffset,
+    chartLabel,
+  }));
+}
+
+function combineRuleSummaries(
+  evaluations: ReadonlyArray<{ evaluation: ReportRuleEvaluation; indexOffset?: number }>,
+): SpcViolationSummary {
+  const affected = new Set<number>();
+  const byRule: Partial<Record<number, number>> = {};
+  let pointRuleHitCount = 0;
+  for (const { evaluation, indexOffset = 0 } of evaluations) {
+    const summary = requirePointRuleSummary(evaluation);
+    pointRuleHitCount += summary.total;
+    evaluation.viol.forEach((index) => affected.add(index + indexOffset));
+    for (const [rawRule, count] of Object.entries(summary.byRule)) {
+      const rule = Number(rawRule) as RuleNo;
+      byRule[rule] = (byRule[rule] ?? 0) + (count ?? 0);
+    }
+  }
+  return { pointRuleHitCount, affectedPointCount: affected.size, byRule };
+}
+
+function spcDetailNote(summary: SpcViolationSummary, shown: number, suffix?: string): string {
+  const bounded = summary.pointRuleHitCount > shown
+    ? `共 ${summary.pointRuleHitCount} 条去重的点-准则命中，为保证导出安全仅保留前 ${shown} 条；未导出的明细请缩小数据范围或减少启用的判异准则。`
+    : `共 ${summary.pointRuleHitCount} 条去重的点-准则命中。`;
+  return suffix ? `${bounded}${suffix}` : bounded;
+}
+
+function boundedReportTableNote(base: string, totalRows: number, shownRows: number): string {
+  if (totalRows <= shownRows) return base;
+  return `${base}原始数据共 ${totalRows.toLocaleString()} 行，为保证导出的内存与格式安全，仅物化前 ${shownRows.toLocaleString()} 行。`;
+}
+
+function boundedGroupedValueRows(
+  groups: ReadonlyArray<{ name: string; vals: readonly number[] }>,
+): Array<Array<string | number>> {
+  const rows: Array<Array<string | number>> = [];
+  for (const group of groups) {
+    for (let index = 0; index < group.vals.length && rows.length < MAX_SPC_REPORT_DETAIL_ROWS; index++) {
+      rows.push([group.name, index + 1, fmt(group.vals[index], 8)]);
+    }
+    if (rows.length >= MAX_SPC_REPORT_DETAIL_ROWS) break;
+  }
+  return rows;
+}
+
+function boundedAnovaObservationRows(
+  groups: ReadonlyArray<{ name: string; vals: readonly number[]; rowIndices?: readonly number[] }>,
+  preserveWorksheetOrder: boolean,
+): Array<Array<string | number>> {
+  if (!preserveWorksheetOrder) {
+    const rows: Array<Array<string | number>> = [];
+    for (const group of groups) {
+      for (let index = 0; index < group.vals.length && rows.length < MAX_SPC_REPORT_DETAIL_ROWS; index++) {
+        // ANOVA 原始观测表的首列是「组内序号」；t2 的原始表才是「组名」在前。
+        // 两者不能共用 boundedGroupedValueRows 的列序，否则演示 ANOVA
+        // 会在导出中把因子名写进「组内序号」列。
+        rows.push([index + 1, group.name, fmt(group.vals[index], 8)]);
+      }
+      if (rows.length >= MAX_SPC_REPORT_DETAIL_ROWS) break;
+    }
+    return rows;
+  }
+
+  type Cursor = { group: number; index: number; row: number };
+  const heap: Cursor[] = [];
+  const less = (left: Cursor, right: Cursor) => left.row < right.row
+    || (left.row === right.row && left.group < right.group);
+  const push = (cursor: Cursor) => {
+    heap.push(cursor);
+    let index = heap.length - 1;
+    while (index > 0) {
+      const parent = (index - 1) >>> 1;
+      if (!less(heap[index], heap[parent])) break;
+      [heap[index], heap[parent]] = [heap[parent], heap[index]];
+      index = parent;
+    }
+  };
+  const pop = (): Cursor | undefined => {
+    const first = heap[0];
+    const last = heap.pop();
+    if (!first || !last || heap.length === 0) return first;
+    heap[0] = last;
+    let index = 0;
+    while (true) {
+      const left = index * 2 + 1;
+      const right = left + 1;
+      let smallest = index;
+      if (left < heap.length && less(heap[left], heap[smallest])) smallest = left;
+      if (right < heap.length && less(heap[right], heap[smallest])) smallest = right;
+      if (smallest === index) break;
+      [heap[index], heap[smallest]] = [heap[smallest], heap[index]];
+      index = smallest;
+    }
+    return first;
+  };
+
+  groups.forEach((group, groupIndex) => {
+    const first = group.rowIndices?.[0];
+    if (first != null) push({ group: groupIndex, index: 0, row: first });
+  });
+  const rows: Array<Array<string | number>> = [];
+  while (heap.length > 0 && rows.length < MAX_SPC_REPORT_DETAIL_ROWS) {
+    const cursor = pop()!;
+    const group = groups[cursor.group];
+    rows.push([cursor.row + 1, group.name, fmt(group.vals[cursor.index], 8)]);
+    const nextIndex = cursor.index + 1;
+    const nextRow = group.rowIndices?.[nextIndex];
+    if (nextRow != null) push({ group: cursor.group, index: nextIndex, row: nextRow });
+  }
+  return rows;
+}
+
+function boundedViolationRows(
+  violations: ReadonlySet<number>,
+  pointCount: number,
+  description: string,
+): Array<Array<string | number>> {
+  const rows: Array<Array<string | number>> = [];
+  for (let index = 0; index < pointCount && rows.length < MAX_SPC_REPORT_DETAIL_ROWS; index++) {
+    if (violations.has(index)) rows.push([index + 1, description]);
+  }
+  return rows;
+}
+
+function violationCountsByStage(
+  violations: ReadonlySet<number>,
+  segments: ReadonlyArray<{ start: number; end: number }>,
+): number[] {
+  const counts = new Array<number>(segments.length).fill(0);
+  // Set 的插入顺序可能受多条准则先后影响，不假定点号已排序；每点二分定位阶段，
+  // 仍将旧实现“每段展开整个 Set”的 O(S×V) 收口为 O(V log S)。
+  for (const point of violations) {
+    let low = 0;
+    let high = segments.length - 1;
+    while (low <= high) {
+      const middle = (low + high) >>> 1;
+      const segment = segments[middle];
+      if (point < segment.start) high = middle - 1;
+      else if (point > segment.end) low = middle + 1;
+      else {
+        counts[middle]++;
+        break;
+      }
+    }
+  }
+  return counts;
+}
 const dispositionLabel = (value: string) => ({
   none: '无不合格品', unrecorded: '未记录处置状态', pending: '已隔离，待负责部门处置', reworked: '已返工并按要求复验',
   replaced: '已替换', scrapped: '已报废', concession: '已批准让步接收',
@@ -123,6 +308,7 @@ function buildSummaryPayload(): AnalysisReportPayload {
   const normality = d.adAvailable
     ? `Anderson-Darling A²=${fmt(d.ad.a2star, 4)}，P=${fmt(d.ad.p, 6)}；${d.ad.normal ? '未拒绝正态假设' : '显著偏离正态'}。`
     : `当前 N=${d.n}，不足以运行 Anderson-Darling 正态检验。`;
+  const rawSummaryRows = Math.min(selected.values.length, MAX_SPC_REPORT_DETAIL_ROWS);
   return {
     kind: 'summary',
     usesWorksheet: true,
@@ -147,12 +333,17 @@ function buildSummaryPayload(): AnalysisReportPayload {
       {
         title: '用于汇总的原始观测',
         headers: ['工作表行', selected.name],
-        rows: selected.values.map((value, index) => [index + 1, fmt(value, 10)]),
-        note: '本报告一次只使用一个数值列，不会展平或合并其他量纲的变量。',
+        rows: selected.values.slice(0, rawSummaryRows).map((value, index) => [index + 1, fmt(value, 10)]),
+        totalRows: selected.values.length,
+        note: boundedReportTableNote(
+          '本报告一次只使用一个数值列，不会展平或合并其他量纲的变量。',
+          selected.values.length,
+          rawSummaryRows,
+        ),
       },
     ],
     charts: [
-      svgChart('直方图与正态曲线', <Histogram T={T} data={selected.values} mu={d.mean} sigmaWithin={d.stdev} sigmaOverall={d.stdev} lsl={null} usl={null} tgt={d.mean} bins={13} h={300} />, 960, 300),
+      svgChart('直方图与正态曲线', <Histogram T={T} data={selected.values} mu={d.mean} sigmaWithin={d.stdev} sigmaOverall={d.stdev} lsl={null} usl={null} tgt={d.mean} tgtLabel="均值" bins={13} h={300} />, 960, 300),
       svgChart('正态概率图', <NormalProbPlot T={T} data={selected.values} h={300} />, 960, 300),
     ],
   };
@@ -264,12 +455,10 @@ function buildAnovaPayload(): AnalysisReportPayload {
     if (pendingCount > 0) {
       return unrunPayload('anova', '单因子 ANOVA 专项报告', M.name, `当前 ANOVA 使用列中还有 ${pendingCount} 个待录入单元格；已拦截将占位值当作实测值的 F/P 计算。`);
     }
-    const roles = resolveAnovaNumericRoles(M.colNames, rows, app.anovaRespName, app.anovaFactorName);
-    responseName = mode === 'wide' ? '测量值' : M.colNames[roles.respIdx] ?? app.anovaRespName ?? '响应';
-    factorName = mode === 'stacked'
-      ? (app.anovaFactorName ?? eligibleText[0]?.name ?? '分组')
-      : mode === 'numfactor' ? (M.colNames[roles.factorIdx] ?? app.anovaFactorName ?? '因子') : '测量列';
-    const built = buildAnovaGroups(mode, M.colNames, rows, eligibleText, responseName, factorName);
+    const input = buildAnovaInput(mode, M.colNames, rows, eligibleText, app.anovaRespName, app.anovaFactorName);
+    responseName = input.roles.responseName;
+    factorName = input.roles.factorName;
+    const built = input.groups;
     if (!built) {
       return unrunPayload('anova', '单因子 ANOVA 专项报告', `${responseName} vs ${factorName}`, '所选因子/响应角色无法形成有效分组；请确认因子至少有 2 个水平，且每个水平至少 2 个观测。');
     }
@@ -284,12 +473,11 @@ function buildAnovaPayload(): AnalysisReportPayload {
   const error = report.sources[1];
   const residuals = report.diagnostics.residuals;
   const hasWorksheetRows = groups.every((group) => group.rowIndices?.length === group.vals.length);
-  const observations = groups.flatMap((group, groupIndex) => group.vals.map((value, index) => ({
-    row: hasWorksheetRows ? group.rowIndices![index] + 1 : index + 1,
-    groupIndex,
-    factor: group.name,
-    value,
-  }))).sort((a, b) => hasWorksheetRows ? a.row - b.row || a.groupIndex - b.groupIndex : a.groupIndex - b.groupIndex || a.row - b.row);
+  const observationCount = groups.reduce((sum, group) => sum + group.vals.length, 0);
+  const observationRows = boundedAnovaObservationRows(groups, hasWorksheetRows);
+  const residualRowCount = Math.min(residuals.length, MAX_SPC_REPORT_DETAIL_ROWS);
+  const groupRowCount = Math.min(report.groups.length, MAX_SPC_REPORT_DETAIL_ROWS);
+  const groupChartNote = groupedPlotWindow(groups).note;
   return {
     kind: 'anova',
     usesWorksheet: !isDemo,
@@ -305,13 +493,19 @@ function buildAnovaPayload(): AnalysisReportPayload {
     warnings: [
       isDemo ? '本报告使用内置的「设备 A/B/C × 直径」演示研究，不得当作用户数据结论。' : '',
       groups.some((group) => group.vals.length < 5) ? '存在样本量小于 5 的组，检验功效有限，建议补充重复观测。' : '',
+      groupChartNote ? `分组图${groupChartNote}可在分析页翻页查看其他组。` : '',
     ].filter(Boolean),
     tables: [
       {
         title: '用于 ANOVA 的原始观测',
         headers: [hasWorksheetRows ? '工作表行' : '组内序号', factorName, responseName],
-        rows: observations.map((observation) => [observation.row, observation.factor, fmt(observation.value, 8)]),
-        note: '该表保留实际分组角色和响应值，可用于复核方差分析。',
+        rows: observationRows,
+        totalRows: observationCount,
+        note: boundedReportTableNote(
+          '该表保留实际分组角色和响应值，可用于复核方差分析。',
+          observationCount,
+          observationRows.length,
+        ),
       },
       {
         title: '方差分析表',
@@ -321,17 +515,19 @@ function buildAnovaPayload(): AnalysisReportPayload {
       {
         title: '分组描述统计与合并误差置信区间',
         headers: ['组', 'N', '均值', '标准差', '95% CI 下限', '95% CI 上限'],
-        rows: report.groups.map((group) => [group.name, group.n, fmt(group.mean), fmt(group.stDev), fmt(group.ciLow), fmt(group.ciHigh)]),
+        rows: report.groups.slice(0, groupRowCount).map((group) => [group.name, group.n, fmt(group.mean), fmt(group.stDev), fmt(group.ciLow), fmt(group.ciHigh)]),
+        totalRows: report.groups.length,
       },
       {
         title: '残差诊断数据',
         headers: ['观测序', '拟合值', '残差'],
-        rows: residuals.map((residual, index) => [index + 1, fmt(report.diagnostics.fits[index]), fmt(residual)]),
+        rows: residuals.slice(0, residualRowCount).map((residual, index) => [index + 1, fmt(report.diagnostics.fits[index]), fmt(residual)]),
+        totalRows: residuals.length,
       },
     ],
     charts: [
-      svgChart('个体值图', <IndividualValuePlot T={T} groups={groups} />, 960, 320),
-      svgChart('均值与 95% 置信区间', <IntervalPlot T={T} groups={groups} pooledError={{ mse: error.ms ?? 0, df: error.df }} />, 960, 320),
+      svgChart('个体值图', <IndividualValuePlot T={T} groups={groups} />, 960, 320, groupChartNote || undefined),
+      svgChart('均值与 95% 置信区间', <IntervalPlot T={T} groups={groups} pooledError={{ mse: error.ms ?? 0, df: error.df }} />, 960, 320, groupChartNote || undefined),
       svgChart('残差正态概率图', <NormalProbPlot T={T} data={residuals} h={280} />, 960, 280),
     ],
   };
@@ -355,6 +551,7 @@ function buildHypothesisPayload(): AnalysisReportPayload {
     const pending = pendingIn([column]);
     if (pending > 0) return unrunPayload('t1', '单样本 t 检验专项报告', `${columnName} vs μ₀=${fmt(mu0, 8)}`, `所选测量列还有 ${pending} 个待录入单元格。`);
     const values = M.subs.map((sub) => sub.vals[column]);
+    const rawRowCount = Math.min(values.length, MAX_SPC_REPORT_DETAIL_ROWS);
     try {
       const result = oneSampleT(values, mu0);
       return {
@@ -364,7 +561,11 @@ function buildHypothesisPayload(): AnalysisReportPayload {
           : `t(${fmt(result.df, 2)})=${fmt(result.t, 5)}，P=${fmt(result.p, 6)}；当前样本未提供总体均值偏离目标的充分证据（双侧 α=0.05）。这不等于过程已对准目标或已满足等效性要求。`],
         warnings: M.isDemo ? ['当前为出厂演示数据集，不得当作用户过程结论。'] : [],
         tables: [
-          { title: '原始样本', headers: ['观测', columnName], rows: values.map((value, index) => [index + 1, fmt(value, 8)]) },
+          {
+            title: '原始样本', headers: ['观测', columnName],
+            rows: values.slice(0, rawRowCount).map((value, index) => [index + 1, fmt(value, 8)]),
+            totalRows: values.length,
+          },
           { title: '检验结果', headers: ['N', '均值', 'μ₀', 't', 'df', 'P', '95% CI 下限', '95% CI 上限', 'SE'], rows: [[values.length, fmt(result.estimate), fmt(mu0), fmt(result.t), fmt(result.df, 2), fmt(result.p, 6), fmt(result.ciLow), fmt(result.ciHigh), fmt(result.se)]] },
         ],
         charts: [svgChart(`${columnName} 的箱线图`, <BoxPlot T={T} groups={[{ name: columnName, vals: values }]} />, 960, 320)],
@@ -395,6 +596,8 @@ function buildHypothesisPayload(): AnalysisReportPayload {
     if (pending > 0) return unrunPayload('t2', '双样本 t 检验专项报告', `${groups[0].name} vs ${groups[1].name}`, `所选样本列还有 ${pending} 个待录入单元格。`);
     try {
       const result = twoSampleT(groups[0].vals, groups[1].vals);
+      const observationCount = groups.reduce((sum, group) => sum + group.vals.length, 0);
+      const sampleRows = boundedGroupedValueRows(groups);
       return {
         kind: 't2', usesWorksheet: true, title: '双样本 t 检验（Welch）专项报告', subtitle: `${groups[0].name} vs ${groups[1].name}`, generatedAt: now(),
         summary: [result.significant
@@ -402,7 +605,10 @@ function buildHypothesisPayload(): AnalysisReportPayload {
           : `t(${fmt(result.df, 2)})=${fmt(result.t, 5)}，P=${fmt(result.p, 6)}；当前样本未提供两组总体均值不同的充分证据（Welch 不等方差，双侧 α=0.05）。这不等于两组均值相同或等效。`],
         warnings: M.isDemo ? ['当前为出厂演示数据集。'] : [],
         tables: [
-          { title: '原始样本', headers: ['样本', '组内序号', '观测'], rows: groups.flatMap((group) => group.vals.map((value, index) => [group.name, index + 1, fmt(value, 8)])) },
+          {
+            title: '原始样本', headers: ['样本', '组内序号', '观测'], rows: sampleRows,
+            totalRows: observationCount,
+          },
           { title: '检验结果', headers: ['均值差', 't', 'df', 'P', '95% CI 下限', '95% CI 上限', 'SE'], rows: [[fmt(result.estimate), fmt(result.t), fmt(result.df, 2), fmt(result.p, 6), fmt(result.ciLow), fmt(result.ciHigh), fmt(result.se)]] },
         ],
         charts: [svgChart('双样本箱线图', <BoxPlot T={T} groups={groups} />, 960, 320)],
@@ -432,7 +638,11 @@ function buildHypothesisPayload(): AnalysisReportPayload {
         : `${yName} = ${fmt(result.intercept, 6)} ${result.slope >= 0 ? '+' : '−'} ${fmt(Math.abs(result.slope), 6)} × ${xName}；R²=${fmt(result.r2, 5)}，P=${fmt(result.p, 6)}。当前样本未提供显著线性关系的充分证据；这不等于 X 与 Y 相互独立，也不能排除非线性关系。`],
       warnings: M.isDemo ? ['当前为出厂演示数据集。'] : [],
       tables: [
-        { title: '原始 X/Y 观测', headers: ['行', xName, yName], rows: xs.map((value, index) => [index + 1, fmt(value, 8), fmt(ys[index], 8)]) },
+        {
+          title: '原始 X/Y 观测', headers: ['行', xName, yName],
+          rows: xs.slice(0, MAX_SPC_REPORT_DETAIL_ROWS).map((value, index) => [index + 1, fmt(value, 8), fmt(ys[index], 8)]),
+          totalRows: xs.length,
+        },
         { title: '回归统计', headers: ['N', '相关系数 r', 'R²', '截距', '斜率', 't', 'df', 'P'], rows: [[result.n, fmt(result.r), fmt(result.r2), fmt(result.intercept), fmt(result.slope), fmt(result.t), result.df, fmt(result.p, 6)]] },
       ],
       charts: [svgChart('散点图与最小二乘回归线', <ScatterPlot T={T} xs={xs} ys={ys} slope={result.slope} intercept={result.intercept} xLabel={xName} yLabel={yName} />, 960, 320)],
@@ -610,9 +820,12 @@ function buildDoePayload(): AnalysisReportPayload {
   const available = detected.design.factorNames.length > 4
     ? allTerms.filter((term) => term.split('×').length <= 2)
     : allTerms;
-  const selected = app.doeModelTerms?.filter((term) => available.includes(term));
+  const storedTerms = app.doeModelTerms?.filter((term) => available.includes(term));
+  const selected = storedTerms?.length
+    ? factorialHierarchyClosure(detected.design.factorNames, storedTerms, available)
+    : available;
   const result = (detected.design.factorNames.length <= 4 ? analyzeFactorial : analyzeFractionalFactorial)(detected.design, {
-    terms: selected?.length ? selected : available,
+    terms: selected,
     includeCurvature: app.doeIncludeCurvature,
   });
   const responseName = M.colNames[respIdx];
@@ -629,7 +842,6 @@ function buildDoePayload(): AnalysisReportPayload {
     );
   }
   const report = buildDoeStructuredReport(detected.design, result, responseName, doeRunMetadata(M.colNames, rows, data.textCols));
-  const sig = report.coefficients.filter((term) => term.term !== '常量' && term.significant).map((term) => term.term);
   const main = factorialAdjustedMainMeans(result, detected.design);
   const isT = result.method === 'ttest';
   const finiteT = result.terms.map((term) => Math.abs(term.tStat ?? 0)).filter(Number.isFinite);
@@ -644,6 +856,7 @@ function buildDoePayload(): AnalysisReportPayload {
     result.stdResiduals ? '标准化残差' : '残差',
   );
   const optimization = factorialOptimizationDecision(result, detected.design);
+  const optimizationTerms = factorialOptimizationTerms(result, detected.design);
   const uniqueSettings = optimization.status === 'unique' && optimization.optimum
     ? optimization.optimum.factorValues.map((value, index) =>
       `${detected.design.factorNames[index]}=${fmt(value, 6)}(${optimization.optimum!.coded[index] > 0 ? '高' : '低'})`).join('、')
@@ -657,13 +870,21 @@ function buildDoePayload(): AnalysisReportPayload {
     ? optimization.optimum?.ties.slice(0, 4).map((corner) => corner.factorValues.map((value, index) =>
       `${detected.design.factorNames[index]}=${fmt(value, 6)}(${corner.coded[index] > 0 ? '高' : '低'})`).join('、')).join('；')
     : '';
-  const optimizationSummary = optimization.status === 'no-significant-effect'
-    ? '当前未检出显著工艺效应，不推荐任意角点作为最优设置；建议增加重复或中心点。'
-    : optimization.status === 'significant-curvature'
-      ? '中心点曲率显著，两水平线性模型不能可靠给出最优角点；应升级为响应曲面设计。'
-      : optimization.status === 'tied'
-        ? `当前模型有 ${optimization.optimum!.ties.length} 个并列最大角点，无唯一最优组合；共同设置为：${fixedSettings || '无（所有因子均存在并列设置）'}；并列组合：${tiedSettings}${optimization.optimum!.ties.length > 4 ? `；另有 ${optimization.optimum!.ties.length - 4} 个` : ''}。`
-        : `按当前完整拟合模型枚举角点，唯一最大组合为：${uniqueSettings}；需用确认试验验证。`;
+  const optimizationSummary = buildDoeConclusion({
+    status: optimization.status,
+    aliases: result.aliases,
+    hasSignificantInteraction: result.terms.some((term) => term.sig && term.name.includes('×')),
+    sigTermNames: optimizationTerms.significantTerms,
+    hierarchyParentNames: optimizationTerms.hierarchyParentTerms,
+    detail: result.method === 'ttest' ? `残差自由度 ${result.dfResid}` : 'Lenth 检验',
+    factorCount: detected.design.factorNames.length,
+    respName: responseName,
+    settings: optimization.status === 'tied'
+      ? `${tiedSettings}${optimization.optimum!.ties.length > 4 ? `；另有 ${optimization.optimum!.ties.length - 4} 个` : ''}`
+      : uniqueSettings,
+    tieCount: optimization.optimum?.ties.length,
+    fixedSettings,
+  });
   return {
     kind: 'doe',
     usesWorksheet: true,
@@ -671,7 +892,6 @@ function buildDoePayload(): AnalysisReportPayload {
     subtitle: `${M.name} · ${report.factors.length} 因子 · ${report.runCount} 运行 · 响应 ${responseName} · ${report.method === 'ttest' ? 't 检验' : 'Lenth 检验'}`,
     generatedAt: now(),
     summary: [
-      sig.length ? `显著项：${sig.join('、')}。` : '当前模型未检出显著效应项。',
       `模型项 ${report.model.requestedTerms.join('、') || '无'}；${report.model.includeCurvature ? '包含中心点曲率' : '不包含曲率'}；残差自由度 ${report.model.residualDf ?? '—'}。`,
       result.block ? `已将 ${result.block.levels.length} 个区组（DF=${result.block.df}）作为扰动项调整；主效应图为区组等权调整后的模型均值，与区组混杂的交互项不单独解释。` : '主效应图使用当前拟合模型的调整均值；未检测到多区组调整。',
       optimizationSummary,
@@ -689,10 +909,11 @@ function buildDoePayload(): AnalysisReportPayload {
       {
         title: '设计矩阵、拟合与残差',
         headers: ['行', '标准序', '运行序', '区组', '点类型', ...report.factors.map((factor) => factor.name), '观测', '拟合', '残差', '标准化残差'],
-        rows: report.runs.map((run) => [
+        rows: report.runs.slice(0, MAX_SPC_REPORT_DETAIL_ROWS).map((run) => [
           run.row, run.standardOrder ?? '—', run.runOrder, run.block ?? '—', run.pointType,
           ...run.factorValues.map((value) => fmt(value, 6)), fmt(run.observed), fmt(run.fitted), fmt(run.residual), fmt(run.standardizedResidual),
         ]),
+        totalRows: report.runs.length,
       },
       {
         title: '别名与可估计性',
@@ -729,6 +950,8 @@ function buildParetoPayload(): AnalysisReportPayload {
   // 人工审核720：页面、总览与专项报告固定展开全部类别；旧偏好中的 mergeOther 不再影响任何展示端。
   const report = paretoReport({ rows: source, mergeOther: false, threshold: app.paretoThreshold });
   const sourceName = hasImportedData ? model.name : '内置示例（非用户数据）';
+  const paretoSourceRows = Math.min(source.length, MAX_SPC_REPORT_DETAIL_ROWS);
+  const paretoRankedRows = Math.min(report.rows.length, MAX_SPC_REPORT_DETAIL_ROWS);
   return {
     kind: 'pareto',
     title: '帕累托分析专项报告',
@@ -740,14 +963,24 @@ function buildParetoPayload(): AnalysisReportPayload {
       {
         title: '导入的原始缺陷数据',
         headers: ['类别', '频数'],
-        rows: source.map((row) => [row.name, row.count]),
-        note: hasImportedData ? '保留导入时的全部类别；本版本不合并尾部类别。' : '内置演示原始数据。',
+        rows: source.slice(0, paretoSourceRows).map((row) => [row.name, row.count]),
+        totalRows: source.length,
+        note: boundedReportTableNote(
+          hasImportedData ? '统计与图形保留导入时的全部类别，不合并尾部类别。' : '内置演示原始数据。',
+          source.length,
+          paretoSourceRows,
+        ),
       },
       {
         title: '缺陷频数与累计贡献',
         headers: ['类别', '频数', '占比', '累计占比'],
-        rows: report.rows.map((row) => [row.name, row.count, `${fmt(row.percentage, 2)}%`, `${fmt(row.cumulativePercentage, 2)}%`]),
-        note: '固定展开全部类别，未启用尾部类别合并。',
+        rows: report.rows.slice(0, paretoRankedRows).map((row) => [row.name, row.count, `${fmt(row.percentage, 2)}%`, `${fmt(row.cumulativePercentage, 2)}%`]),
+        totalRows: report.rows.length,
+        note: boundedReportTableNote(
+          '统计口径固定展开全部类别，未启用尾部类别合并。',
+          report.rows.length,
+          paretoRankedRows,
+        ),
       },
     ],
     charts: [svgChart('帕累托图', <ParetoChart T={T} rows={report.rows.map((row) => ({ name: row.name, count: row.count }))} title={`${hasImportedData ? model.name : '示例数据'} 的 Pareto 图`} />, 960, 300)],
@@ -791,28 +1024,45 @@ function buildCapabilityPayload(): AnalysisReportPayload {
     tgt: app.tgt,
     usl: app.uslOn ? app.usl : null,
   };
-  const inputError = capabilityInputError(M.all, M.sigmaWithin, spec);
+  const specWarning = capabilitySpecDistanceWarning(M.all, M.sigmaWithin, spec);
+  const warningFingerprint = capabilityWarningFingerprint(
+    capabilitySpecKey(data.model, data.textCols) ?? `${data.model.name}:${prepared.variableName}`,
+    M.all,
+    M.sigmaWithin,
+    spec,
+    capabilitySubgroupSemantics(data.model, data.textCols) ?? '',
+  );
+  const warningAcknowledged = specWarning != null && warningFingerprint != null
+    && app.capabilityWarningAcknowledgement === warningFingerprint;
+  const inputError = capabilityInputError(M.all, M.sigmaWithin, spec, { allowDistantSpec: warningAcknowledged });
   if (inputError) return unrunPayload('capability', '过程能力分析专项报告', data.model.name, inputError, true);
-  const cap = computeCapability(M.all, M.sigmaWithin, spec);
+  const cap = computeCapability(M.all, M.sigmaWithin, spec, { allowDistantSpec: warningAcknowledged });
   const ad = M.all.length >= 8 ? andersonDarling(M.all) : null;
   // P0-4:与能力页/保存记录共用唯一判定器,失控时专项报告不得写「能力充足」而无警告。
+  const capabilitySpcModel = withSigmaMethod(M, app.spcSigmaMethod);
   const assessment = assessCapability({
     cpk: cap.cpk, verdict: cap.verdict, adP: ad ? ad.p : null, n: M.all.length,
-    spcViolations: countCapabilityViolations(M, app.spcRules, app.spcRuleK),
+    spcViolations: countCapabilityViolations(capabilitySpcModel, app.spcRules, app.spcRuleK, spcChartFamilyFor(capabilitySpcModel, app.spcType)),
   });
   const verdict = assessment.status;
+  const capabilitySourceRowCount = Math.min(
+    M.hasSubgroups ? M.subs.length : M.indiv.length,
+    MAX_SPC_REPORT_DETAIL_ROWS,
+  );
   const sourceTable = M.hasSubgroups
     ? {
         title: '用于能力分析的解析子组数据',
         headers: ['子组', ...M.colNames],
-        rows: M.subs.map((subgroup, index) => [prepared.subgroupLabels[index] ?? subgroup.i, ...subgroup.vals.map((value) => fmt(value, 8))]),
-        note: prepared.note,
+        rows: M.subs.slice(0, capabilitySourceRowCount).map((subgroup, index) => [prepared.subgroupLabels[index] ?? subgroup.i, ...subgroup.vals.map((value) => fmt(value, 8))]),
+        totalRows: M.subs.length,
+        note: boundedReportTableNote(prepared.note, M.subs.length, capabilitySourceRowCount),
       }
     : {
         title: '用于能力分析的解析单值数据',
         headers: ['观测', prepared.variableName],
-        rows: M.indiv.map((value, index) => [prepared.subgroupLabels[index] ?? index + 1, fmt(value, 8)]),
-        note: prepared.note,
+        rows: M.indiv.slice(0, capabilitySourceRowCount).map((value, index) => [prepared.subgroupLabels[index] ?? index + 1, fmt(value, 8)]),
+        totalRows: M.indiv.length,
+        note: boundedReportTableNote(prepared.note, M.indiv.length, capabilitySourceRowCount),
       };
   return {
     kind: 'capability',
@@ -822,12 +1072,13 @@ function buildCapabilityPayload(): AnalysisReportPayload {
     generatedAt: now(),
     summary: [
       `Cpk=${fmt(cap.cpk, 4)}，Ppk=${fmt(cap.ppk, 4)}，${verdict}。${assessment.spcViolations > 0 ? assessment.headline : ''}`,
-      `规格：${app.lslOn ? `LSL=${fmt(app.lsl, 6)}` : '无下限'} / Target=${fmt(app.tgt, 6)} / ${app.uslOn ? `USL=${fmt(app.usl, 6)}` : '无上限'}；${prepared.note}。`,
+      `规格：${reportSpecDetailText({ lsl: app.lslOn ? app.lsl : null, tgt: app.tgt, usl: app.uslOn ? app.usl : null }, 6)}；${prepared.note}。`,
       ad ? `Anderson-Darling A²*=${fmt(ad.a2star, 4)}，P=${fmt(ad.p, 6)}，${ad.normal ? '未拒绝正态性' : '显著偏离正态分布'}。` : '样本量不足 8，未执行 Anderson-Darling 正态性检验。',
     ],
     warnings: [
       assessment.spcViolations > 0 ? `控制图检出 ${assessment.spcViolations} 个失控点——过程不稳定，能力指标只描述当前样本，不能预测未来质量。` : '',
-      !app.lslOn || !app.uslOn ? '当前为单侧规格，Cp/Pp/Cpm 不适用；Cpk 退化为启用一侧的 CPU 或 CPL。' : '',
+      specWarning && warningAcknowledged ? `用户已对当前测量角色与 LSL/Target/USL 显式确认继续；${specWarning.message}，能力指标必须连同本警告解读。` : '',
+      !app.lslOn || !app.uslOn ? '当前为单侧规格，Cp/Pp 不适用；Cpm 按启用侧距离 (Minitab 单侧式) 计算；Cpk 退化为启用一侧的 CPU 或 CPL。' : '',
       ad && !ad.normal ? '数据显著偏离正态，正态分布能力指标需谨慎解释，并考虑 Box-Cox 或非正态能力方法。' : '',
     ].filter(Boolean),
     tables: [
@@ -896,7 +1147,7 @@ function buildGagePayload(): AnalysisReportPayload {
           fmt(grrRow?.sd, 6),
           fmt(grrRow?.studyVar, 6),
           fmt(grrRow?.pctStudyVar ?? r.totalGageRR, 2),
-          grrRow?.pctTolerance == null ? '未设' : fmt(grrRow.pctTolerance, 2),
+          grrRow?.pctTolerance == null ? (r.tolerance == null ? '未设' : '未计算') : fmt(grrRow.pctTolerance, 2),
           r.ndc === Infinity ? '∞' : String(r.ndc),
           factoryVerdict.label,
           aiagVerdict.label,
@@ -920,6 +1171,7 @@ function buildGagePayload(): AnalysisReportPayload {
     };
   }
   const observations = requestedReal && prepared.ok ? prepared.study.observations : gageStudyData();
+  const gageObservationRows = Math.min(observations.length, MAX_SPC_REPORT_DETAIL_ROWS);
   const tolerance = requestedReal
     ? resolveGageTolerance(app)
     : { mode: 'width' as const, value: GAGE_TOLERANCE };
@@ -994,12 +1246,13 @@ function buildGagePayload(): AnalysisReportPayload {
           ? single ? '导入的单操作员研究原始观测' : '导入的交叉研究原始观测'
           : '演示交叉研究原始观测',
         headers: ['部件', '操作员', '重复', realStudy?.valueName ?? '测量值'],
-        rows: observations.map((observation) => [
+        rows: observations.slice(0, gageObservationRows).map((observation) => [
           realStudy?.partLabels[observation.part] ?? observation.part + 1,
           realStudy?.operatorLabels[observation.operator] ?? observation.operator + 1,
           observation.trial + 1,
           fmt(observation.value, 8),
         ]),
+        totalRows: observations.length,
       },
       {
         title: '方差分量与研究变异',
@@ -1053,13 +1306,16 @@ function buildSpcPayload(): AnalysisReportPayload | undefined {
       app.spcRuleK,
       // P/C 图控制限有钳位,判异用真实 σ(与 SPC 页同口径)
       isP ? data.pModel.pNs.map((n) => Math.sqrt(cl * (1 - cl) / n)) : Math.sqrt(cl),
+      SPC_REPORT_RULE_OPTIONS,
     );
-    const items = expandSpcRuleItems(evaluated.viol, evaluated.list, isP ? 'P' : 'C', app.spcRuleK);
     const typeLabel = isP ? 'P' : 'C';
+    const items = reportRuleItems(evaluated, typeLabel);
+    const violationSummary = combineRuleSummaries([{ evaluation: evaluated }]);
     const modelName = isP ? data.pModel.name : data.cModel.name;
     const sampleSize = isP ? data.pModel.pNs : 1;
+    const sourceRowCount = Math.min(values.length, MAX_SPC_REPORT_DETAIL_ROWS);
     const report = spcReport({
-      violList: items, k: values.length, n: sampleSize, hasSubgroups: false,
+      violList: items, violationSummary, k: values.length, n: sampleSize, hasSubgroups: false,
       structure: isP ? 'attribute-p' : 'attribute-c', typeLabel,
       variableName: isP ? '不良率' : '单位缺陷数', dataRole: isP ? '不合格品数 / 每批检验数' : '每单位缺陷数',
     });
@@ -1070,15 +1326,16 @@ function buildSpcPayload(): AnalysisReportPayload | undefined {
         {
           title: `用于 ${typeLabel} 控制图的原始计数数据`,
           headers: isP ? ['样本', '不合格品数', '检验数', '不良率', 'LCL', 'UCL'] : ['单位', '缺陷数'],
-          rows: values.map((value, index) => isP
+          rows: values.slice(0, sourceRowCount).map((value, index) => isP
             ? [
                 index + 1, data.pModel.pdef[index], data.pModel.pNs[index], fmt(value, 8),
                 fmt(data.pModel.pLcls[index], 8), fmt(data.pModel.pUcls[index], 8),
               ]
             : [index + 1, data.cModel.cdata[index]]),
-          note: isP
+          totalRows: values.length,
+          note: boundedReportTableNote(isP
             ? `不良率 = 不合格品数 / 每批检验数；p̄ 按总不良数 / 总检验数计算，LCL/UCL 按每批 nᵢ 计算并截断到 [0,1]。${data.pModel.pVariableN ? '本数据使用逐批变化的样本量。' : ''}`
-            : '每个点为一个相同机会区域/单位的缺陷数。',
+            : '每个点为一个相同机会区域/单位的缺陷数。', values.length, sourceRowCount),
         },
         {
           title: '控制限', headers: ['图', 'CL', 'UCL', 'LCL', '异常点数'],
@@ -1087,10 +1344,16 @@ function buildSpcPayload(): AnalysisReportPayload | undefined {
             fmt(cl),
             isP && data.pModel.pVariableN ? '逐批见原始计数表' : fmt(ucl),
             isP && data.pModel.pVariableN ? '逐批见原始计数表' : fmt(lcl),
-            new Set(items.map((item) => item.i)).size,
+            evaluated.viol.size,
           ]],
         },
-        { title: '判异明细', headers: ['点', '准则', '说明'], rows: items.map((item) => [item.i + 1, item.rule, item.desc]), note: '属性图按适用性执行 Nelson/Minitab 准则 1–4。' },
+        {
+          title: '判异明细',
+          headers: ['点', '准则', '说明'],
+          rows: items.map((item) => [item.i + 1, item.rule, item.desc]),
+          totalRows: violationSummary.pointRuleHitCount,
+          note: spcDetailNote(violationSummary, items.length, '属性图按适用性执行 Nelson/Minitab 准则 1–4。'),
+        },
       ],
       charts: [svgChart(`${typeLabel} 控制图 · ${modelName}`, <ControlChart
         T={T} data={values} cl={cl} ucl={ucl} lcl={lcl} clLabel={isP ? 'p̄' : 'c̄'}
@@ -1132,32 +1395,50 @@ function buildSpcPayload(): AnalysisReportPayload | undefined {
     ? prepared.textCols.find((column) => column.name === app.spcStageCol)?.values
     : undefined;
   const sourceLabels = labelsFor(M.k);
+  const sourceRowCount = Math.min(M.hasSubgroups ? M.k : M.indiv.length, MAX_SPC_REPORT_DETAIL_ROWS);
   const spcSourceTable = M.hasSubgroups
     ? {
         title: '用于控制图的解析子组数据',
         headers: ['子组', ...(stageValues?.length === M.k ? ['阶段'] : []), ...M.colNames],
-        rows: M.subs.map((sub, index) => [
+        rows: M.subs.slice(0, sourceRowCount).map((sub, index) => [
           sourceLabels?.[index] ?? sub.i,
           ...(stageValues?.length === M.k ? [stageValues[index]] : []),
           ...sub.vals.map((value) => fmt(value, 8)),
         ]),
-        note: prepared.note,
+        totalRows: M.k,
+        note: boundedReportTableNote(prepared.note, M.k, sourceRowCount),
       }
     : {
         title: '用于控制图的解析单值数据',
         headers: ['观测', prepared.variableName],
-        rows: M.indiv.map((value, index) => [labelsFor(M.indiv.length)?.[index] ?? index + 1, fmt(value, 8)]),
-        note: prepared.note,
+        rows: M.indiv.slice(0, sourceRowCount).map((value, index) => [labelsFor(M.indiv.length)?.[index] ?? index + 1, fmt(value, 8)]),
+        totalRows: M.indiv.length,
+        note: boundedReportTableNote(prepared.note, M.indiv.length, sourceRowCount),
       };
 
   if (effectiveType === 'i-mr') {
-    const iEval = evalRules(M.indiv, M.indMean, (M.iUcl - M.indMean) / 3, app.spcRules, app.spcRuleK);
+    const iEval = evalRules(
+      M.indiv, M.indMean, (M.iUcl - M.indMean) / 3,
+      app.spcRules, app.spcRuleK, SPC_REPORT_RULE_OPTIONS,
+    );
     const mr = M.mr.slice(1) as number[];
-    const mrEval = evalLimitedRules(mr, M.mrbar, M.mrUcl, 0, app.spcRules, app.spcRuleK);
-    const iItems = expandSpcRuleItems(iEval.viol, iEval.list, 'I', app.spcRuleK);
-    const mrItems = expandSpcRuleItems(mrEval.viol, mrEval.list, 'MR', app.spcRuleK).map((item) => ({ ...item, i: item.i + 1 }));
+    const mrEval = evalLimitedRules(
+      mr, M.mrbar, M.mrUcl, 0,
+      app.spcRules, app.spcRuleK, undefined, SPC_REPORT_RULE_OPTIONS,
+    );
+    const iItems = reportRuleItems(iEval, 'I');
+    const mrItems = reportRuleItems(mrEval, 'MR', 1);
+    const violationSummary = combineRuleSummaries([
+      { evaluation: iEval },
+      { evaluation: mrEval, indexOffset: 1 },
+    ]);
+    const variationSummary = combineRuleSummaries([{ evaluation: mrEval, indexOffset: 1 }]);
+    const allItems = [...iItems, ...mrItems]
+      .sort((a, b) => a.i - b.i || a.rule - b.rule)
+      .slice(0, MAX_SPC_REPORT_DETAIL_ROWS);
     const report = spcReport({
-      violList: [...iItems, ...mrItems], variationViolations: mrItems, variationChartLabel: 'MR',
+      violList: allItems, violationSummary,
+      variationViolations: mrItems, variationSummary, variationChartLabel: 'MR',
       k: M.indiv.length, n: 1, hasSubgroups: false, structure: 'individual', typeLabel: 'I-MR',
       variableName: prepared.variableName, dataRole: prepared.note,
     });
@@ -1165,11 +1446,16 @@ function buildSpcPayload(): AnalysisReportPayload | undefined {
     return {
       kind: 'spc', title: 'I-MR 控制图专项报告', subtitle: `${prepared.variableName} · ${prepared.layoutLabel} · ${M.indiv.length} 个观测`, generatedAt: now(),
       summary: [report.headline, `判读顺序：${report.details.readingOrder}。`, prepared.note],
-      warnings: mrItems.length ? ['MR 图存在特殊原因信号，先调查相邻观测变异，再解释 I 图。'] : [],
+      warnings: mrEval.viol.size ? ['MR 图存在特殊原因信号，先调查相邻观测变异，再解释 I 图。'] : [],
       tables: [
         spcSourceTable,
-        { title: '控制限', headers: ['图', 'CL', 'UCL', 'LCL', '异常点数'], rows: [['I', fmt(M.indMean), fmt(M.iUcl), fmt(M.iLcl), new Set(iItems.map((item) => item.i)).size], ['MR', fmt(M.mrbar), fmt(M.mrUcl), '0', new Set(mrItems.map((item) => item.i)).size]] },
-        { title: '判异明细', headers: ['观测', '子图', '准则', '说明'], rows: [...iItems, ...mrItems].map((item) => [labels?.[item.i] ?? item.i + 1, item.chartLabel, item.rule, item.desc]) },
+        { title: '控制限', headers: ['图', 'CL', 'UCL', 'LCL', '异常点数'], rows: [['I', fmt(M.indMean), fmt(M.iUcl), fmt(M.iLcl), iEval.viol.size], ['MR', fmt(M.mrbar), fmt(M.mrUcl), '0', mrEval.viol.size]] },
+        {
+          title: '判异明细', headers: ['观测', '子图', '准则', '说明'],
+          rows: allItems.map((item) => [labels?.[item.i] ?? item.i + 1, item.chartLabel, item.rule, item.desc]),
+          totalRows: violationSummary.pointRuleHitCount,
+          note: spcDetailNote(violationSummary, allItems.length),
+        },
       ],
       charts: [
         svgChart(`${prepared.variableName} 的单值控制图 (I)`, <ControlChart T={T} data={M.indiv} cl={M.indMean} ucl={M.iUcl} lcl={M.iLcl} clLabel="X̄" zones={app.spcShowZones} dec={meanDec} h={250} violations={iEval.viol} xLabel={prepared.xAxisLabel} yLabel={`${prepared.variableName} · 单值`} xLabels={labels} />, 960, 250),
@@ -1191,7 +1477,12 @@ function buildSpcPayload(): AnalysisReportPayload | undefined {
     return {
       kind: 'spc', title: `${typeLabel} 控制图专项报告`, subtitle: `${prepared.variableName} · ${source.length} 个点`, generatedAt: now(),
       summary: [viol.size ? `${typeLabel} 检出 ${viol.size} 个超限点，存在小漂移/累积偏移信号。` : `${typeLabel} 未检出超限点。`, prepared.note], warnings: [],
-      tables: [spcSourceTable, { title: '超限点', headers: ['点', '说明'], rows: [...viol].sort((a, b) => a - b).map((index) => [index + 1, isEwma ? 'EWMA 超出时变控制限' : 'CUSUM 超出判定限 H']) }],
+      tables: [spcSourceTable, {
+        title: '超限点',
+        headers: ['点', '说明'],
+        rows: boundedViolationRows(viol, source.length, isEwma ? 'EWMA 超出时变控制限' : 'CUSUM 超出判定限 H'),
+        totalRows: viol.size,
+      }],
       charts: [svgChart(
         `${prepared.variableName} 的 ${typeLabel} 控制图`,
         <ControlChart
@@ -1214,24 +1505,40 @@ function buildSpcPayload(): AnalysisReportPayload | undefined {
   }
 
   if (effectiveType === 'xbar-s') {
-    const xEval = evalRules(means, M.xbarbar, (M.uclXs - M.xbarbar) / 3, app.spcRules, app.spcRuleK);
-    const sEval = evalLimitedRules(M.svals, M.sCl, M.uclS, M.lclS, app.spcRules, app.spcRuleK);
-    const xItems = expandSpcRuleItems(xEval.viol, xEval.list, 'X̄', app.spcRuleK);
-    const sItems = expandSpcRuleItems(sEval.viol, sEval.list, 'S', app.spcRuleK);
-    const all = [...xItems, ...sItems];
+    const xEval = evalRules(
+      means, M.xbarbar, (M.uclXs - M.xbarbar) / 3,
+      app.spcRules, app.spcRuleK, SPC_REPORT_RULE_OPTIONS,
+    );
+    const sEval = evalLimitedRules(
+      M.svals, M.sCl, M.uclS, M.lclS,
+      app.spcRules, app.spcRuleK, undefined, SPC_REPORT_RULE_OPTIONS,
+    );
+    const xItems = reportRuleItems(xEval, 'X̄');
+    const sItems = reportRuleItems(sEval, 'S');
+    const violationSummary = combineRuleSummaries([{ evaluation: xEval }, { evaluation: sEval }]);
+    const variationSummary = combineRuleSummaries([{ evaluation: sEval }]);
+    const all = [...xItems, ...sItems]
+      .sort((a, b) => a.i - b.i || a.rule - b.rule)
+      .slice(0, MAX_SPC_REPORT_DETAIL_ROWS);
     const report = spcReport({
-      violList: all, variationViolations: sItems, variationChartLabel: 'S',
+      violList: all, violationSummary,
+      variationViolations: sItems, variationSummary, variationChartLabel: 'S',
       k: M.k, n: M.n, hasSubgroups: true, structure: 'subgroup', typeLabel: 'X̄-S',
       variableName: prepared.variableName, dataRole: prepared.note,
     });
     const labels = labelsFor(M.k);
     return {
       kind: 'spc', title: 'X̄-S 控制图专项报告', subtitle: `${prepared.variableName} · ${prepared.layoutLabel} · ${M.k} 子组 × n=${M.n}`, generatedAt: now(),
-      summary: [report.headline, `判读顺序：${report.details.readingOrder}。`, prepared.note], warnings: sItems.length ? ['S 图存在特殊原因信号，先调查组内标准差异常，再解释 X̄ 图。'] : [],
+      summary: [report.headline, `判读顺序：${report.details.readingOrder}。`, prepared.note], warnings: sEval.viol.size ? ['S 图存在特殊原因信号，先调查组内标准差异常，再解释 X̄ 图。'] : [],
       tables: [
         spcSourceTable,
-        { title: '控制限', headers: ['图', 'CL', 'UCL', 'LCL', '异常点数'], rows: [['X̄', fmt(M.xbarbar), fmt(M.uclXs), fmt(M.lclXs), new Set(xItems.map((item) => item.i)).size], ['S', fmt(M.sCl), fmt(M.uclS), fmt(M.lclS), new Set(sItems.map((item) => item.i)).size]] },
-        { title: '判异明细', headers: ['子组', '子图', '准则', '说明'], rows: all.map((item) => [labels?.[item.i] ?? item.i + 1, item.chartLabel, item.rule, item.desc]) },
+        { title: '控制限', headers: ['图', 'CL', 'UCL', 'LCL', '异常点数'], rows: [['X̄', fmt(M.xbarbar), fmt(M.uclXs), fmt(M.lclXs), xEval.viol.size], ['S', fmt(M.sCl), fmt(M.uclS), fmt(M.lclS), sEval.viol.size]] },
+        {
+          title: '判异明细', headers: ['子组', '子图', '准则', '说明'],
+          rows: all.map((item) => [labels?.[item.i] ?? item.i + 1, item.chartLabel, item.rule, item.desc]),
+          totalRows: violationSummary.pointRuleHitCount,
+          note: spcDetailNote(violationSummary, all.length),
+        },
       ],
       charts: [
         svgChart(`${prepared.variableName} 的均值控制图 (X̄)`, <ControlChart T={T} data={means} cl={M.xbarbar} ucl={M.uclXs} lcl={M.lclXs} clLabel="X̄" zones={app.spcShowZones} dec={meanDec} h={250} violations={xEval.viol} xLabel={prepared.xAxisLabel} yLabel={`${prepared.variableName} · 子组均值`} xLabels={labels} />, 960, 250),
@@ -1255,18 +1562,36 @@ function buildSpcPayload(): AnalysisReportPayload | undefined {
   }
   const useStage = Boolean(stageValues);
   const staged = useStage ? {
-    x: stagedXbar(M.subs.map((sub) => sub.vals), stageValues!, app.spcRules, app.spcSigmaMethod, app.spcRuleK),
-    r: stagedRange(M.subs.map((sub) => sub.vals), stageValues!, app.spcRules, app.spcSigmaMethod, app.spcRuleK),
+    x: stagedXbar(
+      M.subs.map((sub) => sub.vals), stageValues!, app.spcRules,
+      app.spcSigmaMethod, app.spcRuleK, SPC_REPORT_RULE_OPTIONS,
+    ),
+    r: stagedRange(
+      M.subs.map((sub) => sub.vals), stageValues!, app.spcRules,
+      app.spcSigmaMethod, app.spcRuleK, SPC_REPORT_RULE_OPTIONS,
+    ),
   } : null;
   const x = staged ?? null;
-  const xEval = x ? { viol: x.x.viol, list: x.x.list } : evalRules(means, M.xbarbar, (M.uclX - M.xbarbar) / 3, app.spcRules, app.spcRuleK);
-  const rEval = x ? { viol: x.r.viol, list: x.r.list } : evalLimitedRules(ranges, M.rCl, M.uclR, M.lclR, app.spcRules, app.spcRuleK);
-  const xItems = expandSpcRuleItems(xEval.viol, xEval.list, 'X̄', app.spcRuleK);
-  const rItems = expandSpcRuleItems(rEval.viol, rEval.list, 'R', app.spcRuleK);
-  const all = [...xItems, ...rItems];
+  const xEval = x ? x.x : evalRules(
+    means, M.xbarbar, (M.uclX - M.xbarbar) / 3,
+    app.spcRules, app.spcRuleK, SPC_REPORT_RULE_OPTIONS,
+  );
+  const rEval = x ? x.r : evalLimitedRules(
+    ranges, M.rCl, M.uclR, M.lclR,
+    app.spcRules, app.spcRuleK, undefined, SPC_REPORT_RULE_OPTIONS,
+  );
+  const xItems = reportRuleItems(xEval, 'X̄');
+  const rItems = reportRuleItems(rEval, 'R');
+  const violationSummary = combineRuleSummaries([{ evaluation: xEval }, { evaluation: rEval }]);
+  const variationSummary = combineRuleSummaries([{ evaluation: rEval }]);
+  const all = [...xItems, ...rItems]
+    .sort((a, b) => a.i - b.i || a.rule - b.rule)
+    .slice(0, MAX_SPC_REPORT_DETAIL_ROWS);
+  const stagedXCounts = staged ? violationCountsByStage(xEval.viol, staged.x.segments) : null;
+  const stagedRCounts = staged ? violationCountsByStage(rEval.viol, staged.r.segments) : null;
   const report = spcReport({
-    violList: all,
-    variationViolations: rItems,
+    violList: all, violationSummary,
+    variationViolations: rItems, variationSummary,
     variationChartLabel: 'R',
     k: M.k,
     n: M.n,
@@ -1291,7 +1616,7 @@ function buildSpcPayload(): AnalysisReportPayload | undefined {
     subtitle: `${prepared.variableName} · ${prepared.layoutLabel} · ${M.k} 子组 × n=${M.n}`,
     generatedAt: now(),
     summary: [report.headline, `判读顺序：${report.details.readingOrder}。`, prepared.note],
-    warnings: rItems.length ? ['R 图存在特殊原因信号，均值图控制限暂不具备解释基础；应先调查并消除组内变异异常。'] : [],
+    warnings: rEval.viol.size ? ['R 图存在特殊原因信号，均值图控制限暂不具备解释基础；应先调查并消除组内变异异常。'] : [],
     tables: [
       spcSourceTable,
       {
@@ -1299,16 +1624,17 @@ function buildSpcPayload(): AnalysisReportPayload | undefined {
         headers: ['图', 'CL', 'UCL', 'LCL', '异常点数'],
         rows: staged
           ? staged.x.segments.flatMap((segment, index) => [
-              [`X̄ · ${segment.label}`, fmt(segment.cl), fmt(segment.ucl), fmt(segment.lcl), new Set(xItems.filter((item) => item.i >= segment.start && item.i <= segment.end).map((item) => item.i)).size],
-              [`R · ${staged.r.segments[index].label}`, fmt(staged.r.segments[index].cl), fmt(staged.r.segments[index].ucl), fmt(staged.r.segments[index].lcl), new Set(rItems.filter((item) => item.i >= segment.start && item.i <= segment.end).map((item) => item.i)).size],
+              [`X̄ · ${segment.label}`, fmt(segment.cl), fmt(segment.ucl), fmt(segment.lcl), stagedXCounts![index]],
+              [`R · ${staged.r.segments[index].label}`, fmt(staged.r.segments[index].cl), fmt(staged.r.segments[index].ucl), fmt(staged.r.segments[index].lcl), stagedRCounts![index]],
             ])
-          : [['X̄', fmt(M.xbarbar), fmt(M.uclX), fmt(M.lclX), new Set(xItems.map((item) => item.i)).size], ['R', fmt(M.rCl), fmt(M.uclR), fmt(M.lclR), new Set(rItems.map((item) => item.i)).size]],
+          : [['X̄', fmt(M.xbarbar), fmt(M.uclX), fmt(M.lclX), xEval.viol.size], ['R', fmt(M.rCl), fmt(M.uclR), fmt(M.lclR), rEval.viol.size]],
       },
       {
         title: '判异明细',
         headers: ['子组', '子图', '准则', '说明'],
         rows: all.map((item) => [labels?.[item.i] ?? item.i + 1, item.chartLabel, item.rule, item.desc]),
-        note: '准则定义与来源：Nelson (1984) / Minitab 特殊原因检验。',
+        totalRows: violationSummary.pointRuleHitCount,
+        note: spcDetailNote(violationSummary, all.length, '准则定义与来源：Nelson (1984) / Minitab 特殊原因检验。'),
       },
     ],
     charts: [
@@ -1338,7 +1664,7 @@ export function buildActiveAnalysisReport(): AnalysisReportPayload | undefined {
  * 例如“子组 + 5 个测量列”在原始工作表中是 6 个数值列，但 SPC 专项分析必须排除子组 ID；
  * Excel 的通用数据/摘要 sheet 若继续使用 raw model，会与专项 sheet 自相矛盾。
  */
-export function buildActiveAnalysisExport(): { report?: AnalysisReportPayload; model: VarModel; capabilityModel: VarModel } {
+export function buildActiveAnalysisExport(): { report?: AnalysisReportPayload; model: VarModel; capabilityModel: VarModel; spcFamily: SpcChartFamily } {
   const app = useApp.getState();
   const data = useData.getState();
   let model = data.model;
@@ -1356,11 +1682,11 @@ export function buildActiveAnalysisExport(): { report?: AnalysisReportPayload; m
       // 专项页保持优雅降级(与 v1.42.3 基线一致):buildSpcPayload/buildCapabilityPayload 自会生成
       // 「未运行 + 原因」专项报告,四个构建器在 analysis 分支提前返回,raw model 仅提供工作表名,
       // 不会产出自相矛盾的通用 sheet。整体阻断仅适用于无专项载荷兜底的通用报告页(下方分支)。
-      return { report: buildActiveAnalysisReport(), model: data.model, capabilityModel: data.model };
+      return { report: buildActiveAnalysisReport(), model: data.model, capabilityModel: data.model, spcFamily: 'i-mr' };
     }
-    // SPC 页的图表限值跟随当前 σ 估计方法；能力模型保持自身解析口径。
+    // SPC 与能力稳定性均跟随当前 σ̂ 方法；能力 Cpk 的 sigmaWithin 不受 withSigmaMethod 影响。
     model = app.page === 'spc' ? withSigmaMethod(prepared.model, app.spcSigmaMethod) : prepared.model;
-    capabilityModel = prepared.model;
+    capabilityModel = withSigmaMethod(prepared.model, app.spcSigmaMethod);
   } else if (app.page === 'spc' && app.spcType === 'p') {
     model = computeVarModel(
       data.pModel.name,
@@ -1387,8 +1713,9 @@ export function buildActiveAnalysisExport(): { report?: AnalysisReportPayload; m
     } else {
       const capability = resolveCapabilityMeasurementData(data.model, data.textCols);
       if (!capability.model || capability.error) throw new Error(capability.error ?? '当前能力数据角色无效，无法导出');
-      capabilityModel = capability.model;
+      capabilityModel = withSigmaMethod(capability.model, app.spcSigmaMethod);
     }
   }
-  return { report: buildActiveAnalysisReport(), model, capabilityModel };
+  const spcFamily: SpcChartFamily = spcChartFamilyFor(model, app.spcType);
+  return { report: buildActiveAnalysisReport(), model, capabilityModel, spcFamily };
 }

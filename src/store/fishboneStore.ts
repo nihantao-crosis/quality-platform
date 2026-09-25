@@ -86,8 +86,14 @@ export function loadFishbone(): FishboneData {
   return loadFishboneState().data;
 }
 
+/** 鱼骨图 UI、历史回放与持久化共用的写入前校验。 */
+export function fishboneWriteValidationError(data: unknown, isDemo = false): string | null {
+  return projectStoreValidationError(FISHBONE_STORAGE_KEY, { data, isDemo });
+}
+
 export function saveFishboneState(data: FishboneData, isDemo = false): void {
-  if (!validFishbone(data)) throw new Error('鱼骨图必须包含完整的 6M 分类');
+  const detail = fishboneWriteValidationError(data, isDemo);
+  if (detail) throw new Error(detail);
   const encoded = JSON.stringify({ data: cloneFishbone(data), isDemo });
   if (protectedCorruptFishbone) {
     const { raw, detail } = protectedCorruptFishbone;

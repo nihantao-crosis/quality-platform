@@ -1,16 +1,18 @@
 /** 四个弹窗：导入 / 导出 / 计算器 / 关于 + Toast。 */
 import { useState, useEffect, useRef } from 'react';
+import { appVersionText } from '../../platform/reportLabels';
 import { useApp, type ImportTab, type ExportFmt } from '../../store/appStore';
-import { markActiveDataReplaced, prepareVaultDatasetRemoval, useData } from '../../store/dataStore';
-import { parseMatrix, parseCategoryCounts, extractPChartColumns, evalFormula, truthy, arrMin, arrMax, mean, stdev, FormulaError, worksheetNumericColumnCodes, detectCsvBlocks, assessSpcCharts, countCapabilityViolations, type CsvBlock, type ParsedMatrix } from '../../core';
-import { assertXlsxImportSize, platform } from '../../platform/adapter';
-import { assertTextImportSize } from '../../platform/importLimits';
+import { markActiveDataReplaced, prepareVaultDatasetRemoval, useData, isCapabilityWarningAcknowledged } from '../../store/dataStore';
+import { parseMatrix, parseCategoryCounts, extractPChartColumns, evalFormula, truthy, arrMin, arrMax, mean, stdev, FormulaError, worksheetNumericColumnCodes, detectCsvBlocks, csvBlockLabel, assessSpcCharts, countCapabilityViolations, spcChartFamilyFor, withSigmaMethod, type CategoryCounts, type CsvBlock, type ParsedMatrix } from '../../core';
+import { errText, decodeTextFileBytes, assertXlsxImportSize, platform } from '../../platform/adapter';
+import { assertClipboardImportText, assertTextImportSize } from '../../platform/importLimits';
 import { buildExportJob } from '../../platform/report';
 import { mesStart, mesStop } from '../../platform/mes';
 import { sessionLog } from '../../store/sessionLog';
 import { isProjectFile, applyProjectText } from '../../platform/project';
 import { HelpModal } from './HelpModal';
 import { OptionsModal } from './OptionsModal';
+
 
 import type { ImportKind } from '../../store/appStore';
 type DataKind = ImportKind;
@@ -39,12 +41,12 @@ function ModalFrame({ width, title, onClose, children, footer }: {
   children: React.ReactNode; footer?: React.ReactNode;
 }) {
   return (
-    <div style={{ position: 'relative', width, background: '#fff', borderRadius: 10, boxShadow: '0 24px 60px rgba(10,20,40,0.32)', overflow: 'hidden' }}>
+    <div className="modal-panel" style={{ position: 'relative', width, maxWidth: 'calc(100vw - 24px)', maxHeight: 'calc(100dvh - 24px)', display: 'flex', flexDirection: 'column', background: '#fff', borderRadius: 10, boxShadow: '0 24px 60px rgba(10,20,40,0.32)', overflow: 'hidden' }}>
       <div style={{ display: 'flex', alignItems: 'center', padding: '16px 20px', borderBottom: '1px solid #edf0f3' }}>
         <div style={{ fontSize: 15, fontWeight: 600, color: '#26303c' }}>{title}</div>
         <button type="button" aria-label={`关闭${title}`} onClick={onClose} style={{ marginLeft: 'auto', border: 0, background: 'transparent', cursor: 'pointer', color: '#9aa2ad', fontSize: 17 }}>✕</button>
       </div>
-      {children}
+      <div className="modal-scroll-body modal-frame-body" style={{ minHeight: 0, overflow: 'auto' }}>{children}</div>
       {footer && (
         <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', padding: '14px 20px', borderTop: '1px solid #edf0f3', background: '#fafbfc' }}>{footer}</div>
       )}
@@ -52,20 +54,64 @@ function ModalFrame({ width, title, onClose, children, footer }: {
   );
 }
 
+type PendingImport = {
+  name: string;
+  raw: string;
+  parsed?: ParsedMatrix;
+  pareto?: CategoryCounts;
+};
+
 const cancelBtn: React.CSSProperties = { padding: '8px 18px', border: '1px solid #cfd5dd', background: '#fff', borderRadius: 5, cursor: 'pointer', fontFamily: 'inherit', fontSize: 12.5, color: '#5b6472' };
 const primaryBtn: React.CSSProperties = { padding: '8px 18px', border: '1px solid #1f6fb2', background: '#1f6fb2', color: '#fff', borderRadius: 5, cursor: 'pointer', fontFamily: 'inherit', fontSize: 12.5, fontWeight: 600 };
 
 function ImportModal() {
   const { importTab, setImportTab, importKind, setImportKind, closeModal, goTo, showToast } = useApp();
   const { importMatrix, importCounts, importPareto, mesRunning, model } = useData();
-  const [pending, setPending] = useState<{ name: string; raw: string; parsed?: ParsedMatrix; cats?: number } | null>(null);
+  const [pending, setPending] = useState<PendingImport | null>(null);
   const [blockChoices, setBlockChoices] = useState<{ name: string; raw: string; blocks: CsvBlock[] } | null>(null);
   const [clipText, setClipText] = useState('');
   const [dataKind, setDataKind] = useState<DataKind>(importKind);
   const [pSampleSize, setPSampleSize] = useState(50);
   const [paretoCategoryCol, setParetoCategoryCol] = useState('');
   const [paretoCountCol, setParetoCountCol] = useState('');
+  const [importBusy, setImportBusy] = useState(false);
+  const requestEpoch = useRef(0);
+  const requestController = useRef<AbortController | null>(null);
   const tabs: Array<[ImportTab, string]> = [['csv', 'CSV 文件'], ['excel', 'Excel 工作簿'], ['clip', '剪贴板粘贴'], ['mes', 'MES 实时采集']];
+
+  const isCurrentRequest = (epoch: number) => requestEpoch.current === epoch;
+  const invalidateImportRequest = () => {
+    requestEpoch.current += 1;
+    requestController.current?.abort();
+    requestController.current = null;
+    setImportBusy(false);
+  };
+  const beginImportRequest = () => {
+    requestController.current?.abort();
+    requestController.current = new AbortController();
+    const epoch = requestEpoch.current + 1;
+    requestEpoch.current = epoch;
+    setPending(null);
+    setBlockChoices(null);
+    setImportBusy(true);
+    return epoch;
+  };
+  const finishImportRequest = (epoch: number) => {
+    if (isCurrentRequest(epoch)) {
+      requestController.current = null;
+      setImportBusy(false);
+    }
+  };
+  const closeImportModal = () => {
+    invalidateImportRequest();
+    closeModal();
+  };
+
+  useEffect(() => () => {
+    requestEpoch.current += 1;
+    requestController.current?.abort();
+    requestController.current = null;
+  }, []);
 
   const paretoColumns = () => {
     if (paretoCategoryCol.trim() === '' && paretoCountCol.trim() === '') return undefined;
@@ -78,20 +124,23 @@ function ImportModal() {
     return { categoryColumn, countColumn };
   };
 
-  const tryParse = (name: string, text: string) => {
+  const tryParse = (epoch: number, name: string, text: string) => {
+    if (!isCurrentRequest(epoch)) return;
     if (dataKind === 'pareto') {
       const cols = paretoColumns();
       if (cols === null) return;
       const r = parseCategoryCounts(text, cols);
+      if (!isCurrentRequest(epoch)) return;
       if ('error' in r) {
         showToast('导入失败：' + r.error);
         return;
       }
-      setPending({ name, raw: text, cats: r.rows.length });
+      setPending({ name, raw: text, pareto: r });
       return;
     }
     // v1.40:并排多数据块(工厂 MSA 五案例工作簿)先让用户显式选块,不做整表瞎猜
     const blocks = detectCsvBlocks(text);
+    if (!isCurrentRequest(epoch)) return;
     if (blocks.length > 1) {
       setPending(null);
       setBlockChoices({ name, raw: text, blocks });
@@ -99,13 +148,16 @@ function ImportModal() {
     }
     setBlockChoices(null);
     const r = parseMatrix(text);
+    if (!isCurrentRequest(epoch)) return;
     if ('error' in r) {
       if (blocks.length === 1) {
         const block = blocks[0];
         const retried = parseMatrix(block.csv);
+        if (!isCurrentRequest(epoch)) return;
         if (!('error' in retried)) {
-          setPending({ name: `${name} · ${block.name}`, raw: block.csv, parsed: retried });
-          showToast(`整表解析失败，已截取检测到的表格区域「${block.name}」(${block.rows} 行)`);
+          const label = csvBlockLabel(block);
+          setPending({ name: `${name} · ${label}`, raw: block.csv, parsed: retried });
+          showToast(`整表解析失败，已截取「${label}」(${block.rows} 行${block.omittedRows ? `，忽略 ${block.omittedRows} 个不完整行` : ''})`);
           return;
         }
       }
@@ -115,120 +167,159 @@ function ImportModal() {
     setPending({ name, raw: text, parsed: r });
   };
 
-  const chooseBlock = (choice: { name: string; raw: string; blocks: CsvBlock[] }, block: CsvBlock) => {
-    const parsed = parseMatrix(block.csv);
-    if ('error' in parsed) {
-      showToast(`数据块「${block.name}」解析失败：` + parsed.error);
-      return;
-    }
-    if (importTab === 'clip') {
-      // 剪贴板流:把选中块写回文本框(所见即所导),不设隐藏 pending 压过文本框(对抗审查 P2)
-      setClipText(block.csv);
+  const chooseBlock = async (choice: { name: string; raw: string; blocks: CsvBlock[] }, block: CsvBlock) => {
+    const epoch = beginImportRequest();
+    try {
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      if (!isCurrentRequest(epoch)) return;
+      const parsed = parseMatrix(block.csv);
+      if (!isCurrentRequest(epoch)) return;
+      const label = csvBlockLabel(block);
+      if ('error' in parsed) {
+        showToast(`数据块「${label}」解析失败：` + parsed.error);
+        return;
+      }
+      if (importTab === 'clip') {
+        // 剪贴板流:选中块同时写回文本框与 pending；二者 raw 完全相同，确认时可复用
+        // 已解析结果而不出现「隐藏 pending 覆盖可见文本」的问题。用户再编辑会清掉 pending。
+        setClipText(block.csv);
+        setPending({ name: `剪贴板数据 · ${label}`, raw: block.csv, parsed });
+        setBlockChoices(null);
+        showToast(`已选「${label}」(${block.rows} 行${block.omittedRows ? `，忽略 ${block.omittedRows} 个不完整行` : ''}),文本框已更新,请点「导入」确认`);
+        return;
+      }
+      setPending({ name: `${choice.name} · ${label}`, raw: block.csv, parsed });
       setBlockChoices(null);
-      showToast(`已选数据块「${block.name}」(${block.rows} 行),文本框已更新,请再点「导入」确认`);
-      return;
+    } catch (error) {
+      if (isCurrentRequest(epoch)) showToast('导入失败：' + errText(error));
+    } finally {
+      finishImportRequest(epoch);
     }
-    setPending({ name: `${choice.name} · ${block.name}`, raw: block.csv, parsed });
-    setBlockChoices(null);
   };
 
   // 逃生口:带装饰性空隔列的正常宽表会被拆成多块,必须保留 v1.39 的整表导入路径
-  const importWholeTable = (choice: { name: string; raw: string; blocks: CsvBlock[] }) => {
-    if (applyJob(choice.name, choice.raw)) {
-      setPending(null);
-      setBlockChoices(null);
-      setClipText('');
-      closeModal();
+  const importWholeTable = async (choice: { name: string; raw: string; blocks: CsvBlock[] }) => {
+    const epoch = beginImportRequest();
+    try {
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      if (!isCurrentRequest(epoch)) return;
+      if (applyJob({ name: choice.name, raw: choice.raw })) {
+        setPending(null);
+        setBlockChoices(null);
+        setClipText('');
+        closeImportModal();
+      }
+    } catch (error) {
+      if (isCurrentRequest(epoch)) showToast('导入失败：' + errText(error));
+    } finally {
+      finishImportRequest(epoch);
     }
   };
 
-  const handlePicked = async (name: string, contents?: string, bytes?: Uint8Array) => {
+  const handlePicked = async (epoch: number, name: string, contents?: string, bytes?: Uint8Array) => {
     if (bytes) {
       // 真 Excel 工作簿：SheetJS 解析首个 sheet 转 CSV
       const { xlsxBytesToCsv } = await import('../../platform/xlsxImport');
-      const r = xlsxBytesToCsv(bytes);
+      if (!isCurrentRequest(epoch)) return;
+      const r = await xlsxBytesToCsv(bytes, { signal: requestController.current?.signal });
+      if (!isCurrentRequest(epoch)) return;
       if ('error' in r) {
         showToast('导入失败：' + r.error);
         return;
       }
-      tryParse(`${name} · ${r.sheetName}`, r.csv);
+      tryParse(epoch, `${name} · ${r.sheetName}`, r.csv);
       return;
     }
-    tryParse(name, contents ?? '');
+    tryParse(epoch, name, contents ?? '');
   };
 
   const pickFile = async () => {
-    let f;
+    if (requestController.current) return;
+    const epoch = beginImportRequest();
     try {
-      f = await platform.pickImportFile();
-    } catch (error) {
-      showToast('导入失败：' + (error as Error).message);
-      return;
-    }
-    if (!f) return;
-    if (isProjectFile(f.name)) {
-      // P0-3:导入期间锁死整个界面(遮罩层 zIndex 高于弹窗),失败才解锁;成功保持锁定直至 reload。
-      useApp.getState().setBusyOverlay('正在导入项目，请勿操作…（完成后将自动重载）');
-      const r = await applyProjectText(f.contents ?? '');
-      if (r.error) {
-        useApp.getState().setBusyOverlay(null);
-        showToast('打开项目失败：' + r.error);
+      const f = await platform.pickImportFile();
+      if (!isCurrentRequest(epoch) || !f) return;
+      if (isProjectFile(f.name)) {
+        // P0-3:导入期间锁死整个界面(遮罩层 zIndex 高于弹窗),失败才解锁;成功保持锁定直至 reload。
+        useApp.getState().setBusyOverlay('正在导入项目，请勿操作…（完成后将自动重载）');
+        const r = await applyProjectText(f.contents ?? '');
+        if (!isCurrentRequest(epoch)) return;
+        if (r.error) {
+          if (r.lockRequired) {
+            useApp.getState().setBusyOverlay('项目状态待恢复，请立即重启应用；重启前已禁止继续操作');
+            showToast('打开项目失败：' + r.error + '。状态待恢复，请立即重启');
+          } else {
+            useApp.getState().setBusyOverlay(null);
+            showToast('打开项目失败：' + r.error);
+          }
+          return;
+        }
+        sessionLog('打开项目文件 ' + f.name + (r.note ? ' · ' + r.note : '') + ' · 即将重载');
+        showToast(r.note ? `项目已恢复(${r.note}),正在重载…` : '项目已恢复,正在重载…');
+        markActiveDataReplaced(); // 旧内存数据即将被新项目替换,不再触发 beforeunload 拦截
+        setTimeout(() => location.reload(), 900);
         return;
       }
-      sessionLog('打开项目文件 ' + f.name + (r.note ? ' · ' + r.note : '') + ' · 即将重载');
-      showToast(r.note ? `项目已恢复(${r.note}),正在重载…` : '项目已恢复,正在重载…');
-      markActiveDataReplaced(); // 旧内存数据即将被新项目替换,不再触发 beforeunload 拦截
-      setTimeout(() => location.reload(), 900);
-      return;
+      await handlePicked(epoch, f.name, f.contents, f.bytes);
+    } catch (error) {
+      if (isCurrentRequest(epoch)) showToast('导入失败：' + errText(error));
+    } finally {
+      finishImportRequest(epoch);
     }
-    handlePicked(f.name, f.contents, f.bytes);
   };
 
   const [dragOver, setDragOver] = useState(false);
   const onDrop = async (e: React.DragEvent) => {
     e.preventDefault();
     setDragOver(false);
+    // 拖放不受 disabled 按钮保护；用 ref 同步拒绝连续事件，避免并发读文件。
+    if (requestController.current) return;
     const file = e.dataTransfer.files?.[0];
     if (!file) return;
-    if (isProjectFile(file.name)) {
-      let text: string;
-      try {
+    const epoch = beginImportRequest();
+    const projectFile = isProjectFile(file.name);
+    try {
+      if (projectFile) {
         assertTextImportSize(file.name, file.size);
-        text = await file.text(); // 拖放源文件可能已被移动/删除;必须在上锁之前读取
-      } catch (error) {
-        showToast('打开项目失败：' + ((error as Error).message
-          || '无法读取拖入的文件（源文件可能已被移动或删除）'));
-        return;
-      }
-      useApp.getState().setBusyOverlay('正在导入项目，请勿操作…（完成后将自动重载）');
-      const r = await applyProjectText(text);
-      if (r.error) {
-        useApp.getState().setBusyOverlay(null);
-        showToast('打开项目失败：' + r.error);
-        return;
-      }
-      sessionLog('打开项目文件 ' + file.name + (r.note ? ' · ' + r.note : '') + ' · 即将重载');
-      showToast(r.note ? `项目已恢复(${r.note}),正在重载…` : '项目已恢复,正在重载…');
-      markActiveDataReplaced();
-      setTimeout(() => location.reload(), 900);
-      return;
-    }
-    if (/\.(xlsx|xls)$/i.test(file.name)) {
-      try {
+        const text = await decodeTextFileBytes(file); // 必须在上锁前读取；编码回退与选择器同口径
+        if (!isCurrentRequest(epoch)) return;
+        useApp.getState().setBusyOverlay('正在导入项目，请勿操作…（完成后将自动重载）');
+        const r = await applyProjectText(text);
+        if (!isCurrentRequest(epoch)) return;
+        if (r.error) {
+          if (r.lockRequired) {
+            useApp.getState().setBusyOverlay('项目状态待恢复，请立即重启应用；重启前已禁止继续操作');
+            showToast('打开项目失败：' + r.error + '。状态待恢复，请立即重启');
+          } else {
+            useApp.getState().setBusyOverlay(null);
+            showToast('打开项目失败：' + r.error);
+          }
+          return;
+        }
+        sessionLog('打开项目文件 ' + file.name + (r.note ? ' · ' + r.note : '') + ' · 即将重载');
+        showToast(r.note ? `项目已恢复(${r.note}),正在重载…` : '项目已恢复,正在重载…');
+        markActiveDataReplaced();
+        setTimeout(() => location.reload(), 900);
+      } else if (/\.(xlsx|xls)$/i.test(file.name)) {
         assertXlsxImportSize(file.size); // 拖放流程在读取前拒绝过大文件
         const bytes = new Uint8Array(await file.arrayBuffer());
+        if (!isCurrentRequest(epoch)) return;
         assertXlsxImportSize(bytes.byteLength);
-        handlePicked(file.name, undefined, bytes);
-      } catch (error) {
-        showToast('导入失败：' + (error as Error).message);
-      }
-    } else {
-      try {
+        await handlePicked(epoch, file.name, undefined, bytes);
+      } else {
         assertTextImportSize(file.name, file.size);
-        handlePicked(file.name, await file.text());
-      } catch (error) {
-        showToast('导入失败：' + (error as Error).message);
+        const text = await decodeTextFileBytes(file);
+        if (!isCurrentRequest(epoch)) return;
+        await handlePicked(epoch, file.name, text);
       }
+    } catch (error) {
+      if (!isCurrentRequest(epoch)) return;
+      const detail = errText(error);
+      showToast(projectFile
+        ? '打开项目失败：' + (detail === '未知错误' ? '无法读取拖入的文件（源文件可能已被移动或删除）' : detail)
+        : '导入失败：' + detail);
+    } finally {
+      finishImportRequest(epoch);
     }
   };
 
@@ -239,29 +330,43 @@ function ImportModal() {
     showToast('⚠ 数据已导入到内存,但浏览器存储空间不足,尚未持久化——刷新将丢失！请立即「文件 → 导出项目」备份,或在「工具 → 选项」清理本地数据');
   };
 
-  const applyJob = (name: string, raw: string) => {
+  const applyJob = (job: PendingImport) => {
+    const { name, raw } = job;
     mesStop(); // 导入新数据前停掉模拟采集
     if (dataKind === 'pareto') {
       const cols = paretoColumns();
       if (cols === null) return false;
-      const r = parseCategoryCounts(raw, cols);
+      // 文件预览和数据块选择已经完整解析过；确认导入必须消费同一结果，避免
+      // 大文件在 UI 线程重复扫描/分配。直接粘贴未预览时才在这里解析一次。
+      const r = job.pareto ?? parseCategoryCounts(raw, cols);
       if ('error' in r) {
         showToast('导入失败：' + r.error);
         return false;
       }
       const paretoOutcome = importPareto(name, r.rows);
+      if (paretoOutcome.rejected) {
+        showToast('导入失败：' + paretoOutcome.rejected);
+        return false;
+      }
       goTo('pareto');
-      persistAwareToast(paretoOutcome, `已导入帕累托数据 ${name} · ${r.rows.length} 个类别${r.note ? ' · ' + r.note : ''}`);
+      const kept = r.rows.length - (paretoOutcome.droppedRows ?? 0);
+      persistAwareToast(paretoOutcome, `已导入帕累托数据 ${name} · ${kept} 个类别${paretoOutcome.droppedRows ? ` · 已过滤 ${paretoOutcome.droppedRows} 个非法行` : ''}${r.note ? ' · ' + r.note : ''}`);
       return true;
     }
-    const parsed = parseMatrix(raw);
+    const parsed = job.parsed ?? parseMatrix(raw);
     if ('error' in parsed) {
       showToast('导入失败：' + parsed.error);
       return false;
     }
     const p = parsed;
     if (dataKind === 'var') {
-      const varOutcome = importMatrix(name, p.colNames, p.rows, p.textCols);
+      let varOutcome: { persisted: boolean; archiving: boolean };
+      try {
+        varOutcome = importMatrix(name, p.colNames, p.rows, p.textCols);
+      } catch (error) {
+        showToast('导入失败：' + errText(error));
+        return false;
+      }
       goTo('worksheet');
       const notes: string[] = [];
       if (p.skippedRows > 0) notes.push(`跳过 ${p.skippedRows} 行非法值`);
@@ -279,7 +384,7 @@ function ImportModal() {
       try {
         pOutcome = importCounts('p', name, extracted.counts, extracted.sampleSizes);
       } catch (e) {
-        showToast('导入失败：' + (e as Error).message);
+        showToast('导入失败：' + errText(e));
         return false;
       }
       goTo('spc');
@@ -300,7 +405,7 @@ function ImportModal() {
     try {
       cOutcome = importCounts('c', name, counts);
     } catch (e) {
-      showToast('导入失败：' + (e as Error).message);
+      showToast('导入失败：' + errText(e));
       return false;
     }
     goTo('spc');
@@ -308,38 +413,56 @@ function ImportModal() {
     return true;
   };
 
-  const doImport = () => {
+  const doImport = async () => {
     if (importTab === 'mes') return; // MES tab 有自己的控制按钮
     let job = pending;
-    if (!job && importTab === 'clip' && clipText.trim() !== '') {
-      // v1.40:剪贴板与文件同权——并排多数据块先选块(芯片含「按整表导入」逃生口)
-      if (dataKind !== 'pareto') {
-        const blocks = detectCsvBlocks(clipText);
-        if (blocks.length > 1) {
-          setBlockChoices({ name: '剪贴板数据', raw: clipText, blocks });
-          return;
-        }
-        if (blocks.length === 1) {
-          const direct = parseMatrix(clipText);
-          if ('error' in direct) {
-            const retried = parseMatrix(blocks[0].csv);
-            if (!('error' in retried)) {
-              showToast(`整段解析失败，已截取检测到的表格区域「${blocks[0].name}」(${blocks[0].rows} 行)`);
-              job = { name: `剪贴板数据 · ${blocks[0].name}`, raw: blocks[0].csv };
+    let epoch: number | null = null;
+    try {
+      if (!job && importTab === 'clip' && clipText.trim() !== '') {
+        assertClipboardImportText(clipText);
+        epoch = beginImportRequest();
+        // 让 busy 状态先绘制，再进入可能较重的同步 CSV 分类。
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        if (!isCurrentRequest(epoch)) return;
+        // v1.40:剪贴板与文件同权——并排多数据块先选块(芯片含「按整表导入」逃生口)
+        if (dataKind !== 'pareto') {
+          const blocks = detectCsvBlocks(clipText);
+          if (!isCurrentRequest(epoch)) return;
+          if (blocks.length > 1) {
+            setBlockChoices({ name: '剪贴板数据', raw: clipText, blocks });
+            return;
+          }
+          if (blocks.length === 1) {
+            const direct = parseMatrix(clipText);
+            if (!isCurrentRequest(epoch)) return;
+            if ('error' in direct) {
+              const retried = parseMatrix(blocks[0].csv);
+              if (!isCurrentRequest(epoch)) return;
+              if (!('error' in retried)) {
+                const label = csvBlockLabel(blocks[0]);
+                showToast(`整段解析失败，已截取「${label}」(${blocks[0].rows} 行${blocks[0].omittedRows ? `，忽略 ${blocks[0].omittedRows} 个不完整行` : ''})`);
+                job = { name: `剪贴板数据 · ${label}`, raw: blocks[0].csv, parsed: retried };
+              }
+            } else {
+              job = { name: '剪贴板数据', raw: clipText, parsed: direct };
             }
           }
         }
+        job = job ?? { name: '剪贴板数据', raw: clipText };
       }
-      job = job ?? { name: '剪贴板数据', raw: clipText };
-    }
-    if (!job) {
-      showToast(importTab === 'clip' ? '请先粘贴数据' : '请先选择数据文件');
-      return;
-    }
-    if (applyJob(job.name, job.raw)) {
-      setPending(null);
-      setClipText('');
-      closeModal();
+      if (!job) {
+        showToast(importTab === 'clip' ? '请先粘贴数据' : '请先选择数据文件');
+        return;
+      }
+      if (applyJob(job)) {
+        setPending(null);
+        setClipText('');
+        closeImportModal();
+      }
+    } catch (error) {
+      if (epoch === null || isCurrentRequest(epoch)) showToast('导入失败：' + errText(error));
+    } finally {
+      if (epoch !== null) finishImportRequest(epoch);
     }
   };
 
@@ -348,7 +471,7 @@ function ImportModal() {
       <span style={{ color: '#8a929d', fontWeight: 600, fontSize: 12 }}>数据类型</span>
       {([['var', '变量数据（子组矩阵）'], ['p', '不良数（P 图）'], ['c', '缺陷数（C 图）'], ['pareto', '缺陷类别+频数（帕累托）']] as Array<[DataKind, string]>).map(([k, l]) => (
         <label key={k} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, cursor: 'pointer', color: '#3a4350' }}>
-          <input type="radio" checked={dataKind === k} onChange={() => { setDataKind(k); setImportKind(k); setPending(null); setBlockChoices(null); }} />
+          <input type="radio" checked={dataKind === k} onChange={() => { invalidateImportRequest(); setDataKind(k); setImportKind(k); setPending(null); setBlockChoices(null); }} />
           {l}
         </label>
       ))}
@@ -362,7 +485,7 @@ function ImportModal() {
               value={pSampleSize}
               onChange={(e) => {
                 const v = parseInt(e.target.value);
-                if (!isNaN(v) && v >= 1) setPSampleSize(v);
+                if (Number.isFinite(v) && v >= 1) setPSampleSize(v);
               }}
               className="mono"
               style={{ width: 64, padding: '3px 6px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12 }}
@@ -376,14 +499,14 @@ function ImportModal() {
           多列时指定：类别列
           <input
             type="number" min={1} step={1} placeholder="自动" value={paretoCategoryCol}
-            onChange={(e) => { setParetoCategoryCol(e.target.value); setPending(null); }}
+            onChange={(e) => { invalidateImportRequest(); setParetoCategoryCol(e.target.value); setPending(null); setBlockChoices(null); }}
             className="mono" title="从 1 开始；留空时自动识别"
             style={{ width: 58, padding: '3px 6px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12 }}
           />
           频数列
           <input
             type="number" min={1} step={1} placeholder="自动" value={paretoCountCol}
-            onChange={(e) => { setParetoCountCol(e.target.value); setPending(null); }}
+            onChange={(e) => { invalidateImportRequest(); setParetoCountCol(e.target.value); setPending(null); setBlockChoices(null); }}
             className="mono" title="从 1 开始；留空时自动识别"
             style={{ width: 58, padding: '3px 6px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12 }}
           />
@@ -392,15 +515,15 @@ function ImportModal() {
     </div>
   );
   return (
-    <ModalFrame width={560} title="导入数据" onClose={closeModal}
+    <ModalFrame width={560} title="导入数据" onClose={closeImportModal}
       footer={<>
-        <button type="button" onClick={closeModal} style={cancelBtn}>取消</button>
-        <button type="button" onClick={doImport} style={primaryBtn}>导入</button>
+        <button type="button" onClick={closeImportModal} style={cancelBtn}>取消</button>
+        <button type="button" onClick={() => { void doImport(); }} disabled={importBusy} style={{ ...primaryBtn, ...(importBusy ? { cursor: 'wait', opacity: 0.65 } : {}) }}>{importBusy ? '解析中…' : '导入'}</button>
       </>}>
       <div style={{ padding: '18px 20px' }}>
         <div style={{ display: 'flex', gap: 6, marginBottom: 16, flexWrap: 'wrap' }}>
           {tabs.map(([k, l]) => (
-            <button type="button" role="tab" aria-selected={importTab === k} key={k} style={tabStyle(importTab === k)} onClick={() => { setImportTab(k); setBlockChoices(null); }}>{l}</button>
+            <button type="button" role="tab" aria-selected={importTab === k} key={k} style={tabStyle(importTab === k)} onClick={() => { invalidateImportRequest(); setImportTab(k); setPending(null); setBlockChoices(null); }}>{l}</button>
           ))}
         </div>
         {(importTab === 'csv' || importTab === 'excel' || importTab === 'clip') && kindSelector}
@@ -410,18 +533,18 @@ function ImportModal() {
               「{blockChoices.name}」检测到 {blockChoices.blocks.length} 个并排数据块（工作表含说明区/多案例并排），请选择要导入的一块：
             </div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-              {blockChoices.blocks.map((block, index) => (
+              {blockChoices.blocks.map((block) => (
                 <button
-                  type="button" key={index}
-                  onClick={() => chooseBlock(blockChoices, block)}
+                  type="button" key={`${block.ordinal}:${block.colStart}:${block.colEnd}`}
+                  onClick={() => { void chooseBlock(blockChoices, block); }}
                   style={{ padding: '6px 10px', border: '1px solid #9dbede', background: '#fff', color: '#1c4e7a', borderRadius: 5, cursor: 'pointer', fontFamily: 'inherit', fontSize: 12 }}
                 >
-                  {block.name}（{block.headers.join('/')} · {block.rows} 行）
+                  {csvBlockLabel(block)}（{block.rows} 行{block.omittedRows ? ` · 忽略 ${block.omittedRows} 个不完整行` : ''}）
                 </button>
               ))}
               <button
                 type="button"
-                onClick={() => importWholeTable(blockChoices)}
+                onClick={() => { void importWholeTable(blockChoices); }}
                 title="不选块,按 v1.39 行为把整个工作表按一张表解析导入"
                 style={{ padding: '6px 10px', border: '1px dashed #9aa2ad', background: '#fff', color: '#5b6472', borderRadius: 5, cursor: 'pointer', fontFamily: 'inherit', fontSize: 12 }}
               >
@@ -432,6 +555,7 @@ function ImportModal() {
         )}
         {(importTab === 'csv' || importTab === 'excel') && (
           <div
+            aria-busy={importBusy}
             onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
             onDragLeave={() => setDragOver(false)}
             onDrop={onDrop}
@@ -442,13 +566,18 @@ function ImportModal() {
               transition: 'background 0.15s, border-color 0.15s',
             }}
           >
-            {pending ? (
+            {importBusy ? (
+              <>
+                <div role="status" style={{ fontSize: 13.5, color: '#1f6fb2', fontWeight: 600 }}>正在读取、解压校验并解析…</div>
+                <div style={{ fontSize: 12, color: '#8a929d', marginTop: 6 }}>完成前可切换标签或关闭窗口取消本次请求</div>
+              </>
+            ) : pending ? (
               <>
                 <div style={{ fontSize: 13.5, color: '#2c8a45', fontWeight: 600 }}>✓ {pending.name}</div>
                 <div className="mono" style={{ fontSize: 12, color: '#5b6472', marginTop: 6 }}>
                   {pending.parsed
                     ? `${pending.parsed.rows.length} 行 × ${pending.parsed.colNames.length} 个数值列 · ${pending.parsed.colNames.join(' / ')}`
-                    : `${pending.cats ?? 0} 个类别（帕累托）`}
+                    : `${pending.pareto?.rows.length ?? 0} 个类别（帕累托）`}
                 </div>
                 {pending.parsed && (pending.parsed.skippedRows > 0 || pending.parsed.droppedCols > 0) && (
                   <div style={{ fontSize: 11.5, color: '#d98324', marginTop: 4 }}>
@@ -456,7 +585,7 @@ function ImportModal() {
                     {pending.parsed!.droppedCols > 0 ? `保留 ${pending.parsed!.droppedCols} 个文本/分组列` : ''}
                   </div>
                 )}
-                <button type="button" onClick={pickFile} style={{ display: 'inline-block', marginTop: 14, padding: '8px 18px', border: '1px solid #cfd5dd', color: '#5b6472', borderRadius: 5, fontFamily: 'inherit', fontSize: 12.5, fontWeight: 600, cursor: 'pointer', background: '#fff' }}>重新选择</button>
+                <button type="button" onClick={() => { void pickFile(); }} disabled={importBusy} style={{ display: 'inline-block', marginTop: 14, padding: '8px 18px', border: '1px solid #cfd5dd', color: '#5b6472', borderRadius: 5, fontFamily: 'inherit', fontSize: 12.5, fontWeight: 600, cursor: 'pointer', background: '#fff' }}>重新选择</button>
               </>
             ) : (
               <>
@@ -464,7 +593,7 @@ function ImportModal() {
                 <div style={{ fontSize: 12, color: '#9aa2ad', marginTop: 6 }}>
                   {importTab === 'excel' ? '支持 .xlsx / .xls 工作簿（最大 20 MB，读取首个工作表，首行作为列名）' : '支持 .csv / .txt，自动识别分隔符与列名'}
                 </div>
-                <button type="button" onClick={pickFile} style={{ display: 'inline-block', marginTop: 14, padding: '8px 18px', border: '1px solid #1f6fb2', background: '#1f6fb2', color: '#fff', borderRadius: 5, fontFamily: 'inherit', fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}>选择文件</button>
+                <button type="button" onClick={() => { void pickFile(); }} disabled={importBusy} style={{ display: 'inline-block', marginTop: 14, padding: '8px 18px', border: '1px solid #1f6fb2', background: '#1f6fb2', color: '#fff', borderRadius: 5, fontFamily: 'inherit', fontSize: 12.5, fontWeight: 600, cursor: 'pointer' }}>选择文件</button>
               </>
             )}
           </div>
@@ -472,7 +601,21 @@ function ImportModal() {
         {importTab === 'clip' && (
           <textarea
             value={clipText}
-            onChange={(e) => setClipText(e.target.value)}
+            onChange={(e) => {
+              try {
+                assertClipboardImportText(e.target.value);
+                invalidateImportRequest();
+                setPending(null);
+                setBlockChoices(null);
+                setClipText(e.target.value);
+              } catch (error) {
+                invalidateImportRequest();
+                setPending(null);
+                setBlockChoices(null);
+                setClipText('');
+                showToast('粘贴失败：' + errText(error));
+              }
+            }}
             placeholder={dataKind === 'pareto'
               ? '将「类别,频数」数据粘贴到此处…\n纵向:  划伤,32↵毛刺,21↵缺料,9\n横向:  划伤,毛刺,缺料↵32,21,9\n单列原始标签也可(自动计数)'
               : '将数据粘贴到此处（支持 Tab / 逗号分隔）…\n例：\n直径1,直径2,直径3\n25.01,24.99,25.02\n24.98,25.03,25.00'}
@@ -525,44 +668,74 @@ function ImportModal() {
 
 function ExportModal() {
   const { exportFmt, setExportFmt, closeModal, showToast } = useApp();
+  const exportBusyRef = useRef(false);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
   const fmts: Array<[ExportFmt, string, string]> = [
     ['pdf', 'PDF 报告', '当前分析图文 HTML · 打开后打印即 PDF'],
-    ['excel', 'Excel', '真 .xlsx · 数据 + 当前分析明细'],
+    ['excel', 'Excel', '真 .xlsx · 当前分析所用数据与结果'],
     ['ppt', 'PowerPoint', '真 .pptx · 当前分析表格与图形'],
     ['word', 'Word', '真 .docx · 当前分析图文报告'],
   ];
   const doExport = async () => {
+    // 进行中防抖(双审 P3):快速连点会并发触发两次导出任务
+    if (exportBusyRef.current) return;
+    exportBusyRef.current = true;
     try {
-      const { lsl, lslOn, tgt, usl, uslOn, spcRules, spcRuleK } = useApp.getState();
       const { buildActiveAnalysisExport } = await import('../../platform/activeAnalysisReport');
-      const { report: analysis, model, capabilityModel } = buildActiveAnalysisExport();
+      // 动态 chunk 加载期间页面/数据仍可变化。所有 store 读取必须在 import 完成后的
+      // 同一个同步区间内发生，避免“规格来自 A、工作表来自 B”的混合导出。
+      const appState = useApp.getState();
+      const dataState = useData.getState();
+      const { lsl, lslOn, tgt, usl, uslOn, spcRules, spcRuleK } = appState;
+      const { report: analysis, model, capabilityModel, spcFamily } = buildActiveAnalysisExport();
       // v1.42.3(审计 P1):通用报告判异用「用户当前规则/K」评估一次,四种格式共用——
       // 不再让各导出器各自按 DEFAULT_RULES 只评位置图。
       // 专项载荷自带完整统计与图表，不先构建一份随后会被丢弃的通用 SPC 明细。
-      const spcAssessment = analysis ? null : assessSpcCharts(model, spcRules, spcRuleK);
+      const spcAssessment = analysis ? null : assessSpcCharts(model, spcRules, spcRuleK, spcFamily);
+      // buildActiveAnalysisExport 已返回同口径模型；这里再显式收口，避免将来某专项
+      // 返回原始 capabilityModel 时通用四格式悄然退回 classic 判异。
+      const capabilitySpcModel = withSigmaMethod(capabilityModel, appState.spcSigmaMethod);
+      const capabilityFamily = spcChartFamilyFor(capabilitySpcModel, appState.spcType);
       const capabilitySpcViolations = analysis
         ? null
-        : capabilityModel === model
+        : capabilitySpcModel === model
           ? spcAssessment!.chartPointCount
-          : countCapabilityViolations(capabilityModel, spcRules, spcRuleK);
+          : countCapabilityViolations(capabilitySpcModel, spcRules, spcRuleK, capabilityFamily);
+      const spec = { lsl: lslOn ? lsl : null, tgt, usl: uslOn ? usl : null };
+      const capabilityWarningAcknowledged = isCapabilityWarningAcknowledged(
+        dataState.model,
+        dataState.textCols,
+        capabilitySpcModel,
+        spec,
+        appState.capabilityWarningAcknowledgement,
+      );
       const job = await buildExportJob(
-        exportFmt,
+        appState.exportFmt,
         model,
-        { lsl: lslOn ? lsl : null, tgt, usl: uslOn ? usl : null },
+        spec,
         spcAssessment,
         analysis,
         capabilityModel,
         capabilitySpcViolations,
+        { allowDistantSpec: capabilityWarningAcknowledged },
       );
       const dest = await platform.exportFile(job);
       if (dest == null) return; // 用户取消
       sessionLog(`导出报表 ${dest}`);
       showToast(platform.isDesktop ? '报表已保存: ' + dest : '报表已导出: ' + dest);
-      closeModal();
+      // 异步任务只能关闭发起它的这个 ExportModal 实例。用户在等待期间关闭并
+      // 重开导出或切到其他弹窗时，旧 Promise 完成不得关闭后来的界面。
+      if (mountedRef.current && useApp.getState().modal === 'export') closeModal();
     } catch (error) {
-      const message = error instanceof Error ? error.message : '未知错误';
+      const message = errText(error); // 第三轮 P3:桌面端字符串拒绝值曾被吞成「未知错误」
       sessionLog(`导出失败 · ${message}`);
       showToast(`导出失败：${message}`);
+    } finally {
+      exportBusyRef.current = false;
     }
   };
   return (
@@ -640,7 +813,7 @@ function FormulaModal() {
       const invalidRow = previewVals.findIndex((value) => !Number.isFinite(value));
       if (invalidRow >= 0) error = `第 ${invalidRow + 1} 行未得到有限数值（可能除以 0、对负数开方或数值溢出）`;
     } catch (e) {
-      error = e instanceof FormulaError ? e.message : (e as Error).message;
+      error = e instanceof FormulaError ? e.message : errText(e);
     }
   }
 
@@ -719,12 +892,26 @@ function VaultModal() {
   const db = platform.datasetDb;
   const [list, setList] = useState<Array<{ name: string; saved_at: string; bytes: number }>>([]);
   const [stats, setStats] = useState<{ count: number; total_bytes: number; path: string } | null>(null);
+  const [listError, setListError] = useState<string | null>(null);
+  const [statsError, setStatsError] = useState<string | null>(null);
   const [deleteArmed, setDeleteArmed] = useState<string | null>(null);
 
   const refresh = () => {
     if (!db) return;
-    db.list().then(setList).catch(() => {});
-    db.stats().then(setStats).catch(() => {});
+    db.list().then((next) => {
+      setList(next);
+      setListError(null);
+    }).catch((error) => {
+      setList([]);
+      setListError(errText(error));
+    });
+    db.stats().then((next) => {
+      setStats(next);
+      setStatsError(null);
+    }).catch((error) => {
+      setStats(null);
+      setStatsError(errText(error));
+    });
   };
   useEffect(refresh, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -746,7 +933,17 @@ function VaultModal() {
               每次导入或编辑的数据集都自动归档到本机 SQLite,不占浏览器存储配额;即使从「最近列表」移除也可在此找回。
               {stats && <span> · 共 <b>{stats.count}</b> 个数据集 / {fmtKB(stats.total_bytes)}</span>}
             </div>
-            {list.length === 0 ? (
+            {(listError || statsError) && (
+              <div role="alert" style={{ padding: '10px 12px', marginBottom: 10, border: '1px solid #f1c0c0', borderRadius: 6, background: '#fff5f5', color: '#a52626' }}>
+                数据集库读取失败：{[listError, statsError].filter(Boolean).join('；')}。请重试，或在「选项 · 本地数据」中执行原子清除。
+              </div>
+            )}
+            {!listError && stats && stats.count > list.length && (
+              <div style={{ padding: '8px 10px', marginBottom: 10, borderRadius: 6, background: '#fff8e8', color: '#8a5a00' }}>
+                库内共 {stats.count} 条，当前为避免大型旧库卡顿仅显示最新 {list.length} 条；可逐项删除降容，或在选项中一次性清空。
+              </div>
+            )}
+            {!listError && list.length === 0 ? (
               <div style={{ padding: '16px 4px', color: '#9aa2ad' }}>库内暂无数据集——导入或编辑任意数据集后会自动归档到这里。</div>
             ) : (
               <div style={{ border: '1px solid #eaeef2', borderRadius: 6, overflow: 'hidden', maxHeight: 300, overflowY: 'auto' }}>
@@ -798,7 +995,7 @@ function VaultModal() {
                           refresh();
                           showToast('已从数据集库删除 ' + d.name);
                         } catch (error) {
-                          showToast(`删除失败：${(error as Error).message}`);
+                          showToast(`删除失败：${errText(error)}`);
                         }
                       }}
                       style={{ padding: '5px 12px', border: '1px solid #cfd5dd', background: '#fff', color: '#c22f2f', borderRadius: 4, cursor: 'pointer', fontFamily: 'inherit', fontSize: 12, flex: 'none' }}
@@ -891,7 +1088,7 @@ function SubsetModal() {
       const flags = evalFormula(cond, { columns, colNames: model.colNames, rowCount: model.k, columnNumbers }).values;
       kept = flags.filter(truthy).length;
     } catch (e) {
-      error = e instanceof FormulaError ? e.message : (e as Error).message;
+      error = e instanceof FormulaError ? e.message : errText(e);
     }
   }
 
@@ -968,7 +1165,7 @@ function AboutModal() {
           <span style={{ width: 40, height: 40, borderRadius: 9, background: '#1f6fb2', color: '#fff', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 18, fontWeight: 700 }}>质</span>
           <div>
             <div style={{ fontSize: 16, fontWeight: 700, color: '#26303c' }}>质量分析平台</div>
-            <div style={{ fontSize: 12, color: '#8a929d' }}>Quality Analytics Platform · v{__APP_VERSION__}</div>
+            <div style={{ fontSize: 12, color: '#8a929d' }}>Quality Analytics Platform · v{appVersionText()}</div>
           </div>
         </div>
         <div style={{ fontSize: 12.5, color: '#5b6472', lineHeight: 1.7 }}>
@@ -1076,14 +1273,16 @@ function RandomModal() {
   const [k, setK] = useState(25);
   const [n, setN] = useState(5);
   const apply = () => {
-    if (sigma <= 0 || k < 2 || k > 100000 || n < 1 || n > 10) {
-      showToast('参数无效：σ>0,子组数 2–100000,子组大小 1–10');
-      return;
-    }
-    const name = generateRandom(mu, sigma, k, n);
-    closeModal();
-    goTo('worksheet');
-    showToast(`已生成 ${name} · ${k} 子组 × ${n}`);
+    try {
+      if (sigma <= 0 || k < 2 || k > 100000 || n < 1 || n > 10) {
+        showToast('参数无效：σ>0,子组数 2–100000,子组大小 1–10');
+        return;
+      }
+      const name = generateRandom(mu, sigma, k, n);
+      closeModal();
+      goTo('worksheet');
+      showToast(`已生成 ${name} · ${k} 子组 × ${n}`);
+    } catch (error) { showToast(errText(error)); }
   };
   const inp: React.CSSProperties = { width: 90, padding: '6px 9px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12.5, fontFamily: 'IBM Plex Mono,monospace', textAlign: 'right' };
   const fields: Array<[string, number, (v: number) => void, number]> = [
@@ -1103,7 +1302,7 @@ function RandomModal() {
           <label key={label} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
             {label}
             <input type="number" step={step} value={val} style={inp}
-              onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) set(v); }} />
+              onChange={(e) => { const v = parseFloat(e.target.value); if (Number.isFinite(v)) set(v); }} />
           </label>
         ))}
         <div style={{ gridColumn: '1 / -1', fontSize: 11.5, color: '#9aa2ad' }}>
@@ -1115,9 +1314,10 @@ function RandomModal() {
 }
 
 export function Modals() {
-  const { modal, closeModal } = useApp();
+  const { modal, closeModal, busyOverlay } = useApp();
   const dialogRef = useRef<HTMLDivElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
+  const busyWasActiveRef = useRef(false);
 
   useEffect(() => {
     if (!modal) return;
@@ -1143,6 +1343,24 @@ export function Modals() {
     };
   }, [modal]);
 
+  // QPROJ 的全局事务遮罩会主动夺取焦点。安全失败(lockRequired:false)
+  // 解除遮罩后 modal 本身没有重新挂载，因此需显式把焦点送回仍打开的对话框。
+  useEffect(() => {
+    if (!modal) {
+      busyWasActiveRef.current = Boolean(busyOverlay);
+      return;
+    }
+    if (busyOverlay) {
+      busyWasActiveRef.current = true;
+      return;
+    }
+    if (!busyWasActiveRef.current) return;
+    busyWasActiveRef.current = false;
+    const dialog = dialogRef.current;
+    if (!dialog || (document.activeElement && dialog.contains(document.activeElement))) return;
+    (focusableElements(dialog)[0] ?? dialog).focus();
+  }, [busyOverlay, modal]);
+
   const trapFocus = (event: React.KeyboardEvent<HTMLDivElement>) => {
     if (event.key !== 'Tab') return;
     const dialog = dialogRef.current;
@@ -1156,10 +1374,13 @@ export function Modals() {
     const first = focusable[0];
     const last = focusable[focusable.length - 1];
     const active = document.activeElement;
-    if (event.shiftKey && (active === first || !dialog.contains(active))) {
+    if (active === dialog || !active || !dialog.contains(active)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    } else if (event.shiftKey && active === first) {
       event.preventDefault();
       last.focus();
-    } else if (!event.shiftKey && (active === last || !dialog.contains(active))) {
+    } else if (!event.shiftKey && active === last) {
       event.preventDefault();
       first.focus();
     }
@@ -1172,9 +1393,11 @@ export function Modals() {
     sort: '排序', colstats: '列统计', random: '生成正态随机数据',
   };
   return (
-    <div style={{ position: 'fixed', inset: 0, zIndex: 300, background: 'rgba(20,28,40,0.42)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-      <button type="button" tabIndex={-1} aria-label="关闭弹窗" onClick={closeModal} style={{ position: 'absolute', inset: 0, border: 0, padding: 0, background: 'transparent', cursor: 'default' }} />
-      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={modalLabel[modal]} tabIndex={-1} onKeyDown={trapFocus} style={{ position: 'relative' }}>
+    <div className="modal-overlay" style={{ position: 'fixed', inset: 0, zIndex: 300, padding: 12, background: 'rgba(20,28,40,0.42)', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
+      <button type="button" tabIndex={-1} aria-label="关闭弹窗" onClick={() => {
+        if (!useApp.getState().busyOverlay) closeModal();
+      }} style={{ position: 'absolute', inset: 0, border: 0, padding: 0, background: 'transparent', cursor: 'default' }} />
+      <div ref={dialogRef} className="modal-dialog" role="dialog" aria-modal="true" aria-label={modalLabel[modal]} tabIndex={-1} onKeyDown={trapFocus} style={{ position: 'relative', maxWidth: '100%', maxHeight: '100%' }}>
         {modal === 'import' && <ImportModal />}
         {modal === 'export' && <ExportModal />}
         {modal === 'calc' && <CalcModal />}

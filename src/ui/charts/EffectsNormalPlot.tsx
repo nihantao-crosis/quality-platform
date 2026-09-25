@@ -7,7 +7,7 @@
 import { memo, Fragment } from 'react';
 import { nf, invNorm } from '../../core';
 import type { ChartTokens } from '../tokens';
-import { niceTicks, tickDecimals } from '../tokens';
+import { tickFormatter, niceTicks } from '../tokens';
 import { Svg, Ln, Txt } from './primitives';
 
 export interface EffectsNormalPlotTerm {
@@ -46,7 +46,7 @@ function EffectsNormalPlotImpl({ T, terms, pse, half = false, h }: {
     .map((term) => ({ ...term, x: half ? Math.abs(term.effect) : term.effect }))
     .sort((a, b) => a.x - b.x)
     .map((term, i) => {
-      const pp = (i + 1 - 0.375) / (n + 0.25); // 中位秩(Benard),与正态概率图同口径
+      const pp = (i + 1 - 0.3) / (n + 0.4); // 中位秩(Benard (i−0.3)/(n+0.4)),与正态概率图同口径(第三轮:两处同批从 Blom 改正)
       return { ...term, z: half ? invNorm(0.5 + pp / 2) : invNorm(pp) };
     });
   const zTop = Math.max(2.2, ...pts.map((p) => Math.abs(p.z))) * 1.1;
@@ -84,8 +84,8 @@ function EffectsNormalPlotImpl({ T, terms, pse, half = false, h }: {
       ))}
       {(() => {
         const tks = niceTicks(xlo, xhi, 6);
-        const d = tickDecimals(tks);
-        return tks.map((v, i) => <Txt key={'x' + i} x={X(v)} y={H - 12} s={nf(v, d)} fill={T.axis} size={10} anchor="middle" />);
+        const fmt = tickFormatter(tks);
+        return tks.map((v, i) => <Txt key={'x' + i} x={X(v)} y={H - 12} s={fmt(v)} fill={T.axis} size={10} anchor="middle" />);
       })()}
       {!half && xlo < 0 && xhi > 0 && (
         <Ln x1={X(0)} y1={m.t} x2={X(0)} y2={m.t + ph} stroke={T.classic ? '#ccd2d9' : T.grid} sw={1} dash="3 3" />

@@ -3,20 +3,52 @@
  * 716-R3:创建页扩展为设计类型选择(两水平全因子/一般全因子/分数因子 2^(k−p) 含折叠);
  * 分析页在两水平检测失败且数据为多水平(每因子 2–5 水平)时自动走一般全因子 ANOVA,
  * 5–7 个两水平因子(分数因子)走同一 OLS 引擎的放宽版;既有 2–4 因子两水平路径与文案不回归。 */
-import { Fragment, useMemo, useRef, useState } from 'react';
+import { Fragment, useMemo, useRef, useState , type CSSProperties } from 'react';
 import { useApp, type DoeView } from '../../store/appStore';
 import { useData } from '../../store/dataStore';
 import {
-  nf, tInv,
-  analyzeDoe, mainEffectMeans, interactionMeans, DOE_DESIGN,
-  detectFactorial, analyzeFactorial, factorialAdjustedMainMeans, factorialAdjustedInteractionMeans, factorialCornerPredictions, generateFactorialDesign,
-  resolveDoeColumnsWide, resolveDoeBlockValues, factorialModelTerms, factorialOptimizationDecision, isDoeAnalysisColumn, buildDoeWorksheetOutput,
-  uncodedEquation, lenthPseFromEffects, studentizedDeletedResiduals,
-  detectFractionalFactorial, analyzeFractionalFactorial, MAX_FRACTIONAL_FACTORS,
-  detectGeneralFactorial, analyzeGeneralFactorial, generateGeneralFactorialDesign,
-  fractionalDesignOptions, fractionalFoldPreview, generateFractionalFactorialDesign,
-  type CodedDesign, type FactorialResult, type FactorDef,
-  type GeneralFactorialDesign, type GeneralFactorialResult,
+  buildDoeConclusion,
+  nf,
+  tInv,
+  analyzeDoe,
+  mainEffectMeans,
+  interactionMeans,
+  DOE_DESIGN,
+  detectFactorial,
+  analyzeFactorial,
+  factorialAdjustedMainMeans,
+  factorialAdjustedInteractionMeans,
+  factorialCornerPredictions,
+  factorialOptimizationTerms,
+  factorialBlockPlan,
+  factorialBlockOptions,
+  factorialHierarchyClosure,
+  toggleFactorialHierarchyTerm,
+  generateFactorialDesign,
+  resolveDoeColumnsWide,
+  resolveDoeBlockValues,
+  factorialModelTerms,
+  factorialOptimizationDecision,
+  isDoeAnalysisColumn,
+  buildDoeWorksheetOutput,
+  uncodedEquation,
+  lenthPseFromEffects,
+  studentizedDeletedResiduals,
+  detectFractionalFactorial,
+  analyzeFractionalFactorial,
+  MAX_FRACTIONAL_FACTORS,
+  detectGeneralFactorial,
+  analyzeGeneralFactorial,
+  generateGeneralFactorialDesign,
+  fractionalDesignOptions,
+  fractionalFoldPreview,
+  generateFractionalFactorialDesign,
+  validateDoeFactorNames,
+  type CodedDesign,
+  type FactorialResult,
+  type FactorDef,
+  type GeneralFactorialDesign,
+  type GeneralFactorialResult,
 } from '../../core';
 import type { ChartTokens } from '../tokens';
 import { Card, CardHeader, tabStyle, EmptyStateCard, DemoBadge, numInput } from '../common';
@@ -27,6 +59,34 @@ import { MiniHist } from '../charts/misc';
 import { MainEffects, InteractionPlot, EffectsBar, CubePlot } from '../charts/doe';
 import { Svg, Ln, Txt } from '../charts/primitives';
 
+
+/** 因子低/高水平编辑行(第三轮 P3:此前全因子/分数因子两处逐字重复;空框存 NaN 由生成入口报错,不静默写 0) */
+function FactorRows({ factors, count, setF, inp, showLetter }: {
+  factors: { name: string; low: number; high: number }[];
+  count: number;
+  setF: (i: number, patch: Partial<{ name: string; low: number; high: number }>) => void;
+  inp: CSSProperties;
+  showLetter: boolean;
+}) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      {factors.slice(0, count).map((f, i) => (
+        <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ width: showLetter ? 56 : 40, color: '#8a929d' }}>{showLetter ? `${String.fromCharCode(65 + i)} ` : ''}因子{i + 1}</span>
+          <input aria-label={`${showLetter ? '分数因子' : '两水平全因子'}因子 ${i + 1} 名称`}
+            value={f.name} onChange={(e) => setF(i, { name: e.target.value })}
+            style={{ width: 130, padding: '5px 8px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12.5 }} />
+          <span>低</span>
+          <input aria-label={`${showLetter ? '分数因子' : '两水平全因子'}因子 ${i + 1} 低水平`}
+            type="number" step="any" value={Number.isFinite(f.low) ? f.low : ''} onChange={(e) => setF(i, { low: e.target.value === '' ? Number.NaN : parseFloat(e.target.value) })} style={inp} />
+          <span>高</span>
+          <input aria-label={`${showLetter ? '分数因子' : '两水平全因子'}因子 ${i + 1} 高水平`}
+            type="number" step="any" value={Number.isFinite(f.high) ? f.high : ''} onChange={(e) => setF(i, { high: e.target.value === '' ? Number.NaN : parseFloat(e.target.value) })} style={inp} />
+        </div>
+      ))}
+    </div>
+  );
+}
 const VIEWS: Array<[DoeView, string]> = [
   ['main', '主效应图'],
   ['interact', '交互作用图'],
@@ -137,7 +197,12 @@ function AnalyzeDesign({ T }: { T: ChartTokens }) {
     ? allModelTerms.filter((term) => term.split('×').length <= 2)
     : allModelTerms;
   const storedTerms = doeModelTerms?.filter((term) => availableTerms.includes(term)) ?? null;
-  const selectedTerms = storedTerms && storedTerms.length > 0 ? storedTerms : availableTerms;
+  // Strong hierarchy is a model invariant, not a presentation hint.  Normalize
+  // legacy/non-hierarchical snapshots here with the same core helper used by
+  // saved summaries and the specialist report.
+  const selectedTerms = storedTerms && storedTerms.length > 0
+    ? factorialHierarchyClosure(design!.factorNames, storedTerms, availableTerms)
+    : availableTerms;
   const real: FactorialResult | null = design
     ? (design.factorNames.length <= 4
       ? analyzeFactorial(design, { terms: selectedTerms, includeCurvature: doeIncludeCurvature })
@@ -302,6 +367,7 @@ function AnalyzeDesign({ T }: { T: ChartTokens }) {
   const sigTerms = res.terms.filter((t) => t.sig);
   const sigInteractions = sigTerms.filter((t) => t.name.includes('×'));
   const optimization = !isDemo ? factorialOptimizationDecision(res, design!) : null;
+  const optimizationTerms = !isDemo ? factorialOptimizationTerms(res, design!) : null;
   const uniqueSettings = optimization?.status === 'unique' && optimization.optimum
     ? optimization.optimum.factorValues.map((value, index) =>
       `${factorNames[index]}=${nf(value, 6)}(${optimization.optimum!.coded[index] > 0 ? '高' : '低'})`).join('、')
@@ -315,29 +381,43 @@ function AnalyzeDesign({ T }: { T: ChartTokens }) {
     ? optimization.optimum?.ties.slice(0, 4).map((corner) => corner.factorValues.map((value, index) =>
       `${factorNames[index]}=${nf(value, 6)}(${corner.coded[index] > 0 ? '高' : '低'})`).join('、')).join('；')
     : '';
-  const interactionNote = sigInteractions.length
-    ? '已综合显著交互作用，不按主效应符号独立推荐。'
-    : '当前未检出显著交互，仍建议用确认试验验证。';
+  // 混杂交互提示与导出报告同源(core.confoundedInteractionNote)
+  // 结论文本的四个分支下沉到 core/doe.ts 的 buildDoeConclusion(自审 P2:此前只能靠
+  // 源码切片守护「分支是否消费混杂提示」,保形重写一律绕过;纯函数可直接被行为守护调用)
   const conclusion = isDemo
     ? '温度 (A) 与时间 (C) 为主导因子,压力 (B) 次之;交互作用不显著。要使抗拉强度最大化,应将温度、时间、压力均设为高水平 (+1),预测强度约 66 MPa。'
-    : optimization?.status === 'no-significant-effect'
-      ? `在当前数据下未发现显著的因子或交互作用(${isT ? `残差自由度 ${res.dfResid}` : 'Lenth 检验'})。可增加重复或中心点以提高检验功效。`
-      : optimization?.status === 'significant-curvature'
-        ? `${sigTerms.length ? `显著工艺项:${sigTerms.map((t) => t.name).join('、')}；同时` : ''}中心点曲率显著；两水平线性模型不能可靠给出最优角点，暂不推荐设置，应升级为响应曲面设计。`
-        : optimization?.status === 'tied'
-          ? `显著项:${sigTerms.map((t) => t.name).join('、')}。当前模型有 ${optimization.optimum!.ties.length} 个并列最大角点，无唯一最优组合；共同设置为:${fixedSettings || '无（所有因子均存在并列设置）'}。并列组合:${tiedSettings}${optimization.optimum!.ties.length > 4 ? `；另有 ${optimization.optimum!.ties.length - 4} 个` : ''}。${interactionNote}`
-          : `显著项:${sigTerms.map((t) => t.name).join('、')}。按当前完整拟合模型枚举 2^${factorNames.length} 个角点，「${respName}」唯一最大的设置为:${uniqueSettings}。${interactionNote}`;
+    : buildDoeConclusion({
+      status: (optimization?.status ?? 'unique') as 'no-significant-effect' | 'significant-curvature' | 'tied' | 'unique',
+      aliases: res.aliases,
+      hasSignificantInteraction: sigInteractions.length > 0,
+      sigTermNames: sigTerms.map((t) => t.name),
+      detail: isT ? `残差自由度 ${res.dfResid}` : 'Lenth 检验',
+      factorCount: factorNames.length,
+      respName,
+      settings: optimization?.status === 'tied'
+        ? `${tiedSettings}${(optimization.optimum?.ties.length ?? 0) > 4 ? `；另有 ${(optimization.optimum?.ties.length ?? 0) - 4} 个` : ''}`
+        : uniqueSettings,
+      tieCount: optimization?.optimum?.ties.length,
+      fixedSettings,
+      hierarchyParentNames: optimizationTerms?.hierarchyParentTerms,
+    });
   const hasCenter = !isDemo && design!.coded.some((row) => row.every((value) => value === 0));
   const toggleModelTerm = (term: string, checked: boolean) => {
-    if (!checked && selectedTerms.length <= 1) { showToast('模型至少保留 1 个效应项'); return; }
-    setDoeModel({ doeModelTerms: checked ? [...selectedTerms, term] : selectedTerms.filter((name) => name !== term) });
+    const next = toggleFactorialHierarchyTerm(design!.factorNames, selectedTerms, term, checked, availableTerms);
+    if (!next.length) { showToast('模型至少保留 1 个效应项'); return; }
+    if (!checked) {
+      const cascaded = selectedTerms.filter((name) => name !== term && !next.includes(name));
+      if (cascaded.length) showToast(`已按层级原则同步取消依赖项：${cascaded.join('、')}`);
+    }
+    setDoeModel({ doeModelTerms: next });
   };
   const storeOutputs = () => {
     if (isDemo) return;
     try {
       const output = buildDoeWorksheetOutput(res);
-      writeAnalysisColumns(output.numericColumns, output.textColumns);
-      showToast('已写回工作表：拟合值、效应、残差、系数、标准化残差（按运行/模型项对齐）');
+      if (writeAnalysisColumns(output.numericColumns, output.textColumns)) {
+        showToast('已写回工作表：拟合值、效应、残差、系数、标准化残差（按运行/模型项对齐）');
+      }
     } catch (error) {
       showToast(`写回失败：${(error as Error).message}`);
     }
@@ -399,10 +479,10 @@ function AnalyzeDesign({ T }: { T: ChartTokens }) {
           )}
           {doeView === 'interact' && !isDemo && k > 2 && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#5b6472' }}>
-              <select style={selStyle} value={pairA} onChange={(e) => setPairA(+e.target.value)}>
+              <select aria-label="交互作用图第一个因子" style={selStyle} value={pairA} onChange={(e) => setPairA(+e.target.value)}>
                 {factorNames.map((n, i) => <option key={i} value={i}>{n}</option>)}
               </select>×
-              <select style={selStyle} value={pairB} onChange={(e) => setPairB(+e.target.value)}>
+              <select aria-label="交互作用图第二个因子" style={selStyle} value={pairB} onChange={(e) => setPairB(+e.target.value)}>
                 {factorNames.map((n, i) => <option key={i} value={i}>{n}</option>)}
               </select>
             </div>
@@ -427,7 +507,7 @@ function AnalyzeDesign({ T }: { T: ChartTokens }) {
         </div>
       </Card>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1.3fr 1fr', gap: 16 }}>
+      <div className="responsive-grid-2" style={{ display: 'grid', gridTemplateColumns: '1.3fr 1fr', gap: 16 }}>
         <Card>
           <CardHeader title={`效应与系数 · ${isDemo || !isT ? 'Lenth 检验' : `t 检验(残差自由度 ${res.dfResid})`}`} />
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
@@ -784,11 +864,22 @@ function CreateDesign() {
   const kOutOfRange = !(Number.isInteger(parsedK) && parsedK >= 2 && parsedK <= 4);
   const k = Number.isInteger(parsedK) ? Math.max(2, Math.min(4, parsedK)) : 2;
 
-  const maxBlocks = 1 << (k - 1);
-  const blocksEff = Math.min(blocks, maxBlocks);
+  const blockOptions = factorialBlockOptions(k, reps);
+  const blocksEff = blockOptions.includes(blocks)
+    ? blocks
+    : ([...blockOptions].reverse().find((candidate) => candidate <= blocks) ?? blockOptions[0]);
   const runs = (1 << k) * reps + center * blocksEff;
+  const blockPlan = factorialBlockPlan(k, blocksEff, reps);
   const setF = (i: number, patch: Partial<FactorDef>) =>
     setFactors((prev) => prev.map((f, j) => (j === i ? { ...f, ...patch } : f)));
+  const resolveFactorNames = (drafts: Array<{ name: string }>): string[] | null => {
+    const validation = validateDoeFactorNames(drafts.map((factor) => factor.name));
+    if (!validation.ok) {
+      showToast(validation.reason);
+      return null;
+    }
+    return validation.names;
+  };
 
   const deliverDesign = (
     name: string,
@@ -801,24 +892,47 @@ function CreateDesign() {
       return;
     }
     const pending = design.rows.map((_, row) => ({ row, col: design.responseCol }));
-    importMatrix(name, design.colNames, design.rows, design.textCols, pending);
+    const outcome = importMatrix(name, design.colNames, design.rows, design.textCols, pending);
     setCreatedPreview(null);
     goTo('worksheet');
-    showToast(`${description}；已写入工作表，请录入响应后回 DOE→分析`);
+    if (outcome.persisted) {
+      showToast(`${description}；已持久化并写入工作表，请录入响应后回 DOE→分析`);
+      return;
+    }
+    if (outcome.archiving) {
+      showToast(`${description}；已写入工作表，正在归档到本机数据集库，归档完成前请勿关闭应用`);
+      // 大数据集的写库在后台完成。消费 durability 的拒绝，既避免未处理的
+      // Promise rejection，也保证后到的“已写入”成功文案不会盖住归档失败警告。
+      if (outcome.durability) {
+        void outcome.durability.catch((error: unknown) => {
+          const detail = error instanceof Error ? error.message : String(error);
+          showToast(`⚠ 设计已写入当前工作表内存，但本机归档失败，尚未持久化——刷新或关闭将丢失！${detail ? `（${detail}）` : ''}请立即「文件 → 导出项目」备份`);
+        });
+      }
+      return;
+    }
+    const rejected = outcome.rejected ? `（${outcome.rejected}）` : '';
+    showToast(`⚠ 设计已生成并写入当前工作表内存，但自动保存失败、尚未持久化——刷新或关闭将丢失！${rejected}请立即「文件 → 导出项目」备份`);
   };
 
   const create = () => {
     const facs = factors.slice(0, k);
-    if (facs.some((f) => !f.name.trim())) { showToast('请填写所有因子名'); return; }
-    if (new Set(facs.map((f) => f.name.trim())).size !== facs.length) { showToast('因子名不能重复'); return; }
+    const names = resolveFactorNames(facs);
+    if (!names) return;
     if (facs.some((f) => !(f.low < f.high))) { showToast('每个因子必须满足低水平 < 高水平'); return; }
-    const audit = resolveRandomization();
-    if (!audit) return;
-    const generated = generateFactorialDesign(facs.map((f) => ({ name: f.name.trim(), low: f.low, high: f.high })),
-      { centerPoints: center, replicates: reps, blocks: blocksEff, randomize, seed: audit.seed });
-    const d = randomize ? generated : alignUnrandomizedDoeOrders(generated);
-    const stamp = new Date().toLocaleTimeString('zh-CN', { hour12: false }).replace(/:/g, '');
-    deliverDesign(`DOE设计_${stamp}_${audit.auditSuffix}`, d, `已生成 ${d.rows.length} 运行 / ${d.blockCount} 区组的因子设计（含标准序、运行序、区组、点类型；${audit.auditText}）`);
+    try {
+      const audit = resolveRandomization();
+      if (!audit) return;
+      const generated = generateFactorialDesign(facs.map((f, index) => ({ name: names[index], low: f.low, high: f.high })),
+        { centerPoints: center, replicates: reps, blocks: blocksEff, randomize, seed: audit.seed });
+      const d = randomize ? generated : alignUnrandomizedDoeOrders(generated);
+      const stamp = new Date().toLocaleTimeString('zh-CN', { hour12: false }).replace(/:/g, '');
+      deliverDesign(
+        `DOE设计_${stamp}_${audit.auditSuffix}`,
+        d,
+        `已生成 ${d.rows.length} 运行 / ${d.blockCount} 区组的因子设计（${d.blockPlan?.description ?? blockPlan.description}；${audit.auditText}）`,
+      );
+    } catch (error) { showToast((error as Error).message); }
   };
 
   // —— 一般全因子:派生值与生成 ——
@@ -847,9 +961,9 @@ function CreateDesign() {
 
   const createGeneral = () => {
     const facs = gFactors.slice(0, gK);
-    if (facs.some((f) => !f.name.trim())) { showToast('请填写所有因子名'); return; }
-    if (new Set(facs.map((f) => f.name.trim())).size !== facs.length) { showToast('因子名不能重复'); return; }
-    const parsed = facs.map((f) => ({ name: f.name.trim(), levels: f.levelTexts.map((t) => Number.parseFloat(t)) }));
+    const names = resolveFactorNames(facs);
+    if (!names) return;
+    const parsed = facs.map((f, index) => ({ name: names[index], levels: f.levelTexts.map((t) => Number.parseFloat(t)) }));
     for (const f of parsed) {
       if (f.levels.length < 2 || f.levels.length > 5) { showToast(`因子「${f.name}」的水平数须在 2–5 之间`); return; }
       if (f.levels.some((v) => !Number.isFinite(v))) { showToast(`因子「${f.name}」的水平值必须全部为有效数值`); return; }
@@ -886,14 +1000,14 @@ function CreateDesign() {
 
   const createFractional = () => {
     const facs = factors.slice(0, fK);
-    if (facs.some((f) => !f.name.trim())) { showToast('请填写所有因子名'); return; }
-    if (new Set(facs.map((f) => f.name.trim())).size !== facs.length) { showToast('因子名不能重复'); return; }
+    const names = resolveFactorNames(facs);
+    if (!names) return;
     if (facs.some((f) => !(f.low < f.high))) { showToast('每个因子必须满足低水平 < 高水平'); return; }
     try {
       const audit = resolveRandomization();
       if (!audit) return;
       const generated = generateFractionalFactorialDesign(
-        facs.map((f) => ({ name: f.name.trim(), low: f.low, high: f.high })),
+        facs.map((f, index) => ({ name: names[index], low: f.low, high: f.high })),
         fSpec.p,
         {
           fold: foldArg,
@@ -923,7 +1037,7 @@ function CreateDesign() {
           <option value="auto">自动换新</option>
           <option value="fixed">固定复现</option>
         </select>
-        <input type="number" min={1} max={MAX_DOE_SEED} value={seedText} onChange={(e) => { setSeedText(e.target.value); setSeedMode('fixed'); }} disabled={!randomize}
+        <input aria-label="随机化种子数值" type="number" min={1} max={MAX_DOE_SEED} value={seedText} onChange={(e) => { setSeedText(e.target.value); setSeedMode('fixed'); }} disabled={!randomize}
           style={{ ...inp, width: 100, ...(randomize ? {} : { opacity: 0.5 }) }} />
       </label>
       <span style={{ fontSize: 11, color: '#8a929d' }}>数据集名会保存「未随机」或实际 seed</span>
@@ -980,14 +1094,14 @@ function CreateDesign() {
             return (
               <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                 <span style={{ width: 40, color: '#8a929d' }}>因子{i + 1}</span>
-                <input value={f.name} onChange={(e) => setGF(i, { name: e.target.value })}
+                <input aria-label={`一般全因子因子 ${i + 1} 名称`} value={f.name} onChange={(e) => setGF(i, { name: e.target.value })}
                   style={{ width: 110, padding: '5px 8px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12.5 }} />
                 <span>水平数</span>
-                <input type="number" min={2} max={5} step={1} value={f.countText}
+                <input aria-label={`一般全因子因子 ${i + 1} 水平数`} type="number" min={2} max={5} step={1} value={f.countText}
                   onChange={(e) => setGLevelCount(i, e.target.value)} style={{ ...inp, width: 56 }} />
                 <span>水平值</span>
                 {f.levelTexts.map((t, li) => (
-                  <input key={li} value={t} inputMode="decimal" aria-label={`因子${i + 1}水平${li + 1}`}
+                  <input key={li} value={t} inputMode="decimal" aria-label={`一般全因子因子 ${i + 1} 水平 ${li + 1} 数值`}
                     onChange={(e) => setGLevelValue(i, li, e.target.value)}
                     style={{ ...inp, width: 64 }} />
                 ))}
@@ -1035,19 +1149,7 @@ function CreateDesign() {
           <span style={{ color: '#8a929d' }}>(字母 A–{String.fromCharCode(64 + fK)} 用于生成元记号)</span>
           {fOutOfRange && <span style={{ color: '#b0620f', fontWeight: 600 }}>分数因子支持 3–7 因子</span>}
         </label>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {factors.slice(0, fK).map((f, i) => (
-            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <span style={{ width: 56, color: '#8a929d' }}>{String.fromCharCode(65 + i)} 因子{i + 1}</span>
-              <input value={f.name} onChange={(e) => setF(i, { name: e.target.value })}
-                style={{ width: 130, padding: '5px 8px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12.5 }} />
-              <span>低</span>
-              <input type="number" step="any" value={f.low} onChange={(e) => setF(i, { low: parseFloat(e.target.value) || 0 })} style={inp} />
-              <span>高</span>
-              <input type="number" step="any" value={f.high} onChange={(e) => setF(i, { high: parseFloat(e.target.value) || 0 })} style={inp} />
-            </div>
-          ))}
-        </div>
+        <FactorRows factors={factors} count={fK} setF={setF} inp={inp} showLetter={true} />
         <div>
           <div style={{ fontWeight: 600, color: '#33404f', marginBottom: 6 }}>设计选择表</div>
           <table style={{ borderCollapse: 'collapse', fontSize: 12.5, minWidth: 520 }}>
@@ -1065,7 +1167,9 @@ function CreateDesign() {
                 <tr key={option.p} onClick={() => { setFP(option.p); setFFraction(1); }}
                   style={{ borderTop: '1px solid #f0f2f5', cursor: 'pointer', background: option.p === fPEff ? '#f2f7fc' : undefined }}>
                   <td style={{ padding: '6px 10px' }}>
-                    <input type="radio" name="frac-design" checked={option.p === fPEff} onChange={() => { setFP(option.p); setFFraction(1); }} />
+                    <input type="radio" name="frac-design"
+                      aria-label={`选择 ${option.p === 0 ? `${option.label} 全因子` : `${option.label} 分数因子，分辨率 ${option.resolutionLabel}`}`}
+                      checked={option.p === fPEff} onChange={() => { setFP(option.p); setFFraction(1); }} />
                   </td>
                   <td style={{ padding: '6px 10px', color: '#33404f', fontWeight: 600 }} className="mono">
                     {option.p === 0 ? `${option.label} 全因子` : `${option.label} 分数因子`}
@@ -1096,7 +1200,7 @@ function CreateDesign() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
           <label title="折叠前会检查镜像是否产生新设计点；无效折叠不会写入重复运行" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             折叠
-            <select style={selStyle} value={foldEff === 'none' && fSpec.p === 0 ? 'none' : foldMode} disabled={fSpec.p === 0}
+            <select aria-label="折叠" style={selStyle} value={foldEff === 'none' && fSpec.p === 0 ? 'none' : foldMode} disabled={fSpec.p === 0}
               onChange={(e) => setFoldMode(e.target.value as 'none' | 'full' | 'factor')}>
               <option value="none">不折叠</option>
               <option value="full">全折叠(全部因子取反)</option>
@@ -1104,7 +1208,7 @@ function CreateDesign() {
             </select>
           </label>
           {fSpec.p > 0 && foldMode === 'factor' && (
-            <select style={selStyle} value={foldFactorEff} onChange={(e) => setFoldFactorIdx(+e.target.value)}>
+            <select aria-label="指定要折叠的因子" style={selStyle} value={foldFactorEff} onChange={(e) => setFoldFactorIdx(+e.target.value)}>
               {factors.slice(0, fK).map((f, i) => <option key={i} value={i}>{String.fromCharCode(65 + i)} {f.name}</option>)}
             </select>
           )}
@@ -1171,19 +1275,7 @@ function CreateDesign() {
           <span style={{ color: '#8a929d' }}>({1 << k} 角点/仿行)</span>
           {kOutOfRange && <span style={{ color: '#b0620f', fontWeight: 600 }}>本版支持 2–4 因子</span>}
         </label>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {factors.slice(0, k).map((f, i) => (
-            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <span style={{ width: 40, color: '#8a929d' }}>因子{i + 1}</span>
-              <input value={f.name} onChange={(e) => setF(i, { name: e.target.value })}
-                style={{ width: 130, padding: '5px 8px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12.5 }} />
-              <span>低</span>
-              <input type="number" step="any" value={f.low} onChange={(e) => setF(i, { low: parseFloat(e.target.value) || 0 })} style={inp} />
-              <span>高</span>
-              <input type="number" step="any" value={f.high} onChange={(e) => setF(i, { high: parseFloat(e.target.value) || 0 })} style={inp} />
-            </div>
-          ))}
-        </div>
+        <FactorRows factors={factors} count={k} setF={setF} inp={inp} showLetter={false} />
         <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
           <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             每区组中心点数
@@ -1196,8 +1288,7 @@ function CreateDesign() {
           <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             区组数
             <select style={selStyle} value={blocksEff} onChange={(e) => setBlocks(+e.target.value)}>
-              {Array.from({ length: Math.log2(maxBlocks) + 1 }, (_, index) => 1 << index)
-                .map((value) => <option key={value} value={value}>{value}</option>)}
+              {blockOptions.map((value) => <option key={value} value={value}>{value}</option>)}
             </select>
           </label>
           {randomizeControls}
@@ -1205,7 +1296,8 @@ function CreateDesign() {
           <span style={{ color: '#1c4e7a' }}>共 <b className="mono">{runs}</b> 次试验</span>
         </div>
         <div style={{ fontSize: 11.5, color: '#9aa2ad', lineHeight: 1.6 }}>
-          生成后进入工作表：标准序保留未随机化顺序，运行序为实际执行顺序，区组用 A×B、A×C…生成元保持主效应与区组可分离，
+          生成后进入工作表：标准序保留未随机化顺序，运行序为实际执行顺序。当前区组方案：<span className="mono">{blockPlan.description}</span>。
+          区组与上述定义对比混杂，不得将这些处理效应单独解释；
           点类型标明因子点/中心点；末列「响应(待录入)」逐行录入。中心点用于检验曲率并提供纯误差估计。
           随机化由确定性伪随机数(LCG)驱动，同一种子重新生成会得到完全相同的运行序。
         </div>
@@ -1325,7 +1417,7 @@ function GeneralAnalyzeSection({ T, design, respIdx, respName, picker }: {
         )}
       </Card>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1.3fr 1fr', gap: 16 }}>
+      <div className="responsive-grid-2" style={{ display: 'grid', gridTemplateColumns: '1.3fr 1fr', gap: 16 }}>
         <Card>
           <CardHeader title={`方差分析 · 响应 = ${respName}`}
             right={<span style={{ fontSize: 11.5, color: '#98a1ac' }}>Adj SS(调整平方和)· α=0.05</span>} />
@@ -1475,8 +1567,13 @@ function GeneralMainEffects({ T, factors, grand }: {
   }
   const ph = H - m.t - m.b;
   const Y = (v: number) => m.t + (1 - (v - lo) / (hi - lo)) * ph;
+  const accessibleSummary = factors.map((factor) => (
+    `${factor.name}：${factor.levels.map((level, index) => `水平 ${nf(level, 6)} 均值 ${nf(factor.means[index], 6)}`).join('，')}`
+  )).join('；');
   return (
-    <Svg w={W} h={H}>
+    <Svg w={W} h={H} label={`DOE 一般全因子主效应图。${accessibleSummary}`}>
+      <title>DOE 一般全因子主效应图</title>
+      <desc>{accessibleSummary}</desc>
       <rect x={0} y={0} width={W} height={H} fill={T.bg} />
       {factors.map((f, i) => {
         const x0 = pad + i * (panelW + gap);

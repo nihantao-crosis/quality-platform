@@ -35,7 +35,30 @@ export interface SpcChartEvent {
   chart: string;
 }
 
+/** 通用报告的控制图族必须来自当前 SPC 配置，报告层不得按 VarModel 猜回 X̄-R。 */
+export type SpcChartFamily = 'xbar-r' | 'xbar-s' | 'i-mr';
+
+/** 所有稳定性消费者共用：单值模型只能是 I-MR；子组模型仅 X̄-S 显式切换到 S。 */
+export function spcChartFamilyFor(M: VarModel, spcType: string): SpcChartFamily {
+  return !M.hasSubgroups ? 'i-mr' : spcType === 'xbar-s' ? 'xbar-s' : 'xbar-r';
+}
+
+export interface SpcChartContext {
+  data: number[];
+  cl: number;
+  ucl: number;
+  lcl: number;
+  /** 图标题/判异明细使用的图名：X̄、R、S、I、MR。 */
+  label: string;
+  /** 控制中心线标签：X̄、R̄、S̄、I、MR̄。 */
+  clLabel: string;
+  xIndexOffset: number;
+}
+
 export interface SpcAssessment {
+  family: SpcChartFamily;
+  location: SpcChartContext;
+  dispersion: SpcChartContext;
   locationLabel: string;   // X̄ / I
   dispersionLabel: string; // R / MR
   /** 位置图内去重后的图表点数（兼容字段）。 */
@@ -72,31 +95,38 @@ function evaluateSpcChartRules(
   M: VarModel,
   rules: NelsonRules,
   ruleK: NelsonRuleK,
+  family: SpcChartFamily,
   collectDetails: boolean,
 ) {
   if (ruleK == null) throw new TypeError('SPC 判异评估必须显式传入 ruleK，不允许回落默认 K 值');
   const normalizedK = normalizeRuleK(ruleK);
   const options = { collectDetails };
+  if (M.hasSubgroups !== (family !== 'i-mr')) {
+    throw new Error(`SPC 图族 ${family} 与当前数据结构不兼容`);
+  }
+  const xUcl = family === 'xbar-s' ? M.uclXs : M.uclX;
   const location = M.hasSubgroups
-    ? evalRules(M.subs.map((s) => s.mean), M.xbarbar, (M.uclX - M.xbarbar) / 3, rules, normalizedK, options)
+    ? evalRules(M.subs.map((s) => s.mean), M.xbarbar, (xUcl - M.xbarbar) / 3, rules, normalizedK, options)
     // σ 用 (UCL−CL)/3 而非 M.iSig:与页面(Spc.tsx)和保存摘要(analyses.ts)逐位同一浮点表达式。
     : evalRules(M.indiv, M.indMean, (M.iUcl - M.indMean) / 3, rules, normalizedK, options);
   const dispersion = M.hasSubgroups
-    ? evalLimitedRules(M.subs.map((s) => s.range), M.rCl, M.uclR, M.lclR, rules, normalizedK, undefined, options)
+    ? family === 'xbar-s'
+      ? evalLimitedRules(M.svals, M.sCl, M.uclS, M.lclS, rules, normalizedK, undefined, options)
+      : evalLimitedRules(M.subs.map((s) => s.range), M.rCl, M.uclR, M.lclR, rules, normalizedK, undefined, options)
     : evalLimitedRules(M.mr.slice(1) as number[], M.mrbar, M.mrUcl, 0, rules, normalizedK, undefined, options);
   return { normalizedK, location, dispersion };
 }
 
 /** 通用报告(四种导出格式)共用的 SPC 判异评估。rules/ruleK 必须来自用户当前设置——
  * 任何调用点不得回落 DEFAULT_RULES,否则导出与页面口径分裂。 */
-export function assessSpcCharts(M: VarModel, rules: NelsonRules, ruleK: NelsonRuleK): SpcAssessment {
+export function assessSpcCharts(M: VarModel, rules: NelsonRules, ruleK: NelsonRuleK, family: SpcChartFamily): SpcAssessment {
   // 公开 API 不允许静默回落标准 K：即使 JavaScript/反序列化调用绕过 TypeScript，
   // 漏传也必须立即暴露，而不是生成一份与用户当前设置不一致的报告。
   // evalRules 会自行规范化 K，明细展开也必须消费同一份规范化结果；
   // 否则 JS/旧快照传入空对象或非法字段时会出现“图 18 点、明细 10 行”。
-  const { normalizedK, location, dispersion } = evaluateSpcChartRules(M, rules, ruleK, true);
+  const { normalizedK, location, dispersion } = evaluateSpcChartRules(M, rules, ruleK, family, true);
   const locationLabel = M.hasSubgroups ? 'X̄' : 'I';
-  const dispersionLabel = M.hasSubgroups ? 'R' : 'MR';
+  const dispersionLabel = family === 'xbar-s' ? 'S' : M.hasSubgroups ? 'R' : 'MR';
   // MR[j] 对应原始观测 j+2;点号空间统一到观测号后才能与 I 图去重
   const dispersionOffset = M.hasSubgroups ? 0 : 1;
   const dispersionPointSet = new Set([...dispersion.viol].map((i) => i + dispersionOffset));
@@ -116,6 +146,15 @@ export function assessSpcCharts(M: VarModel, rules: NelsonRules, ruleK: NelsonRu
       ? '✓ 未检出失控点，过程受控（按当前启用的判异准则）'
       : `✗ ${locationLabel} 图检出 ${location.viol.size} 个失控点，存在特殊原因变异`;
   return {
+    family,
+    location: M.hasSubgroups
+      ? { data: M.subs.map((s) => s.mean), cl: M.xbarbar, ucl: family === 'xbar-s' ? M.uclXs : M.uclX, lcl: family === 'xbar-s' ? M.lclXs : M.lclX, label: 'X̄', clLabel: 'X̄', xIndexOffset: 0 }
+      : { data: M.indiv, cl: M.indMean, ucl: M.iUcl, lcl: M.iLcl, label: 'I', clLabel: 'I', xIndexOffset: 0 },
+    dispersion: family === 'xbar-s'
+      ? { data: M.svals, cl: M.sCl, ucl: M.uclS, lcl: M.lclS, label: 'S', clLabel: M.sigmaMethod === 'pooled' ? 'c₄σ̂' : 'S̄', xIndexOffset: 0 }
+      : M.hasSubgroups
+        ? { data: M.subs.map((s) => s.range), cl: M.rCl, ucl: M.uclR, lcl: M.lclR, label: 'R', clLabel: M.sigmaMethod === 'pooled' ? 'd₂σ̂' : 'R̄', xIndexOffset: 0 }
+        : { data: M.mr.slice(1) as number[], cl: M.mrbar, ucl: M.mrUcl, lcl: 0, label: 'MR', clLabel: 'MR̄', xIndexOffset: 1 },
     locationLabel, dispersionLabel,
     locationPoints: location.viol.size,
     dispersionPoints: dispersion.viol.size,
@@ -134,9 +173,9 @@ export function assessSpcCharts(M: VarModel, rules: NelsonRules, ruleK: NelsonRu
 
 /** 能力分析口径的失控点数:位置图 + 离散图(与能力页 158–165 行历史逻辑一致)。
  * K 值需与 SPC 页/报告同源传入,否则同一数据两侧「受控性」结论会分裂。 */
-export function countCapabilityViolations(M: VarModel, rules: NelsonRules, ruleK: NelsonRuleK): number {
+export function countCapabilityViolations(M: VarModel, rules: NelsonRules, ruleK: NelsonRuleK, family: SpcChartFamily): number {
   // 页面/看板只需要整数；禁止为此构建、展开并排序整份报告明细。
-  const { location, dispersion } = evaluateSpcChartRules(M, rules, ruleK, false);
+  const { location, dispersion } = evaluateSpcChartRules(M, rules, ruleK, family, false);
   return location.viol.size + dispersion.viol.size;
 }
 
@@ -161,7 +200,9 @@ export function assessCapability(args: {
   const headline = spcViolations > 0
     ? `控制图检出 ${spcViolations} 个失控点（各图累计）；Cpk=${nf(cpk, 2)} 只能描述现有样本，过程稳定前不得用于预测未来质量。`
     : capLevel === 'ok'
-      ? `过程能力充足(Cpk=${nf(cpk, 2)}),按当前受控状态可满足规格要求。`
+      ? normPenalty !== 'ok'
+        ? `过程能力充足(Cpk=${nf(cpk, 2)}),但数据显著偏离正态,指标可能失真——建议 Box-Cox 变换后复核再作判定。`
+        : `过程能力充足(Cpk=${nf(cpk, 2)}),按当前受控状态可满足规格要求。`
       : capLevel === 'warn'
         ? `过程能力临界(Cpk=${nf(cpk, 2)}),建议减少变异或居中过程后复评。`
         : `过程能力不足(Cpk=${nf(cpk, 2)}),预期将产出超差品——优先减少变异/对中,并加严检验。`;

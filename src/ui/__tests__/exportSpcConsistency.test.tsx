@@ -37,7 +37,7 @@ function k12Model() {
 describe('assessSpcCharts 唯一判异源', () => {
   it('R-only 夹具:位置图 0 点、离散图 >0 点,结论行先判 R 图', () => {
     const M = rOnlyModel();
-    const a = assessSpcCharts(M, RULES, DEFAULT_RULE_K);
+    const a = assessSpcCharts(M, RULES, DEFAULT_RULE_K, 'xbar-r');
     expect(a.locationPoints).toBe(0);
     expect(a.dispersionPoints).toBeGreaterThan(0);
     expect(a.analysisUnitLabel).toBe('子组');
@@ -53,7 +53,7 @@ describe('assessSpcCharts 唯一判异源', () => {
     const values: number[][] = [[10], [30], [10]];
     for (let k = 0; k < 17; k++) values.push([k % 2 === 0 ? 10.05 : 10]);
     const M = computeVarModel('MR尖峰.csv', ['x'], values);
-    const a = assessSpcCharts(M, { ...OFF, r1: true }, DEFAULT_RULE_K);
+    const a = assessSpcCharts(M, { ...OFF, r1: true }, DEFAULT_RULE_K, 'i-mr');
     expect(a.dispersionLabel).toBe('MR');
     // 精确点号:丢失 +1 偏移会得到 [1, 2],此断言即红
     expect(a.events.filter((e) => e.chart === 'MR').map((e) => e.i + 1)).toEqual([2, 3]);
@@ -66,16 +66,16 @@ describe('assessSpcCharts 唯一判异源', () => {
 
   it('规则全关 → 稳定受控;规则/K 生效(自定义 K1 收紧后检出更多)', () => {
     const M = rOnlyModel();
-    expect(assessSpcCharts(M, OFF, DEFAULT_RULE_K).stable).toBe(true);
-    const tight = assessSpcCharts(M, { ...OFF, r1: true }, { ...DEFAULT_RULE_K, k1: 1 });
-    const normal = assessSpcCharts(M, { ...OFF, r1: true }, DEFAULT_RULE_K);
+    expect(assessSpcCharts(M, OFF, DEFAULT_RULE_K, 'xbar-r').stable).toBe(true);
+    const tight = assessSpcCharts(M, { ...OFF, r1: true }, { ...DEFAULT_RULE_K, k1: 1 }, 'xbar-r');
+    const normal = assessSpcCharts(M, { ...OFF, r1: true }, DEFAULT_RULE_K, 'xbar-r');
     expect(tight.uniqueAnalysisUnitCount).toBeGreaterThanOrEqual(normal.uniqueAnalysisUnitCount);
   });
 });
 
 describe('跨格式一致性(同一 R-only 数据)', () => {
   const M = rOnlyModel();
-  const a = assessSpcCharts(M, RULES, DEFAULT_RULE_K);
+  const a = assessSpcCharts(M, RULES, DEFAULT_RULE_K, 'xbar-r');
 
   it('textReport:不再出现「未检出失控点」,三个计数各自标注口径', () => {
     const text = textReport(M, SPEC, a);
@@ -109,7 +109,7 @@ describe('跨格式一致性(同一 R-only 数据)', () => {
     const rows: number[][] = [[10], [30], [10]];
     for (let index = 0; index < 17; index++) rows.push([index % 2 === 0 ? 10.05 : 10]);
     const model = computeVarModel('I-MR.csv', ['x'], rows);
-    const assessment = assessSpcCharts(model, { ...OFF, r1: true }, DEFAULT_RULE_K);
+    const assessment = assessSpcCharts(model, { ...OFF, r1: true }, DEFAULT_RULE_K, 'i-mr');
     const html = buildHtmlReport(model, { lsl: 0, tgt: 15, usl: 40 }, assessment);
     const doc = new DOMParser().parseFromString(html, 'text/html');
     const heading = [...doc.querySelectorAll('h3')].find((node) => node.textContent === 'MR 控制图（离散）');
@@ -154,7 +154,7 @@ describe('跨格式一致性(同一 R-only 数据)', () => {
     const assessment = assessSpcCharts(
       model,
       { ...OFF, r2: true },
-      { ...DEFAULT_RULE_K, k2: 12 },
+      { ...DEFAULT_RULE_K, k2: 12 }, 'xbar-r',
     );
     const wb = XLSX.read(buildXlsx(model, { lsl: -30, tgt: 0, usl: 30 }, assessment), { type: 'array' });
     const summaryRows = XLSX.utils.sheet_to_json<(string | number)[]>(wb.Sheets['统计摘要'], { header: 1 });
@@ -170,7 +170,7 @@ describe('跨格式一致性(同一 R-only 数据)', () => {
   });
 
   it('规则全关时三种格式一致写受控', () => {
-    const calm = assessSpcCharts(M, OFF, DEFAULT_RULE_K);
+    const calm = assessSpcCharts(M, OFF, DEFAULT_RULE_K, 'xbar-r');
     expect(textReport(M, SPEC, calm)).toContain('未检出失控点');
     expect(buildHtmlReport(M, SPEC, calm)).toContain('未检出失控点');
     const wb = XLSX.read(buildXlsx(M, SPEC, calm), { type: 'array' });
@@ -180,7 +180,7 @@ describe('跨格式一致性(同一 R-only 数据)', () => {
 
   it('常量数据的能力/AD 不可计算时，文本、HTML 和 Excel 仍保留 SPC 稳定性', () => {
     const constant = computeVarModel('常量.csv', ['a', 'b'], Array.from({ length: 20 }, () => [1, 1]));
-    const assessment = assessSpcCharts(constant, OFF, DEFAULT_RULE_K);
+    const assessment = assessSpcCharts(constant, OFF, DEFAULT_RULE_K, 'xbar-r');
     const spec = { lsl: 0, tgt: 1, usl: 2 };
 
     const text = textReport(constant, spec, assessment);
@@ -228,6 +228,9 @@ describe('判异明细行上限(v1.42.4 审计 P2:对抗性事件量不冻结导
   function bigAssessment(count: number): SpcAssessment {
     const events = Array.from({ length: count }, (_, k) => ({ i: k, rule: 1, desc: '超出控制限', chart: 'X̄' }));
     return {
+      family: 'xbar-r',
+      location: { data: M.subs.map((s) => s.mean), cl: M.xbarbar, ucl: M.uclX, lcl: M.lclX, label: 'X̄', clLabel: 'X̄', xIndexOffset: 0 },
+      dispersion: { data: M.subs.map((s) => s.range), cl: M.rCl, ucl: M.uclR, lcl: M.lclR, label: 'R', clLabel: 'R̄', xIndexOffset: 0 },
       locationLabel: 'X̄', dispersionLabel: 'R', locationPoints: count, dispersionPoints: 0,
       chartPointCount: count, analysisUnitLabel: '子组', uniqueAnalysisUnitCount: count,
       uniqueObservationCount: count, uniquePointCount: count, stable: false, events,
@@ -255,5 +258,21 @@ describe('判异明细行上限(v1.42.4 审计 P2:对抗性事件量不冻结导
     expect(html).toContain(`共 ${total} 条判异事件`);
     const small = buildHtmlReport(M, SPEC, bigAssessment(10));
     expect(small).not.toContain('已截断');
+  });
+});
+
+describe('专项报告大表导出(v1.43.0 双审 P1:push-spread 栈溢出)', () => {
+  it('13 万行专项表格 Excel 导出不崩且行数完整', () => {
+    const big = Array.from({ length: 130000 }, (_, i) => [i + 1, i * 2]);
+    const analysis = {
+      kind: 'spc', title: '大表', subtitle: '压力测试', generatedAt: '2026-07-25',
+      summary: ['ok'], warnings: [], charts: [],
+      tables: [{ title: '观测', headers: ['序号', '值'], rows: big }],
+    } as never;
+    const M = rOnlyModel();
+    const wb = XLSX.read(buildXlsx(M, SPEC, null, analysis), { type: 'array' });
+    const sheet = wb.Sheets[wb.SheetNames[0]];
+    const range = XLSX.utils.decode_range(sheet['!ref'] as string);
+    expect(range.e.r + 1).toBeGreaterThan(130000);
   });
 });
