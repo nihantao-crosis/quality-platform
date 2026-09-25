@@ -8,6 +8,7 @@ import {
   nf, anovaGroups, DEFECTS, gageStudyData, GAGE_TOLERANCE,
   computeGageRR, oneWayAnova, anovaResiduals, anovaGroupSummaries, buildAnovaInput, wideScaleDisparate, oneSampleT, twoSampleT, linearRegression,
   resolveAnovaMode, resolveAnovaNumericRoles, countAnovaPendingCells, isDoeAnalysisColumn, prepareGageStudy, listGageCategoryColumns, recommendGageRoles, effectiveGageSelection,
+  resolveGageStudy, type GageStudyPreparation,
   GAGE_SINGLE_OPERATOR, assessGage, computeGagePanelData, CONTROL_CONSTANTS,
   type TTestResult, type AnovaMode, type AnovaGroup,
 } from '../../core';
@@ -164,14 +165,14 @@ function GageRRInner({ T }: { T: ChartTokens }) {
       )}
     </div>
   ) : null;
-  // 计算与下拉显示同源:用户手选优先,未选过的角色用推荐预填(仍可被下拉修改)
-  const prepared = useMemo(() => prepareGageStudy(model, textCols, {
-    valueColumn: effective.valueColumn,
-    partColumn: effective.partColumn,
-    operatorColumn: effective.operatorColumn,
-    pendingCells,
-  }), [model, textCols, effective, pendingCells]);
   const requestedReal = !model.isDemo && gageUseReal;
+  // 计算与下拉显示同源:用户手选优先,未选过的角色用推荐预填(仍可被下拉修改)。
+  // fix2609c CORE-02/03:只在启用导入数据时按需解析,并与壳层(副标题/状态栏)共享单槽记忆,同一输入只算一次。
+  const prepared = useMemo<GageStudyPreparation>(() => (requestedReal
+    ? resolveGageStudy(model, textCols,
+      { value: gageValueName, part: gagePartName, operator: gageOperatorName }, pendingCells, effective).prepared
+    : { ok: false, reason: '未启用导入数据' }),
+  [requestedReal, model, textCols, gageValueName, gagePartName, gageOperatorName, pendingCells, effective]);
   const tolSpec = resolveGageTolerance({ gageTolMode, gageTolValue, lsl, usl, lslOn, uslOn });
   // ---------- 批次720-B:多测量列批量 GRR ----------
   // 审查修复(720):批量行锚定同一对部件/操作员列——effective 为 null(推荐并列)时

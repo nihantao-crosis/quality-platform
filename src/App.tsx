@@ -1,10 +1,11 @@
 /** 应用外壳 — 菜单栏 → 工具栏 → (左导航 + 主内容) → 状态栏 + 弹窗/Toast + 全局快捷键。 */
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useApp, resolveGageTolerance } from './store/appStore';
 import { useData, resolveCapabilityMeasurementData, isCapabilityWarningAcknowledged, datasetWriteNotes } from './store/dataStore';
 import {
   capabilityInputError, computeCapability, computeGageRR, gageStudyData, GAGE_TOLERANCE, nf,
-  effectiveGageSelection, prepareGageStudy, prepareSpcData, resolveNumericColumn,
+  peekResolvedGageStudy, resolveGageStudy, prepareSpcData, resolveNumericColumn,
+  type GageStudyPreparation,
 } from './core';
 import { errText, platform } from './platform/adapter';
 import { exportProject } from './platform/project';
@@ -41,9 +42,94 @@ function isEditingTarget(target: EventTarget | null): boolean {
   return !editor.hasAttribute('contenteditable') || editor.getAttribute('contenteditable') !== 'false';
 }
 
+const shellButton = { padding: '7px 16px', borderRadius: 5, fontFamily: 'inherit', fontSize: 12.5, cursor: 'pointer' } as const;
+
+/**
+ * fix2609c UI-02:壳层错误卡。App 函数体(派生计算)、菜单栏/工具栏/状态栏/会话面板等任一渲染期异常
+ * 不再卸载整棵树;本卡片不依赖已崩溃的壳层组件,只用 store 动作提供逃生入口。
+ */
+function ShellCrashCard({ error, reset }: { error: Error; reset: () => void }) {
+  const [exportNote, setExportNote] = useState('');
+  return (
+    <div role="alert" style={{ height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#eef0f3', fontSize: 13 }}>
+      <div style={{ background: '#fff', border: '1px solid #f0d3d3', borderRadius: 6, padding: '28px 32px', maxWidth: 560, boxShadow: '0 4px 18px rgba(20,30,50,0.08)' }}>
+        <div style={{ fontSize: 16, fontWeight: 700, color: '#c22f2f', marginBottom: 8 }}>应用界面渲染出错</div>
+        <div className="mono" style={{ fontSize: 12, color: '#8a929d', marginBottom: 16, whiteSpace: 'pre-wrap', maxHeight: 140, overflow: 'auto' }}>
+          {error.message}
+        </div>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          <button type="button" onClick={reset} style={{ ...shellButton, border: 0, background: '#1f6fb2', color: '#fff', fontWeight: 600 }}>
+            重试
+          </button>
+          <button type="button"
+            onClick={() => {
+              exportProject(__APP_VERSION__, useApp.getState().projectName)
+                .then((dest) => setExportNote(dest ? `项目已保存: ${dest}` : ''))
+                .catch((exportError) => setExportNote(`项目保存失败：${errText(exportError)}`));
+            }}
+            style={{ ...shellButton, border: '1px solid #cfd5dd', background: '#fff', color: '#3a4350' }}
+          >
+            保存项目文件
+          </button>
+          <button type="button"
+            onClick={() => {
+              useData.getState().resetDemo();
+              reset();
+            }}
+            style={{ ...shellButton, border: '1px solid #cfd5dd', background: '#fff', color: '#5b6472' }}
+          >
+            恢复演示数据集并重试
+          </button>
+        </div>
+        {exportNote && <div style={{ fontSize: 12, color: '#3a4350', marginTop: 12 }}>{exportNote}</div>}
+        <div style={{ fontSize: 11.5, color: '#9aa2ad', marginTop: 14, lineHeight: 1.6 }}>
+          若反复出现,可能是当前数据集或角色选择异常:可先保存项目文件留底,再恢复演示数据集继续使用。
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** fix2609c UI-02:对话框层独立边界——对话框渲染异常只替换对话框本身,关闭即复位。 */
+function ModalCrashCard({ error, reset }: { error: Error; reset: () => void }) {
+  return (
+    <div role="alertdialog" aria-label="对话框渲染出错" style={{ position: 'fixed', inset: 0, zIndex: 60, background: 'rgba(20,28,40,0.35)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <div style={{ background: '#fff', borderRadius: 6, padding: '22px 28px', maxWidth: 480, boxShadow: '0 8px 30px rgba(0,0,0,0.2)' }}>
+        <div style={{ fontSize: 15, fontWeight: 700, color: '#c22f2f', marginBottom: 8 }}>对话框渲染出错</div>
+        <div className="mono" style={{ fontSize: 12, color: '#8a929d', marginBottom: 14, whiteSpace: 'pre-wrap', maxHeight: 120, overflow: 'auto' }}>
+          {error.message}
+        </div>
+        <button type="button"
+          onClick={() => {
+            useApp.getState().closeModal();
+            reset();
+          }}
+          style={{ ...shellButton, border: 0, background: '#1f6fb2', color: '#fff', fontWeight: 600 }}
+        >
+          关闭对话框
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * 根级错误边界包住整个壳层(fix2609c UI-02):含 AppShell 函数体内的派生计算。
+ * resetKey 与页面级边界同源(页面 + 数据集),切换数据集(如「恢复演示数据集」)时自动复位。
+ */
 export default function App() {
+  const page = useApp((s) => s.page);
+  const wsName = useData((s) => s.model.name);
+  return (
+    <ErrorBoundary resetKey={page + '|' + wsName} fallback={(error, reset) => <ShellCrashCard error={error} reset={reset} />}>
+      <AppShell />
+    </ErrorBoundary>
+  );
+}
+
+function AppShell() {
   const {
-    page, openMenu, varOpen, setOpenMenu, setVarOpen, openModal, showToast, chartStyle, showGrid, lsl, usl, tgt, lslOn, busyOverlay, uslOn,
+    page, modal, openMenu, varOpen, setOpenMenu, setVarOpen, openModal, showToast, chartStyle, showGrid, lsl, usl, tgt, lslOn, busyOverlay, uslOn,
     spcType, spcDataLayout, spcValueCol, spcSubgroupCol, hypoTab, aqlLevel, aqlAQL, aqlRegime,
     gageUseReal, gageValueName, gagePartName, gageOperatorName, gageTolMode, gageTolValue, activeVar,
     capSubgroupMode, capSubgroupSize, capValueCol, capSubgroupIdCol, capabilityWarningAcknowledgement,
@@ -76,19 +162,26 @@ export default function App() {
   const cap = capModel && capabilityInputError(capModel.all, capModel.sigmaWithin, capSpec, { allowDistantSpec: capWarningAcknowledged }) == null
     ? computeCapability(capModel.all, capModel.sigmaWithin, capSpec, { allowDistantSpec: capWarningAcknowledged })
     : null;
-  // Gage 角色经 effectiveGageSelection 与 MSA 页同源(未手选时用推荐,不再按列序猜)
-  const preparedGage = useMemo(
-    () => prepareGageStudy(M, textCols, {
-      ...effectiveGageSelection(M, textCols, { value: gageValueName, part: gagePartName, operator: gageOperatorName }),
-      pendingCells,
-    }),
-    [M, textCols, pendingCells, gageValueName, gagePartName, gageOperatorName],
-  );
+  // Gage 角色经 effectiveGageSelection 与 MSA 页同源(未手选时用推荐,不再按列序猜)。
+  // fix2609c CORE-02/03:壳层不再每次渲染无条件解析 Gage 研究——只在启用导入数据且位于 MSA 页时
+  // 按需解析(与页面共享单槽记忆);其他页只读已算好的结果,输入变了就显示「未运行」。异常降级为未运行。
   const requestedRealGage = !M.isDemo && gageUseReal;
+  const preparedGage = useMemo<GageStudyPreparation | null>(() => {
+    if (!requestedRealGage) return null;
+    const stored = { value: gageValueName, part: gagePartName, operator: gageOperatorName };
+    try {
+      const resolved = page === 'gagerr'
+        ? resolveGageStudy(M, textCols, stored, pendingCells)
+        : peekResolvedGageStudy(M, textCols, stored, pendingCells);
+      return resolved?.prepared ?? null;
+    } catch (error) {
+      return { ok: false, reason: `Gage 数据解析失败：${errText(error)}` };
+    }
+  }, [requestedRealGage, page, M, textCols, pendingCells, gageValueName, gagePartName, gageOperatorName]);
   let gageRR: number | null = null;
   if (!requestedRealGage) {
     gageRR = computeGageRR(gageStudyData(), { mode: 'width', value: GAGE_TOLERANCE }).totalGageRR;
-  } else if (preparedGage.ok) {
+  } else if (preparedGage?.ok) {
     try {
       gageRR = computeGageRR(preparedGage.study.observations, resolveGageTolerance({ gageTolMode, gageTolValue, lsl, usl, lslOn, uslOn })).totalGageRR;
     } catch { /* 状态栏显示未运行；页面负责给出具体原因 */ }
@@ -182,11 +275,11 @@ export default function App() {
       : cap
         ? `正态能力 · ${preparedCap.variableName} · 规格 ${specLabel}`
         : `正态能力 · ${preparedCap.variableName} · 未运行(输入校验未通过)`,
-    gagerr: requestedRealGage
-      ? preparedGage.ok
+    gagerr: !requestedRealGage
+      ? '演示研究 · 交叉设计 · ANOVA 法'
+      : preparedGage?.ok
         ? `导入数据 · ${preparedGage.study.operatorLabels.length} 操作员 × ${preparedGage.study.partLabels.length} 部件 × ${preparedGage.study.repeats} 次`
-        : `尚未运行 · ${preparedGage.reason}`
-      : '演示研究 · 交叉设计 · ANOVA 法',
+        : `尚未运行 · ${preparedGage?.reason ?? '数据角色待配置'}`,
     aql: `GB/T 2828.1 · ${aqlLevel.startsWith('S-') ? '特殊' : '一般'}检验水平 ${aqlLevel} · AQL ${aqlAQL} · ${aqlRegime === 'per100' ? '每百单位不合格数' : '百分不合格品'}`,
   };
   const subtitle = dynSub[page] ?? cur.sub;
@@ -260,7 +353,9 @@ export default function App() {
       {openMenu != null && <div onClick={() => setOpenMenu(null)} style={{ position: 'fixed', inset: 0, zIndex: 55 }} />}
       {varOpen && <div onClick={() => setVarOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 45 }} />}
 
-      <Modals />
+      <ErrorBoundary resetKey={modal ?? ''} fallback={(error, reset) => <ModalCrashCard error={error} reset={reset} />}>
+        <Modals />
+      </ErrorBoundary>
       <Toast />
       {busyOverlay && (
         <div role="alert" aria-busy="true" tabIndex={-1} ref={(el) => el?.focus()} onKeyDown={(e) => e.preventDefault()} style={{ position: 'fixed', inset: 0, zIndex: 1000, outline: 'none', background: 'rgba(20,28,40,0.62)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>

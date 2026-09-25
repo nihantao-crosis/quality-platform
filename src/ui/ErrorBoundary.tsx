@@ -1,5 +1,6 @@
 /**
- * 页面级错误边界 — 任一模块崩溃时显示可恢复的错误卡,而非整应用白屏。
+ * 错误边界 — 任一模块崩溃时显示可恢复的错误卡,而非整应用白屏。
+ * 默认渲染页面级错误卡;壳层/对话框层通过 fallback 自定义恢复入口(fix2609c UI-02)。
  */
 import { Component, type ReactNode } from 'react';
 import { useData } from '../store/dataStore';
@@ -8,6 +9,8 @@ interface Props {
   children: ReactNode;
   /** 变化时自动重置错误态（如切换页面/数据集） */
   resetKey?: string;
+  /** 自定义错误卡;reset 清除错误态并重新渲染子树。缺省为页面级错误卡。 */
+  fallback?: (error: Error, reset: () => void) => ReactNode;
 }
 
 interface State {
@@ -27,9 +30,12 @@ export class ErrorBoundary extends Component<Props, State> {
     }
   }
 
+  private readonly reset = () => this.setState({ error: null });
+
   render() {
     const { error } = this.state;
     if (!error) return this.props.children;
+    if (this.props.fallback) return this.props.fallback(error, this.reset);
     return (
       <div style={{ background: '#fff', border: '1px solid #f0d3d3', borderRadius: 5, padding: '28px 32px', boxShadow: '0 1px 2px rgba(20,30,50,0.04)' }}>
         <div style={{ fontSize: 15, fontWeight: 700, color: '#c22f2f', marginBottom: 8 }}>页面渲染出错</div>

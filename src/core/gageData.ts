@@ -1,5 +1,6 @@
 import type { VarModel } from './model';
 import type { GageObservation } from './gage';
+import { arrMax, arrMin } from './basicMath';
 
 export interface GageTextColumn {
   name: string;
@@ -27,6 +28,14 @@ export interface PreparedGageStudy {
   operatorLabels: string[];
   repeats: number;
 }
+
+/**
+ * 交叉 Gage R&R 的「部件水平数 × 操作员水平数」组合上限(fix2609c CORE-02/03)。
+ * 常规 MSA 为 10 部件 × 3 操作员(30 个组合),工厂扩展研究也不过数百个;组合数上万几乎必然是
+ * 把样品号/流水号等逐行唯一的 ID 列选成了部件或操作员。超限直接给出可读原因,不再进入
+ * 按组合枚举的缺胞诊断(曾 O(部件×操作员) 物化字符串致 OOM)或按胞展开的统计(曾 RangeError)。
+ */
+export const GAGE_MAX_CROSS_CELLS = 10_000;
 
 export interface GageCategoryColumn {
   name: string;
@@ -415,12 +424,19 @@ export function prepareGageStudy(
     if (numeric) return [...labels].sort((a, b) => Number(a) - Number(b));
     return [...labels].sort((a, b) => a.localeCompare(b, 'zh-Hans-CN-u-co-pinyin'));
   };
-  const partLabels = sortRoleLabels([...new Set(partValues)]);
+  const partSet = new Set(partValues);
   // 单操作员研究合法(操作员列为常数或显式选「无」):退化为单因子模型,GRR=重复性,不估计再现性。
-  const operatorLabels = sortRoleLabels([...new Set(operatorValues)]);
-  if (partLabels.length < 2) {
-    return { ok: false, reason: `仅检测到 1 个部件(${partLabels[0]}):交叉 Gage R&R 需 ≥2 个部件供各操作员重复测量;请补充其他部件数据` };
+  const operatorSet = new Set(operatorValues);
+  if (partSet.size < 2) {
+    return { ok: false, reason: `仅检测到 1 个部件(${partValues[0]}):交叉 Gage R&R 需 ≥2 个部件供各操作员重复测量;请补充其他部件数据` };
   }
+  // 组合数熔断先于排序/分胞:水平数×水平数超限时不做任何按组合的工作(见 GAGE_MAX_CROSS_CELLS)。
+  const expectedCells = partSet.size * operatorSet.size;
+  if (expectedCells > GAGE_MAX_CROSS_CELLS) {
+    return { ok: false, reason: `部件 ${partSet.size} 个水平 × 操作员 ${operatorSet.size} 个水平 = ${expectedCells} 个组合,超出交叉 Gage R&R 的适用范围(上限 ${GAGE_MAX_CROSS_CELLS} 个组合):部件/操作员列疑似选成了样品号、流水号等几乎逐行唯一的 ID 列,请在测量系统分析页重新选择部件与操作员列` };
+  }
+  const partLabels = sortRoleLabels([...partSet]);
+  const operatorLabels = sortRoleLabels([...operatorSet]);
 
   const cellRows = new Map<string, number[]>();
   for (let row = 0; row < model.k; row++) {
@@ -429,26 +445,30 @@ export function prepareGageStudy(
     rows.push(row);
     cellRows.set(key, rows);
   }
-  const expectedCells = partLabels.length * operatorLabels.length;
   const counts = [...cellRows.values()].map((rows) => rows.length);
   if (cellRows.size !== expectedCells) {
-    // 指名缺失的具体胞:工厂拿到「计算错误」必须能定位到该补哪个部件×操作员
+    // 指名缺失的具体胞:工厂拿到「计算错误」必须能定位到该补哪个部件×操作员。
+    // fix2609c CORE-02:缺胞总数直接由 expectedCells − 已有胞数得出;示例只收前 3 个即停
+    // (遍历步数 ≤ 已有胞数 + 3 ≤ 行数 + 3),不再为每个缺胞物化一条字符串。
     const modal = modalCellCount(counts);
-    const missing: string[] = [];
-    for (const part of partLabels) {
+    const missingCount = expectedCells - cellRows.size;
+    const examples: string[] = [];
+    scan: for (const part of partLabels) {
       for (const operator of operatorLabels) {
         if (!cellRows.has(`${part}\u0000${operator}`)) {
-          missing.push(`部件「${part}」×操作员「${operator}」缺 ${modal} 次测量`);
+          examples.push(`部件「${part}」×操作员「${operator}」缺 ${modal} 次测量`);
+          if (examples.length >= 3) break scan;
         }
       }
     }
-    const head = missing.slice(0, 3).join('、');
-    const tail = missing.length > 3 ? `等共 ${missing.length} 个组合缺测` : '';
+    const head = examples.join('、');
+    const tail = missingCount > 3 ? `等共 ${missingCount} 个组合缺测` : '';
     const uniform = counts.every((count) => count === modal);
     return { ok: false, reason: `交叉设计不完整:${head}${tail}(其余胞${uniform ? '均' : '多'}为 ${modal} 次)` };
   }
-  const minCount = Math.min(...counts);
-  const maxCount = Math.max(...counts);
+  // fix2609c CORE-03:不得 Math.min/max(...counts) 展开(胞数 >~12 万即 RangeError),与 basicMath 纪律一致
+  const minCount = arrMin(counts);
+  const maxCount = arrMax(counts);
   if (minCount !== maxCount) {
     // 不等重复:列出最少/最多的具体胞,而不是笼统一句「必须相同」
     const describeCellWithCount = (target: number) => {
@@ -492,4 +512,75 @@ export function prepareGageStudy(
       repeats,
     },
   };
+}
+
+export type GageStudyPreparation = ReturnType<typeof prepareGageStudy>;
+
+/** 「存储角色」(store 手选,null=用推荐):effectiveGageSelection 的输入。 */
+export interface StoredGageRoles {
+  value: string | null;
+  part: string | null;
+  operator: string | null;
+}
+
+export interface ResolvedGageStudy {
+  selection: ReturnType<typeof effectiveGageSelection>;
+  prepared: GageStudyPreparation;
+}
+
+interface GageStudyMemoEntry extends ResolvedGageStudy {
+  model: VarModel;
+  textCols: GageTextColumn[];
+  pendingCells: GageStudySelection['pendingCells'];
+  stored: StoredGageRoles;
+}
+
+let gageStudyMemo: GageStudyMemoEntry | null = null;
+
+/** 命中则返回记忆槽,否则 null。 */
+function gageMemoLookup(
+  model: VarModel,
+  textCols: GageTextColumn[],
+  stored: StoredGageRoles,
+  pendingCells: GageStudySelection['pendingCells'],
+): GageStudyMemoEntry | null {
+  const entry = gageStudyMemo;
+  return entry != null && entry.model === model && entry.textCols === textCols && entry.pendingCells === pendingCells
+    && entry.stored.value === stored.value && entry.stored.part === stored.part && entry.stored.operator === stored.operator
+    ? entry : null;
+}
+
+/**
+ * fix2609c CORE-02/03:按需解析「生效角色 + 交叉研究」,单槽记忆(按引用比较模型/文本列/待录入格与三个存储角色)。
+ * 只在 MSA 页(且启用导入数据)调用;壳层不再每次渲染无条件解析——在 MSA 页上与页面共享同一结果,
+ * 其他页面用 peekResolvedGageStudy 只读已算好的结果(不触发计算)。
+ * selection 可由调用方传入已算好的 effectiveGageSelection(同一输入下的纯函数结果),免去重复推荐打分。
+ */
+export function resolveGageStudy(
+  model: VarModel,
+  textCols: GageTextColumn[],
+  stored: StoredGageRoles,
+  pendingCells: GageStudySelection['pendingCells'],
+  selection?: ReturnType<typeof effectiveGageSelection>,
+): ResolvedGageStudy {
+  const hit = gageMemoLookup(model, textCols, stored, pendingCells);
+  if (hit) return { selection: hit.selection, prepared: hit.prepared };
+  const effective = selection ?? effectiveGageSelection(model, textCols, stored);
+  const prepared = prepareGageStudy(model, textCols, { ...effective, pendingCells });
+  gageStudyMemo = { model, textCols, pendingCells, stored: { ...stored }, selection: effective, prepared };
+  return { selection: effective, prepared };
+}
+
+/** 只读已记忆的解析结果;输入与最近一次 resolveGageStudy 不同则返回 null(调用方按「未运行」处理)。 */
+export function peekResolvedGageStudy(
+  model: VarModel,
+  textCols: GageTextColumn[],
+  stored: StoredGageRoles,
+  pendingCells: GageStudySelection['pendingCells'],
+): ResolvedGageStudy | null {
+  const hit = gageMemoLookup(model, textCols, stored, pendingCells);
+  if (hit) return { selection: hit.selection, prepared: hit.prepared };
+  // 活动模型已换(模型不可变,旧引用不会再命中):释放旧槽,避免长期持有已离开的大数据集
+  if (gageStudyMemo && gageStudyMemo.model !== model) gageStudyMemo = null;
+  return null;
 }
