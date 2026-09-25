@@ -299,10 +299,13 @@ export function Worksheet() {
           showToast('粘贴导入失败：' + r.error);
           return;
         }
-        const outcome = importMatrix('剪贴板数据', r.colNames, r.rows, r.textCols);
+        // UI-04:固定名「剪贴板数据」走同名写入策略——已编辑过的上一份粘贴数据保留，新数据另存为「剪贴板数据 (2)」
+        const outcome = importMatrix('剪贴板数据', r.colNames, r.rows, r.textCols, [], { onNameConflict: 'rename' });
+        const name = outcome.name ?? '剪贴板数据';
         const note = r.textCols.length > 0 ? ` · 含 ${r.textCols.length} 个分组列` : '';
+        const renamed = name !== '剪贴板数据' ? ` · 已有内容不同的「剪贴板数据」，已另存为新数据集（原数据集保留在最近列表）` : '';
         if (outcome.persisted || outcome.archiving) {
-          showToast(`已粘贴导入 · ${r.rows.length} 行 × ${r.colNames.length} 个数值列${note}`);
+          showToast(`已粘贴导入「${name}」· ${r.rows.length} 行 × ${r.colNames.length} 个数值列${note}${renamed}`);
         } else {
           showToast('⚠ 粘贴数据已导入到内存,但浏览器存储空间不足,尚未持久化——刷新将丢失！请立即「文件 → 导出项目」备份');
         }

@@ -1,7 +1,7 @@
 /** 左侧导航 — 分组导航 + 徽标 + 项目管理器（可命名项目 + 最近数据集 + 已保存分析）。 */
 import { useEffect, useRef, useState } from 'react';
 import { useApp } from '../../store/appStore';
-import { useData } from '../../store/dataStore';
+import { datasetReplacementBlockReason, useData } from '../../store/dataStore';
 import { useAnalyses } from '../../store/analyses';
 import { PAGES } from '../pagesMeta';
 import { Icon } from '../icons';
@@ -172,7 +172,8 @@ export function SideNav() {
                         closeMobileNav();
                         showToast('已加载数据集 ' + r.name);
                       } else {
-                        showToast('数据集加载失败或已被更新的加载请求取代：' + r.name);
+                        // STORE-08:被替换闸门拒绝时保留闸门的可操作提示，不用泛化失败文案覆盖
+                        showToast(datasetReplacementBlockReason() ?? ('数据集加载失败或已被更新的加载请求取代：' + r.name));
                       }
                     }}
                     style={{ minWidth: 0, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', border: 0, padding: 0, background: 'transparent', color: 'inherit', cursor: 'pointer', fontFamily: 'inherit', fontSize: 'inherit', lineHeight: 'inherit', textAlign: 'left' }}

@@ -360,9 +360,10 @@ function ImportModal() {
     }
     const p = parsed;
     if (dataKind === 'var') {
-      let varOutcome: { persisted: boolean; archiving: boolean };
+      let varOutcome: { persisted: boolean; archiving: boolean; name?: string };
       try {
-        varOutcome = importMatrix(name, p.colNames, p.rows, p.textCols);
+        // UI-04:同名文件再导入/剪贴板导入走同名写入策略，内容不同时另存为「名 (2)」，不覆盖已编辑的旧数据集
+        varOutcome = importMatrix(name, p.colNames, p.rows, p.textCols, [], { onNameConflict: 'rename' });
       } catch (error) {
         showToast('导入失败：' + errText(error));
         return false;
@@ -371,7 +372,9 @@ function ImportModal() {
       const notes: string[] = [];
       if (p.skippedRows > 0) notes.push(`跳过 ${p.skippedRows} 行非法值`);
       if (p.textCols.length > 0) notes.push(`含 ${p.textCols.length} 个分组列（可用于 ANOVA / Gage）`);
-      persistAwareToast(varOutcome, `已导入 ${name} · ${p.rows.length} 行 × ${p.colNames.length} 个数值列；请在 SPC 页确认数据角色${notes.length ? ' · ' + notes.join(' · ') : ''}`);
+      const finalName = varOutcome.name ?? name;
+      if (finalName !== name) notes.push(`已有内容不同的同名数据集「${name}」，本次另存为新数据集（原数据集保留在最近列表）`);
+      persistAwareToast(varOutcome, `已导入 ${finalName} · ${p.rows.length} 行 × ${p.colNames.length} 个数值列；请在 SPC 页确认数据角色${notes.length ? ' · ' + notes.join(' · ') : ''}`);
       return true;
     }
     if (dataKind === 'p') {

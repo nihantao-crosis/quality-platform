@@ -57,6 +57,13 @@ export interface DatasetModelOptions {
   preserveSpecs?: boolean;
   /** restore 前安全副本：活动槽只尝试 localStorage，不发普通 vault 镜像；随后由不可合并 put 独立确认。 */
   independentRecoveryCopy?: boolean;
+  /**
+   * 同名数据集写入策略(STORE-04/UI-04):派生(子集/标准化/转置/堆叠/随机)、文件/剪贴板导入、
+   * 工作表粘贴等「新建类」入口置 'rename'——目标名已被内容不同(或内容无法核对)的数据集占用时
+   * 改名为「名 (2)」写入，绝不整键覆盖旧数据集(最近列表/本机库/撤销栈/规格记忆)。
+   * 省略时保持按名替换语义(回看快照、另存副本等调用方已自行保证名称语义)。
+   */
+  onNameConflict?: 'rename';
 }
 
 export interface PendingCell { row: number; col: number }
@@ -198,6 +205,8 @@ let storageWarned = false;
 export interface PersistOutcome {
   persisted: boolean;
   archiving: boolean;
+  /** 实际写入的数据集名；onNameConflict='rename' 改名时与请求名不同，调用方提示须以此为准。 */
+  name?: string;
   /** SQLite 归档的真实完成承诺。archiving 只表示已发起，覆盖数据前必须 await 此承诺。 */
   durability?: Promise<void>;
   /** 校验拒绝原因(第三轮 P3):调用方据此区分「被拒」与「存储空间不足」,不再错报 */
@@ -260,7 +269,7 @@ function setRecentsUnpersisted(v: boolean): void {
   if (recentsPersistenceWarned) return;
   recentsPersistenceWarned = true;
   try {
-    useApp.getState().showToast('最近数据集列表未能保存；当前活动表仍为最新版本，请在离开前导出项目');
+    useApp.getState().showToast('最近数据集列表未能保存（浏览器存储空间不足）；当前活动表仍为最新版本，请尽快「文件 → 导出项目」备份，腾出空间前将暂停切换其他数据集');
   } catch { /* 非 UI 环境忽略 */ }
 }
 /** 项目导入成功后旧内存数据注定被替换——上遮罩重载前清除未持久化标记,避免 beforeunload 拦截自动重载。 */
@@ -359,6 +368,95 @@ function allocateWorksheetName(currentNames: Iterable<string>): string {
   lastWorksheetStamp = stamp;
   knownDatasetNames.add(candidate);
   return candidate;
+}
+
+/** 数据集内容(用于同名写入策略的逐值比对)。 */
+interface DatasetContent {
+  colNames: string[];
+  rows: number[][];
+  textCols: TextColumn[];
+  pendingCells: PendingCell[];
+}
+
+function sameDatasetContent(a: DatasetContent, b: DatasetContent): boolean {
+  if (a.colNames.length !== b.colNames.length || a.rows.length !== b.rows.length
+    || a.textCols.length !== b.textCols.length || a.pendingCells.length !== b.pendingCells.length) return false;
+  if (a.colNames.some((name, index) => name !== b.colNames[index])) return false;
+  for (let i = 0; i < a.rows.length; i++) {
+    const ra = a.rows[i];
+    const rb = b.rows[i];
+    if (!Array.isArray(ra) || !Array.isArray(rb) || ra.length !== rb.length) return false;
+    for (let j = 0; j < ra.length; j++) if (ra[j] !== rb[j]) return false;
+  }
+  for (let t = 0; t < a.textCols.length; t++) {
+    const ca = a.textCols[t];
+    const cb = b.textCols[t];
+    if (ca.name !== cb.name || ca.values.length !== cb.values.length) return false;
+    if (ca.values.some((value, index) => value !== cb.values[index])) return false;
+  }
+  const pending = new Set(a.pendingCells.map(({ row, col }) => `${row}:${col}`));
+  return b.pendingCells.every(({ row, col }) => pending.has(`${row}:${col}`));
+}
+
+/**
+ * 某名称当前占用情况：undefined=无人占用；null=已占用但内容无法同步核对
+ * (桌面端轻量最近条目、已滑出最近列表但仍在本机库的数据集)；否则为可比对内容。
+ * 活动表以内存 model 为权威(含尚未落盘的编辑)，优先于同名最近条目。
+ */
+function occupiedDatasetContent(name: string, st: DataState): DatasetContent | null | undefined {
+  if (st.model.name === name) {
+    return {
+      colNames: st.model.colNames,
+      rows: st.model.subs.map((subgroup) => subgroup.vals),
+      textCols: st.textCols,
+      pendingCells: st.pendingCells,
+    };
+  }
+  const recent = st.recents.find((entry) => entry.name === name);
+  if (recent) {
+    return recent.data
+      ? { colNames: recent.data.colNames, rows: recent.data.rows, textCols: recent.data.textCols ?? [], pendingCells: recent.data.pendingCells ?? [] }
+      : null;
+  }
+  // Web 端滑出最近列表的数据集已无任何落盘位置；桌面端仍在本机 SQLite 库中(按名 upsert)。
+  if (platform.datasetDb && knownDatasetNames.has(name)) return null;
+  return undefined;
+}
+
+/** 「report.csv」→ stem「report」+ ext「.csv」；扩展名须以字母开头，避免把「N(10,1.5)」的小数误当扩展名。 */
+function splitDatasetName(name: string): { base: string; ext: string } {
+  const matched = /^(.+?)(\.[A-Za-z][A-Za-z0-9]{0,7})$/.exec(name);
+  const stem = matched ? matched[1] : name;
+  const ext = matched ? matched[2] : '';
+  // 已带「 (n)」序号的名称按同一基名续号，不叠成「名 (2) (2)」。
+  const numbered = / \((\d+)\)$/.exec(stem);
+  const base = numbered && Number(numbered[1]) >= 2 ? stem.slice(0, -numbered[0].length) : stem;
+  return { base, ext };
+}
+
+/**
+ * 同名数据集写入策略的唯一实现(STORE-04/UI-04)。
+ * - 名称空闲 → 原名；
+ * - 名称被内容完全相同的数据集占用 → 原名(重复同一操作不制造「(2)(3)…」挤占最近列表上限)；
+ * - 名称被内容不同或无法核对的数据集占用 → 依次尝试「名 (2)」「名 (3)」…，同样复用内容相同者，
+ *   取第一个空闲名。旧数据集及其编辑、本机库记录、规格记忆均不受影响。
+ */
+function resolveDatasetWriteName(
+  requested: string, incoming: DatasetContent, st: DataState,
+): { name: string; identical: boolean } {
+  const occupiedBy = (name: string) => occupiedDatasetContent(name, st);
+  const first = occupiedBy(requested);
+  if (first === undefined) return { name: requested, identical: false };
+  if (first !== null && sameDatasetContent(first, incoming)) return { name: requested, identical: true };
+  const { base, ext } = splitDatasetName(requested);
+  for (let sequence = 2; ; sequence++) {
+    const suffix = ` (${sequence})${ext}`;
+    const candidate = `${base.slice(0, Math.max(1, MAX_DATASET_NAME_CHARS - suffix.length)).trimEnd() || '数据集'}${suffix}`;
+    if (candidate === requested || reservedPrototypeNameError(candidate)) continue;
+    const occupied = occupiedBy(candidate);
+    if (occupied === undefined) return { name: candidate, identical: false };
+    if (occupied !== null && sameDatasetContent(occupied, incoming)) return { name: candidate, identical: true };
+  }
 }
 
 interface DataState {
@@ -945,29 +1043,47 @@ function beginDatasetIntent(): number {
 /** 数据集替换统一闸门(第三轮 arch):任何替换活动数据集的入口必须经此——
  * 停掉模拟采集 + 开新数据集意图。「替换必停 MES」的不变量此前分散在 5 个执行点
  * 逐个记得处理,漏一处就是一次数据污染(快照回看正是漏网的第 6 处)。 */
+function replacementBlockReason(options: { equivalentRecoveryCopy?: boolean }): string | null {
+  const activeName = useData.getState().model.name;
+  if (recentsUnpersistedFlag
+    && !options.equivalentRecoveryCopy
+    && independentlyDurableRecoveryCopy !== activeName) {
+    // STORE-08:旧文案「请先重试保存或导出项目」指向不存在的入口与无效动作(导出不解除闸门)。
+    // 改为可操作口径：导出备份 → 移除不需要的最近数据集腾出空间 → 重试(闸门会自动重试保存)。
+    return `最近数据集列表尚未保存（浏览器存储空间不足），为防「${activeName}」的最新数据在刷新后丢失，已暂停切换/导入其他数据集；`
+      + '请先「文件 → 导出项目」备份，再在左侧「最近数据集」点 × 移除不再需要的数据集（已导出备份的也可移除）腾出空间后重试';
+  }
+  if (lightweightRecentDurability.has(activeName) && !options.equivalentRecoveryCopy) {
+    return `最近列表仅保存了数据集「${activeName}」的轻量引用，精确矩阵尚未落入本机库；请稍后重试`;
+  }
+  if (overflowRequiredVaultSnapshot) {
+    const name = overflowRequiredVaultSnapshot.data.name;
+    return `数据集「${name}」的未持久化快照已占用安全保全槽；请先导出项目或重试归档，再替换当前数据集`;
+  }
+  return null;
+}
+
+/** 当前替换活动数据集会被闸门拒绝的原因(纯查询)；UI 在加载失败时据此给出与闸门一致的提示。 */
+export function datasetReplacementBlockReason(): string | null {
+  return replacementBlockReason({});
+}
+
+/** 数据集替换统一闸门(第三轮 arch):任何替换活动数据集的入口必须经此——
+ * 停掉模拟采集 + 开新数据集意图。「替换必停 MES」的不变量此前分散在 5 个执行点
+ * 逐个记得处理,漏一处就是一次数据污染(快照回看正是漏网的第 6 处)。 */
 function beginDatasetReplacement(options: { equivalentRecoveryCopy?: boolean } = {}): number {
   // updateCell 会在同一事件循环内合并持久化。数据集切换必须先把这个
   // pending 载荷同步提交，再根据 persistRecents 设置的未保存标记决定
   // 是否放行。先 cancel 会让用户最后一格编辑在同 tick loadRecent 时永久丢失。
   flushPendingCellPersistence();
-  if (recentsUnpersistedFlag
-    && !options.equivalentRecoveryCopy
-    && independentlyDurableRecoveryCopy !== useData.getState().model.name) {
-    const detail = '最近数据集列表尚未保存，替换当前工作表会丢失最新矩阵；请先重试保存或导出项目';
-    sessionLog(`数据集替换已阻止 · ${detail}`);
-    try { useApp.getState().showToast(detail); } catch { /* 非 UI 环境忽略 */ }
-    throw new Error(detail);
+  let detail = replacementBlockReason(options);
+  if (detail && recentsUnpersistedFlag) {
+    // STORE-08:真正的「重试保存」——用户移除其他最近数据集/清理空间后，
+    // 无需再编辑一格即可在下一次切换时重新落盘并解锁；仍写不下则继续拦截。
+    persistRecents(useData.getState().recents);
+    detail = replacementBlockReason(options);
   }
-  const activeName = useData.getState().model.name;
-  if (lightweightRecentDurability.has(activeName) && !options.equivalentRecoveryCopy) {
-    const detail = `最近列表仅保存了数据集「${activeName}」的轻量引用，精确矩阵尚未落入本机库；请稍后重试`;
-    sessionLog(`数据集替换已阻止 · ${detail}`);
-    try { useApp.getState().showToast(detail); } catch { /* 非 UI 环境忽略 */ }
-    throw new Error(detail);
-  }
-  if (overflowRequiredVaultSnapshot) {
-    const name = overflowRequiredVaultSnapshot.data.name;
-    const detail = `数据集「${name}」的未持久化快照已占用安全保全槽；请先导出项目或重试归档，再替换当前数据集`;
+  if (detail) {
     sessionLog(`数据集替换已阻止 · ${detail}`);
     try { useApp.getState().showToast(detail); } catch { /* 非 UI 环境忽略 */ }
     throw new Error(detail);
@@ -1903,7 +2019,7 @@ export const useData = create<DataState>((set, get) => ({
   undoStack: [],
   redoStack: [],
 
-  importMatrix: (name, colNames, rows, textCols = [], pendingCells = [], modelOptions = {}) => {
+  importMatrix: (requestedName, colNames, rows, textCols = [], pendingCells = [], modelOptions = {}) => {
     if (!Array.isArray(colNames) || !Array.isArray(rows) || !Array.isArray(textCols)) {
       throw new Error('数据集矩阵结构无效，已拒绝导入');
     }
@@ -1932,10 +2048,10 @@ export const useData = create<DataState>((set, get) => ({
     }
     // 盲审 P2:保留原型键必须在**创建时**拒绝——只在导出侧拦会让用户先成功建集、
     // 之后每次导出项目都失败,且报错指向「读取本机数据集库失败」无自救路径。
-    const reservedName = reservedPrototypeNameError(name);
+    const reservedName = reservedPrototypeNameError(requestedName);
     if (reservedName) throw new Error(reservedName);
-    if (!name.trim()) throw new Error('数据集名称不能为空');
-    if (name.length > MAX_DATASET_NAME_CHARS) {
+    if (!requestedName.trim()) throw new Error('数据集名称不能为空');
+    if (requestedName.length > MAX_DATASET_NAME_CHARS) {
       throw new Error(`数据集名称超过 ${MAX_DATASET_NAME_CHARS} 字符上限`);
     }
     if (colNames.some((column) => typeof column !== 'string')) {
@@ -1969,6 +2085,13 @@ export const useData = create<DataState>((set, get) => ({
     // 也会抛(重名列、子组不齐等),先过闸门会让 MES 已停、datasetIntentRevision 已推进
     // 才抛错(在途的 loadRecent/vault 恢复被静默作废)。与 importCounts 同一顺序。
     const normalized = normalizeImportColumns(colNames, textCols);
+    // 同名写入策略(STORE-04/UI-04):新建类入口在此统一改名，绝不整键覆盖内容不同的同名数据集。
+    const resolved = modelOptions.onNameConflict === 'rename'
+      ? resolveDatasetWriteName(requestedName, {
+        colNames: normalized.colNames, rows, textCols: normalized.textCols, pendingCells,
+      }, get())
+      : { name: requestedName, identical: false };
+    const name = resolved.name;
     const model = computeVarModel(name, normalized.colNames, rows, {
       isDemo: modelOptions.isDemo === true,
       indivSeries: modelOptions.indivSeries?.map((value) => value),
@@ -1993,7 +2116,8 @@ export const useData = create<DataState>((set, get) => ({
     // 导入/创建/另存为会切换数据集，编辑历史不得跨数据集生效。
     set({ model, textCols: normalized.textCols, pendingCells: validPending, recents, undoStack: [], redoStack: [] });
     if (!modelOptions.preserveSpcRoles) resetDatasetSpcRoles();
-    if (!modelOptions.preserveSpecs) forgetSpecsForDataset(name);
+    // 内容完全相同的同名重写不是「新内容」，保留该数据集已记住的规格限。
+    if (!modelOptions.preserveSpecs && !resolved.identical) forgetSpecsForDataset(name);
     useApp.setState({ anovaShowDemo: false });
     knownDatasetNames.add(name);
     const outcome = persistActive(data, { allowVaultFallback: !modelOptions.independentRecoveryCopy });
@@ -2004,8 +2128,11 @@ export const useData = create<DataState>((set, get) => ({
       sessionLog(`导入列名已规范化 ${name} · 空名使用 C#/T#，重名追加序号`);
       try { useApp.getState().showToast('导入列名存在空值或重复，已稳定规范化（重名列追加序号）'); } catch { /* 非 UI 环境忽略 */ }
     }
+    if (name !== requestedName) {
+      sessionLog(`同名数据集「${requestedName}」已存在(内容不同或仅在本机库无法核对)，新数据另存为「${name}」，原数据集保留`);
+    }
     sessionLog(`导入变量数据 ${name} · ${rows.length} 行 × ${normalized.colNames.length} 个数值列`);
-    return outcome;
+    return modelOptions.onNameConflict === 'rename' ? { ...outcome, name } : outcome;
   },
 
   writeAnalysisColumns: (numericColumns, textColumns = []) => {
@@ -2447,8 +2574,9 @@ export const useData = create<DataState>((set, get) => ({
       ((v - stats[j].origin) - stats[j].meanOffset) / stats[j].sd
     ).toFixed(4))));
     const name = m.name.replace(/\.[^.]+$/, '') + ' (标准化)';
-    get().importMatrix(name, m.colNames.map((c) => c + '_z'), rows, get().textCols);
-    return name;
+    // STORE-04:派生结果走同名写入策略，不覆盖上一份已编辑过的同名标准化数据集
+    const outcome = get().importMatrix(name, m.colNames.map((c) => c + '_z'), rows, get().textCols, [], { onNameConflict: 'rename' });
+    return outcome.name ?? name;
   },
 
   generateRandom: (mu, sigma, k, n) => {
@@ -2465,8 +2593,9 @@ export const useData = create<DataState>((set, get) => ({
       Array.from({ length: n }, () => Number((mu + randn() * sigma).toFixed(digits))),
     );
     const name = `随机数据 N(${mu},${sigma})`;
-    get().importMatrix(name, Array.from({ length: n }, (_, i) => `X${i + 1}`), rows);
-    return name;
+    // STORE-04:随机值不可复现，同参数再生成绝不能覆盖上一份
+    const outcome = get().importMatrix(name, Array.from({ length: n }, (_, i) => `X${i + 1}`), rows, [], [], { onNameConflict: 'rename' });
+    return outcome.name ?? name;
   },
 
   sortBy: (col, asc) => {
@@ -2634,8 +2763,9 @@ export const useData = create<DataState>((set, get) => ({
     const rows = m.subs.filter((_, i) => keep[i]).map((s) => [...s.vals]);
     const textCols = get().textCols.map((c) => ({ ...c, values: c.values.filter((_, i) => keep[i]) }));
     const base = m.name.replace(/\.[^.]+$/, '');
-    const name = `${base} (子集)`;
-    get().importMatrix(name, [...m.colNames], rows, textCols);
+    // STORE-04:换条件再筛选不得覆盖上一份子集中用户补录/修正的数据
+    const outcome = get().importMatrix(`${base} (子集)`, [...m.colNames], rows, textCols, [], { onNameConflict: 'rename' });
+    const name = outcome.name ?? `${base} (子集)`;
     sessionLog(`条件筛选「${cond.trim()}」→ ${name} · 保留 ${kept}/${m.k} 行`);
     return { ok: true, name, kept, total: m.k };
   },
@@ -2657,8 +2787,9 @@ export const useData = create<DataState>((set, get) => ({
     // 转置后每行才是一个子组；原数值列名是子组身份，必须保留而不是改成隐含序号。
     const colNames = rows.map((_, i) => `测量${i + 1}`);
     const subgroupLabels: TextColumn[] = [{ name: '原列子组', values: selectedIndices.map((i) => m.colNames[i]) }];
-    const base = m.name.replace(/ \(转置\)$/, '');
-    get().importMatrix(`${base} (转置)`, colNames, t, subgroupLabels);
+    // 改名策略产生的「X (转置) (2)」再做同操作时同样回到基名，不叠成「X (转置) (2) (转置)」
+    const base = m.name.replace(/ \(转置\)(?: \(\d+\))?$/, '');
+    get().importMatrix(`${base} (转置)`, colNames, t, subgroupLabels, [], { onNameConflict: 'rename' });
   },
 
   stackColumns: () => {
@@ -2679,8 +2810,9 @@ export const useData = create<DataState>((set, get) => ({
         source.push(cn);
       });
     });
-    const base = m.name.replace(/ \(堆叠\)$/, '');
-    get().importMatrix(`${base} (堆叠)`, ['测量值'], rows, [{ name: '来源列', values: source }]);
+    // 改名策略产生的「X (堆叠) (2)」再做同操作时同样回到基名，不叠成「X (堆叠) (2) (堆叠)」
+    const base = m.name.replace(/ \(堆叠\)(?: \(\d+\))?$/, '');
+    get().importMatrix(`${base} (堆叠)`, ['测量值'], rows, [{ name: '来源列', values: source }], [], { onNameConflict: 'rename' });
   },
 
   startMesDataset: (n) => {
