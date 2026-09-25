@@ -337,7 +337,7 @@ describe('(3) 跨窗口未落盘分支不静默分叉', () => {
     expect(w3.useData.getState().recents.find((entry) => entry.name === 'X.csv')?.data?.rows[0]).toEqual([7777]);
   });
 
-  it('× 后活动槽仍写不下、另一窗口按旧活动槽回退：本窗口静默保持拦截，切换时重试写盘(含活动槽)，写次数有界', async () => {
+  it('× 后活动槽仍写不下：过时的同名活动槽被移除(fix2609i G15)，另一窗口不再按它回退，切换后编辑仍在，写次数有界', async () => {
     const w1 = await openWindow();
     w1.useData.getState().importMatrix('Z.csv', ['x'], [[8], [9]]);
     w1.useData.getState().importMatrix('Y.csv', ['x'], [[5], [6]]);
@@ -355,22 +355,23 @@ describe('(3) 跨窗口未落盘分支不静默分叉', () => {
 
     failRecents = false;
     w1.useData.getState().removeRecent('Z.csv');
-    const toastBefore = w1.useData.getState().recentsUnpersisted;
-    expect(toastBefore).toBe(false);
+    expect(w1.useData.getState().recentsUnpersisted).toBe(false);
+    // 活动槽重试仍失败：LS_RECENTS 已含 7777，共享 LS_DATASET 里的同名旧版不能再当权威
+    expect(localStorage.getItem(DATASET)).toBeNull();
     const before = recentsWrites;
     pump();
     expect(pendingEvents).toHaveLength(0);
     expect(recentsWrites - before).toBeLessThanOrEqual(2);
-    // W2 已按共享旧活动槽回退 LS_RECENTS：W1 的内存与磁盘已分叉，闸门必须继续拦截
-    expect(storedX(RECENTS)?.[0]).toEqual([1]);
-    expect(w1.useData.getState().recentsUnpersisted).toBe(true);
-    expect(w1.datasetReplacementBlockReason()).not.toBeNull();
+    // W2 找不到同名活动槽，只水合最新列表，不回退
+    expect(storedX(RECENTS)?.[0]).toEqual([7777]);
+    expect(w2.useData.getState().recents.find((entry) => entry.name === 'X.csv')?.data?.rows[0]).toEqual([7777]);
+    expect(w1.useData.getState().recentsUnpersisted).toBe(false);
+    expect(w1.datasetReplacementBlockReason()).toBeNull();
 
-    // 空间腾出后切换：闸门用内存列表重试写盘(每次操作最多一次)，活动槽一并重试
-    failDataset = false;
     const beforeSwitch = recentsWrites;
     expect(await w1.useData.getState().loadRecent('Y.csv')).toBe(true);
-    expect(recentsWrites - beforeSwitch).toBe(1);
+    // 闸门未拦截，无需重试写盘
+    expect(recentsWrites - beforeSwitch).toBeLessThanOrEqual(1);
     pump();
     expect(pendingEvents).toHaveLength(0);
     expect(recentsWrites - beforeSwitch).toBeLessThanOrEqual(2);

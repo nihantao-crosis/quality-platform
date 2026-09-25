@@ -339,12 +339,52 @@ function markRecentsDivergedSilently(): void {
 /**
  * 最近列表刚落盘成功时，Web 端活动槽若仍未落盘则顺带重试一次(fix2609f G4d)：使共享 LS_DATASET 与
  * 最近列表一致，另一窗口按 LS_DATASET 协调时得到相同内容，不会把本窗口的编辑回退。
- * 桌面端活动槽有 SQLite 归档管线兜底，不在此重复入队。
+ * 桌面端活动槽有 SQLite 归档管线兜底，不在此重复入队。返回活动槽是否已与内存一致(无需重试也算)。
+ *
+ * fix2609i G15:重试仍写不下时(全局配额下腾出空间 Δ≤S<2Δ 即可触发)，LS_DATASET 里残留的是同名旧版，
+ * 而启动协调与另一窗口的「标志为假」协调分支都把 LS_DATASET 当权威——切换到同样写不下的表后，
+ * 本窗口的编辑会被对端回退、或刷新时被旧版覆盖。此时若刚落盘的 LS_RECENTS 已含活动表的精确版本，
+ * 就删除这份过时副本：最新版只在最近列表里，两处协调都会取它，还顺带腾出空间。
  */
-function retryUnpersistedActive(): void {
-  if (!currentActiveUnpersistedFlag || platform.datasetDb) return;
+function retryUnpersistedActive(): boolean {
+  if (!currentActiveUnpersistedFlag || platform.datasetDb) return true;
   const activeData = inMemoryActiveDataset(useData.getState());
-  if (activeData) persistActive(activeData);
+  if (!activeData) return true;
+  if (persistActive(activeData).persisted) return true;
+  dropStaleActiveSlot(activeData);
+  return false;
+}
+
+/** 解析 localStorage 中的 JSON；缺失/损坏返回 undefined(损坏值由各自的启动校验负责隔离)。 */
+function peekStoredJson(key: string): unknown {
+  try {
+    const text = localStorage.getItem(key);
+    return text == null ? undefined : JSON.parse(text) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Web 端活动槽写不下时，删除 LS_DATASET 中的同名旧版(fix2609i G15)。三个条件缺一不删：
+ * - LS_DATASET 当前确实是同名、且与内存活动表版本不同的合法数据集(别名/同版/损坏都不动)；
+ * - 磁盘上的 LS_RECENTS 已含活动表的精确版本(× 移除活动表本身等情形下旧版是唯一落盘副本，必须保留)。
+ */
+function dropStaleActiveSlot(activeData: StoredDataset): boolean {
+  const slot = peekStoredJson(LS_DATASET);
+  if (slot === undefined || projectStoreValidationError(LS_DATASET, slot)) return false;
+  const slotData = slot as StoredDataset;
+  if (slotData.name !== activeData.name || sameStoredDatasetVersion(slotData, activeData)) return false;
+  const recents = peekStoredJson(LS_RECENTS);
+  if (!Array.isArray(recents) || projectStoreValidationError(LS_RECENTS, recents)) return false;
+  const onDisk = (recents as RecentEntry[]).find((entry) => entry.name === activeData.name)?.data;
+  if (!onDisk || !sameStoredDatasetVersion(onDisk, activeData)) return false;
+  if (!removeJson(LS_DATASET)) return false;
+  const detail = `数据集「${activeData.name}」的最新版本已保存在最近列表，但活动槽写不下（浏览器存储空间不足）；`
+    + `已移除活动槽里的旧版本，避免刷新或另一窗口把编辑回退。刷新后请从左侧「最近数据集」重新打开「${activeData.name}」`;
+  sessionLog(detail);
+  try { useApp.getState().showToast(detail); } catch { /* 非 UI 环境忽略 */ }
+  return true;
 }
 
 /** 项目导入成功后旧内存数据注定被替换——上遮罩重载前清除未持久化标记,避免 beforeunload 拦截自动重载。 */
