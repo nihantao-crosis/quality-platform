@@ -100,6 +100,23 @@ const selStyle: React.CSSProperties = {
   fontSize: 12, color: '#2a333f', background: '#fff',
 };
 
+/** 分析页「设计矩阵」表的渲染上限(UI-21):含两个 1/2 编码列的大型生产记录会被识别为重复 2² 设计,
+ * 逐行渲染十万级 <tr> 会冻结 WebView。只显示前 N 行并注明总运行数;统计仍用全部运行。 */
+export const MAX_DOE_MATRIX_ROWS = 64;
+/** 运行数超过此值时提示「不像按设计采集的数据」(标准两水平/一般全因子设计远小于此规模)。 */
+const DOE_TYPICAL_MAX_RUNS = 128;
+
+/** 设计矩阵截断/规模提示;未超上限时不渲染。 */
+function DoeMatrixNote({ runs }: { runs: number }) {
+  if (runs <= MAX_DOE_MATRIX_ROWS) return null;
+  return (
+    <div role="note" style={{ padding: '8px 16px', fontSize: 11.5, color: '#8a5a00', background: '#fff8e8', lineHeight: 1.6 }}>
+      共 {runs} 运行，仅显示前 {MAX_DOE_MATRIX_ROWS} 行；完整矩阵见工作表，效应、方差分析与残差均使用全部运行。
+      {runs > DOE_TYPICAL_MAX_RUNS && ' 运行数远超常规因子设计规模，这不像按设计采集的数据——请确认所选因子列是否确为实验控制的因子，而非班次/机台等生产记录编码。'}
+    </div>
+  );
+}
+
 export function Doe({ T }: { T: ChartTokens }) {
   const name = useData((s) => s.model.name);
   return <DoeInner key={name} T={T} />;
@@ -719,6 +736,7 @@ function AnalyzeDesign({ T }: { T: ChartTokens }) {
 
       <Card>
         <CardHeader title={isDemo ? '设计矩阵 · 2³ 全因子 (8 运行)' : `设计矩阵 · ${design!.factorNames.length} 因子 (${design!.response.length} 运行)`} />
+        {!isDemo && <DoeMatrixNote runs={design!.coded.length} />}
         <div style={{ overflowX: 'auto' }}>
           <table className="mono" style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5, whiteSpace: 'nowrap' }}>
             <thead>
@@ -737,7 +755,7 @@ function AnalyzeDesign({ T }: { T: ChartTokens }) {
                     <td style={{ padding: '7px 12px', color: '#2a333f', fontWeight: 600, textAlign: 'right' }}>{d[3]}</td>
                   </tr>
                 ))
-                : design!.coded.map((row, i) => (
+                : design!.coded.slice(0, MAX_DOE_MATRIX_ROWS).map((row, i) => (
                   <tr key={i} style={{ borderTop: '1px solid #f0f2f5', textAlign: 'center' }}>
                     <td style={{ padding: '7px 12px', color: '#9aa2ad' }}>{i + 1}</td>
                     {row.map((c, j) => <td key={j} style={{ padding: '7px 12px', color: c > 0 ? '#2c8a45' : c < 0 ? '#c22f2f' : '#8a929d' }}>{c > 0 ? '+' : c < 0 ? '−' : '0'}</td>)}
@@ -1542,6 +1560,7 @@ function GeneralAnalyzeSection({ T, design, respIdx, respName, picker }: {
 
       <Card>
         <CardHeader title={`设计矩阵 · ${k} 因子 (${res.nRuns} 运行,实际水平值)`} />
+        <DoeMatrixNote runs={design.levelIndex.length} />
         <div style={{ overflowX: 'auto' }}>
           <table className="mono" style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5, whiteSpace: 'nowrap' }}>
             <thead>
@@ -1554,7 +1573,7 @@ function GeneralAnalyzeSection({ T, design, respIdx, respName, picker }: {
               </tr>
             </thead>
             <tbody>
-              {design.levelIndex.map((row, i) => (
+              {design.levelIndex.slice(0, MAX_DOE_MATRIX_ROWS).map((row, i) => (
                 <tr key={i} style={{ borderTop: '1px solid #f0f2f5', textAlign: 'center' }}>
                   <td style={{ padding: '7px 12px', color: '#9aa2ad' }}>{i + 1}</td>
                   {row.map((levelIdx, f) => (

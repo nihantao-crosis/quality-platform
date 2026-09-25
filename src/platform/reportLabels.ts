@@ -176,16 +176,42 @@ const MAX_FILE_NAME_CHARS = 80;
  * 数据集名直接来自用户或拖入的文件名,这些都是可达输入。
  */
 export function sanitizeFileName(raw: string): string {
-  let out = raw
+  // PLATFORM-06:先限长再清洗——此前在完整原串上跑 /[. ]+$/,「长串点/空格 + 普通字符结尾」
+  // 触发二次方回溯(8 万字符 ≈2.5s),而项目名/数据集名不限长,可卡死主线程。
+  // PLATFORM-18:只在码点边界截断——按 UTF-16 码元硬切会把 emoji/CJK 扩展 B 的代理对切成孤立高代理,
+  // 桌面端 Tauri IPC(serde_json)拒收整个请求,保存对话框打不开。
+  let out = clipFileNameUnits(raw)
     // 非法字符 + 全部 C0/C1 控制字符(含 NUL)
     .replace(/[\\/:*?"<>|]/g, '_')
     // eslint-disable-next-line no-control-regex -- 目标正是剥掉控制字符
     .replace(/[\u0000-\u001f\u007f-\u009f]/g, '_')
-    // Windows 不允许文件名以点或空格结尾
-    .replace(/[. ]+$/, '');
-  if (WINDOWS_RESERVED_NAMES.test(out)) out = `_${out}`;
-  if (out.length > MAX_FILE_NAME_CHARS) out = out.slice(0, MAX_FILE_NAME_CHARS);
+    // 原串自带的孤立代理项(畸形文件名)同样不能进 IPC
+    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '_');
+  // Windows 不允许文件名以点或空格结尾(线性扫描,不用回溯正则)
+  out = trimTrailingDotsAndSpaces(out);
+  if (WINDOWS_RESERVED_NAMES.test(out)) out = trimTrailingDotsAndSpaces(clipFileNameUnits(`_${out}`));
   return out || '未命名';
+}
+
+/** 截到 ≤ MAX_FILE_NAME_CHARS 个 UTF-16 码元,只在码点边界处切(不拆代理对);只看前缀,与原串长度无关。
+ * 预算仍按码元计:星平面字符 2 码元 = UTF-8 4 字节,80 码元 ≤ 240 字节,不放宽文件系统字节上限。 */
+function clipFileNameUnits(text: string): string {
+  if (text.length <= MAX_FILE_NAME_CHARS) return text;
+  let end = MAX_FILE_NAME_CHARS;
+  const last = text.charCodeAt(end - 1);
+  const next = text.charCodeAt(end);
+  if (last >= 0xd800 && last <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) end -= 1;
+  return text.slice(0, end);
+}
+
+function trimTrailingDotsAndSpaces(text: string): string {
+  let end = text.length;
+  while (end > 0) {
+    const code = text.charCodeAt(end - 1);
+    if (code !== 0x2e && code !== 0x20) break;
+    end -= 1;
+  }
+  return text.slice(0, end);
 }
 
 /** HTML 转义唯一实现(曾在 htmlReport 与 projectSummary 各有一份,覆盖字符还不一致)。 */

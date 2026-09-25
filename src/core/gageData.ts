@@ -236,12 +236,33 @@ function crossBalance(part: RoleCandidate, operator: RoleCandidate): number | nu
   return repeats >= 1 ? repeats : null;
 }
 
+const gageRecommendationMemo = new WeakMap<VarModel, { textCols: GageTextColumn[]; recommendation: GageRoleRecommendation }>();
+let gageRecommendationComputeCount = 0;
+
+/** 测试观测:recommendGageRoles 实际打分(未命中记忆)的累计次数。仅供回归测试计数,生产代码勿用。 */
+export function __gageRecommendationComputeCountForTests(): number {
+  return gageRecommendationComputeCount;
+}
+
 /**
  * MSA 默认角色推荐:对「测量/部件/操作员」三个角色做可解释打分,返回推荐列名与依据。
  * 只做预填——UI 仍以用户手动选择优先;信号不足或并列时对应角色明确返回 null,不瞎猜。
  * 背景:工厂列序「部件、测试人、螺钉高度」曾被列序默认(第一数值列当测量)推荐反(716-R3 P1-2)。
  */
 export function recommendGageRoles(model: VarModel, textCols: GageTextColumn[]): GageRoleRecommendation {
+  // CORE-07:交叉平衡打分是 O(类别列数²×行数)(2 万行×100 列 ≈ 7s)。MSA 页、effectiveGageSelection、
+  // prepareGageStudy 与壳层在同一输入上各自调用,此前每次都全量重算。按 (model, textCols) 引用记忆:
+  // VarModel 不可变(单元格编辑经 updateVarModelCell 产出新引用),textCols 换引用即重算——
+  // 不按内容猜等价,不会给出陈旧推荐。WeakMap 以模型为键,离开的数据集随模型一起回收。
+  const hit = gageRecommendationMemo.get(model);
+  if (hit && hit.textCols === textCols) return hit.recommendation;
+  const recommendation = computeGageRoleRecommendation(model, textCols);
+  gageRecommendationMemo.set(model, { textCols, recommendation });
+  return recommendation;
+}
+
+function computeGageRoleRecommendation(model: VarModel, textCols: GageTextColumn[]): GageRoleRecommendation {
+  gageRecommendationComputeCount++;
   const n = model.k;
   const numeric: RoleCandidate[] = model.colNames.map((name, index) => {
     const values = model.subs.map((row) => row.vals[index]);
@@ -335,6 +356,10 @@ export function effectiveGageSelection(
   textCols: GageTextColumn[],
   stored: { value: string | null; part: string | null; operator: string | null },
 ): { valueColumn: string | null; partColumn: string | null; operatorColumn: string | null } {
+  // CORE-07:三角色都已手选时推荐结果会被整份丢弃(下方 `stored.x ?? rec.x`),不再为它全量打分。
+  if (stored.value != null && stored.part != null && stored.operator != null) {
+    return { valueColumn: stored.value, partColumn: stored.part, operatorColumn: stored.operator };
+  }
   const rec = recommendGageRoles(model, textCols);
   const valueColumn = stored.value ?? rec.value ?? rec.valueFallback;
   const namedValueIndex = valueColumn ? model.colNames.indexOf(valueColumn) : -1;

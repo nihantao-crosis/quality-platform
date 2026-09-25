@@ -15,14 +15,13 @@ import {
 import { ScatterPlot } from '../charts/ScatterPlot';
 import { NormalProbPlot } from '../charts/NormalProbPlot';
 import { Fishbone } from './Fishbone';
-import { loadFishboneState } from '../../store/fishboneStore';
 import { useApp, resolveGageTolerance, GAGE_BATCH_COL_CAP, normalizeGageBatchCols } from '../../store/appStore';
 import { datasetWriteNotes, useData } from '../../store/dataStore';
 import { numericInputMode, parseStrictNumber } from '../../core/numberInput';
 import type { ChartTokens } from '../tokens';
 import { paretoColors } from '../tokens';
 import { Card, CardHeader, KvRows, Badge, tabStyle, numInput, EmptyStateCard, DemoBadge } from '../common';
-import { ParetoChart, BoxPlot, IndividualValuePlot, IntervalPlot, MiniHist, groupedPlotWindow, MAX_GROUPED_PLOT_GROUPS } from '../charts/misc';
+import { ParetoChart, BoxPlot, IndividualValuePlot, IntervalPlot, MiniHist, groupedPlotWindow, MAX_GROUPED_PLOT_GROUPS, paretoDisplayWindow } from '../charts/misc';
 import { GageReportFigure, gageBarCategories } from '../charts/gagePanels';
 
 const selStyle: CSSProperties = {
@@ -1186,8 +1185,19 @@ function AnovaInner({ T }: { T: ChartTokens }) {
 }
 
 // ---------- 帕累托 ----------
+/** 缺陷明细表显示预算(UI-10):超过时前 N−1 类逐行 + 一行「其他(X 类)」合计;件数与结论仍按全部类别。 */
+export const MAX_PARETO_TABLE_ROWS = 50;
+
 export function Pareto({ T }: { T: ChartTokens }) {
-  const { paretoView, setParetoView, fishboneRevision } = useApp();
+  // UI-20:按字段订阅——toast 自动消失、打开菜单等无关状态变化不得重渲染本页。
+  const paretoView = useApp((s) => s.paretoView);
+  const setParetoView = useApp((s) => s.setParetoView);
+  const fishboneRevision = useApp((s) => s.fishboneRevision);
+  // UI-20:鱼骨图 key 不得含实时存储内容(鱼骨每次编辑都写存储而不重渲染本页,下一次任意重渲染
+  // 就会换 key → 整体重挂载,丢失所选类别/草稿/焦点并打断输入法)。外部改写存储的路径:
+  // 历史恢复显式 bumpFishboneRevision;「清除本地数据」与项目导入都在全局遮罩(busyOverlay)
+  // 事务内改写存储——遮罩期间用户无法编辑,遮罩起落各换一次 key,撤遮罩后从存储重读。
+  const storageBarrier = useApp((s) => s.busyOverlay != null);
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <Card style={{ padding: '11px 16px', display: 'flex', alignItems: 'center', gap: 14 }}>
@@ -1200,21 +1210,27 @@ export function Pareto({ T }: { T: ChartTokens }) {
           <span style={{ marginLeft: 'auto', fontSize: 11.5, color: '#8a929d' }}>针对帕累托 Top 缺陷做根因分析</span>
         )}
       </Card>
-      {paretoView === 'pareto' ? <ParetoInner T={T} /> : <Fishbone key={`${fishboneRevision}:${JSON.stringify(loadFishboneState())}`} T={T} />}
+      {paretoView === 'pareto' ? <ParetoInner T={T} /> : <Fishbone key={`${fishboneRevision}:${storageBarrier ? 'barrier' : 'live'}`} T={T} />}
     </div>
   );
 }
 
 function ParetoInner({ T }: { T: ChartTokens }) {
-  const {
-    openModal, setImportTab, setImportKind,
-    paretoThreshold,
-    paretoShowDemo: showDemo, setParetoShowDemo: setShowDemo,
-  } = useApp();
+  const openModal = useApp((s) => s.openModal);
+  const setImportTab = useApp((s) => s.setImportTab);
+  const setImportKind = useApp((s) => s.setImportKind);
+  const paretoThreshold = useApp((s) => s.paretoThreshold);
+  const showDemo = useApp((s) => s.paretoShowDemo);
+  const setShowDemo = useApp((s) => s.setParetoShowDemo);
   const pareto = useData((st) => st.paretoModel);
   const colors = paretoColors(T);
-
   const isReal = !!(pareto && pareto.rows.length > 0);
+  // 5 万类别下排序/累计是 O(n log n):按输入记忆化,不随无关重渲染重算。
+  const analysis = useMemo(
+    () => paretoReport({ rows: isReal ? pareto!.rows : DEFECTS, mergeOther: false, threshold: paretoThreshold }),
+    [isReal, pareto, paretoThreshold],
+  );
+  const display = useMemo(() => analysis.rows.map(({ name, count }) => ({ name, count })), [analysis]);
   if (!isReal && !showDemo) {
     return (
       <EmptyStateCard
@@ -1226,15 +1242,24 @@ function ParetoInner({ T }: { T: ChartTokens }) {
     );
   }
 
-  const source = isReal ? pareto!.rows : DEFECTS;
-  const analysis = paretoReport({ rows: source, mergeOther: false, threshold: paretoThreshold });
-  const display = analysis.rows.map(({ name, count }) => ({ name, count }));
   const total0 = analysis.total;
-  const rows = analysis.rows.map((d, i) => ({
+  // UI-10:明细表只逐行列出前 N−1 类,其余合并为一行(累计 = 全量末行累计,即 100%)。
+  const tableWindow = paretoDisplayWindow(analysis.rows, MAX_PARETO_TABLE_ROWS);
+  const rows = tableWindow.shown.map((d, i) => ({
     name: d.name, count: d.count,
     cum: Math.round(d.cumulativePercentage) + '%',
     color: d.mergedOther ? '#c8cfd8' : colors[i % colors.length],
   }));
+  if (tableWindow.other) {
+    rows.push({
+      name: tableWindow.other.name, count: tableWindow.other.count,
+      cum: Math.round(analysis.rows[analysis.rows.length - 1].cumulativePercentage) + '%',
+      color: '#c8cfd8',
+    });
+  }
+  const foldedNote = tableWindow.other
+    ? `共 ${tableWindow.totalCategories} 类：明细列出前 ${tableWindow.shown.length} 类，其余 ${tableWindow.other.categories} 类合并为一行；件数、累计%与结论按全部类别计算。`
+    : null;
   const conclusion = analysis.conclusion;
 
   return (
@@ -1271,6 +1296,9 @@ function ParetoInner({ T }: { T: ChartTokens }) {
             ))}
           </tbody>
         </table>
+        {foldedNote && (
+          <div style={{ padding: '8px 16px 0', fontSize: 11.5, color: '#8a5a00', lineHeight: 1.55 }}>{foldedNote}</div>
+        )}
         <div style={{ padding: '12px 16px', margin: 6, background: '#f2f8f3', border: '1px solid #d6ebda', borderRadius: 4, fontSize: 12, color: '#2c6b3c', lineHeight: 1.55 }}>
           {conclusion}
         </div>

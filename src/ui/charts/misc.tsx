@@ -54,6 +54,38 @@ export interface GageBarCat {
 }
 
 // ---------- 帕累托 ----------
+/** 帕累托图显示预算(UI-10):导入契约允许 5 万类别,逐类画柱/累计点/统计表会生成数十万 SVG 节点
+ * 并冻结总览(默认落地页)与帕累托页;柱宽在 ~1000 类时已不足 1px,图本身也不可读。
+ * 超出预算时按输入顺序(已按频数降序)保留前 N−1 类,其余合并为一根「其他(X 类)」柱,
+ * 并在图上注明折叠数。只限制绘图,频数总和、累计%与结论仍按全部类别计算。 */
+export const MAX_PARETO_PLOT_BARS = 30;
+
+export interface ParetoDisplayWindow<R> {
+  /** 逐类显示的前若干行(原样引用输入行)。 */
+  shown: R[];
+  /** 被折叠的尾部合计;未超预算时为 null。 */
+  other: { name: string; count: number; categories: number } | null;
+  totalCategories: number;
+}
+
+/** 帕累托图/明细表共用的显示窗口:超过 maxRows 时保留前 maxRows−1 行 + 一行「其他(X 类)」。 */
+export function paretoDisplayWindow<R extends { name: string; count: number }>(
+  rows: readonly R[],
+  maxRows: number,
+): ParetoDisplayWindow<R> {
+  const budget = Math.max(2, Math.floor(maxRows));
+  if (rows.length <= budget) return { shown: rows.slice(), other: null, totalCategories: rows.length };
+  const keep = budget - 1;
+  let tail = 0;
+  for (let i = keep; i < rows.length; i++) tail += rows[i].count;
+  const categories = rows.length - keep;
+  return {
+    shown: rows.slice(0, keep),
+    other: { name: `其他（${categories} 类）`, count: tail, categories },
+    totalCategories: rows.length,
+  };
+}
+
 function ParetoChartImpl(p: {
   T: ChartTokens;
   rows: { name: string; count: number }[];
@@ -63,7 +95,13 @@ function ParetoChartImpl(p: {
   title?: string;
 }) {
   const T = p.T;
-  const rows = p.rows;
+  const plotWindow = paretoDisplayWindow(p.rows, MAX_PARETO_PLOT_BARS);
+  const rows = plotWindow.other
+    ? [...plotWindow.shown, { name: plotWindow.other.name, count: plotWindow.other.count }]
+    : plotWindow.shown;
+  const foldNote = plotWindow.other
+    ? `共 ${plotWindow.totalCategories} 类 · 显示前 ${plotWindow.shown.length} 类，其余 ${plotWindow.other.categories} 类合并为「其他」`
+    : '';
   const W = p.w ?? 960;
   const H = p.h ?? 300;
   // 批次720-C2:帕累托不再跟随图表风格切换形制——任何主题都输出 Minitab 形制
@@ -114,6 +152,7 @@ function ParetoChartImpl(p: {
       {classic && p.title && (
         <Txt x={m.l + pw / 2} y={15} s={p.title} fill="#111111" size={14} anchor="middle" weight={700} />
       )}
+      {foldNote && <Txt x={m.l + pw} y={m.t - 8} s={foldNote} fill="#5b6472" size={10} anchor="end" />}
       {Array.from({ length: 5 }, (_, g) => {
         const yy = m.t + (g / 4) * ph;
         return (
