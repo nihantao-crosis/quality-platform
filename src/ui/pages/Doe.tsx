@@ -894,7 +894,11 @@ function CreateDesign() {
     }
     const pending = design.rows.map((_, row) => ({ row, col: design.responseCol }));
     // UI-04 P3:时间戳只到时分秒，跨天同一秒生成会与旧设计(可能已录入响应)同名——同样走同名写入策略
-    const outcome = importMatrix(name, design.colNames, design.rows, design.textCols, pending, { onNameConflict: 'rename' });
+    // fix2609d G4c:设计名含时间戳/随机种子后缀，每次重试都会变；Web 端挤出确认必须用稳定的操作标识，
+    // 否则「60 秒内再次生成」永远对不上、最近列表满 5 条时 DOE 永久卡死。
+    const outcome = importMatrix(name, design.colNames, design.rows, design.textCols, pending, {
+      onNameConflict: 'rename', confirmKey: 'doe-create',
+    });
     setCreatedPreview(null);
     goTo('worksheet');
     const writeNotes = datasetWriteNotes(name, outcome).map((text) => `；${text}`).join('');

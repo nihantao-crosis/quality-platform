@@ -89,14 +89,15 @@ afterEach(async () => {
 });
 
 describe('M1 最近列表挤出保全(Web 端无本机库)', () => {
-  it('未经编辑的上一份粘贴按名替换：再粘贴不多占列表位，最旧的已编辑数据集不被挤出', async () => {
+  it('未经编辑的上一份粘贴也不按名替换(剪贴板不可重算，fix2609d)：需改名且会挤出时先拒绝，两份数据都不丢', async () => {
     render(<Worksheet />);
     await seedFourWithEditedOldest();
     paste('值\n10\n20');
     expect(recentNames()).toHaveLength(5);
     paste('值\n1\n2\n3');
+    expect(useApp.getState().toast).toContain('最近列表已满（5 个）');
     expect(useData.getState().model.name).toBe('剪贴板数据');
-    expect(useData.getState().model.subs.map((s) => s.vals)).toEqual([[1], [2], [3]]);
+    expect(useData.getState().model.subs.map((s) => s.vals)).toEqual([[10], [20]]);
     expect(recentNames()).toHaveLength(5);
     expect(recentNames()).toContain('供应商A来料.csv');
     expect(persistedRecent('供应商A来料.csv')?.rows[0]).toEqual([77.25]);
@@ -131,7 +132,7 @@ describe('M1 最近列表挤出保全(Web 端无本机库)', () => {
     useData.getState().importMatrix('E.csv', ['x'], [[1], [2], [3]]);
     await editCell(0, 0, 5);
     for (let i = 1; i <= 3; i++) useData.getState().importMatrix(`D${i}.csv`, ['x'], [[i], [i + 1]]);
-    expect(useData.getState().generateRandom(10, 1, 3, 1)).toBe('随机数据 N(10,1)');
+    expect(useData.getState().generateRandom(10, 1, 3, 1).name).toBe('随机数据 N(10,1)');
     let error: unknown = null;
     try { useData.getState().generateRandom(10, 1, 3, 1); } catch (caught) { error = caught; }
     expect(error).toBeInstanceOf(DatasetEvictionError);
@@ -173,14 +174,12 @@ describe('M1 最近列表挤出保全(Web 端无本机库)', () => {
     expect(useApp.getState().toast).toContain('无法恢复');
   });
 
-  it('同名文件再导入：旧文件未经编辑按名替换，编辑过才改名', async () => {
+  it('同名文件再导入：内容不同即改名(文件不可重算，未编辑也不按名替换，fix2609d)', async () => {
     const opts = { onNameConflict: 'rename' as const };
     expect(useData.getState().importMatrix('report.csv', ['x'], [[1], [2]], [], [], opts).name).toBe('report.csv');
-    expect(useData.getState().importMatrix('report.csv', ['x'], [[3], [4]], [], [], opts).name).toBe('report.csv');
-    expect(recentNames()).toEqual(['report.csv']);
-    await editCell(0, 0, 11);
-    expect(useData.getState().importMatrix('report.csv', ['x'], [[5], [6]], [], [], opts).name).toBe('report (2).csv');
-    expect(persistedRecent('report.csv')?.rows).toEqual([[11], [4]]);
+    expect(useData.getState().importMatrix('report.csv', ['x'], [[3], [4]], [], [], opts).name).toBe('report (2).csv');
+    expect(recentNames()).toEqual(['report (2).csv', 'report.csv']);
+    expect(persistedRecent('report.csv')?.rows).toEqual([[1], [2]]);
   });
 
   it('转置/堆叠返回实际名称；改名时提示原数据集实际位置', async () => {

@@ -31,11 +31,13 @@ const knownDatasetNames = new Set<string>();
 const unclaimedCopyNames = new Set<string>();
 const sessionClaimedCopyNames = new Set<string>();
 /**
- * 本会话由新建类入口(onNameConflict='rename')写入、此后未经编辑的数据集：名称 → 写入时的 savedAt。
- * 只有最近列表中同名条目的 savedAt 仍与之相同，才算「原样结果」(编辑、撤销、另一窗口改写都会换 savedAt)。
+ * 本会话由确定性派生(子集/标准化/转置/堆叠，modelOptions.derivedFrom)写入、此后未经编辑的数据集：
+ * 名称 → { 写入时的 savedAt, 源表签名 }。只有最近列表中同名条目的 savedAt 仍与之相同(编辑、撤销、
+ * 另一窗口改写都会换 savedAt)、且本次派生的源表签名与记录一致(源表未被编辑)，才算「原样结果」。
+ * 文件导入、剪贴板粘贴、DOE、随机数据不可由同一操作重新得到，从不登记(fix2609d G4c)。
  * 不落盘：重启后一律视为可能已编辑，按改名策略保守处理。
  */
-const pristineDatasets = new Map<string, string>();
+const pristineDatasets = new Map<string, { savedAt: string; source: string }>();
 let lastWorksheetStamp = 0;
 
 interface StoredDataset {
@@ -65,13 +67,22 @@ export interface DatasetModelOptions {
   independentRecoveryCopy?: boolean;
   /**
    * 同名数据集写入策略(STORE-04/UI-04):派生(子集/标准化/转置/堆叠/随机)、文件/剪贴板导入、
-   * 工作表粘贴等「新建类」入口置 'rename'——目标名已被内容不同(或内容无法核对)的数据集占用时
+   * 工作表粘贴、DOE 等「新建类」入口置 'rename'——目标名已被内容不同(或内容无法核对)的数据集占用时
    * 改名为「名 (2)」写入，绝不整键覆盖旧数据集(最近列表/本机库/撤销栈/规格记忆)。
-   * 例外(fix2609b M1):旧同名数据集是本会话新建类入口写入、此后未经任何编辑的原样结果时，
-   * 仍按名替换——它可由同一操作重新得到，改名只会多占最近列表位并挤出无关数据集。
-   * 省略时保持按名替换语义(回看快照、另存副本等调用方已自行保证名称语义)。
+   * 唯一例外见 derivedFrom。省略时保持按名替换语义(回看快照、另存副本等调用方已自行保证名称语义)。
    */
   onNameConflict?: 'rename';
+  /**
+   * 确定性派生(子集/标准化/转置/堆叠)的源表签名(derivationSourceStamp，名称+内容指纹)。只有带此签名的
+   * 'rename' 写入才登记「原样结果」：之后同一源表(内容未变)再做同一派生、且旧结果未经编辑时按名替换(沿用其规格记忆，
+   * 结果带 replacedPristine 供提示)。Web 端专用——桌面端被挤出条目已有只插入归档，一律改名。
+   */
+  derivedFrom?: string;
+  /**
+   * Web 端挤出确认的操作标识(fix2609d G4c)：省略时用请求名。请求名每次都会变的入口(DOE 名含时间戳)
+   * 必须传稳定值(如 'doe-create')，否则「60 秒内再次执行同一操作」永远对不上。
+   */
+  confirmKey?: string;
   /**
    * Web 端(无本机库)新建类写入会把某数据集挤出最近列表时，默认先拒绝并提示备份(fix2609b M1)。
    * 用户确认后由调用方带 true 重试；同一操作 60 秒内再次执行也视为确认。
@@ -246,6 +257,8 @@ export interface PersistOutcome {
   evicted?: string[];
   /** 改名写入时，原同名数据集现在的位置：最近列表 / 本机数据集库 / 已移出(Web 端不可恢复)。 */
   conflictLocation?: ConflictDatasetLocation;
+  /** 按名替换了本会话未经编辑的同名派生结果(源表未变，可由同一操作重新得到)；提示须明示。 */
+  replacedPristine?: boolean;
   /** SQLite 归档的真实完成承诺。archiving 只表示已发起，覆盖数据前必须 await 此承诺。 */
   durability?: Promise<void>;
   /** 校验拒绝原因(第三轮 P3):调用方据此区分「被拒」与「存储空间不足」,不再错报 */
@@ -510,31 +523,80 @@ function numberedDatasetName(requested: string, sequence: number): string {
   return `${base.slice(0, Math.max(1, MAX_DATASET_NAME_CHARS - suffix.length)).trimEnd() || '数据集'}${suffix}`;
 }
 
-/** 旧同名数据集是否为本会话新建类入口写入后未经编辑的原样结果(可由同一操作重新得到)。 */
-function isPristineDataset(name: string, st: DataState): boolean {
-  const savedAt = pristineDatasets.get(name);
-  if (savedAt === undefined) return false;
+/**
+ * 确定性派生的源表签名：活动表名 + 内容指纹(列名、数值逐位、文本列、待录入格；双 32 位哈希)。
+ * 按内容而非 savedAt(毫秒分辨率，同毫秒内的编辑会撞)判定「源表未变」：源表被编辑过即签名不同；
+ * 改回完全相同的内容则派生结果确实可由同一操作重新得到。
+ */
+function derivationSourceStamp(st: DataState): string | undefined {
+  // 桌面端不登记原样结果(被挤出条目有只插入归档，一律改名)，不为大表白算指纹。
+  if (platform.datasetDb) return undefined;
+  let h1 = 0x811c9dc5;
+  let h2 = 0x9747b28c;
+  const mix = (value: number) => {
+    h1 = Math.imul(h1 ^ value, 0x01000193);
+    h2 = Math.imul(h2 ^ value, 0x5bd1e995);
+    h2 ^= h2 >>> 13;
+  };
+  const text = (value: string) => {
+    mix(value.length);
+    for (let i = 0; i < value.length; i++) mix(value.charCodeAt(i));
+  };
+  const f64 = new Float64Array(1);
+  const u32 = new Uint32Array(f64.buffer);
+  const m = st.model;
+  text(m.name);
+  mix(m.colNames.length);
+  m.colNames.forEach(text);
+  mix(m.subs.length);
+  for (const subgroup of m.subs) {
+    mix(subgroup.vals.length);
+    for (const value of subgroup.vals) {
+      f64[0] = value;
+      mix(u32[0]);
+      mix(u32[1]);
+    }
+  }
+  mix(st.textCols.length);
+  for (const column of st.textCols) {
+    text(column.name);
+    mix(column.values.length);
+    column.values.forEach(text);
+  }
+  mix(st.pendingCells.length);
+  for (const cell of st.pendingCells) { mix(cell.row); mix(cell.col); }
+  return `${m.name}\u0000${(h1 >>> 0).toString(36)}.${(h2 >>> 0).toString(36)}`;
+}
+
+/**
+ * 旧同名数据集是否为本会话同一源表(签名未变)的确定性派生、此后未经编辑的原样结果(可由同一操作重新得到)。
+ * 文件导入/粘贴/DOE/随机数据没有 derivedFrom，桌面端有只插入归档，两者都一律改名。
+ */
+function isPristineDataset(name: string, st: DataState, derivedFrom: string | undefined): boolean {
+  if (derivedFrom === undefined || platform.datasetDb) return false;
+  const marker = pristineDatasets.get(name);
+  if (marker === undefined || marker.source !== derivedFrom) return false;
   const recent = st.recents.find((entry) => entry.name === name);
-  return recent?.data !== undefined && recent.savedAt === savedAt && recent.data.savedAt === savedAt;
+  return recent?.data !== undefined && recent.savedAt === marker.savedAt && recent.data.savedAt === marker.savedAt;
 }
 
 /**
  * 同名数据集写入策略的唯一实现(STORE-04/UI-04)。
  * - 名称空闲 → 原名；
  * - 名称被内容完全相同的数据集占用 → 原名(重复同一操作不制造「(2)(3)…」挤占最近列表上限)；
- * - 名称被本会话新建类入口写入、此后未经编辑的原样结果占用 → 原名按名替换(fix2609b M1：
- *   与修复前语义一致，不为可重新得到的结果多占最近列表位、挤出无关数据集)；
+ * - 名称被本会话同一源表(未编辑)的同一确定性派生写入、此后未经编辑的原样结果占用 → 原名按名替换
+ *   (fix2609b M1 / fix2609d G4c：只限 Web 端带 derivedFrom 的派生；不为可重新得到的结果多占最近列表位)；
  * - 名称被已编辑、或内容无法核对的数据集占用 → 依次尝试「名 (2)」「名 (3)」…，同样复用内容相同者，
  *   取第一个空闲名。旧数据集及其编辑、本机库记录、规格记忆均不受影响。
  */
 function resolveDatasetWriteName(
-  requested: string, incoming: DatasetContent, st: DataState,
-): { name: string; identical: boolean } {
+  requested: string, incoming: DatasetContent, st: DataState, derivedFrom?: string,
+): { name: string; identical: boolean; replacedPristine?: boolean } {
   const occupiedBy = (name: string) => occupiedDatasetContent(name, st);
   const first = occupiedBy(requested);
   if (first === undefined) return { name: requested, identical: false };
   if (first !== null && sameDatasetContent(first, incoming)) return { name: requested, identical: true };
-  if (isPristineDataset(requested, st)) return { name: requested, identical: false };
+  if (isPristineDataset(requested, st, derivedFrom)) return { name: requested, identical: false, replacedPristine: true };
   for (let sequence = 2; ; sequence++) {
     const candidate = numberedDatasetName(requested, sequence);
     if (candidate === requested || reservedPrototypeNameError(candidate)) continue;
@@ -596,10 +658,10 @@ interface DataState {
    * 返回 name + 持久化结果(蜂群 P1-01:此前只返回名字、丢弃 PersistOutcome,
    * 配额满时调用方仍提示「已另存」并覆盖当前编辑,后续编辑静默丢失)。 */
   saveAsCopy(): { name: string; outcome: PersistOutcome };
-  /** 列 z-score 标准化 → 新数据集 */
-  standardize(): string | null;
-  /** 生成正态随机数据集 */
-  generateRandom(mu: number, sigma: number, k: number, n: number): string;
+  /** 列 z-score 标准化 → 新数据集；有待录入格或无变异列时返回 null。 */
+  standardize(): DerivedDatasetResult | null;
+  /** 生成正态随机数据集(返回实际名称、请求名与持久化结果，调用方据此拼接改名/挤出提示) */
+  generateRandom(mu: number, sigma: number, k: number, n: number): DerivedDatasetResult;
   /** 按测量列排序（文本列同步重排） */
   sortBy(col: number, asc: boolean): void;
   /** 从最近列表移除（不影响当前数据集） */
@@ -946,27 +1008,27 @@ function trimRecents(nextList: RecentEntry[]): { recents: RecentEntry[]; evicted
 }
 
 /**
- * Web 端挤出确认(与「再次点击确认删除」同一交互)：首次被拒后，同一请求名 + 同一批将被移出的
- * 数据集在时限内再次执行即视为用户确认。确认只消费一次。
+ * Web 端挤出确认(与「再次点击确认删除」同一交互)：首次被拒后，同一操作标识(modelOptions.confirmKey，
+ * 省略时为请求名) + 同一批将被移出的数据集在时限内再次执行即视为用户确认。确认只消费一次。
  */
 const EVICTION_CONFIRM_SECONDS = 60;
 let evictionConfirmation: { key: string; expires: number } | null = null;
 
-function evictionConfirmationKey(requestedName: string, evicted: string[]): string {
-  return JSON.stringify([requestedName, evicted]);
+function evictionConfirmationKey(operationKey: string, evicted: string[]): string {
+  return JSON.stringify([operationKey, evicted]);
 }
 
-function armEvictionConfirmation(requestedName: string, evicted: string[]): void {
+function armEvictionConfirmation(operationKey: string, evicted: string[]): void {
   evictionConfirmation = {
-    key: evictionConfirmationKey(requestedName, evicted),
+    key: evictionConfirmationKey(operationKey, evicted),
     expires: Date.now() + EVICTION_CONFIRM_SECONDS * 1000,
   };
 }
 
-function consumeEvictionConfirmation(requestedName: string, evicted: string[]): boolean {
+function consumeEvictionConfirmation(operationKey: string, evicted: string[]): boolean {
   const armed = evictionConfirmation;
   if (!armed || armed.expires < Date.now()
-    || armed.key !== evictionConfirmationKey(requestedName, evicted)) return false;
+    || armed.key !== evictionConfirmationKey(operationKey, evicted)) return false;
   evictionConfirmation = null;
   return true;
 }
@@ -1724,6 +1786,22 @@ export async function prepareVaultDatasetRemoval(name: string): Promise<void> {
   forgetFailedVaultArchive(name);
 }
 
+/**
+ * 本机库删除成功后的收口(fix2609d G4c)：同名最近条目带着全量副本，若留在列表里，之后点 × 或被自然挤出时
+ * settleEvictedRecents 会按只插入把它重新写回库，用户刚确认删除的内容随之复活。库删除是用户对该名称的
+ * 明确删除意图，同步从最近列表移除，且不经过 settleEvictedRecents。返回最近列表里是否确有该条目。
+ */
+export function completeVaultDatasetRemoval(name: string): boolean {
+  const st = useData.getState();
+  if (!st.recents.some((entry) => entry.name === name)) return false;
+  const recents = st.recents.filter((entry) => entry.name !== name);
+  useData.setState({ recents });
+  pristineDatasets.delete(name);
+  persistRecents(recents);
+  sessionLog(`数据集库删除「${name}」后同步移出最近列表`);
+  return true;
+}
+
 /** 导出项目前把 400ms 防抖内容即时写入，并等待所有已经提交的 SQLite 写入。 */
 /**
  * 等待某数据集的异步归档落定并回报成败(盲审 P3:此前 archiving 只是「已提交」,
@@ -1949,6 +2027,9 @@ export function datasetWriteNotes(requestedName: string, outcome: PersistOutcome
         : '原数据集保留在最近列表';
     notes.push(`已有内容不同的同名数据集「${requestedName}」，本次另存为「${outcome.name}」（${where}）`);
   }
+  if (outcome.replacedPristine) {
+    notes.push(`已替换未编辑的同名数据集「${outcome.name ?? requestedName}」（源表未变，可由同一操作重新得到；规格限沿用）`);
+  }
   const others = (outcome.evicted ?? []).filter((name) => !(renamed && name === requestedName));
   if (others.length > 0) {
     notes.push(`${others.map((name) => `「${name}」`).join('')}已移出最近列表${platform.datasetDb
@@ -2117,7 +2198,8 @@ watchExternalWrite(LS_RECENTS, () => {
   const fresh = loadValidatedStoreJson<RecentEntry[]>(LS_RECENTS);
   if (!Array.isArray(fresh)) return;
   let localActive: StoredDataset | null = null;
-  if (activeUnpersistedFlag || recentsUnpersistedFlag) {
+  const unpersistedLocal = activeUnpersistedFlag || recentsUnpersistedFlag;
+  if (unpersistedLocal) {
     // fix2609b M2:本窗口活动表尚未完整落盘时，localStorage 里要么没有它、要么是旧版本；
     // 权威版本只在内存中，外部列表不得把它挤掉或回退。
     localActive = inMemoryActiveDataset(useData.getState());
@@ -2133,7 +2215,9 @@ watchExternalWrite(LS_RECENTS, () => {
   const coordinated = coordinateRecentsWithActive(fresh, localActive);
   const before = useData.getState().recents.length;
   useData.setState({ recents: coordinated.recents });
-  if (coordinated.changed) persistRecents(coordinated.recents, localActive ?? undefined);
+  // fix2609d G4c:未落盘分支只在内存里保住活动表，不在监听器里回写——否则另一窗口按其 LS_DATASET
+  // 协调同名条目后再写回，两窗口交替写 LS_RECENTS 无限乒乓。落盘交给闸门重试或下一次编辑。
+  if (coordinated.changed && !unpersistedLocal) persistRecents(coordinated.recents, localActive ?? undefined);
   if (coordinated.recents.length !== before) {
     try {
       useApp.getState().showToast(`另一窗口更新了最近数据集列表（${coordinated.recents.length} 项），已同步到本窗口`);
@@ -2358,8 +2442,8 @@ export const useData = create<DataState>((set, get) => ({
     const resolved = modelOptions.onNameConflict === 'rename'
       ? resolveDatasetWriteName(requestedName, {
         colNames: normalized.colNames, rows, textCols: normalized.textCols, pendingCells,
-      }, get())
-      : { name: requestedName, identical: false };
+      }, get(), modelOptions.derivedFrom)
+      : { name: requestedName, identical: false, replacedPristine: false };
     const name = resolved.name;
     const model = computeVarModel(name, normalized.colNames, rows, {
       isDemo: modelOptions.isDemo === true,
@@ -2368,13 +2452,21 @@ export const useData = create<DataState>((set, get) => ({
     // fix2609b M1:Web 端(无本机库)新建类写入会把数据集挤出最近列表时，被挤出的数据再无任何
     // 落盘位置。必须在闸门(停 MES、推进意图)之前拒绝并说明，用户确认后才允许继续。
     if (modelOptions.onNameConflict === 'rename' && !platform.datasetDb) {
+      const current = get();
       const prospective = trimRecents([
         { name, savedAt: '' },
-        ...get().recents.filter((r) => r.name !== name),
+        ...current.recents.filter((r) => r.name !== name),
       ]).evicted.filter((entry) => entry.data).map((entry) => entry.name);
+      // 冲突方是不在最近列表里的活动表(如用户已用 × 移出当前表)时，改名写入会直接替换活动槽，
+      // 该表在浏览器端再无落盘位置——同样须经确认(fix2609d G4c)。
+      if (name !== requestedName && current.model.name === requestedName && !current.model.isDemo
+        && !current.recents.some((entry) => entry.name === requestedName)) {
+        prospective.push(requestedName);
+      }
+      const operationKey = modelOptions.confirmKey ?? requestedName;
       if (prospective.length > 0 && !modelOptions.allowEviction
-        && !consumeEvictionConfirmation(requestedName, prospective)) {
-        armEvictionConfirmation(requestedName, prospective);
+        && !consumeEvictionConfirmation(operationKey, prospective)) {
+        armEvictionConfirmation(operationKey, prospective);
         const detail = `最近列表已满（${MAX_RECENT_DATASETS} 个），继续会移除${prospective.map((n) => `「${n}」`).join('')}，浏览器端无法恢复；`
           + `请先${PROJECT_BACKUP_HINT}备份，或移除不需要的最近数据集；`
           + `确认移除请在 ${EVICTION_CONFIRM_SECONDS} 秒内再次执行同一操作`;
@@ -2399,15 +2491,17 @@ export const useData = create<DataState>((set, get) => ({
       { name, savedAt: data.savedAt, data },
       ...get().recents.filter((r) => r.name !== name),
     ]);
-    // 新建类入口写入的原样结果：未经编辑前，同一操作可按名替换它(不必改名多占最近列表位)。
-    // 随机数据不可复现，由 generateRandom 在写入后撤销该标记。
-    if (modelOptions.onNameConflict === 'rename') pristineDatasets.set(name, data.savedAt);
-    else pristineDatasets.delete(name);
+    // 确定性派生的原样结果：源表与本结果都未经编辑前，同一派生可按名替换它(不必改名多占最近列表位)。
+    // 导入/粘贴/DOE/随机数据(无 derivedFrom)与桌面端一律不登记。
+    if (modelOptions.onNameConflict === 'rename' && modelOptions.derivedFrom !== undefined && !platform.datasetDb) {
+      pristineDatasets.set(name, { savedAt: data.savedAt, source: modelOptions.derivedFrom });
+    } else pristineDatasets.delete(name);
     // 导入/创建/另存为会切换数据集，编辑历史不得跨数据集生效。
     set({ model, textCols: normalized.textCols, pendingCells: validPending, recents, undoStack: [], redoStack: [] });
     if (!modelOptions.preserveSpcRoles) resetDatasetSpcRoles();
-    // 内容完全相同的同名重写不是「新内容」，保留该数据集已记住的规格限。
-    if (!modelOptions.preserveSpecs && !resolved.identical) forgetSpecsForDataset(name);
+    // 内容完全相同的同名重写不是「新内容」，保留该数据集已记住的规格限；
+    // 按名替换未编辑的派生结果时同样沿用(用户为该名录入的 LSL/USL 不随换条件再筛选丢失)。
+    if (!modelOptions.preserveSpecs && !resolved.identical && !resolved.replacedPristine) forgetSpecsForDataset(name);
     useApp.setState({ anovaShowDemo: false });
     knownDatasetNames.add(name);
     const outcome = persistActive(data, { allowVaultFallback: !modelOptions.independentRecoveryCopy });
@@ -2421,6 +2515,10 @@ export const useData = create<DataState>((set, get) => ({
     settleEvictedRecents(evicted);
     const result: PersistOutcome = { ...outcome };
     if (evicted.length > 0) result.evicted = evicted.map((entry) => entry.name);
+    if (resolved.replacedPristine) {
+      result.replacedPristine = true;
+      sessionLog(`已按名替换本会话未编辑的同名派生数据集「${name}」(源表未变)`);
+    }
     if (name !== requestedName) {
       result.conflictLocation = datasetLocation(requestedName, recents);
       sessionLog(`同名数据集「${requestedName}」已存在(已编辑、内容不同或仅在本机库无法核对)，新数据另存为「${name}」，`
@@ -2812,10 +2910,11 @@ export const useData = create<DataState>((set, get) => ({
             }
             retireUnclaimedCopySource(m.name);
           }
-          get().importMatrix(data.name, data.colNames, data.rows, data.textCols, data.pendingCells, {
+          const activated = get().importMatrix(data.name, data.colNames, data.rows, data.textCols, data.pendingCells, {
             preserveSpcRoles: true, preserveSpecs: true,
             indivSeries: data.indivSeries, independentRecoveryCopy: true,
           });
+          if (activated.evicted) result.outcome.evicted = activated.evicted;
           independentlyDurableRecoveryCopy = data.name;
           return;
         }
@@ -2848,6 +2947,8 @@ export const useData = create<DataState>((set, get) => ({
     const outcome: PersistOutcome = independent
       ? { persisted: true, archiving: false }
       : { persisted: false, archiving: false, rejected: activeOutcome.rejected ?? '副本未能写入独立恢复位置' };
+    // fix2609d G4c:副本置顶可能把最旧的数据集挤出最近列表(Web 端无法恢复)，调用方必须能如实提示。
+    if (activeOutcome.evicted) outcome.evicted = activeOutcome.evicted;
     return { name, outcome };
   },
 
@@ -2866,10 +2967,12 @@ export const useData = create<DataState>((set, get) => ({
     const rows = m.subs.map((s) => s.vals.map((v, j) => Number((
       ((v - stats[j].origin) - stats[j].meanOffset) / stats[j].sd
     ).toFixed(4))));
-    const name = m.name.replace(/\.[^.]+$/, '') + ' (标准化)';
+    const requested = m.name.replace(/\.[^.]+$/, '') + ' (标准化)';
     // STORE-04:派生结果走同名写入策略，不覆盖上一份已编辑过的同名标准化数据集
-    const outcome = get().importMatrix(name, m.colNames.map((c) => c + '_z'), rows, get().textCols, [], { onNameConflict: 'rename' });
-    return outcome.name ?? name;
+    const outcome = get().importMatrix(requested, m.colNames.map((c) => c + '_z'), rows, get().textCols, [], {
+      onNameConflict: 'rename', derivedFrom: derivationSourceStamp(get()),
+    });
+    return { name: outcome.name ?? requested, requested, outcome };
   },
 
   generateRandom: (mu, sigma, k, n) => {
@@ -2885,12 +2988,10 @@ export const useData = create<DataState>((set, get) => ({
     const rows = Array.from({ length: k }, () =>
       Array.from({ length: n }, () => Number((mu + randn() * sigma).toFixed(digits))),
     );
-    const name = `随机数据 N(${mu},${sigma})`;
-    // STORE-04:随机值不可复现，同参数再生成绝不能覆盖上一份
-    const outcome = get().importMatrix(name, Array.from({ length: n }, (_, i) => `X${i + 1}`), rows, [], [], { onNameConflict: 'rename' });
-    // 随机值不可复现：即使未编辑，也不能被下一次同参数生成按名替换。
-    pristineDatasets.delete(outcome.name ?? name);
-    return outcome.name ?? name;
+    const requested = `随机数据 N(${mu},${sigma})`;
+    // STORE-04:随机值不可复现(不带 derivedFrom)，同参数再生成即使上一份未编辑也绝不能覆盖
+    const outcome = get().importMatrix(requested, Array.from({ length: n }, (_, i) => `X${i + 1}`), rows, [], [], { onNameConflict: 'rename' });
+    return { name: outcome.name ?? requested, requested, outcome };
   },
 
   sortBy: (col, asc) => {
@@ -3065,7 +3166,9 @@ export const useData = create<DataState>((set, get) => ({
     const requested = `${base} (子集)`;
     let outcome: PersistOutcome;
     try {
-      outcome = get().importMatrix(requested, [...m.colNames], rows, textCols, [], { onNameConflict: 'rename' });
+      outcome = get().importMatrix(requested, [...m.colNames], rows, textCols, [], {
+        onNameConflict: 'rename', derivedFrom: derivationSourceStamp(get()),
+      });
     } catch (error) {
       return { ok: false, error: errText(error) };
     }
@@ -3094,7 +3197,9 @@ export const useData = create<DataState>((set, get) => ({
     // 改名策略产生的「X (转置) (2)」再做同操作时同样回到基名，不叠成「X (转置) (2) (转置)」
     const base = m.name.replace(/ \(转置\)(?: \(\d+\))?$/, '');
     const requested = `${base} (转置)`;
-    const outcome = get().importMatrix(requested, colNames, t, subgroupLabels, [], { onNameConflict: 'rename' });
+    const outcome = get().importMatrix(requested, colNames, t, subgroupLabels, [], {
+      onNameConflict: 'rename', derivedFrom: derivationSourceStamp(get()),
+    });
     return { name: outcome.name ?? requested, requested, outcome };
   },
 
@@ -3119,7 +3224,9 @@ export const useData = create<DataState>((set, get) => ({
     // 改名策略产生的「X (堆叠) (2)」再做同操作时同样回到基名，不叠成「X (堆叠) (2) (堆叠)」
     const base = m.name.replace(/ \(堆叠\)(?: \(\d+\))?$/, '');
     const requested = `${base} (堆叠)`;
-    const outcome = get().importMatrix(requested, ['测量值'], rows, [{ name: '来源列', values: source }], [], { onNameConflict: 'rename' });
+    const outcome = get().importMatrix(requested, ['测量值'], rows, [{ name: '来源列', values: source }], [], {
+      onNameConflict: 'rename', derivedFrom: derivationSourceStamp(get()),
+    });
     return { name: outcome.name ?? requested, requested, outcome };
   },
 

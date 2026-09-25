@@ -2,7 +2,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { appVersionText } from '../../platform/reportLabels';
 import { useApp, type ImportTab, type ExportFmt } from '../../store/appStore';
-import { PROJECT_BACKUP_HINT, datasetWriteNotes, markActiveDataReplaced, prepareVaultDatasetRemoval, useData, isCapabilityWarningAcknowledged, type PersistOutcome } from '../../store/dataStore';
+import { PROJECT_BACKUP_HINT, completeVaultDatasetRemoval, datasetWriteNotes, markActiveDataReplaced, prepareVaultDatasetRemoval, useData, isCapabilityWarningAcknowledged, type PersistOutcome } from '../../store/dataStore';
 import { parseMatrix, parseCategoryCounts, extractPChartColumns, evalFormula, truthy, arrMin, arrMax, mean, stdev, FormulaError, worksheetNumericColumnCodes, detectCsvBlocks, csvBlockLabel, assessSpcCharts, countCapabilityViolations, spcChartFamilyFor, withSigmaMethod, type CategoryCounts, type CsvBlock, type ParsedMatrix } from '../../core';
 import { errText, decodeTextFileBytes, assertXlsxImportSize, platform } from '../../platform/adapter';
 import { assertClipboardImportText, assertTextImportSize } from '../../platform/importLimits';
@@ -996,9 +996,11 @@ function VaultModal() {
                           await prepareVaultDatasetRemoval(d.name);
                           const removed = await db.remove(d.name);
                           if (!removed) throw new Error('数据集不存在或未能删除');
+                          // fix2609d G4c:同名最近条目一并移出，否则 × / 挤出会把已删内容补回库
+                          const alsoRecent = completeVaultDatasetRemoval(d.name);
                           setDeleteArmed(null);
                           refresh();
-                          showToast('已从数据集库删除 ' + d.name);
+                          showToast(`已从数据集库删除 ${d.name}${alsoRecent ? '（同名最近数据集已一并移出，不会再被补存回库）' : ''}`);
                         } catch (error) {
                           showToast(`删除失败：${errText(error)}`);
                         }
@@ -1289,10 +1291,12 @@ function RandomModal() {
         showToast('参数无效：σ>0,子组数 2–100000,子组大小 1–10');
         return;
       }
-      const name = generateRandom(mu, sigma, k, n);
+      const generated = generateRandom(mu, sigma, k, n);
       closeModal();
       goTo('worksheet');
-      showToast(`已生成 ${name} · ${k} 子组 × ${n}`);
+      // fix2609d G4c:同名改名/挤出说明随成功提示一并给出(单槽 toast 会盖掉 store 层的挤出警告)
+      const writeNotes = datasetWriteNotes(generated.requested, generated.outcome).map((text) => ` · ${text}`).join('');
+      showToast(`已生成 ${generated.name} · ${k} 子组 × ${n}${writeNotes}`);
     } catch (error) { showToast(errText(error)); }
   };
   const inp: React.CSSProperties = { width: 90, padding: '6px 9px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12.5, fontFamily: 'IBM Plex Mono,monospace', textAlign: 'right' };

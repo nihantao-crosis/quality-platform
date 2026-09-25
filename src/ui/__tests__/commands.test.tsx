@@ -99,7 +99,7 @@ describe('数据集命令', () => {
     expect(useData.getState().model.name.startsWith('质检数据 (副本')).toBe(true);
   });
   it('标准化:各列均值≈0 标准差≈1', () => {
-    const name = useData.getState().standardize();
+    const name = useData.getState().standardize()?.name;
     expect(name).toContain('(标准化)');
     const m = useData.getState().model;
     for (let j = 0; j < m.n; j++) {
@@ -117,7 +117,7 @@ describe('数据集命令', () => {
     const blocked = [...Array(50).fill(low), ...Array(450).fill(high)] as number[];
     const standardized = (values: number[]) => {
       useData.getState().importMatrix('微扰.csv', ['测量值'], values.map((value) => [value]));
-      expect(useData.getState().standardize()).toContain('(标准化)');
+      expect(useData.getState().standardize()?.name).toContain('(标准化)');
       return useData.getState().model.all;
     };
     const ordered = standardized(blocked);

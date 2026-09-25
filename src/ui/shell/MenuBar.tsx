@@ -211,10 +211,12 @@ export function MenuBar({ wsName }: { wsName: string }) {
       } else {
         // 盲审 P3:archiving 只是「已提交异步归档」,失败时界面此前永远停在
         // 「正在归档到本机库」而没有回执。落盘确认后补一条终态提示。
-        showToast(outcome.archiving ? '正在安全创建副本，请等待本机库确认' : `已另存为 ${copy.name}`);
+        // fix2609d G4c:副本置顶挤出最旧数据集时，挤出说明必须并入本条提示(单槽 toast 会盖掉 store 层警告)
+        const notes = () => datasetWriteNotes(copy.name, outcome).map((text) => ` · ${text}`).join('');
+        showToast(outcome.archiving ? '正在安全创建副本，请等待本机库确认' : `已另存为 ${copy.name}${notes()}`);
         if (outcome.archiving) {
           void outcome.durability?.then(() => {
-            showToast(`「${copy.name}」已归档到本机数据集库`);
+            showToast(`「${copy.name}」已归档到本机数据集库${notes()}`);
           }).catch((error: unknown) => showToast(`另存副本未完成：${errText(error)}`));
         }
       }
@@ -227,11 +229,12 @@ export function MenuBar({ wsName }: { wsName: string }) {
         return;
       }
       // 有限性屏障可能抛出(闭环终审 P3:极值数据标准化时曾是未捕获异常)
-      let name: string | null;
-      try { name = data.standardize(); } catch (error) { showToast(errText(error)); return; }
-      if (name) {
+      let derived: ReturnType<typeof data.standardize>;
+      try { derived = data.standardize(); } catch (error) { showToast(errText(error)); return; }
+      if (derived) {
         goTo('worksheet');
-        showToast('已标准化为新数据集 ' + name);
+        const notes = datasetWriteNotes(derived.requested, derived.outcome).map((text) => ` · ${text}`).join('');
+        showToast(`已标准化为新数据集 ${derived.name}${notes}`);
       } else showToast('存在无变异列,无法标准化');
       return;
     }

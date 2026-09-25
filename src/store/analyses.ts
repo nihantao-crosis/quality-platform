@@ -16,7 +16,7 @@ import {
   type InspectionLevel, type AnovaMode, type AqlMethod, type AqlAcMethod, type AqlRegime, type GageStandard, type NelsonRules, type NelsonRuleK, type SwitchStatus, type SpcDataLayout, type SpcSigmaMethod,
 } from '../core';
 import { useApp, resolveGageTolerance, DEFAULT_SPC_RULES, GAGE_TOL_MEMORY_CAP, normalizeGageBatchCols, normalizeGageTolMemory, type SpcType, type DoeView, type DoeTab, type HypoTab, type ParetoView } from './appStore';
-import { PROJECT_BACKUP_HINT, syncSpecForActiveMeasurement, useData, resolveCapabilityMeasurementData, isCapabilityWarningAcknowledged, type ParetoModel } from './dataStore';
+import { PROJECT_BACKUP_HINT, datasetWriteNotes, syncSpecForActiveMeasurement, useData, resolveCapabilityMeasurementData, isCapabilityWarningAcknowledged, type ParetoModel } from './dataStore';
 import { loadFishboneState, saveFishboneState, type FishboneData } from './fishboneStore';
 import { sessionLog } from './sessionLog';
 import { analysisLabelListText, projectStoreValidationError, registerProjectLifecycleHooks, spcPayloadContractError } from '../platform/project';
@@ -1356,7 +1356,9 @@ export const useAnalyses = create<AnalysesState>((set, get) => ({
           }
         }
         stashedName = stash.name;
-        stashNotes.push(`${label}与快照内容不同，已先安全另存为「${stash.name}」`);
+        // fix2609d G4c:副本置顶挤出的数据集随本条提示说明(否则被「…再回放」提示同步覆盖)
+        const evictionNotes = datasetWriteNotes(stash.name, stash.outcome).map((text) => `（${text}）`).join('');
+        stashNotes.push(`${label}与快照内容不同，已先安全另存为「${stash.name}」${evictionNotes}`);
         return true;
       };
       const initial = useData.getState();

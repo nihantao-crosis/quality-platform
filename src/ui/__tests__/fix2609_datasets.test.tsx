@@ -113,19 +113,19 @@ describe('STORE-04 派生数据集同名写入策略', () => {
 
   it('标准化：源表改过一格后再标准化，不覆盖已录入的「B (标准化)」', async () => {
     useData.getState().importMatrix('B.csv', ['x', 'y'], [[1, 2], [2, 5], [4, 7], [8, 3]]);
-    expect(useData.getState().standardize()).toBe('B (标准化)');
+    expect(useData.getState().standardize()?.name).toBe('B (标准化)');
     await editCell(0, 0, 555);
     expect(await useData.getState().loadRecent('B.csv')).toBe(true);
     await editCell(1, 1, 6);
-    expect(useData.getState().standardize()).toBe('B (标准化) (2)');
+    expect(useData.getState().standardize()?.name).toBe('B (标准化) (2)');
     expect(rowsOf('B (标准化)')?.[0][0]).toBe(555);
     expect(persistedRecentRows('B (标准化)')?.[0][0]).toBe(555);
   });
 
   it('同参数随机数据再生成另存为新数据集，上一份随机值(不可复现)保留', () => {
-    const first = useData.getState().generateRandom(10, 1, 5, 2);
+    const first = useData.getState().generateRandom(10, 1, 5, 2).name;
     const firstRows = rowsOf(first);
-    const second = useData.getState().generateRandom(10, 1, 5, 2);
+    const second = useData.getState().generateRandom(10, 1, 5, 2).name;
     expect(first).toBe('随机数据 N(10,1)');
     expect(second).toBe('随机数据 N(10,1) (2)');
     expect(rowsOf(first)).toEqual(firstRows);
@@ -236,8 +236,8 @@ describe('UI-04 工作表粘贴 / 导入弹窗同名写入策略', () => {
     expect(useData.getState().importMatrix('report.csv', ['x'], [[3], [4]], [], [], opts).name).toBe('report (2).csv');
     expect(rowsOf('report.csv')).toEqual([[11], [2]]);
     // 小数形式的名称不被误判为扩展名
-    expect(useData.getState().generateRandom(10, 1.5, 3, 1)).toBe('随机数据 N(10,1.5)');
-    expect(useData.getState().generateRandom(10, 1.5, 3, 1)).toBe('随机数据 N(10,1.5) (2)');
+    expect(useData.getState().generateRandom(10, 1.5, 3, 1).name).toBe('随机数据 N(10,1.5)');
+    expect(useData.getState().generateRandom(10, 1.5, 3, 1).name).toBe('随机数据 N(10,1.5) (2)');
   });
 });
 
