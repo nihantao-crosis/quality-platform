@@ -226,14 +226,51 @@ export interface FactorialTerm {
   tStat?: number;
 }
 
-export type FactorialAlias = { term: string; with: string; relation: 'same' | 'opposite' | 'linear-dependent' };
+export type FactorialAlias = {
+  term: string;
+  with: string;
+  relation: 'same' | 'opposite' | 'linear-dependent';
+  /**
+   * 仅 relation='linear-dependent' 时可能出现:该项的编码列在每个区组内取常数,
+   * 即落在「截距 + 区组指示列」张成的空间里——真正的区组混杂。区组列是 0/1 指示列,
+   * 与 ±1 效应列永远不会逐元素相同/相反,所以区组混杂只能以线性相关的形态出现。
+   */
+  confoundedWithBlocks?: true;
+};
+
+/** 混杂提示中每类最多列出的交互项数;总数如实给出(附录 F.2-7:此前不封顶,整串拼进结论)。 */
+export const CONFOUNDED_NOTE_TERM_CAP = 6;
+
+function cappedTermList(labels: readonly string[]): string {
+  const shown = labels.slice(0, CONFOUNDED_NOTE_TERM_CAP).join('、');
+  return labels.length > CONFOUNDED_NOTE_TERM_CAP ? `${shown} 等共 ${labels.length} 项` : shown;
+}
 
 /** 与区组/别名结构混杂而被剔除的交互项提示(闭环审核 P1:页面与导出报告必须同源)。
- * 这些项根本没有被检验,任何界面都不得据此宣称「未检出显著交互」。 */
+ * 这些项根本没有被检验,任何界面都不得据此宣称「未检出显著交互」。
+ * 附录 F.2-7:按 alias 的 relation/confoundedWithBlocks 分句——
+ *   · 与区组混杂(线性相关且区组内为常数)→ 建议减少区组数或增加仿行;
+ *   · 与生成元别名(same/opposite)→ 建议提高设计分辨率或折叠设计;
+ *   · 其余线性相关(非正交/缺运行)→ 建议增加运行或减少模型项。
+ * 无区组设计不会产生第一类,文案中不出现「区组」字样。每类最多列 6 项并注明总数。 */
 export function confoundedInteractionNote(aliases: FactorialAlias[] | undefined): string | null {
-  const terms = (aliases ?? []).filter((alias) => alias.term.includes('×')).map((alias) => alias.term);
-  if (!terms.length) return null;
-  return `注意:交互项 ${terms.join('、')} 与区组/别名结构混杂,本设计无法检验其显著性,不能据此认为无交互;如需检验请减少区组数或提高设计分辨率。`;
+  const interactions = (aliases ?? []).filter((alias) => alias.term.includes('×'));
+  if (!interactions.length) return null;
+  const blockConfounded = interactions.filter((alias) => alias.relation === 'linear-dependent' && alias.confoundedWithBlocks === true);
+  const generatorAliased = interactions.filter((alias) => alias.relation === 'same' || alias.relation === 'opposite');
+  const otherDependent = interactions.filter((alias) => alias.relation === 'linear-dependent' && alias.confoundedWithBlocks !== true);
+  const sentences: string[] = [];
+  if (blockConfounded.length) {
+    sentences.push(`交互项 ${cappedTermList(blockConfounded.map((alias) => alias.term))} 与区组混杂,本设计无法检验其显著性,不能据此认为无交互;如需检验请减少区组数或增加仿行。`);
+  }
+  if (generatorAliased.length) {
+    const labels = generatorAliased.map((alias) => `${alias.term}(=${alias.relation === 'opposite' ? '−' : ''}${alias.with})`);
+    sentences.push(`交互项 ${cappedTermList(labels)} 与已保留的项互为别名(分式设计的生成元结构),本设计无法检验其单独显著性,不能据此认为无交互;如需检验请提高设计分辨率或折叠设计。`);
+  }
+  if (otherDependent.length) {
+    sentences.push(`交互项 ${cappedTermList(otherDependent.map((alias) => alias.term))} 与已保留模型项线性相关,本设计无法检验其显著性,不能据此认为无交互;如需检验请增加运行或减少模型项。`);
+  }
+  return `注意:${sentences.join('')}`;
 }
 
 export interface FactorialResult {
@@ -243,7 +280,7 @@ export interface FactorialResult {
   mse?: number; dfResid?: number;
   curvature?: { coef: number; tStat?: number; p?: number; sig: boolean }; // 中心点时的曲率(弯曲)检验
   droppedTerms?: string[];       // 因设计不完整/别名而无法估计的项(如分数因子)
-  aliases?: { term: string; with: string; relation: 'same' | 'opposite' | 'linear-dependent' }[];
+  aliases?: FactorialAlias[];
   requestedTerms: string[];
   includeCurvature: boolean;
   block?: { levels: string[]; df: number; coefficients: Array<{ level: string; coef: number }> };
@@ -661,7 +698,19 @@ function analyzeTwoLevelCore(design: CodedDesign, options: FactorialModelOptions
         return { term: name, with: withName, relation: same ? 'same' as const : 'opposite' as const };
       }
     }
-    return { term: name, with: '已保留模型项的线性组合', relation: 'linear-dependent' as const };
+    // 区组混杂:该列在每个区组内为常数(落在截距+区组指示列的张成空间)。`with` 文案保持不变,
+    // 只追加标记,供混杂提示分句(附录 F.2-7)。
+    const constantWithinBlocks = blockValues != null && blockLevels.length > 1 && blockLevels.every((level) => {
+      let first: number | undefined;
+      return blockValues.every((value, row) => {
+        if (value !== level) return true;
+        if (first === undefined) first = x[row];
+        return x[row] === first;
+      });
+    });
+    return constantWithinBlocks
+      ? { term: name, with: '已保留模型项的线性组合', relation: 'linear-dependent' as const, confoundedWithBlocks: true as const }
+      : { term: name, with: '已保留模型项的线性组合', relation: 'linear-dependent' as const };
   });
 
   let method: 'lenth' | 'ttest';
@@ -875,6 +924,22 @@ function finiteMeanPreservingOrdinary(values: number[]): number {
 }
 
 /**
+ * 主效应/交互图均值的位置/尺度病态阈值(附录 F.2-8)。
+ *
+ * 历史路径先在响应单位里形成角点预测 grand+offset+contrast(每个角点舍入到 ulp(|center|)),
+ * 再朴素求和取均值,误差约 |center|·2⁻⁵³ 的数倍。|center|/scale ≤ 1e8 时误差相对于响应半极差
+ * < 1e-8,常规量级继续走历史路径、逐位不变;超过阈值(如响应整体加 1e16)时主效应 hi−lo 可被
+ * 扭曲 10% 以上,且角点舍入方向会随行序引起的末位差异而变。此时与超大量级分支一样,在无量纲
+ * 坐标内平均后只加回一次中心,结果只经一次舍入。仅作用于图形均值,不改效应/检验/角点预测。
+ */
+const DOE_PLOT_MEAN_ILL_CONDITIONED_RATIO = 1e8;
+
+function needsStablePlotMeans(model: StableFactorialCoordinates): boolean {
+  if (model.scale > Number.MAX_VALUE / 16) return true;
+  return model.scale > 0 && Math.abs(model.center) > DOE_PLOT_MEAN_ILL_CONDITIONED_RATIO * model.scale;
+}
+
+/**
  * 枚举当前拟合模型的全部 2^k 角点预测。区组使用等权最小二乘均值（LS mean），
  * 从而不会让非平衡区组的原始边际构成反转主效应/交互图方向。
  */
@@ -917,7 +982,7 @@ export function factorialAdjustedMainMeans(
   design: CodedDesign,
 ): { name: string; lo: number; hi: number }[] {
   const stable = stableCornerCoordinates(result, design);
-  if (stable && stable.model.scale > Number.MAX_VALUE / 16) {
+  if (stable && needsStablePlotMeans(stable.model)) {
     return design.factorNames.map((name, index) => ({
       name,
       lo: restoreCenteredResponse(
@@ -951,7 +1016,7 @@ export function factorialAdjustedInteractionMeans(
     throw new Error('交互作用图需要两个不同的有效因子');
   }
   const stable = stableCornerCoordinates(result, design);
-  if (stable && stable.model.scale > Number.MAX_VALUE / 16) {
+  if (stable && needsStablePlotMeans(stable.model)) {
     const cell = (a: number, b: number) => restoreCenteredResponse(
       stable.model.center,
       finiteMeanPreservingOrdinary(stable.corners

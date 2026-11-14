@@ -16,6 +16,7 @@ import {
   detectFactorial, analyzeFactorial, factorialCornerOptimum,
   computeVarModel, assessSpcCharts, DEFAULT_RULE_K, parseMatrix, parseCategoryCounts, probPlotPoints, invNorm,
   computeGageRR, linearRegression, confoundedInteractionNote, buildDoeConclusion, doeInteractionNote, median, minitabQuantile, type GageObservation,
+  generateFactorialDesign, type FactorialAlias,
 } from '../../core';
 import { DEFAULT_SPC_RULES, useApp } from '../../store/appStore';
 import { cancelPendingDatasetWork, useData } from '../../store/dataStore';
@@ -92,6 +93,22 @@ const M3 = () => computeVarModel('w.csv', ['x'], [[1], [2], [3]]);
 const SPEC = { lsl: 0, tgt: 2, usl: 4 };
 
 // ──────────────── 导出行为本体 ────────────────
+
+/** fix2611a B3:由真实引擎生成的区组混杂 alias(2^4 分 4 区组,Minitab 默认生成元 BC、ABD)。 */
+function realBlockConfoundedAliases(): FactorialAlias[] {
+  const names = ['A', 'B', 'C', 'D'];
+  const plan = generateFactorialDesign(names.map((name) => ({ name, low: -1, high: 1 })), { blocks: 4, randomize: false });
+  const signs = plan.rows.map((row) => (row.slice(3, 7) as number[]).map((value) => (value > 0 ? 1 : -1)));
+  const detected = detectFactorial(
+    names.map((name, j) => ({ name, values: signs.map((s) => s[j]) })),
+    signs.map((s, row) => 50 + 3 * s[0] - 2 * s[1] + s[2] + 0.1 * (row % 3)),
+  );
+  if (!detected.ok) throw new Error(detected.reason);
+  const aliases = analyzeFactorial(detected.design, { blocks: plan.rows.map((row) => String(row[2])) }).aliases ?? [];
+  if (!aliases.some((alias) => alias.confoundedWithBlocks)) throw new Error('夹具设计未产生区组混杂');
+  return aliases;
+}
+
 describe('导出上限:断言真实产出规模,而非截断文案', () => {
   it('Word 专项表只写 2000 个数据行(删掉 slice 即红)', async () => {
     const zip = await JSZip.loadAsync(await buildDocx(M3(), SPEC, {}, null, bigAnalysis(2500)));
@@ -547,20 +564,17 @@ describe('闭环批 P1 守护', () => {
   });
 
   it('DOE 混杂交互提示:页面三分支与导出报告同源(恒 null 即红)', () => {
-    const note = confoundedInteractionNote([
-      { term: 'B×D', with: '区组 2', relation: 'same' },
-      { term: 'A×B×C', with: '区组 2', relation: 'same' },
-    ]);
-    expect(note).toContain('B×D');
+    // fix2611a B3:夹具改由真实引擎产出(2^4 分 4 区组,BC/ABD/ACD 与区组混杂),
+    // 不再手写引擎产不出的 {with:'区组 2', relation:'same'}
+    const aliases = realBlockConfoundedAliases();
+    const note = confoundedInteractionNote(aliases);
+    expect(note).toContain('B×C');
+    expect(note).toContain('与区组混杂');
     expect(note).toContain('无法检验');
     expect(confoundedInteractionNote([])).toBeNull();
     expect(confoundedInteractionNote(undefined)).toBeNull();
     // 自审 P2/P3:源码切片 + 别名白名单三轮都被证明空洞(保形重写一律绕过)。
     // 结论文本已下沉到 core 的 buildDoeConclusion,可直接构造四种 status 做**行为断言**。
-    const aliases = [
-      { term: 'B×D', with: '区组 2', relation: 'same' as const },
-      { term: 'A×B×C', with: '区组 2', relation: 'same' as const },
-    ];
     const base = {
       aliases, hasSignificantInteraction: false, sigTermNames: ['A', 'B'],
       detail: '残差自由度 4', factorCount: 4, respName: 'Y', settings: 'A=+1', tieCount: 3, fixedSettings: 'A=+1',
@@ -569,7 +583,7 @@ describe('闭环批 P1 守护', () => {
     for (const status of STATUSES) {
       const text = buildDoeConclusion({ ...base, status });
       expect(text, `分支 ${status} 未带混杂提示`).toContain('无法检验');
-      expect(text).toContain('B×D');
+      expect(text).toContain('B×C');
     }
     // 对照:无别名时四个分支都不得出现该提示(证明断言有区分力)
     for (const status of STATUSES) {
@@ -1713,7 +1727,7 @@ describe('刻度保真度守护', () => {
 // ──────────────── 分层整改守护 ────────────────
 describe('分层整改守护', () => {
   it('DOE:显著交互与区组混杂可并存,两句提示都要给', () => {
-    const aliases = [{ term: 'B×D', with: '区组 2', relation: 'same' as const }];
+    const aliases = realBlockConfoundedAliases();
     const both = doeInteractionNote({ hasSignificantInteraction: true, aliases });
     expect(both, '显著交互时吞掉了混杂提示').toContain('无法检验');
     expect(both).toContain('已综合显著交互作用');

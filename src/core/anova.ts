@@ -2,7 +2,7 @@
  * 单因子方差分析 — F 统计量 + P 值（F 分布 CDF）。
  * 补齐交接文档 core-skeleton/statistics.ts §7 的签名。
  */
-import { mean, fCdf } from './basicMath';
+import { mean, fCdf, stdev } from './basicMath';
 import { tInv } from './ttest';
 import { isDoeAnalysisColumn } from './doe';
 
@@ -115,6 +115,17 @@ export interface AnovaGroupSummary {
   ciHigh: number;
 }
 
+/**
+ * 分组标准差的位置/尺度病态阈值(附录 F.2-8)。
+ *
+ * 历史写法 Σ(x−m)² 中 m 的舍入误差 δ ≤ |m|·2⁻⁵³,使平方和多出约 n·δ²,
+ * 标准差的相对误差约 (|m|/σ·1.11e-16)²/2。|m|/σ ≤ 1e8 时该误差 < 1e-16,
+ * 低于一个 ulp,常规量级继续走历史公式、逐位不变;同一组数据加 1e16 这类
+ * 大基准时误差可达 10%,此时改用 basicMath.stdev(以样本值为原点的偏移坐标 +
+ * 补偿求和,平移不变)。阈值只影响分组 σ 显示,F 检验/置信区间不消费它。
+ */
+const ANOVA_ILL_CONDITIONED_LOCATION_RATIO = 1e8;
+
 /** 单因子 ANOVA 的分组描述统计及合并误差置信区间。 */
 export function anovaGroupSummaries(
   groups: AnovaGroup[],
@@ -125,7 +136,11 @@ export function anovaGroupSummaries(
   const critical = tInv(0.5 + confidence / 2, result.errorDf);
   return groups.map((group) => {
     const m = mean(group.vals);
-    const stDev = Math.sqrt(group.vals.reduce((sum, value) => sum + (value - m) ** 2, 0) / (group.vals.length - 1));
+    const naiveStDev = Math.sqrt(group.vals.reduce((sum, value) => sum + (value - m) ** 2, 0) / (group.vals.length - 1));
+    // 常规量级沿用历史平方和(逐位不变);位置/尺度比病态时改用 basicMath.stdev 的相对中心化。
+    const stDev = naiveStDev > 0 && Math.abs(m) > ANOVA_ILL_CONDITIONED_LOCATION_RATIO * naiveStDev
+      ? stdev(group.vals, true)
+      : naiveStDev;
     const margin = critical * Math.sqrt(result.errorMS / group.vals.length);
     return {
       name: group.name,
