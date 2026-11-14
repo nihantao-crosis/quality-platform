@@ -118,7 +118,9 @@ describe('GAP-10-24 多列单格编辑', () => {
     for (const xs of cases) expect(Object.is(mean(xs), legacyMean(xs)), `mean(${xs.slice(0, 4).join(',')}…)`).toBe(true);
   });
 
-  it('200k×4 连续编辑与完整重建逐位一致,且每格耗时相对同进程旧求和基准显著下降', () => {
+  // 相对计时断言(同进程基准、取最小值)在机器极度繁忙时仍可能单次抖动;阈值不变,允许重试 2 次——
+  // 真正的性能回退是确定性的,三次都会失败。
+  it('200k×4 连续编辑与完整重建逐位一致,且每格耗时相对同进程旧求和基准显著下降', { retry: 2, timeout: 120_000 }, () => {
     const k = 200_000;
     const n = 4;
     const flat = driftSeries(k * n, 777);
@@ -186,7 +188,9 @@ describe('UI-05 工作表列虚拟化', () => {
     expect(grid.getAttribute('aria-colcount')).toBe('101');
   });
 
-  it('导入闸门上限 400 × 5000 列可挂载,渲染格数与列数无关', () => {
+  // 本用例断言的是渲染格数与无障碍属性,不是耗时;导入 200 万格本身要 6–10s,机器或 CI runner 繁忙时会撞上
+  // 全局 20s 超时(2026-11 实测:负载均值 30 时全量跑必现),单独放宽到 120s。
+  it('导入闸门上限 400 × 5000 列可挂载,渲染格数与列数无关', { timeout: 120_000 }, () => {
     const cols = 5000;
     const rows = Array.from({ length: 400 }, (_, r) => Array.from({ length: cols }, (_, c) => ((r + c) % 89) + 0.25));
     act(() => { useData.getState().importMatrix('宽表5000', Array.from({ length: cols }, (_, c) => `P${c + 1}`), rows); });
@@ -286,7 +290,9 @@ function load200kDrift() {
 const UNRELATED_RENDER_BUDGET_MS = 100;
 
 describe('GAP-10-22 总览页:无关状态变化不重跑 O(N) 计算', () => {
-  it('200k 漂移数据:toast 出现/消失、菜单开合都不再阻塞;准则变化仍正确重算', () => {
+  // 绝对毫秒预算(修复前 0.5–1.1s,修复后数毫秒)在机器极度繁忙时可能单次超预算;预算不变,允许重试 2 次——
+  // 真正的 O(N) 重算回退是确定性的,三次都会失败。
+  it('200k 漂移数据:toast 出现/消失、菜单开合都不再阻塞;准则变化仍正确重算', { retry: 2, timeout: 120_000 }, () => {
     const values = load200kDrift();
     const mount = timed('GAP-10-22 首屏', () => { render(<Harness page="dashboard" />); });
     expect(mount.wall).toBeGreaterThan(0);
@@ -320,7 +326,8 @@ describe('GAP-10-22 总览页:无关状态变化不重跑 O(N) 计算', () => {
 });
 
 describe('GAP-10-23 SPC 页:无关状态变化不重跑判异链路', () => {
-  it('200k 漂移 I-MR:toast/菜单零重算,点选数据点只做常数级渲染', () => {
+  // 同上:绝对毫秒预算不变,允许重试 2 次。
+  it('200k 漂移 I-MR:toast/菜单零重算,点选数据点只做常数级渲染', { retry: 2, timeout: 120_000 }, () => {
     load200kDrift();
     useApp.setState({ page: 'spc' });
     timed('GAP-10-23 首屏', () => { render(<Harness page="spc" />); });

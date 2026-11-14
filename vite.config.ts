@@ -36,7 +36,9 @@ export default defineConfig({
     // 复审:本套件含整 App 渲染与 13 万行导出等重用例,单跑 0.5~1s,并发跑在负载下会冲破
     // vitest 默认的 5s——本机全量跑已出现 6.5s 的假红,CI 共享 runner 更慢。放宽到 20s
     // 仍能拦住真正挂死的用例(正常用例与该上限相差一个数量级以上)。
-    testTimeout: 20_000,
+    // 2026-11:整改新增的 20 万行/200 万格重用例本机单条已要 5–14s,且从未在 CI 上跑过;发版构建会在更慢的
+    // Windows/macOS runner 上首次执行 npm test,本机负载均值 30 时全量跑也实测撞线。超时只负责拦挂死,放宽到 60s。
+    testTimeout: 60_000,
     // 复审代理的临时 worktree 与复现目录都在工作树内,本机全量 vitest 不应跑到它们(fix2609n G24c 自报)
     exclude: [...configDefaults.exclude, '**/.claude/**', 'src/__audit_scratch__/**'],
   },
