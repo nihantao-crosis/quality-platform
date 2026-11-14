@@ -1,7 +1,14 @@
 import React from 'react';
+
+// 蜂群 P2-08:桌面壳(Tauri)保留 1180 最小宽度;Web/PWA 走 index.css 的响应式断点
+if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
+  document.documentElement.classList.add('is-desktop');
+}
 import ReactDOM from 'react-dom/client';
 import { registerSW } from 'virtual:pwa-register';
-import App from './App';
+import { bootstrapApplication } from './bootstrap';
+import { acquireAppWriterLease } from './platform/singleWriter';
+import { installDesktopCloseGuard, showDesktopStartupNotice } from './platform/desktopCloseGuard';
 // 字体本地打包（桌面端离线可用，交接文档 §10）
 import '@fontsource/ibm-plex-sans/400.css';
 import '@fontsource/ibm-plex-sans/500.css';
@@ -47,9 +54,50 @@ function PwaUpdatePrompt() {
   );
 }
 
-ReactDOM.createRoot(document.getElementById('root')!).render(
-  <React.StrictMode>
-    <App />
-    <PwaUpdatePrompt />
-  </React.StrictMode>,
-);
+// fix2609j G16-desktop:桌面壳关窗/Cmd+Q 不触发 beforeunload——监听窗口 close-requested,
+// 复用同一未持久化判定弹原生确认;并取走 Rust 启动期提示(损坏库备份路径/另一实例占用)。
+// 两者都不加载业务 store,可在启动屏障之前安装;Web/PWA 下均为空操作。
+void installDesktopCloseGuard().catch((error) => console.warn('桌面关窗保护安装失败', error));
+void showDesktopStartupNotice().catch((error) => console.warn('桌面启动提示读取失败', error));
+
+const rootElement = document.getElementById('root')!;
+
+function mount(node: React.ReactNode) {
+  ReactDOM.createRoot(rootElement).render(node);
+}
+
+void bootstrapApplication({
+  acquireWriterLease: acquireAppWriterLease,
+  // 先用不会加载业务 store 的 project 模块收口崩溃 journal。
+  // 此阶段不得导入 App/dataStore/appStore。
+  recoverProjectData: async () => {
+    const recovery = await (await import('./platform/project')).recoverPendingProjectImport();
+    if (recovery.reloadRequired) {
+      return { ready: false, hydrated: recovery.recovered, reloadRequired: true, error: recovery.error };
+    }
+    if (recovery.error) {
+      return { ready: false, hydrated: false, reloadRequired: false, error: recovery.error };
+    }
+    // 项目 journal 先收口；随后在任何业务 store 模块加载前，凭 SQLite
+    // 持久回执裁决可能因崩溃中断的跨存储清库。状态未知必须阻断水合。
+    const clearRecovery = await (await import('./platform/clearRecovery')).recoverPendingClearOperation();
+    return {
+      ready: clearRecovery.ready,
+      hydrated: clearRecovery.recovered,
+      reloadRequired: false,
+      error: clearRecovery.error,
+    };
+  },
+  // 只有取得唯一写租约后才加载 App/store 模块；这是跨窗口数据保护边界。
+  loadApp: async () => (await import('./App')).default,
+  // 此时 store 可安全水合；挂载前再收口仅存 SQLite 的活动表。
+  hydrateLoadedData: async () => (await import('./store/dataStore')).hydrateLoadedDataAfterProjectRecovery(),
+  renderApplication: (App) => (
+    <React.StrictMode>
+      <App />
+      <PwaUpdatePrompt />
+    </React.StrictMode>
+  ),
+  mount,
+  reload: () => window.location.reload(),
+});

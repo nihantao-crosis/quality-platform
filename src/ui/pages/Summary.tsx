@@ -1,11 +1,15 @@
 /** 描述性统计 · 图形化摘要（对标 Minitab Graphical Summary）。 */
 import { useState } from 'react';
+import { sampleOutliers, boxplotStats } from '../charts/gagePanels';
 import { useData } from '../../store/dataStore';
 import { useApp } from '../../store/appStore';
-import { computeDescriptive, nf, resolveNumericColumn } from '../../core';
+import { arrMax, arrMin, computeDescriptive, nf, resolveNumericColumn } from '../../core';
 import type { ChartTokens } from '../tokens';
+import { reportNum } from '../../platform/reportLabels';
 import { Card, CardHeader, Badge } from '../common';
 import { Histogram } from '../charts/Histogram';
+import { Svg } from '../charts/primitives';
+import { coordinateDomain, createPowerOfTwoAxis, projectCoordinate } from '../charts/axisScale';
 
 export function Summary({ T }: { T: ChartTokens }) {
   const { model: M, pendingCells } = useData();
@@ -15,29 +19,34 @@ export function Summary({ T }: { T: ChartTokens }) {
   const pending = pendingCells.filter((cell) => cell.col === selected.index);
   const d = computeDescriptive(selected.values);
 
-  const dp = 3; // 显示小数位
+  // 显示小数位;fix2609l G22a(3b 尾巴):与报告层 reportNum 同一派生规则——定点只剩不到 3 位有效数字
+  // 时改按有效数字,小量级数据(如 4.7e-9 F)不再显示 0.000。
+  const dp = 3;
   const statRows: Array<[string, string, string?]> = [
     ['观测数 N', String(d.n)],
-    ['均值', nf(d.mean, dp)],
-    ['均值标准误 SE', nf(d.seMean, dp)],
-    ['标准差', nf(d.stdev, dp)],
-    ['方差', nf(d.variance, dp)],
+    ['均值', reportNum(d.mean, dp)],
+    ['均值标准误 SE', reportNum(d.seMean, dp)],
+    ['标准差', reportNum(d.stdev, dp)],
+    ['方差', reportNum(d.variance, dp)],
     ['变异系数 CV', d.cv == null ? '—（均值为 0）' : nf(d.cv, 2) + ' %'],
-    ['偏度', nf(d.skewness, 3)],
-    ['峰度', nf(d.kurtosis, 3)],
-    ['最小值', nf(d.min, dp)],
-    ['第一四分位 Q1', nf(d.q1, dp)],
-    ['中位数', nf(d.median, dp)],
-    ['第三四分位 Q3', nf(d.q3, dp)],
-    ['最大值', nf(d.max, dp)],
-    ['极差', nf(d.range, dp)],
-    ['四分位距 IQR', nf(d.iqr, dp)],
-    ['总和', nf(d.sum, dp)],
+    // 常量列时偏度/峰度为 NaN(不可估计),显示「—」而非伪值
+    ['偏度', Number.isFinite(d.skewness) ? nf(d.skewness, 3) : '—'],
+    ['峰度', Number.isFinite(d.kurtosis) ? nf(d.kurtosis, 3) : '—'],
+    ['最小值', reportNum(d.min, dp)],
+    ['第一四分位 Q1', reportNum(d.q1, dp)],
+    ['中位数', reportNum(d.median, dp)],
+    ['第三四分位 Q3', reportNum(d.q3, dp)],
+    ['最大值', reportNum(d.max, dp)],
+    ['极差', reportNum(d.range, dp)],
+    ['四分位距 IQR', reportNum(d.iqr, dp)],
+    ['总和', reportNum(d.sum, dp)],
   ];
   const ciRows: Array<[string, string]> = [
-    ['均值 95% CI', `(${nf(d.ciMean[0], dp)}, ${nf(d.ciMean[1], dp)})`],
-    ['中位数 95% CI', `(${nf(d.ciMedian[0], dp)}, ${nf(d.ciMedian[1], dp)})`],
-    ['标准差 95% CI', `(${nf(d.ciStdev[0], dp)}, ${nf(d.ciStdev[1], dp)})`],
+    ['均值 95% CI', `(${reportNum(d.ciMean[0], dp)}, ${reportNum(d.ciMean[1], dp)})`],
+    // 蜂群 P3-01:n<6 时区间退回全距,实际覆盖率只有 50%~93.75%,不能无条件标「95%」
+    [d.ciMedianAchieved >= 0.95 ? '中位数 95% CI' : `中位数 CI（实际 ${nf(d.ciMedianAchieved * 100, 2)}%）`,
+      `(${reportNum(d.ciMedian[0], dp)}, ${reportNum(d.ciMedian[1], dp)})`],
+    ['标准差 95% CI', `(${reportNum(d.ciStdev[0], dp)}, ${reportNum(d.ciStdev[1], dp)})`],
   ];
 
   return (
@@ -63,7 +72,7 @@ export function Summary({ T }: { T: ChartTokens }) {
       ) : (
       <>
       <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap' }}>
-        <Card style={{ flex: '2 1 460px', minWidth: 420 }}>
+        <Card className="responsive-card" style={{ flex: '2 1 460px', minWidth: 420 }}>
           <CardHeader
             title="分布图形摘要"
             right={
@@ -73,14 +82,14 @@ export function Summary({ T }: { T: ChartTokens }) {
               </label>
             }
           />
-          <Histogram T={T} data={selected.values} mu={d.mean} sigmaWithin={d.stdev} sigmaOverall={d.stdev} lsl={null} usl={null} tgt={d.mean} bins={bins} h={210} />
-          <BoxPlot T={T} data={selected.values} d={d} />
+          <Histogram T={T} data={selected.values} mu={d.mean} sigmaWithin={d.stdev} sigmaOverall={d.stdev} lsl={null} usl={null} tgt={d.mean} tgtLabel="均值" bins={bins} h={210} />
+          <BoxPlot T={T} data={selected.values} d={d} name={selected.name} />
           <div style={{ fontSize: 11.5, color: '#98a1ac', padding: '2px 4px 4px' }}>
-            上:直方图叠正态曲线（μ={nf(d.mean, dp)}, σ={nf(d.stdev, dp)}）· 下:箱线图（Q1–中位–Q3,须及 1.5·IQR,○ 为离群点）
+            上:直方图叠正态曲线（μ={reportNum(d.mean, dp)}, σ={reportNum(d.stdev, dp)}）· 下:箱线图（Q1–中位–Q3,须及 1.5·IQR,○ 为离群点）
           </div>
         </Card>
 
-        <Card style={{ flex: '1 1 300px', minWidth: 280 }}>
+        <Card className="responsive-card" style={{ flex: '1 1 300px', minWidth: 280 }}>
           <CardHeader
             title="正态性检验"
             right={d.adAvailable
@@ -131,44 +140,63 @@ function Row({ k, v }: { k: string; v: string }) {
 }
 
 /** 水平箱线图:Q1–中位–Q3 盒,须延伸到 1.5·IQR 内的极值,盒外点为离群。 */
-function BoxPlot({ T, data, d }: { T: ChartTokens; data: number[]; d: ReturnType<typeof computeDescriptive> }) {
+function BoxPlot({ T, data, d, name }: { T: ChartTokens; data: number[]; d: ReturnType<typeof computeDescriptive>; name: string }) {
   const W = 640, H = 74, padL = 14, padR = 14;
-  const loFence = d.q1 - 1.5 * d.iqr;
-  const hiFence = d.q3 + 1.5 * d.iqr;
-  const sorted = [...data].sort((a, b) => a - b);
-  const inliers = sorted.filter((value) => value >= loFence && value <= hiFence);
-  const outliers = sorted.filter((value) => value < loFence || value > hiFence);
-  // Tukey 须必须落在真实观测值上，不能直接把理论 fence 当须端。
-  const whiskLo = inliers[0] ?? d.q1;
-  const whiskHi = inliers[inliers.length - 1] ?? d.q3;
-  // 轴范围:含全部数据（含离群),留白
-  const dataLo = Math.min(d.min, whiskLo);
-  const dataHi = Math.max(d.max, whiskHi);
-  const span = (dataHi - dataLo) || 1;
-  const lo = dataLo - span * 0.06, hi = dataHi + span * 0.06;
-  const X = (v: number) => padL + ((v - lo) / (hi - lo)) * (W - padL - padR);
+  const finiteData = data.filter(Number.isFinite);
+  const axis = createPowerOfTwoAxis(finiteData);
+  const coordinates = finiteData.map(axis.coordinate);
+  // 箱线统计走共享实现(闭环终审 P2:此前本页是第三份独立须端逻辑,
+  // [0,0,0,0,0,1000] 会画出「上须从 q3=250 反向指回 0」的图形)
+  const box = boxplotStats(coordinates);
+  // 自审 P2:slice(0,500) 是方向性偏倚(按值排序后只留最小的一批);改用共享抽稀
+  const { shown: outliers, total: outlierTotal } = sampleOutliers(box.outliers);
+  const whiskLo = box.whiskerLo;
+  const whiskHi = box.whiskerHi;
+  // 轴范围:含全部数据（含离群),留白。极值时不在原量纲构造 2·MAX。
+  const domain = coordinateDomain(axis, coordinates, {
+    padding: 0.06,
+    constantHalf: 0.06,
+    extremeConstantRelative: 0.06,
+  });
+  const X = (coordinate: number) => projectCoordinate(coordinate, domain, padL, W - padL - padR);
+  const minCoordinate = coordinates.length ? arrMin(coordinates) : 0;
+  const maxCoordinate = coordinates.length ? arrMax(coordinates) : 0;
+  const meanCoordinate = axis.coordinate(d.mean);
   const cy = 34, bh = 26;
 
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ display: 'block' }}>
+    // fix2611b B2:经 Svg 基元给出具体名称(此前常规情形是无 role、无名称的裸 <svg>)。
+    // 常规情形 role="group",刻度读数仍可读;离群抽样时名称带抽样说明,沿用 role="img"。
+    <Svg
+      w={W}
+      h={H}
+      label={outlierTotal > outliers.length
+        ? `箱线图 · ${name}；共 ${outlierTotal} 个离群观测，图上抽样显示 ${outliers.length} 个`
+        : `箱线图 · ${name}`}
+      readable={outlierTotal <= outliers.length}
+    >
       {/* 须 */}
-      <line x1={X(whiskLo)} y1={cy} x2={X(d.q1)} y2={cy} stroke={T.axis} strokeWidth={1.4} />
-      <line x1={X(d.q3)} y1={cy} x2={X(whiskHi)} y2={cy} stroke={T.axis} strokeWidth={1.4} />
+      <line x1={X(whiskLo)} y1={cy} x2={X(box.q1)} y2={cy} stroke={T.axis} strokeWidth={1.4} />
+      <line x1={X(box.q3)} y1={cy} x2={X(whiskHi)} y2={cy} stroke={T.axis} strokeWidth={1.4} />
       <line x1={X(whiskLo)} y1={cy - 7} x2={X(whiskLo)} y2={cy + 7} stroke={T.axis} strokeWidth={1.4} />
       <line x1={X(whiskHi)} y1={cy - 7} x2={X(whiskHi)} y2={cy + 7} stroke={T.axis} strokeWidth={1.4} />
       {/* 盒 */}
-      <rect x={X(d.q1)} y={cy - bh / 2} width={Math.max(1, X(d.q3) - X(d.q1))} height={bh} fill={T.bar3} stroke={T.bar} strokeWidth={1.4} />
-      <line x1={X(d.median)} y1={cy - bh / 2} x2={X(d.median)} y2={cy + bh / 2} stroke={T.bar} strokeWidth={2.2} />
+      <rect x={X(box.q1)} y={cy - bh / 2} width={Math.max(1, X(box.q3) - X(box.q1))} height={bh} fill={T.bar3} stroke={T.bar} strokeWidth={1.4} />
+      <line x1={X(box.median)} y1={cy - bh / 2} x2={X(box.median)} y2={cy + bh / 2} stroke={T.bar} strokeWidth={2.2} />
       {/* 均值菱形 */}
-      <path d={`M ${X(d.mean)} ${cy - 5} L ${X(d.mean) + 5} ${cy} L ${X(d.mean)} ${cy + 5} L ${X(d.mean) - 5} ${cy} Z`} fill={T.curve} opacity={0.9} />
+      <path d={`M ${X(meanCoordinate)} ${cy - 5} L ${X(meanCoordinate) + 5} ${cy} L ${X(meanCoordinate)} ${cy + 5} L ${X(meanCoordinate) - 5} ${cy} Z`} fill={T.curve} opacity={0.9} />
       {/* 全部离群观测；重复值稍作纵向错位，避免只看见一个点。 */}
-      {outliers.map((value, index) => (
-        <circle key={`${value}-${index}`} cx={X(value)} cy={cy + ((index % 3) - 1) * 5} r={3.2} fill="none" stroke={T.limit} strokeWidth={1.3} />
+      {outliers.map((coordinate, index) => (
+        <circle key={index} cx={X(coordinate)} cy={cy + ((index % 3) - 1) * 5} r={3.2} fill="none" stroke={T.limit} strokeWidth={1.3} />
       ))}
       {/* 刻度标注 */}
-      {[['min', d.min], ['Q1', d.q1], ['中位', d.median], ['Q3', d.q3], ['max', d.max]].map(([lab, v]) => (
-        <text key={lab as string} x={X(v as number)} y={H - 6} fontSize={9.5} fill={T.text} textAnchor="middle">{nf(v as number, 2)}</text>
+      {[
+        ['min', minCoordinate], ['Q1', box.q1], ['中位', box.median], ['Q3', box.q3], ['max', maxCoordinate],
+      ].map(([label, coordinate]) => (
+        <text key={label as string} x={X(coordinate as number)} y={H - 6} fontSize={9.5} fill={T.text} textAnchor="middle">
+          {nf(axis.restore(coordinate as number), 2)}
+        </text>
       ))}
-    </svg>
+    </Svg>
   );
 }

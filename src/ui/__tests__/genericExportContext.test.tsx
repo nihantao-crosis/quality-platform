@@ -36,15 +36,16 @@ function officeTextRuns(xml: string): string[] {
     .map((match) => match[1]);
 }
 
-function expectSingleSidedCapabilityRows(xml: string, namespace: 'word' | 'ppt') {
+function expectSingleSidedCapabilityRows(xml: string, namespace: 'word' | 'ppt', expectedCpm: number) {
   const runs = officeTextRuns(xml);
-  const labels = ['Cp', 'Cpk', 'Pp', 'Ppk', 'Cpm', 'CPU', 'CPL', 'Z.bench', 'σ 水平', 'PPM(整体)'];
+  const labels = ['Cp', 'Cpk', 'Pp', 'Ppk', 'Cpm', 'CPU', 'CPL', 'Z.bench', '西格玛水平', 'PPM 合计（整体）'];
   const start = runs.findIndex((value, index) => labels.every((label, offset) => runs[index + offset] === label));
   expect(start, `${namespace} 应包含完整能力指标表头`).toBeGreaterThanOrEqual(0);
   const values = runs.slice(start + labels.length, start + labels.length * 2);
   expect(values[0]).toBe('—'); // Cp
   expect(values[2]).toBe('—'); // Pp
-  expect(values[4]).toBe('—'); // Cpm
+  // Cpm:v1.43.0 起单侧按 Minitab 单侧式计算,锚定精确值(对抗审查:not '—' 会放过 NaN)
+  expect(values[4]).toBe(nf(expectedCpm, 2));
 }
 
 beforeEach(() => {
@@ -81,8 +82,8 @@ describe('通用导出数据上下文', () => {
   it('HTML/Excel/Word/PPT 使用同一解析模型，数据表头只有一个“子组”', async () => {
     importNumericSubgroupTable();
     const { model, capabilityModel } = buildActiveAnalysisExport();
-    const assessment = assessSpcCharts(model, DEFAULT_SPC_RULES, DEFAULT_RULE_K);
-    const capCount = countCapabilityViolations(capabilityModel, DEFAULT_SPC_RULES, DEFAULT_RULE_K);
+    const assessment = assessSpcCharts(model, DEFAULT_SPC_RULES, DEFAULT_RULE_K, 'xbar-r');
+    const capCount = countCapabilityViolations(capabilityModel, DEFAULT_SPC_RULES, DEFAULT_RULE_K, 'xbar-r');
     const expected = computeCapability(capabilityModel.all, capabilityModel.sigmaWithin, SPEC);
 
     const html = buildHtmlReport(model, SPEC, assessment, undefined, capabilityModel, capCount);
@@ -122,8 +123,8 @@ describe('通用导出数据上下文', () => {
     const { model, capabilityModel } = buildActiveAnalysisExport();
     expect(model).toMatchObject({ n: 1, k: 18 });
     expect(capabilityModel).toMatchObject({ n: 6, k: 3 });
-    const assessment = assessSpcCharts(model, DEFAULT_SPC_RULES, DEFAULT_RULE_K);
-    const capCount = countCapabilityViolations(capabilityModel, DEFAULT_SPC_RULES, DEFAULT_RULE_K);
+    const assessment = assessSpcCharts(model, DEFAULT_SPC_RULES, DEFAULT_RULE_K, 'i-mr');
+    const capCount = countCapabilityViolations(capabilityModel, DEFAULT_SPC_RULES, DEFAULT_RULE_K, 'xbar-r');
     expect(assessment.chartPointCount).toBeGreaterThan(0);
     expect(capCount).toBe(0);
     const spec = { lsl: -10, tgt: 3.5, usl: 20 };
@@ -177,10 +178,10 @@ describe('通用导出单双侧规格', () => {
   it('仅上限在四格式均保持单侧：Cpk=CPU，关闭的 LSL 不进入图或文本', async () => {
     importNumericSubgroupTable();
     const { model, capabilityModel } = buildActiveAnalysisExport();
-    const assessment = assessSpcCharts(model, DEFAULT_SPC_RULES, DEFAULT_RULE_K);
+    const assessment = assessSpcCharts(model, DEFAULT_SPC_RULES, DEFAULT_RULE_K, 'xbar-r');
     const spec = { lsl: null, tgt: 25, usl: 25.2 };
     const expected = computeCapability(capabilityModel.all, capabilityModel.sigmaWithin, spec);
-    const capCount = countCapabilityViolations(capabilityModel, DEFAULT_SPC_RULES, DEFAULT_RULE_K);
+    const capCount = countCapabilityViolations(capabilityModel, DEFAULT_SPC_RULES, DEFAULT_RULE_K, 'xbar-r');
 
     const html = buildHtmlReport(model, spec, assessment, undefined, capabilityModel, capCount);
     const text = textReport(model, spec, assessment, capabilityModel, capCount);
@@ -203,8 +204,8 @@ describe('通用导出单双侧规格', () => {
     }
     expect(text).toContain('Cp —');
     expect(text).toContain('Pp —');
-    expectSingleSidedCapabilityRows(wordXml, 'word');
-    expectSingleSidedCapabilityRows(slideXml, 'ppt');
+    expectSingleSidedCapabilityRows(wordXml, 'word', expected.cpm!);
+    expectSingleSidedCapabilityRows(slideXml, 'ppt', expected.cpm!);
     const doc = new DOMParser().parseFromString(html, 'text/html');
     const capabilityChart = [...doc.querySelectorAll('h2')]
       .find((node) => node.textContent?.startsWith('3. 过程能力'))?.nextElementSibling;
@@ -213,7 +214,8 @@ describe('通用导出单双侧规格', () => {
     expect(labels).toContain('USL');
 
     const summary = XLSX.utils.sheet_to_json<(string | number)[]>(workbook.Sheets['统计摘要'], { header: 1 });
-    expect(summary).toContainEqual(['规格 LSL / 目标 / USL', '无下限 / 25 / 25.2']);
+    // PLATFORM-07:Excel 与 HTML/Word/PPT/文本同一规格格式化口径(specLimitText)
+    expect(summary).toContainEqual(['规格 LSL / 目标 / USL', '无下限 / 25.00 / 25.20']);
     expect(summary.find((row) => row[0] === 'Cp')?.[1]).toBe('—');
     expect(summary.find((row) => row[0] === 'Cpk')?.[1]).toBeCloseTo(expected.cpk, 3);
   });
@@ -221,10 +223,10 @@ describe('通用导出单双侧规格', () => {
   it('仅下限在文本/HTML/Excel/Word/PPT 对称保持 Cpk=CPL，并明确显示无上限', async () => {
     importNumericSubgroupTable();
     const { model, capabilityModel } = buildActiveAnalysisExport();
-    const assessment = assessSpcCharts(model, DEFAULT_SPC_RULES, DEFAULT_RULE_K);
+    const assessment = assessSpcCharts(model, DEFAULT_SPC_RULES, DEFAULT_RULE_K, 'xbar-r');
     const spec = { lsl: 24.8, tgt: 25, usl: null };
     const expected = computeCapability(capabilityModel.all, capabilityModel.sigmaWithin, spec);
-    const capCount = countCapabilityViolations(capabilityModel, DEFAULT_SPC_RULES, DEFAULT_RULE_K);
+    const capCount = countCapabilityViolations(capabilityModel, DEFAULT_SPC_RULES, DEFAULT_RULE_K, 'xbar-r');
     const text = textReport(model, spec, assessment, capabilityModel, capCount);
     const html = buildHtmlReport(model, spec, assessment, undefined, capabilityModel);
     const workbook = XLSX.read(buildXlsx(model, spec, assessment, undefined, capabilityModel, capCount), { type: 'array' });
@@ -241,10 +243,10 @@ describe('通用导出单双侧规格', () => {
       expect(content).toContain('24.80 / 25.00 / 无上限');
       expect(content).toContain(`Cpk ${nf(expected.cpk, 2)}`);
     }
-    expectSingleSidedCapabilityRows(wordXml, 'word');
-    expectSingleSidedCapabilityRows(slideXml, 'ppt');
+    expectSingleSidedCapabilityRows(wordXml, 'word', expected.cpm!);
+    expectSingleSidedCapabilityRows(slideXml, 'ppt', expected.cpm!);
     const summary = XLSX.utils.sheet_to_json<(string | number)[]>(workbook.Sheets['统计摘要'], { header: 1 });
-    expect(summary).toContainEqual(['规格 LSL / 目标 / USL', '24.8 / 25 / 无上限']);
+    expect(summary).toContainEqual(['规格 LSL / 目标 / USL', '24.80 / 25.00 / 无上限']);
     expect(summary.find((row) => row[0] === 'Cpk')?.[1]).toBeCloseTo(expected.cpk, 3);
   });
 

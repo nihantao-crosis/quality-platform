@@ -3,7 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { cleanup, render } from '@testing-library/react';
 import { createElement } from 'react';
-import {
+import { computeVarModel,
   assessGage,
   computeGageRR,
   nf,
@@ -51,12 +51,13 @@ function multiResponseFixture(extraResponses = 0): MultiResponseFixture {
 
 function importFixture(extraResponses = 0) {
   const fixture = multiResponseFixture(extraResponses);
-  useData.getState().importMatrix(
-    'MSA多响应.csv',
-    fixture.columns,
-    fixture.rows,
-    [{ name: '测试人', values: fixture.operators }],
-  );
+  // v1.43.0 起 importMatrix 写入口拒绝非有限单元格;本夹具的 NaN 坏列模拟的是
+  // 「遗留/损坏数据已在内存」的失败隔离场景,故直接播种 store 而不经导入门
+  useData.setState({
+    model: computeVarModel('MSA多响应.csv', fixture.columns, fixture.rows),
+    textCols: [{ name: '测试人', values: fixture.operators, sourceIndex: fixture.columns.length }],
+    pendingCells: [],
+  });
   return fixture;
 }
 

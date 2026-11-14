@@ -1,11 +1,14 @@
 # Windows 桌面端打包 — 产出 .msi (WiX) 与 .exe (NSIS) 安装包。
-# 仅手动触发(workflow_dispatch)。日常发版由 release.yml 统一构建并上传 Windows 安装包到
-# GitHub Release;本工作流保留作为独立产出到 Actions Artifacts 的备用手段,避免与 release
-# 在每个 tag 上重复构建 Windows(以往双跑会多产生一份失败/成功通知)。
+# 可复用的备用 Windows 构建，仅产出 Actions Artifact。日常发版由 release.yml
+# 统一构建并上传 GitHub Release。本文件故意不提供任意 ref 的手动触发入口；
+# 需要备用包时由受审查的调用方以 workflow_call 复用。
+#
+# **安全约束**:本工作流不读取任何签名 secret，并同时关闭代码签名与
+# updater 签名产物。输出仅供本地验证，不可用于正式更新分发。
 name: build-windows
 
 on:
-  workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
@@ -35,16 +38,27 @@ jobs:
       - name: Unit tests (statistics engine)
         run: npm test
 
-      - name: Tauri build (msi + nsis)
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
-        run: npx tauri build --bundles msi,nsis
+      # --no-sign 关闭安装包代码签名；配置覆盖关闭 updater 产物，避免
+      # tauri.conf.json 的正式发版设置在无密钥构建中仍要求生成 .sig。
+      #
+      # 盲审 P2:覆盖**必须走配置文件**,不能用内联 JSON。windows-latest 默认 shell 是
+      # pwsh,npx 落在 npx.cmd,pwsh 对 .cmd 走 Legacy 传参不转义内嵌双引号,
+      # node 按 MSVC 规则解析时会把引号全部消费,tauri-cli 收到 `{bundle:{...}}`
+      # 这种无引号键形式并直接报 "key must be a string" —— 备用构建 100% 失败。
+      - name: Tauri build (msi + nsis, 不签名)
+        run: npx tauri build --bundles msi,nsis --no-sign --config ../.github/tauri.windows-unsigned.conf.json
+        working-directory: src-tauri
+
+      - name: 标注产物未签名
+        shell: bash
+        run: |
+          echo "::warning::本工作流产出的安装包**未签名**,不能用于自动更新分发;正式发版请走 release.yml(tag 触发)。"
 
       - name: Upload installers
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: quality-platform-windows
+          name: quality-platform-windows-unsigned
+          if-no-files-found: error
           path: |
             src-tauri/target/release/bundle/msi/*.msi
             src-tauri/target/release/bundle/nsis/*.exe

@@ -42,7 +42,7 @@ function OcCurveChartImpl(cfg: {
     );
   };
   return (
-    <Svg w={W} h={H}>
+    <Svg w={W} h={H} readable label={`OC 特性曲线（二项）· n=${n}，Ac=${ac}`}>
       <rect x={0} y={0} width={W} height={H} fill={T.bg} />
       {Array.from({ length: 6 }, (_, g) => {
         const yy = m.t + (g / 5) * ph;

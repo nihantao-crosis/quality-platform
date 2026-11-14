@@ -2,14 +2,15 @@
  * UI 全局状态（交接文档 §6）。派生数据一律由 /core 纯函数实时计算，不入 store。
  */
 import { create } from 'zustand';
+import { markLocalWrite, watchExternalWrite } from './crossTab';
 import { createJSONStorage, persist } from 'zustand/middleware';
 import type { NelsonRules, NelsonRuleK, InspectionLevel, CalcState, AnovaMode, AqlMethod, AqlAcMethod, AqlRegime, SwitchStatus, SpcDataLayout, SpcSigmaMethod, GageStandard, GageToleranceSpec } from '../core';
 import {
   AQL_COLS, MAX_LOT_SIZE, aqlRegime, aqlRegimeAllows, calcKey as coreCalcKey, CALC_INIT,
-  freshSwitchStatus, normalizeSwitchStatus, DEFAULT_RULE_K, normalizeRuleK,
+  freshSwitchStatus, normalizeSwitchStatus, DEFAULT_RULE_K, normalizeRuleK, isAqlBatchRecord,
 } from '../core';
 import { isIsoCalendarDate } from '../platform/calendarDate';
-import { projectStoreValidationError, registerProjectLifecycleHooks } from '../platform/project';
+import { STORAGE_SPACE_RELEASE_HINT, clampProjectName, projectStoreValidationError, registerProjectLifecycleHooks } from '../platform/project';
 import { preserveCorruptStore } from './quarantine';
 
 export type Page =
@@ -26,23 +27,44 @@ export type DoeTab = 'analyze' | 'create';
 export type HypoTab = 'anova' | 't1' | 't2' | 'reg';
 export type ParetoView = 'pareto' | 'fishbone';
 export type ChartStyle = '经典' | '现代' | '高对比';
+/**
+ * STORE-09:独立 AQL 责任账本(qp-aql-state-v1)损坏时的受限状态。
+ * quarantined = 原文已复制进隔离区；unpreserved = 隔离区写入失败，原文只剩原位置这一份。
+ * 瞬态字段：不进 partialize/persistedPrefsOf，也不进 .qproj。
+ */
+export type AqlLedgerFault = 'quarantined' | 'unpreserved';
 
 /** 批量研究最多 64 个响应；公差记忆还必须额外容纳当前明细列（它可能不在批量集合中）。 */
 export const GAGE_BATCH_COL_CAP = 64;
 export const GAGE_TOL_MEMORY_CAP = GAGE_BATCH_COL_CAP + 1;
+function emptyStringKeyedMap<T>(): Record<string, T> {
+  return Object.create(null) as Record<string, T>;
+}
+
 function clampGageTolMemory<T>(map: Record<string, T>, protectedKeys: Array<string | null | undefined> = []): Record<string, T> {
   const keys = Object.keys(map);
-  if (keys.length <= GAGE_TOL_MEMORY_CAP) return map;
+  const out = emptyStringKeyedMap<T>();
+  if (keys.length <= GAGE_TOL_MEMORY_CAP) {
+    for (const key of keys) out[key] = map[key];
+    return out;
+  }
   // 批量列和当前/目标明细列优先保留；其余位置再按插入序保留最近使用项。
   const kept = new Set<string>();
   for (const key of protectedKeys) {
     if (key && Object.prototype.hasOwnProperty.call(map, key) && kept.size < GAGE_TOL_MEMORY_CAP) kept.add(key);
   }
   for (let index = keys.length - 1; index >= 0 && kept.size < GAGE_TOL_MEMORY_CAP; index -= 1) kept.add(keys[index]);
-  const out: Record<string, T> = {};
   // 沿用原插入序，后续“最近使用”截断仍有稳定语义。
   for (const key of keys) if (kept.has(key)) out[key] = map[key];
   return out;
+}
+
+/** 外部回放边界也必须把任意列名映射收口为无原型对象。 */
+export function normalizeGageTolMemory<T>(
+  map: Record<string, T>,
+  protectedKeys: Array<string | null | undefined> = [],
+): Record<string, T> {
+  return clampGageTolMemory(map, protectedKeys);
 }
 
 export function normalizeGageBatchCols(cols: string[] | null): string[] | null {
@@ -97,6 +119,8 @@ interface AppState {
   capSubgroupSize: number;
   capValueCol: string | null;
   capSubgroupIdCol: string | null;
+  /** 超 1000σ 规格强警告的显式确认；内容是绑定测量角色/规格/数据摘要的 fingerprint。 */
+  capabilityWarningAcknowledgement: string | null;
   gageUseReal: boolean;
   gageValueName: string | null;
   gagePartName: string | null;
@@ -146,6 +170,8 @@ interface AppState {
   aqlMethod: AqlMethod;     // 兼容旧快照；正式产品路径固定为 'gb'
   aqlAcMethod: AqlAcMethod; // 兼容旧快照；正式产品路径固定为 'gb'
   aqlSwitch: SwitchStatus;  // 当前正常/加严/放宽状态及批次历史
+  /** 账本损坏期间非空：AQL 页据此常驻说明并阻断登记；setAqlSwitch 同步拒绝写入。 */
+  aqlLedgerFault: AqlLedgerFault | null;
   openMenu: string | null;
   modal: Modal;
   toast: string | null;
@@ -181,6 +207,7 @@ interface AppState {
   toggleSide(side: 'lslOn' | 'uslOn'): void;
   setCapabilityBins(v: number): void;
   setCapabilitySubgroup(patch: Partial<Pick<AppState, 'capSubgroupMode' | 'capSubgroupSize' | 'capValueCol' | 'capSubgroupIdCol'>>): void;
+  acknowledgeCapabilityWarning(fingerprint: string | null): void;
   setGageOptions(patch: Partial<Pick<AppState,
     'gageUseReal' | 'gageValueName' | 'gagePartName' | 'gageOperatorName'
     | 'gageGaugeName' | 'gageReportBy' | 'gageStudyDate' | 'gageNotes'
@@ -234,15 +261,75 @@ function isRecoverablePrefsEnvelope(raw: unknown): boolean {
       && (envelope.version as number) <= 3);
 }
 
+/** 旧 prefs 内嵌 AQL 业务状态的字段(v1.43 起已迁到独立键 qp-aql-state-v1)。 */
+const PREFS_EMBEDDED_AQL_KEYS = ['aqlLot', 'aqlLevel', 'aqlAQL', 'aqlRegime', 'aqlMethod', 'aqlAcMethod', 'aqlSwitch'] as const;
+
+/**
+ * fix2609m B2:旧 prefs 内嵌账本入口必须与独立账本同口径 fail-closed。
+ * getItem 在「原文」上核对(migrate 会先归一化旧账本，归一化会静默丢弃坏记录、改写状态)，
+ * 结果交给 merge:没有独立账本而要回退到 prefs 内嵌账本时，校验不过即进入受限状态。
+ * G24a A2:getItem 只记下原文与校验结论；原文进隔离区推迟到 merge 确定要回退到内嵌账本时——
+ * 独立账本有效时内嵌子集根本不会被使用，把它写进隔离区只是噪声并挤占配额。
+ */
+let prefsEmbeddedAqlFault: { name: string; raw: string; detail: string; subset: Record<string, unknown> } | null = null;
+/**
+ * 受限状态期间 prefs 仍会因其他偏好改动而重写(partialize 不含 AQL 字段)。为让坏证据留在原位置、
+ * 下次启动继续受限(与损坏的独立账本「原文不被覆盖」同一语义)，重写 prefs 时把原 AQL 字段原样带上。
+ */
+let prefsEmbeddedAqlHold: Record<string, unknown> | null = null;
+
+function prefsEmbeddedAqlSubset(parsed: unknown): Record<string, unknown> | null {
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  const state = (parsed as { state?: unknown }).state;
+  if (!state || typeof state !== 'object' || Array.isArray(state) || !('aqlSwitch' in state)) return null;
+  const subset: Record<string, unknown> = {};
+  for (const key of PREFS_EMBEDDED_AQL_KEYS) {
+    if (key in state) subset[key] = (state as Record<string, unknown>)[key];
+  }
+  return subset;
+}
+
+/** 与 qp-aql-state-v1 同一校验口径(含 CORE-06 记录链重放)；缺省字段按初始值、旧近似方法按 v2 迁移补齐。 */
+function prefsEmbeddedAqlValidationError(subset: Record<string, unknown>): string | null {
+  const migratedMethod = (value: unknown, legacy: string) => (value === undefined || value === legacy ? 'gb' : value);
+  return projectStoreValidationError(AQL_STATE_STORAGE_KEY, {
+    aqlLot: subset.aqlLot ?? 120,
+    aqlLevel: subset.aqlLevel ?? 'II',
+    aqlAQL: subset.aqlAQL ?? 1,
+    ...(subset.aqlRegime === undefined ? {} : { aqlRegime: subset.aqlRegime }),
+    aqlMethod: migratedMethod(subset.aqlMethod, 'shift'),
+    aqlAcMethod: migratedMethod(subset.aqlAcMethod, 'binom'),
+    aqlSwitch: subset.aqlSwitch,
+  });
+}
+
+/** 去掉 state 中旧内嵌 AQL 字段后的 prefs 信封(仅用于其余偏好的校验)。 */
+function withoutEmbeddedAql(parsed: unknown): unknown {
+  const envelope = parsed as { state: Record<string, unknown> };
+  const state = { ...envelope.state };
+  for (const key of PREFS_EMBEDDED_AQL_KEYS) delete state[key];
+  return { ...envelope, state };
+}
+
 const safePrefsStorage = {
   getItem(name: string): string | null {
     let raw: string | null = null;
+    prefsEmbeddedAqlFault = null;
     try {
       raw = localStorage.getItem(name);
       if (raw == null) return null;
       const parsed = JSON.parse(raw) as unknown;
-      const detail = projectStoreValidationError(name, parsed);
-      if (!detail) return raw;
+      const embeddedAql = prefsEmbeddedAqlSubset(parsed);
+      const embeddedAqlDetail = embeddedAql ? prefsEmbeddedAqlValidationError(embeddedAql) : null;
+      if (embeddedAql && embeddedAqlDetail) {
+        prefsEmbeddedAqlFault = { name, raw, detail: embeddedAqlDetail, subset: embeddedAql };
+      }
+      // 内嵌 AQL 子集校验不过时由上面的结论(merge 决定是否隔离)负责；其余偏好仍按原口径核对，
+      // 避免同一 AQL 子集经整份 prefs 校验在这里提前写隔离区。
+      const genericDetail = projectStoreValidationError(name, prefsEmbeddedAqlFault ? withoutEmbeddedAql(parsed) : parsed);
+      if (!genericDetail) return raw;
+      // 其余字段与内嵌账本同时损坏时,隔离区「首份证据优先」会让 merge 稍后写入的账本原因落空——把两者拼成一条(fix2609n G24e)
+      const detail = prefsEmbeddedAqlFault ? `${genericDetail}；旧偏好内嵌的 AQL 责任账本未通过校验：${prefsEmbeddedAqlFault.detail}` : genericDetail;
       if (!preserveCorruptStore(name, raw, detail)) protectedCorruptPrefs = { raw, detail };
       else protectedCorruptPrefs = null;
       // 语义污染交给下方白名单 merge 逐字段回退；结构损坏才整体拒绝。
@@ -254,8 +341,17 @@ const safePrefsStorage = {
       return null;
     }
   },
-  setItem(name: string, value: string): void {
+  setItem(name: string, incoming: string): void {
     if (prefsPersistenceSuspended) return;
+    let value = incoming;
+    if (prefsEmbeddedAqlHold) {
+      try {
+        const envelope = JSON.parse(incoming) as { state?: Record<string, unknown> };
+        if (envelope.state && typeof envelope.state === 'object') {
+          value = JSON.stringify({ ...envelope, state: { ...envelope.state, ...prefsEmbeddedAqlHold } });
+        }
+      } catch { /* 非 JSON 原样写入 */ }
+    }
     if (protectedCorruptPrefs) {
       let live: string | null = protectedCorruptPrefs.raw;
       try { live = localStorage.getItem(name); } catch { /* 使用已捕获原文重试 */ }
@@ -307,6 +403,7 @@ function persistedPrefsOf(s: AppState) {
     capSubgroupSize: s.capSubgroupSize,
     capValueCol: s.capValueCol,
     capSubgroupIdCol: s.capSubgroupIdCol,
+    capabilityWarningAcknowledgement: s.capabilityWarningAcknowledgement,
     gageUseReal: s.gageUseReal,
     gageValueName: s.gageValueName,
     gagePartName: s.gagePartName,
@@ -361,6 +458,18 @@ interface PersistedAqlState {
 let aqlStateCorrupt = false;
 let aqlStateQuarantined = false;
 
+function currentAqlLedgerFault(): AqlLedgerFault | null {
+  if (!aqlStateCorrupt) return null;
+  return aqlStateQuarantined ? 'quarantined' : 'unpreserved';
+}
+
+/** 账本损坏时一切批次登记/状态转移的拒绝原因(store 与 AQL 页共用同一文案)。 */
+function aqlLedgerBlockedMessage(): string {
+  return aqlStateQuarantined
+    ? 'AQL 责任账本已损坏（原文已复制到隔离区），批次登记已暂停：新记录无法落盘，刷新后会丢失；请先导入有效项目备份或清除业务数据'
+    : 'AQL 责任账本已损坏（隔离区写入失败，原文仍保留在原位置），批次登记已暂停：新记录无法落盘，刷新后会丢失；请导入有效项目备份恢复，切勿清除数据';
+}
+
 function loadPersistedAqlState(): PersistedAqlState | null {
   let text: string | null = null;
   try {
@@ -390,6 +499,9 @@ function loadPersistedAqlState(): PersistedAqlState | null {
 const initialAql = loadPersistedAqlState();
 
 let toastTimer: ReturnType<typeof setTimeout> | undefined;
+/** 每次 showToast 递增;调用方用「前后序号是否变化」判断 store 是否给出过提示,不按文本比较(同文提示会误判,fix2609n G24f)。 */
+let toastSeq = 0;
+export function toastSequence(): number { return toastSeq; }
 
 let paretoMergeMigrationPending = false;
 
@@ -417,6 +529,7 @@ export const useApp = create<AppState>()(persist((set, get) => ({
   capSubgroupSize: 5,
   capValueCol: null,
   capSubgroupIdCol: null,
+  capabilityWarningAcknowledgement: null,
   gageUseReal: true,
   gageValueName: null,
   gagePartName: null,
@@ -429,7 +542,7 @@ export const useApp = create<AppState>()(persist((set, get) => ({
   gageTolValue: null,
   gageStandard: 'factory',
   gageBatchCols: null,
-  gageTolByCol: {},
+  gageTolByCol: emptyStringKeyedMap(),
   doeView: 'main',
   doeTab: 'analyze',
   doeFactorCols: null,
@@ -459,6 +572,7 @@ export const useApp = create<AppState>()(persist((set, get) => ({
   aqlMethod: 'gb',
   aqlAcMethod: 'gb',
   aqlSwitch: initialAql?.aqlSwitch ?? freshSwitchStatus(),
+  aqlLedgerFault: currentAqlLedgerFault(),
   openMenu: null,
   modal: null,
   toast: null,
@@ -477,6 +591,7 @@ export const useApp = create<AppState>()(persist((set, get) => ({
   setBusyOverlay: (msg) => set({ busyOverlay: msg }),
   showToast: (msg) => {
     clearTimeout(toastTimer);
+    toastSeq += 1;
     set({ toast: msg, openMenu: null, varOpen: false });
     toastTimer = setTimeout(() => set({ toast: null }), 2400);
   },
@@ -489,25 +604,52 @@ export const useApp = create<AppState>()(persist((set, get) => ({
   toggleRule: (r) => set((s) => ({ spcRules: { ...s.spcRules, [r]: !s.spcRules[r] } })),
   // 越界/非法字段由 normalizeRuleK 回落标准值;UI 依据回写后的 store 值回弹输入框
   setSpcRuleK: (patch) => set((s) => ({ spcRuleK: normalizeRuleK({ ...s.spcRuleK, ...patch }) })),
-  setSpcRoles: (patch) => set({ ...patch, selSub: null, spcStageCol: null }),
+  setSpcRoles: (patch) => set({ ...patch, selSub: null, spcStageCol: null, capabilityWarningAcknowledgement: null }),
   setSpcStageCol: (spcStageCol) => set({ spcStageCol, selSub: null }),
-  setSpcSigmaMethod: (spcSigmaMethod) => set({ spcSigmaMethod, selSub: null }),
+  setSpcSigmaMethod: (spcSigmaMethod) => set({ spcSigmaMethod, selSub: null, capabilityWarningAcknowledgement: null }),
   toggleSpcZones: () => set((s) => ({ spcShowZones: !s.spcShowZones })),
   setSelSub: (selSub) => set({ selSub }),
-  setSpec: (patch) => set(patch),
-  setProjectName: (projectName) => set({ projectName: projectName.trim() || '未命名项目' }),
+  setSpec: (patch) => {
+    // 写入口守卫(双审 P2):规格必须有限,非法值静默丢弃而非落盘后被读取侧整店隔离
+    const safe = Object.fromEntries(Object.entries(patch).filter(([, v]) => Number.isFinite(v)));
+    if (Object.keys(safe).length) set({ ...(safe as Partial<AppState>), capabilityWarningAcknowledgement: null });
+  },
+  // PLATFORM-06:项目名截到 MAX_PROJECT_NAME_CHARS(写读对称:merge 同样截断)。
+  setProjectName: (projectName) => set({ projectName: clampProjectName(projectName.trim()).trim() || '未命名项目' }),
   toggleSide: (side) => set((s) => {
     const next = { ...s, [side]: !s[side] };
     // 至少保留一侧
     if (!next.lslOn && !next.uslOn) return s;
-    return { [side]: next[side] } as Partial<AppState>;
+    return { [side]: next[side], capabilityWarningAcknowledgement: null } as Partial<AppState>;
   }),
-  setCapabilityBins: (value) => set({ capabilityBins: Math.max(5, Math.min(40, Math.round(value))) }),
-  setCapabilitySubgroup: (patch) => set(patch),
-  setGageOptions: (patch) => set(patch),
+  setCapabilityBins: (value) => {
+    if (!Number.isFinite(value)) return; // 非有限值不落盘(闭环审核 P2)
+    set({ capabilityBins: Math.max(5, Math.min(40, Math.round(value))) });
+  },
+  setCapabilitySubgroup: (patch) => set({ ...patch, capabilityWarningAcknowledgement: null }),
+  acknowledgeCapabilityWarning: (fingerprint) => set({
+    capabilityWarningAcknowledgement: typeof fingerprint === 'string' && fingerprint.length <= 4096 ? fingerprint : null,
+  }),
+  setGageOptions: (patch) => {
+    // 写入口守卫(审查 P3,与 setSpec 同纪律):数值字段必须有限或 null,Infinity 不落盘
+    const safe = { ...patch };
+    if (safe.gageTolValue != null && !Number.isFinite(safe.gageTolValue)) delete safe.gageTolValue;
+    // 第三轮 P2:研究日期必须为空串或真日历日期——非法日期落盘会先阻断项目导出,
+    // 再让整份分析历史在重启时被读取侧校验器整店隔离(type=date 输入只发完整值,不影响输入过程)
+    if (typeof safe.gageStudyDate === 'string' && safe.gageStudyDate !== '' && !isIsoCalendarDate(safe.gageStudyDate)) {
+      delete safe.gageStudyDate;
+    }
+    // 长度钳位(闭环审核 P2):DOM maxLength 只挡键入,粘贴/程序化写入越界会阻断项目导出
+    for (const [key, max] of [['gageGaugeName', 80], ['gageReportBy', 80], ['gageNotes', 200]] as const) {
+      const value = safe[key];
+      if (typeof value === 'string' && value.length > max) safe[key] = value.slice(0, max);
+    }
+    set(safe);
+  },
   switchGageMeasurement: (prev, next) => set((s) => {
     if (prev === next) return {};
-    const memory = { ...s.gageTolByCol };
+    // 列名可合法地叫 __proto__/constructor；始终使用无原型映射，避免把列名解释成对象语义。
+    const memory = clampGageTolMemory(s.gageTolByCol, [...(s.gageBatchCols ?? []), next, prev]);
     // 必须在截断前读取目标列；否则满容量时，最旧的目标项会先被逐出并错误恢复为“未设置”。
     const restored = next ? memory[next] : undefined;
     // 触碰过的列移到插入序末尾，截断语义才是真正的“保留最近使用”。
@@ -526,7 +668,7 @@ export const useApp = create<AppState>()(persist((set, get) => ({
   }),
   setGageBatchCols: (gageBatchCols) => set({ gageBatchCols: normalizeGageBatchCols(gageBatchCols) }),
   applyGageTolToCols: (cols) => set((s) => {
-    const gageTolByCol = { ...s.gageTolByCol };
+    const gageTolByCol = clampGageTolMemory(s.gageTolByCol, [...(s.gageBatchCols ?? []), s.gageValueName]);
     const normalized = normalizeGageBatchCols(cols) ?? [];
     for (const col of normalized) {
       delete gageTolByCol[col];
@@ -541,7 +683,11 @@ export const useApp = create<AppState>()(persist((set, get) => ({
   setHypoTab: (hypoTab) => set({ hypoTab }),
   setAnovaSel: (patch) => set(patch),
   setAnovaShowDemo: (anovaShowDemo) => set({ anovaShowDemo }),
-  setHypothesisOptions: (patch) => set(patch),
+  setHypothesisOptions: (patch) => {
+    const safe = { ...patch };
+    if (safe.t1Mu0 != null && !Number.isFinite(safe.t1Mu0)) delete safe.t1Mu0;
+    set(safe);
+  },
   setParetoView: (paretoView) => set({ paretoView }),
   setParetoOptions: (patch) => set((s) => {
     const raw = patch.paretoThreshold;
@@ -586,7 +732,12 @@ export const useApp = create<AppState>()(persist((set, get) => ({
       } : {}),
     };
   }),
-  setAqlSwitch: (aqlSwitch) => set({ aqlSwitch: normalizeSwitchStatus(aqlSwitch) }),
+  setAqlSwitch: (aqlSwitch) => {
+    // STORE-09:损坏账本期间的批次追溯只能进内存、刷新即丢，且没有任何导出通道能带走；
+    // 在唯一写入口拒绝，而不是让记录悄悄变成孤儿数据。
+    if (aqlStateCorrupt) throw new Error(aqlLedgerBlockedMessage());
+    set({ aqlSwitch: normalizeSwitchStatus(aqlSwitch) });
+  },
   setImportTab: (importTab) => set({ importTab }),
   setImportKind: (importKind) => set({ importKind }),
   setExportFmt: (exportFmt) => set({ exportFmt }),
@@ -644,7 +795,9 @@ export const useApp = create<AppState>()(persist((set, get) => ({
       typeof value === 'number' && Number.isFinite(value) ? value : fallback;
     merged.chartStyle = STYLE_ORDER.includes(p.chartStyle as ChartStyle) ? p.chartStyle as ChartStyle : current.chartStyle;
     merged.showGrid = typeof p.showGrid === 'boolean' ? p.showGrid : current.showGrid;
-    merged.projectName = typeof p.projectName === 'string' && p.projectName.trim() ? p.projectName : current.projectName;
+    // 旧版无长度上限:超长项目名按 setProjectName 同一规则截断后接受(硬上限外的载荷已在校验层拒绝)。
+    const storedProjectName = typeof p.projectName === 'string' ? clampProjectName(p.projectName) : '';
+    merged.projectName = storedProjectName.trim() ? storedProjectName : current.projectName;
     merged.lsl = finiteOr(p.lsl, current.lsl);
     merged.usl = finiteOr(p.usl, current.usl);
     merged.tgt = finiteOr(p.tgt, current.tgt);
@@ -663,6 +816,10 @@ export const useApp = create<AppState>()(persist((set, get) => ({
       : current.capSubgroupSize;
     merged.capValueCol = stringOrNull(p.capValueCol, current.capValueCol);
     merged.capSubgroupIdCol = stringOrNull(p.capSubgroupIdCol, current.capSubgroupIdCol);
+    merged.capabilityWarningAcknowledgement = p.capabilityWarningAcknowledgement === null
+      || (typeof p.capabilityWarningAcknowledgement === 'string' && p.capabilityWarningAcknowledgement.length <= 4096)
+      ? p.capabilityWarningAcknowledgement as string | null
+      : current.capabilityWarningAcknowledgement;
     merged.gageUseReal = typeof p.gageUseReal === 'boolean' ? p.gageUseReal : current.gageUseReal;
     merged.gageValueName = stringOrNull(p.gageValueName, current.gageValueName);
     merged.gagePartName = stringOrNull(p.gagePartName, current.gagePartName);
@@ -690,8 +847,10 @@ export const useApp = create<AppState>()(persist((set, get) => ({
       : current.gageBatchCols;
     merged.gageTolByCol = (() => {
       const raw = p.gageTolByCol;
-      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return current.gageTolByCol;
-      const out: Record<string, { mode: GageTolMode; value: number | null }> = {};
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+        return clampGageTolMemory(current.gageTolByCol, [...(merged.gageBatchCols ?? []), merged.gageValueName]);
+      }
+      const out = emptyStringKeyedMap<{ mode: GageTolMode; value: number | null }>();
       for (const [key, entry] of Object.entries(raw as Record<string, unknown>)) {
         if (!entry || typeof entry !== 'object') continue;
         const mode = (entry as { mode?: unknown }).mode;
@@ -740,6 +899,19 @@ export const useApp = create<AppState>()(persist((set, get) => ({
     merged.paretoThreshold = typeof p.paretoThreshold === 'number' && Number.isFinite(p.paretoThreshold)
       && p.paretoThreshold >= 0.5 && p.paretoThreshold <= 1 ? p.paretoThreshold : current.paretoThreshold;
     const separateAql = loadPersistedAqlState();
+    // fix2609m B2:没有独立账本、要回退到旧 prefs 内嵌账本时，内嵌账本必须先通过与独立账本同口径的
+    // 校验(getItem 已在原文上核对)。不通过 → 与独立账本损坏同样受限：原文已进隔离区、回退当前默认值、
+    // 绝不 normalizeSwitchStatus(p.aqlSwitch) 后当作有效账本使用或写入 qp-aql-state-v1。
+    if (!aqlStateCorrupt && !separateAql && prefsEmbeddedAqlFault) {
+      const { name, raw, subset } = prefsEmbeddedAqlFault;
+      const detail = `旧偏好内嵌的 AQL 责任账本未通过校验：${prefsEmbeddedAqlFault.detail}`;
+      aqlStateCorrupt = true;
+      // G24a A2:确定要回退到内嵌账本时才把 prefs 原文写进隔离区。
+      aqlStateQuarantined = preserveCorruptStore(name, raw, detail);
+      // 隔离失败：与整份 prefs 损坏同一语义——写保护原文，下次写 prefs 前先重试隔离。
+      if (!aqlStateQuarantined && !protectedCorruptPrefs) protectedCorruptPrefs = { raw, detail };
+      prefsEmbeddedAqlHold = subset;
+    }
     // 独立账本一旦损坏就保留原文等待导入备份/显式清除，绝不能退回旧 prefs 后覆写坏证据。
     const aql = aqlStateCorrupt ? current : separateAql ?? p;
     merged.aqlLot = Number.isSafeInteger(aql.aqlLot) && aql.aqlLot! >= 2 && aql.aqlLot! <= MAX_LOT_SIZE
@@ -760,6 +932,7 @@ export const useApp = create<AppState>()(persist((set, get) => ({
     merged.aqlMethod = 'gb';
     merged.aqlAcMethod = 'gb';
     merged.aqlSwitch = normalizeSwitchStatus(aql.aqlSwitch ?? current.aqlSwitch);
+    merged.aqlLedgerFault = currentAqlLedgerFault();
     return merged;
   },
   onRehydrateStorage: () => (state, error) => {
@@ -780,13 +953,45 @@ function persistedAqlOf(state: AppState): PersistedAqlState {
 
 let aqlPersistenceDirty = false;
 
+/** 盲审 P2:AQL 账本被另一标签页改写时,先把最新账本水合回内存再让本地修改叠加,
+ * 避免「标签 A 改一个无关字段就把标签 B 的批次追溯记录整键抹掉」。 */
+function rehydrateAqlFromStorage(): void {
+  if (aqlStateCorrupt) return;
+  const fresh = loadPersistedAqlState();
+  if (!fresh) {
+    // 另一窗口写入了无法通过校验的账本：本窗口同样停写并进入受限状态。
+    if (aqlStateCorrupt) useApp.setState({ aqlLedgerFault: currentAqlLedgerFault() });
+    return;
+  }
+  const app = useApp.getState();
+  const incomingRecords = fresh.aqlSwitch?.records?.length ?? 0;
+  const localRecords = app.aqlSwitch?.records?.length ?? 0;
+  // 账本含批次记录与人工状态转移记录(S-2);提示里的「批次记录」只数批次，转移条目单独说明。
+  const incomingLedger = fresh.aqlSwitch?.records ?? [];
+  const incomingBatches = incomingLedger.filter(isAqlBatchRecord).length;
+  const incomingTransitions = incomingLedger.length - incomingBatches;
+  useApp.setState({
+    aqlLot: fresh.aqlLot ?? app.aqlLot,
+    aqlLevel: fresh.aqlLevel ?? app.aqlLevel,
+    aqlAQL: fresh.aqlAQL ?? app.aqlAQL,
+    aqlRegime: fresh.aqlRegime ?? app.aqlRegime,
+    aqlSwitch: fresh.aqlSwitch ?? app.aqlSwitch,
+  });
+  if (incomingRecords !== localRecords) {
+    app.showToast(`另一窗口更新了 AQL 责任账本（${incomingBatches} 条批次记录${incomingTransitions > 0 ? `、${incomingTransitions} 条状态转移记录` : ''}），已同步到本窗口`);
+  }
+}
+
 function savePersistedAqlState(state: AppState): boolean {
   if (aqlStateCorrupt) {
     aqlPersistenceDirty = true;
     return false;
   }
   try {
-    localStorage.setItem(AQL_STATE_STORAGE_KEY, JSON.stringify(persistedAqlOf(state)));
+    const encoded = JSON.stringify(persistedAqlOf(state));
+    localStorage.setItem(AQL_STATE_STORAGE_KEY, encoded);
+    // 登记自己的写,避免浏览器把本标签页的写回投成「外部写」触发无谓水合
+    markLocalWrite(AQL_STATE_STORAGE_KEY, encoded);
     aqlPersistenceDirty = false;
     return true;
   } catch {
@@ -796,20 +1001,34 @@ function savePersistedAqlState(state: AppState): boolean {
   }
 }
 
+/** AQL 账本配额写入失败的统一提示(登记批次与启动迁移共用，fix2609j STORE-10)。 */
+const AQL_QUOTA_TOAST = 'AQL 责任账本尚未写入本地存储（存储空间不足）；请释放空间，项目备份导出会携带内存中的最新账本，'
+  + '导入其他项目会在落盘前被阻止，关闭页面前会提示';
+
 useApp.subscribe((state, previous) => {
   if (state.aqlLot !== previous.aqlLot || state.aqlLevel !== previous.aqlLevel
     || state.aqlAQL !== previous.aqlAQL || state.aqlRegime !== previous.aqlRegime
     || state.aqlSwitch !== previous.aqlSwitch) {
     const wasDirty = aqlPersistenceDirty;
     if (!savePersistedAqlState(state) && !wasDirty) {
-      state.showToast('AQL 责任账本尚未写入本地存储；请释放空间，项目导出会在安全落盘前阻止');
+      // STORE-09:损坏与配额不足是两种原因，排障方向完全不同，不能共用「请释放空间」。
+      state.showToast(aqlStateCorrupt
+        ? `${aqlStateQuarantined ? 'AQL 责任账本已损坏（原文已复制到隔离区）' : 'AQL 责任账本已损坏（隔离区写入失败）'}，本次改动只在当前窗口有效、不会保存；项目备份导出已阻止，请按 AQL 页提示恢复`
+        // 配额分支 beforeExport 会以内存覆盖项导出最新账本，导入其他项目才会被阻止。
+        : AQL_QUOTA_TOAST);
     }
   }
 });
 
+// 盲审 P2:监听其它标签页对责任账本的写入(此前全仓零 storage 监听 → 静默互相覆盖)
+watchExternalWrite(AQL_STATE_STORAGE_KEY, rehydrateAqlFromStorage);
+
 // 首次加载即把旧 qp-prefs-v1 中的 AQL 业务状态迁出；损坏的新账本必须原样保留以便恢复。
-if (!aqlStateCorrupt) savePersistedAqlState(useApp.getState());
-else useApp.getState().showToast(aqlStateQuarantined
+// fix2609j STORE-10:启动迁移写入失败(工作表已占满配额后刷新)时 aqlPersistenceDirty 已为真，
+// 之后登记批次的首次失败提示会被短路——必须在这里提示一次，否则全程零信号。
+if (!aqlStateCorrupt) {
+  if (!savePersistedAqlState(useApp.getState())) useApp.getState().showToast(AQL_QUOTA_TOAST);
+} else useApp.getState().showToast(aqlStateQuarantined
   ? '检测到损坏的 AQL 责任账本，原文已复制到隔离区且未被覆盖；请导入有效项目备份或清除业务数据'
   : '检测到损坏的 AQL 责任账本（隔离区写入失败，原文仍保留在原位置、未被覆盖）；请勿清除浏览器数据，可通过导入有效项目备份恢复');
 
@@ -824,19 +1043,64 @@ function requirePersistedAqlState(): void {
   }
 }
 
+// —— GAP-7-16:项目导出(一致性快照) × 清除本地数据 互斥 ——
+// 项目导出的中央租约在 project.ts，这里通过 beforeExport 钩子镜像其生命周期，
+// 让清库入口无需依赖 project/dataStore 的私有状态即可 fail-closed。
+let projectExportInFlight: symbol | null = null;
+let localDataClearActive = false;
+
+/**
+ * 导出期间拒绝清库的统一文案(UI 租约与直接调用共用)。导出租约在生成完备份内容后、
+ * 保存对话框出现前就已释放；用户取消保存或导出失败时也不会有「项目已保存」提示，
+ * 因此不能让用户去等那条提示。
+ */
+export const PROJECT_EXPORT_BLOCKS_CLEAR_MESSAGE =
+  '项目备份正在生成，本地数据未清除；请等待保存对话框出现或保存结束后再清除数据';
+
+/** 项目导出是否正在生成快照(导出租约持有中)。 */
+export function isProjectExportInFlight(): boolean {
+  return projectExportInFlight !== null;
+}
+
+/**
+ * 清除本地数据的独占租约：导出进行中或已有清库时抛出可直接展示的原因；
+ * 成功时返回幂等 release。持有期间新的项目导出会在 beforeExport 被拒绝。
+ */
+export function beginLocalDataClear(): () => void {
+  if (projectExportInFlight !== null) {
+    throw new Error(PROJECT_EXPORT_BLOCKS_CLEAR_MESSAGE);
+  }
+  if (localDataClearActive) throw new Error('本地数据清除已在进行，请等待完成');
+  localDataClearActive = true;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    localDataClearActive = false;
+  };
+}
+
 registerProjectLifecycleHooks({
   // 导入有效项目是损坏账本的恢复路径；仅普通写入失败时要求先落稳当前内存账本。
   beforeMutation: () => {
     if (prefsPersistenceDirty) {
-      throw new Error('当前界面/分析参数尚未写入本地存储；请先导出项目或释放空间后再导入其他项目');
+      throw new Error('当前界面/分析参数尚未写入本地存储；请先「文件 → 保存项目文件…」（Ctrl+S）备份或释放空间后再导入其他项目');
     }
     if (!aqlStateCorrupt) requirePersistedAqlState();
   },
-  beforeExport: () => {
-    if (protectedCorruptPrefs) throw new Error('损坏的偏好设置尚未成功复制到隔离区，项目未导出');
+  beforeExport: (owner) => {
+    // GAP-7-16:清库进行中的一致性快照必然读到半清空的数据，直接拒绝并说明真实原因。
+    if (localDataClearActive) throw new Error('正在清除本地数据，项目未导出；请等待清除完成后再保存项目');
+    if (protectedCorruptPrefs) throw new Error(`损坏的偏好设置尚未成功复制到隔离区，项目未导出；请先${STORAGE_SPACE_RELEASE_HINT}，再重试保存项目`);
     if (aqlStateCorrupt) requirePersistedAqlState();
     // 配额不足时允许下面以内存覆盖项导出最新账本；不能退回 localStorage 中的旧值。
     savePersistedAqlState(useApp.getState());
+    // 本钩子同步执行且先于 dataStore(其依赖 appStore)的异步 vault 冲刷注册，
+    // 因此标记在 buildProjectJsonFull 同步阶段即建立，覆盖整个快照生成窗口。
+    projectExportInFlight = owner;
+    return () => {
+      if (projectExportInFlight === owner) projectExportInFlight = null;
+    };
   },
   projectStoreOverrides: () => ({
     'qp-prefs-v1': JSON.stringify({ state: persistedPrefsOf(useApp.getState()), version: 3 }),
@@ -845,17 +1109,32 @@ registerProjectLifecycleHooks({
   afterSuccessfulMutation: () => {
     // applyProjectText 已写入新项目；刷新前任何 toast/modal set 都不能把旧内存偏好写回去。
     prefsPersistenceSuspended = true;
+    // 旧会话写不下的账本/参数已被新项目整体取代，不得再拦截随后的自动重载(fix2609j STORE-10)。
+    prefsPersistenceDirty = false;
+    aqlPersistenceDirty = false;
   },
 });
+
+/**
+ * 本 store 中写入 localStorage 失败、最新值只在内存的数据类别(fix2609j STORE-10)。
+ * dataStore.hasUnpersistedState 汇总它作离开拦截；账本损坏属独立故障态(AQL 页常驻提示、导出已阻断)，不计入。
+ */
+export function appUnpersistedStateLabels(): string[] {
+  const labels: string[] = [];
+  if (aqlPersistenceDirty && !aqlStateCorrupt) labels.push('AQL 责任账本');
+  if (prefsPersistenceDirty && !prefsPersistenceSuspended) labels.push('界面与分析参数');
+  return labels;
+}
 
 export function resetUiPreferences(): void {
   useApp.setState({
     chartStyle: '经典', showGrid: true, projectName: '质检项目 2026-Q2',
     lsl: 24.9, usl: 25.1, tgt: 25, lslOn: true, uslOn: true, capabilityBins: 13,
+    capabilityWarningAcknowledgement: null,
     gageUseReal: true, gageValueName: null, gagePartName: null, gageOperatorName: null,
     gageGaugeName: '', gageReportBy: '', gageStudyDate: '', gageNotes: '',
     gageTolMode: 'auto', gageTolValue: null, gageStandard: 'factory',
-    gageBatchCols: null, gageTolByCol: {},
+    gageBatchCols: null, gageTolByCol: emptyStringKeyedMap(),
     spcRules: { ...DEFAULT_SPC_RULES }, spcRuleK: { ...DEFAULT_RULE_K },
     spcDataLayout: 'auto', spcValueCol: null, spcSubgroupCol: null, spcStageCol: null,
     spcSigmaMethod: 'classic', spcShowZones: true,
@@ -890,10 +1169,13 @@ export function resolveGageTolerance(
 
 export function clearAqlBusinessState(): void {
   aqlStateCorrupt = false;
+  aqlStateQuarantined = false;
+  prefsEmbeddedAqlHold = null;
   aqlPersistenceDirty = false;
   useApp.setState({
     aqlLot: 120, aqlLevel: 'II', aqlAQL: 1, aqlRegime: 'percent', aqlMethod: 'gb', aqlAcMethod: 'gb',
     aqlSwitch: freshSwitchStatus(),
+    aqlLedgerFault: null,
   });
   // setState 的订阅会先写入干净空账本；“清业务数据”契约要求最终连该键一起移除。
   try { localStorage.removeItem(AQL_STATE_STORAGE_KEY); } catch { /* 忽略 */ }

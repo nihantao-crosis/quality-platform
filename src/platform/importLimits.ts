@@ -3,6 +3,9 @@
  * QPROJ 可包含多个数据集与快照，因此保留更高的 64 MB 上限。
  */
 export const MAX_TEXT_DATA_IMPORT_BYTES = 20 * 1024 * 1024;
+/** 剪贴板先做 UTF-16 字符数快检，再计算 UTF-8；避免把超大字符串写入 React state。 */
+export const MAX_CLIPBOARD_IMPORT_CHARS = 20_000_000;
+export { MAX_IMPORT_DATA_ROWS } from '../core/csv';
 export const MAX_QPROJ_IMPORT_BYTES = 64 * 1024 * 1024;
 const UTF8_BOM_BYTES = 3;
 
@@ -64,5 +67,16 @@ export function assertTextImportSize(fileName: string, byteLength: number): void
   const limit = textImportLimit(fileName);
   if (byteLength > limit.bytes) {
     throw new Error(`${limit.label}超过 ${limit.bytes / 1024 / 1024} MB 导入上限`);
+  }
+}
+
+/** 弹窗粘贴与工作表 Ctrl/Cmd+V 共用同一入口，且必须在解析/写 React state 前调用。 */
+export function assertClipboardImportText(text: string): void {
+  if (text.length > MAX_CLIPBOARD_IMPORT_CHARS) {
+    throw new Error(`剪贴板文本超过 ${MAX_CLIPBOARD_IMPORT_CHARS.toLocaleString()} 字符上限`);
+  }
+  const bytes = utf8ByteLength(text);
+  if (bytes > MAX_TEXT_DATA_IMPORT_BYTES) {
+    throw new Error(`剪贴板文本 UTF-8 大小超过 ${MAX_TEXT_DATA_IMPORT_BYTES / 1024 / 1024} MB 导入上限`);
   }
 }

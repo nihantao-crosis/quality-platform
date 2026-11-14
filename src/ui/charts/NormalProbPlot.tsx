@@ -3,10 +3,17 @@
  * 数据落在直线附近 → 正态假设成立。
  */
 import { memo, Fragment } from 'react';
-import { nf, probPlotPoints, mean, stdev, invNorm, decimateUniform, arrMin, arrMax } from '../../core';
+import { probPlotPoints, mean, stdev, invNorm, decimateUniform, arrMin, arrMax } from '../../core';
 import type { ChartTokens } from '../tokens';
-import { niceTicks, tickDecimals } from '../tokens';
 import { Svg, Ln, Txt } from './primitives';
+import {
+  coordinateDomain,
+  coordinateTicks,
+  createPowerOfTwoAxis,
+  niceCoordinateTicks,
+  projectCoordinate,
+  type PowerOfTwoAxis,
+} from './axisScale';
 
 const PCT_TICKS = [1, 5, 20, 50, 80, 95, 99];
 const MAX_RENDER_PTS = 800;
@@ -14,6 +21,34 @@ const MAX_RENDER_PTS = 800;
 export interface NumericAxisScale {
   domain: readonly [number, number];
   ticks: readonly number[];
+}
+
+function residualCoordinateScale(data: readonly number[], axis: PowerOfTwoAxis): NumericAxisScale {
+  const coordinates = data.filter(Number.isFinite).map(axis.coordinate);
+  if (coordinates.length === 0) return { domain: [-1, 1], ticks: [-1, 0, 1] };
+  let lo = arrMin(coordinates);
+  let hi = arrMax(coordinates);
+  if (!(hi > lo)) {
+    [lo, hi] = coordinateDomain(axis, coordinates, {
+      padding: 0,
+      constantHalf: 1,
+      constantRelative: 0.1,
+      extremeConstantRelative: 0.1,
+    });
+  }
+  const targetBins = Math.max(5, Math.min(15, Math.ceil(Math.sqrt(coordinates.length)) + 2));
+  const step0 = (hi - lo) / targetBins;
+  const mag = Math.pow(10, Math.floor(Math.log10(step0 || 1)));
+  const norm = step0 / mag;
+  const binWidth = (norm >= 5 ? 10 : norm >= 2.5 ? 5 : norm >= 1.5 ? 2 : 1) * mag;
+  let axisLo = Math.floor(lo / binWidth) * binWidth;
+  let axisHi = Math.ceil(hi / binWidth - 1e-9) * binWidth;
+  if (!(axisHi > axisLo)) axisHi = axisLo + binWidth;
+  // Floating addition can produce -0 or a tiny tail; normalise only axis values.
+  axisLo = Math.abs(axisLo) < binWidth * 1e-12 ? 0 : axisLo;
+  axisHi = Math.abs(axisHi) < binWidth * 1e-12 ? 0 : axisHi;
+  const domain: readonly [number, number] = [axisLo, axisHi];
+  return { domain, ticks: niceCoordinateTicks(axis, domain, 6).map((tick) => tick.coordinate) };
 }
 
 /**
@@ -24,25 +59,11 @@ export interface NumericAxisScale {
 export function residualAxisScale(data: readonly number[]): NumericAxisScale {
   const finite = data.filter(Number.isFinite);
   if (finite.length === 0) return { domain: [-1, 1], ticks: [-1, 0, 1] };
-  let lo = arrMin(finite);
-  let hi = arrMax(finite);
-  if (!(hi > lo)) {
-    const half = Math.max(1, Math.abs(lo) * 0.1);
-    lo -= half;
-    hi += half;
-  }
-  const targetBins = Math.max(5, Math.min(15, Math.ceil(Math.sqrt(finite.length)) + 2));
-  const step0 = (hi - lo) / targetBins;
-  const mag = Math.pow(10, Math.floor(Math.log10(step0 || 1)));
-  const norm = step0 / mag;
-  const binWidth = (norm >= 5 ? 10 : norm >= 2.5 ? 5 : norm >= 1.5 ? 2 : 1) * mag;
-  let axisLo = Math.floor(lo / binWidth) * binWidth;
-  let axisHi = Math.ceil(hi / binWidth - 1e-9) * binWidth;
-  if (!(axisHi > axisLo)) axisHi = axisLo + binWidth;
-  // 浮点连加可能产生 -0 或极小尾数，只在轴值层做归一化。
-  axisLo = Math.abs(axisLo) < binWidth * 1e-12 ? 0 : axisLo;
-  axisHi = Math.abs(axisHi) < binWidth * 1e-12 ? 0 : axisHi;
-  return { domain: [axisLo, axisHi], ticks: niceTicks(axisLo, axisHi, 6) };
+  const axis = createPowerOfTwoAxis(finite);
+  const coordinateScale = residualCoordinateScale(finite, axis);
+  const restoredDomain = coordinateScale.domain.map(axis.restore) as [number, number];
+  const restoredTicks = coordinateTicks(axis, coordinateScale.ticks).map((tick) => tick.value);
+  return { domain: restoredDomain, ticks: restoredTicks };
 }
 
 interface NormalProbPlotProps {
@@ -65,27 +86,45 @@ function NormalProbPlotImpl({ T, data, h, xLabel, xDomain, xTicks }: NormalProbP
   const finiteData = data.filter(Number.isFinite);
   if (finiteData.length === 0) {
     return (
-      <Svg w={W} h={H}>
+      <Svg w={W} h={H} label="正态概率图">
         <rect x={0} y={0} width={W} height={H} fill={T.bg} />
         <Txt x={W / 2} y={H / 2} s="无有效数据，无法绘制正态概率图" fill={T.axis} size={12} anchor="middle" />
       </Svg>
     );
   }
-  const pts = probPlotPoints(finiteData);
-  const mu = mean(finiteData);
-  const rawSd = finiteData.length > 1 ? stdev(finiteData, true) : 0;
+  // Values, domain, padding, ticks and point projection all share one power-of-two
+  // coordinate.  For ordinary input the scale is exactly 1, preserving the old path.
+  const axis = createPowerOfTwoAxis([
+    ...finiteData,
+    ...(xDomain ?? []),
+    ...(xTicks ?? []),
+  ]);
+  const coordinateData = finiteData.map(axis.coordinate);
+  const pts = probPlotPoints(coordinateData);
+  const mu = mean(coordinateData);
+  const rawSd = coordinateData.length > 1 ? stdev(coordinateData, true) : 0;
   const sd = Number.isFinite(rawSd) ? rawSd : 0;
   const zmax = Math.max(2.6, Math.abs(pts[0].z), Math.abs(pts[pts.length - 1].z)) * 1.08;
-  const fallbackScale = residualAxisScale(finiteData);
+  const fallbackScale = residualCoordinateScale(finiteData, axis);
   const suppliedDomainValid = xDomain != null
     && Number.isFinite(xDomain[0]) && Number.isFinite(xDomain[1]) && xDomain[1] > xDomain[0];
-  const [xlo, xhi] = suppliedDomainValid ? xDomain : fallbackScale.domain;
-  const axisTicks = (xTicks ?? fallbackScale.ticks)
-    .filter((value) => Number.isFinite(value) && value >= xlo && value <= xhi);
-  const X = (v: number) => m.l + ((v - xlo) / (xhi - xlo)) * pw;
+  const suppliedDomain = suppliedDomainValid
+    ? [axis.coordinate(xDomain[0]), axis.coordinate(xDomain[1])] as const
+    : null;
+  const domain = suppliedDomain != null && suppliedDomain[1] > suppliedDomain[0]
+    ? suppliedDomain
+    : fallbackScale.domain;
+  const [xlo, xhi] = domain;
+  const suppliedTickCoordinates = xTicks?.map(axis.coordinate) ?? fallbackScale.ticks;
+  const preparedTicks = coordinateTicks(
+    axis,
+    suppliedTickCoordinates.filter((value) => Number.isFinite(value) && value >= xlo && value <= xhi),
+  );
+  const axisTicks = preparedTicks.length > 0 ? preparedTicks : niceCoordinateTicks(axis, domain, 6);
+  const X = (v: number) => projectCoordinate(v, domain, m.l, pw);
   const Y = (z: number) => m.t + (1 - (z + zmax) / (2 * zmax)) * ph;
   return (
-    <Svg w={W} h={H}>
+    <Svg w={W} h={H} label="正态概率图">
       <rect x={0} y={0} width={W} height={H} fill={T.bg} />
       {PCT_TICKS.map((p) => {
         const z = invNorm(p / 100);
@@ -96,13 +135,9 @@ function NormalProbPlotImpl({ T, data, h, xLabel, xDomain, xTicks }: NormalProbP
           </Fragment>
         );
       })}
-      {(() => {
-        const ticks = axisTicks.length > 0 ? axisTicks : niceTicks(xlo, xhi, 6);
-        const xDp = tickDecimals([...ticks]);
-        return ticks.map((v) => (
-          <Txt key={'x' + v} x={X(v)} y={H - 24} s={nf(v, xDp)} fill={T.axis} size={10} anchor="middle" />
-        ));
-      })()}
+      {axisTicks.map((tick, index) => (
+        <Txt key={'x' + index} x={X(tick.coordinate)} y={H - 24} s={tick.label} fill={T.axis} size={10} anchor="middle" />
+      ))}
       {/* 拟合直线 x = μ + σz,裁剪到 x 域内(σ=0 时退化为竖直参考,跳过) */}
       {sd > 0 && (() => {
         const x1 = Math.max(xlo, mu - zmax * sd);

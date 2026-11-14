@@ -69,14 +69,18 @@ describe('列操作', () => {
     m = useData.getState().model;
     expect(m.n).toBe(1);
   });
-  it('插入数值列（末列复制），数值列数不再被 SPC 子组上限误限制', () => {
+  it('插入数值列(v1.43.0:整列待录入占位,不再复制末列冒充实测),列数不被 SPC 子组上限误限制', () => {
     useData.getState().insertColumn();
     for (let i = 0; i < 7; i++) useData.getState().insertColumn();
     const m = useData.getState().model;
     expect(m.n).toBe(11);
     expect(m.hasSubgroups).toBe(false);
     expect(m.colNames[3]).toBe('测量4');
-    expect(m.subs[0].vals.slice(0, 4)).toEqual([1, 2, 3, 3]);
+    // 新列值为占位 0 且整列进入 pendingCells(待录入),σ 组内不被伪实测值污染
+    expect(m.subs[0].vals.slice(0, 4)).toEqual([1, 2, 3, 0]);
+    const pending = useData.getState().pendingCells;
+    expect(pending.some((cell) => cell.col === 3 && cell.row === 0)).toBe(true);
+    expect(pending.filter((cell) => cell.col === 3)).toHaveLength(m.k);
   });
   it('列操作可撤销(colNames 一并恢复)', () => {
     useData.getState().renameColumn(1, 'X');

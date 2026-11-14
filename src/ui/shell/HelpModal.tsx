@@ -27,9 +27,9 @@ const TOPICS: Topic[] = [
     key: 'capability', title: '过程能力',
     lines: [
       'Cp=(USL−LSL)/6σ组内;Cpk=min(CPU,CPL);Pp/Ppk 用 σ整体。',
-      'Cpm=(USL−LSL)/6τ,τ²=Σ(x−T)²/n(惩罚偏离目标)。',
+      'Cpm=min(USL−T, T−LSL)/3τ,τ²=Σ(x−T)²/n(惩罚偏离目标;目标居中时等于 (USL−LSL)/6τ)。',
       '判定:Cpk ≥ 1.33 充足;1.0–1.33 临界;< 1.0 不足。',
-      '单侧规格:仅有一侧限值时 Cpk 取可用侧,Cp/Pp/Cpm 不适用。',
+      '单侧规格:仅有一侧限值时 Cpk 取可用侧,Cp/Pp 不适用;Cpm 用启用侧距离 (USL−T 或 T−LSL)/3τ。',
       'Z.bench = Φ⁻¹(1−PPM整体/10⁶);西格玛水平 = Z.bench + 1.5。',
       '前提:数据近似正态——先看 Anderson-Darling 检验与概率图;非正态用 Box-Cox。',
     ],
@@ -41,7 +41,7 @@ const TOPICS: Topic[] = [
       '单操作员研究:操作员列可为同一人或选「无(单操作员)」,按单因子退化模型计算,GRR=重复性,不估计再现性;图形报告为 4 联(多人 6 联)。',
       '过程公差:双侧宽度 %公差=6×SD/宽度;仅上限/下限按 Minitab 单边口径 %公差=3×SD/|限值−总均值|;「联动规格限」自动取全局 LSL/USL。',
       '判定标准可选:工厂标准(主要 %研究变异 与 次要 %公差 均 ≤10% 理想、≤20% 可接受,取较差);AIAG(GRR<10% 可接受,10–30% 临界,>30% 不可接受)。',
-      '可区分的类别数 ndc=⌊√(2σ²部件/σ²GRR)⌋(下限 1),AIAG 建议 ≥5。',
+      '可区分的类别数 ndc=⌊1.41×σ部件/σGRR⌋(AIAG/Minitab 公布常数 1.41,非精确 √2;下限 1),AIAG 建议 ≥5。',
       '导入数据需含 1 个数值测量列与 部件 类别列(多人另需操作员列),类别可使用文本编码或数值 ID;每个组合须有相同且 ≥2 次重复。并排多案例工作簿导入时可直接选择数据块。',
     ],
   },
@@ -73,15 +73,17 @@ const TOPICS: Topic[] = [
       'OC 曲线:百分体系 Pa(p) = BinomCDF(Ac, n, p);每百单位体系 Pa(λ) = PoissonCDF(Ac, n·λ/100),横轴为每百单位不合格数 λ。RQL 为 Pa = 10% 的批质量(单位随体系:% 或 λ)。',
       '转移规则按第 9.3/9.4 条执行：2/5 批不接收转加严；转移得分≥30+生产稳定+负责部门同意才放宽；加严累计 5 批不接收时暂停抽样检验。AQL 15 的严一档是 10(跨体系边界,得分规则只比较计数 d 与严一档 Ac)。',
       '生产方风险 α = 1 − Pa(AQL);使用方风险 β = Pa(RQL) = 10%。',
+      '责任账本(批次与人工状态转移记录)具备记录链一致性核对:逐条重放记录链并与当前检验状态、转移得分交叉核对,不一致按损坏隔离并提示;这不是防篡改签名,整条伪造但前后自洽的记录无法识别,取证级要求请对导出的账本另行签名/归档。',
     ],
   },
   {
     key: 'data', title: '数据操作',
     lines: [
       '导入:CSV/剪贴板/.xlsx,保留数值列与文本分组列;SPC 页可指定行式/列式子组、单值或测量值+子组 ID 长表。',
+      '长表子组 ID(Minitab 口径,v1.43 起):按行序相邻同值为一组,ID 值一变即开新子组;同一 ID 在不相邻的行再次出现视为不同子组,不合并(v1.42 及更早会合并)。每天从 1 重新编号的子组号请先按时间排序或改用「日期-子组」唯一 ID。ID 从不相邻重复(每行一个 ID)时自动识别改按单值 I-MR;有相邻重复但各段大小不等或 n 不在 2–10 时,自动识别与「堆叠」都报「组内样本量不一致」/n 越界(不回落 I-MR),按报错里的排序/唯一 ID 建议整理后重试。',
       '手工录入:工作表双击单元格编辑;编辑演示集自动另存「副本」。',
       '堆叠列:多测量列 → 单列+「来源列」,可直接做 ANOVA;转置:行列互换。',
-      '撤销/重做:Ctrl+Z / Ctrl+Y(20 层);全部数据本地持久化,重启自动恢复。',
+      '撤销/重做:Ctrl+Z / Ctrl+Y,小表最多 20 步;大表按内存预算保留,「编辑」菜单显示实际可撤销步数。项目备份生成期间的撤销/重做会被拒绝,请稍后重试。全部数据本地持久化,重启自动恢复。',
       '查找/替换(Ctrl+F):按数值批量替换测量单元格,可限定列,可撤销。',
     ],
   },
@@ -114,6 +116,7 @@ const TOPICS: Topic[] = [
       '超大数据集(十万行级)超出浏览器存储时自动只存库,重启自动恢复。',
       '从「最近列表」移除的数据集仍可在库中找回;删除仅经弹窗显式操作。',
       'Web/便携版无此功能,数据经「最近数据集」与 .qproj 项目文件持久化。',
+      '桌面端关窗(含 Cmd+Q / Alt+F4)时若仍有未持久化数据,会先弹原生确认;本机数据集库文件损坏时自动保全为 datasets.db.corrupt-<时间戳> 并以空库继续,原文件保留备查。',
     ],
   },
   {
@@ -121,7 +124,7 @@ const TOPICS: Topic[] = [
     lines: [
       '统计 → 描述性统计/图形化摘要:直方图+正态曲线、箱线图与完整统计表一屏呈现。',
       '统计量:N/均值/SE/标准差/方差/CV/偏度/峰度/五数概括/极差/IQR/总和。',
-      '95% 置信区间:均值(t 分布)、中位数(次序统计)、标准差(χ² 近似)。',
+      '95% 置信区间:均值(t 分布)、中位数(n≤1000 用次序统计量二项精确秩,n>1000 用带连续性校正的保守正态近似;n<6 时退回全距,实际覆盖不足 95%)、标准差(χ² 分位)。',
       'Anderson-Darling 正态检验:P ≥ 0.05 可用正态方法;偏态建议 Box-Cox。',
       '任何深入分析前先看图形化摘要,是了解数据分布最稳妥的第一步。',
     ],
@@ -143,13 +146,13 @@ export function HelpModal({ onClose }: { onClose: () => void }) {
   const cur = TOPICS.find((t) => t.key === topic)!;
   const goTo = useApp((s) => s.goTo);
   return (
-    <div style={{ position: 'relative', width: 720, background: '#fff', borderRadius: 10, boxShadow: '0 24px 60px rgba(10,20,40,0.32)', overflow: 'hidden' }}>
+    <div className="modal-panel help-modal" style={{ position: 'relative', width: 720, maxWidth: 'calc(100vw - 24px)', maxHeight: 'calc(100dvh - 24px)', display: 'flex', flexDirection: 'column', background: '#fff', borderRadius: 10, boxShadow: '0 24px 60px rgba(10,20,40,0.32)', overflow: 'hidden' }}>
       <div style={{ display: 'flex', alignItems: 'center', padding: '16px 20px', borderBottom: '1px solid #edf0f3' }}>
         <div style={{ fontSize: 15, fontWeight: 600, color: '#26303c' }}>帮助中心 · 统计指南</div>
         <button type="button" aria-label="关闭帮助中心" onClick={onClose} style={{ marginLeft: 'auto', padding: 0, border: 0, background: 'transparent', cursor: 'pointer', color: '#9aa2ad', fontSize: 17 }}>✕</button>
       </div>
-      <div style={{ display: 'flex', minHeight: 340 }}>
-        <div style={{ width: 168, borderRight: '1px solid #edf0f3', padding: '10px 0', background: '#fbfcfd' }}>
+      <div className="help-modal-body" style={{ display: 'flex', minHeight: 0, flex: 1, overflow: 'hidden' }}>
+        <div className="help-modal-topics" style={{ width: 168, flex: 'none', borderRight: '1px solid #edf0f3', padding: '10px 0', background: '#fbfcfd', overflowY: 'auto' }}>
           {TOPICS.map((t) => (
             <button type="button"
               key={t.key}
@@ -167,7 +170,7 @@ export function HelpModal({ onClose }: { onClose: () => void }) {
             </button>
           ))}
         </div>
-        <div style={{ flex: 1, padding: '16px 22px' }}>
+        <div className="help-modal-content" style={{ flex: 1, minWidth: 0, padding: '16px 22px', overflowY: 'auto' }}>
           <div style={{ fontWeight: 700, color: '#26303c', marginBottom: 10 }}>{cur.title}</div>
           {cur.lines.map((l, i) => (
             <div key={i} style={{ display: 'flex', gap: 8, padding: '5px 0', fontSize: 12.5, color: '#3a4350', lineHeight: 1.6 }}>

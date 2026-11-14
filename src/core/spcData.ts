@@ -103,19 +103,92 @@ function grouping(values: Array<number | string>) {
   return { order, rows, sizes };
 }
 
+/**
+ * 堆叠格式的子组划分(CORE-01,Minitab 口径):子组 ID 列的值**一变就开新子组**。
+ * 同一 ID 在不相邻位置再次出现(每天/每班从 1 重新编号、轮换的操作员/班次)属于不同子组,
+ * 不得按值合并——那会把不同时段的测量揉进同一子组,撑大 R̄/组内 σ、掩盖真实漂移。
+ * 与 stages.splitStages 的连续段语义一致。label 可重复(图横轴照原 ID 显示)。
+ */
+function runGrouping(values: Array<number | string>) {
+  const labels: string[] = [];
+  const segments: number[][] = [];
+  let previous: string | null = null;
+  values.forEach((raw, i) => {
+    const key = labelOf(raw);
+    if (key !== previous || segments.length === 0) {
+      labels.push(key);
+      segments.push([]);
+      previous = key;
+    }
+    segments[segments.length - 1].push(i);
+  });
+  const sizes = segments.map((segment) => segment.length);
+  const distinct = new Set(labels).size;
+  return { labels, segments, sizes, recurring: distinct < labels.length };
+}
+
+function sizeList(sizes: number[]): string {
+  return sizes.length > 12 ? `${sizes.slice(0, 12).join('、')}…共 ${sizes.length} 段` : sizes.join('、');
+}
+
 function repeatedGroupShape(role: RoleColumn): { valid: boolean; repeated: boolean; reason?: string } {
-  const g = grouping(role.values);
-  const repeated = g.order.length < role.values.length;
-  if (!repeated) return { valid: false, repeated: false };
-  if (g.order.length < 2) return { valid: false, repeated: true, reason: `子组列「${role.name}」只有 1 个子组` };
+  const g = runGrouping(role.values);
+  const repeated = g.segments.length < role.values.length;
+  if (!repeated) {
+    // 值有重复但从不相邻:按旧口径(v1.42 及更早)会被合并成子组,现按 Minitab 口径不成组。
+    return g.recurring
+      ? {
+        valid: false, repeated: false,
+        reason: `子组列「${role.name}」中相同 ID 从不相邻出现；按 Minitab 口径（ID 值一变即开新子组），每行各自成组，无法组成 n≥2 的堆叠子组。请先按时间顺序把同一子组的测量排在一起，或改用唯一子组 ID（如「日期-子组」）。`,
+      }
+      : { valid: false, repeated: false };
+  }
+  if (g.segments.length < 2) return { valid: false, repeated: true, reason: `子组列「${role.name}」只有 1 个子组` };
+  // fix2609i G14:段长不等/n 越界时给出可操作的处理办法。同一 ID 不相邻再现(每天重新编号、
+  // 行序被打乱、轮换的操作员/班次)是 v1.43 口径变更后最常见的成因,单独给排序/唯一 ID 建议。
+  const recurringRemedy = g.recurring
+    ? `。该列中同一 ID 在不相邻的行再次出现，被切成了多个子组：若同一 ID 确属同一子组，请先按采集时间/子组排序，让同一子组的测量排在相邻行；若是每天/每班重新编号的子组号，请改用全表唯一的子组 ID（如「日期-子组」）；若该列不是子组 ID（如操作员、班次），请改选「单值列：I-MR」布局或指定真正的子组列`
+    : null;
   if (new Set(g.sizes).size !== 1) {
-    return { valid: false, repeated: true, reason: `子组列「${role.name}」的组内样本量不一致（${g.sizes.join('、')}）；X̄-R/X̄-S 需等大小子组` };
+    const remedy = recurringRemedy ?? '。请核对各子组的测量个数是否漏测/多测，或改选「单值列：I-MR」布局';
+    return { valid: false, repeated: true, reason: `子组列「${role.name}」的组内样本量不一致（${sizeList(g.sizes)}）；X̄-R/X̄-S 需等大小子组（按 Minitab 口径，ID 值一变即开新子组）${remedy}` };
   }
   const n = g.sizes[0];
   if (n < 2 || n > 10) {
-    return { valid: false, repeated: true, reason: `子组列「${role.name}」对应的子组大小 n=${n}，X̄-R/X̄-S 支持 2–10` };
+    const remedy = recurringRemedy ?? '。请改选「单值列：I-MR」布局，或改用每 2–10 个测量一个子组的 ID 列';
+    return { valid: false, repeated: true, reason: `子组列「${role.name}」对应的子组大小 n=${n}，X̄-R/X̄-S 支持 2–10${remedy}` };
   }
   return { valid: true, repeated: true };
+}
+
+/** v1.42 及更早版本的「按值合并」判定:仅用于识别口径变更会影响结果的数据并给出说明。 */
+function legacyHashShapeValid(role: RoleColumn): boolean {
+  const g = grouping(role.values);
+  if (g.order.length >= role.values.length || g.order.length < 2) return false;
+  if (new Set(g.sizes).size !== 1) return false;
+  const n = g.sizes[0];
+  return n >= 2 && n <= 10;
+}
+
+function legacyMergedStackedShape(role: RoleColumn): boolean {
+  return legacyHashShapeValid(role) && runGrouping(role.values).recurring;
+}
+
+/** 复刻旧版 auto 布局会选中的堆叠 ID 列(仅用于口径变更说明,不参与本次分组)。 */
+function legacyAutoIdRole(model: VarModel, textCols: TextColumn[], roles: RoleColumn[], selectedRole: RoleColumn | null): RoleColumn | null {
+  const measurementColumns = spcMeasurementColumnNames(model);
+  if (measurementColumns.length > 10 && model.k >= 2 && model.k <= 10) return null;
+  const strong = roles.filter((r) => r.strongId);
+  const legacyRepeated = roles.filter(legacyHashShapeValid);
+  return selectedRole
+    ?? legacyRepeated.find((role) => role.strongId)
+    ?? strong[0]
+    ?? (measurementColumns.length === 1 ? legacyRepeated[0] : null)
+    ?? (textCols.length === 1 && measurementColumns.length === 1 ? roles.find((r) => r.kind === 'text') ?? null : null);
+}
+
+function subgroupRuleChangeNotice(role: RoleColumn): string {
+  return `口径说明：「${role.name}」中同一 ID 在不相邻的行再次出现。自 v1.43 起按 Minitab 口径「ID 值一变即开新子组」划分子组，不再把不相邻的同名 ID 合并；v1.42 及更早版本对此数据算出的子组、控制限、组内 σ 与 Cp/Cpk 会与现在不同，用旧版本保存的 SPC/能力分析记录回看时按新口径重算。`;
 }
 
 function measurementBase(name: string): string {
@@ -243,9 +316,9 @@ function prepareStacked(
   if (pending > 0) return pendingError(selection, pending);
   const shape = repeatedGroupShape(idRole);
   if (!shape.valid) return makeError(selection, shape.reason ?? `子组列「${idRole.name}」没有重复 ID，无法组成堆叠子组。`);
-  const g = grouping(idRole.values);
+  const g = runGrouping(idRole.values);
   const rawRows = model.subs.map((s) => s.vals);
-  const rows = g.order.map((key) => g.rows.get(key)!.map((i) => rawRows[i][valueIndex]));
+  const rows = g.segments.map((segment) => segment.map((i) => rawRows[i][valueIndex]));
   const n = rows[0].length;
   const out = computeVarModel(model.name, Array.from({ length: n }, (_, i) => `${selection.valueColumn} ${i + 1}`), rows, { isDemo: false });
 
@@ -256,8 +329,7 @@ function prepareStacked(
     if (col.values.length !== rawRows.length || (idRole.kind === 'text' && col.name === idRole.name)) return;
     const values: string[] = [];
     let valid = true;
-    for (const key of g.order) {
-      const idx = g.rows.get(key)!;
+    for (const idx of g.segments) {
       const first = col.values[idx[0]];
       if (idx.some((i) => col.values[i] !== first)) { valid = false; break; }
       values.push(first);
@@ -271,8 +343,7 @@ function prepareStacked(
     if (isDoeOutputColumn(name)) return;
     const values: string[] = [];
     let valid = true;
-    for (const key of g.order) {
-      const idx = g.rows.get(key)!;
+    for (const idx of g.segments) {
       const first = rawRows[idx[0]][numericIndex];
       if (idx.some((i) => rawRows[i][numericIndex] !== first)) { valid = false; break; }
       values.push(labelOf(first));
@@ -283,8 +354,8 @@ function prepareStacked(
   return {
     model: out, requestedLayout: selection.layout, layout: 'stacked', layoutLabel: '堆叠格式（测量值 + 子组 ID）',
     variableName: selection.valueColumn!, valueColumn: selection.valueColumn, subgroupColumn: idRole.ref,
-    subgroupLabels: g.order, textCols: groupedText, xAxisLabel: `子组（${idRole.name}）`,
-    note: `「${selection.valueColumn}」作为测量值；「${idRole.name}」作为子组 ID，共 ${rows.length} 个子组 × ${n} 次测量`,
+    subgroupLabels: g.labels, textCols: groupedText, xAxisLabel: `子组（${idRole.name}）`,
+    note: `「${selection.valueColumn}」作为测量值；「${idRole.name}」作为子组 ID（值一变即开新子组），共 ${rows.length} 个子组 × ${n} 次测量`,
   };
 }
 
@@ -349,6 +420,24 @@ function prepareIndividuals(
 
 /** 为当前工作表与用户角色选择构造 SPC 分析数据。 */
 export function prepareSpcData(model: VarModel, textCols: TextColumn[], selection: SpcRoleSelection): SpcPreparedData {
+  const prepared = prepareSpcDataInner(model, textCols, selection);
+  if (selection.layout !== 'auto' && selection.layout !== 'stacked') return prepared;
+  // CORE-01 口径变更说明:只要本次可能被当作堆叠子组 ID 的列在旧口径下会「按值合并」,
+  // 就在角色说明(或错误)里写明,旧版本保存的记录回看时结果会变。
+  const roles = roleColumns(model, textCols);
+  const selectedRole = resolveRole(roles, selection.subgroupColumn);
+  const legacyRole = selection.layout === 'stacked'
+    ? selectedRole ?? resolveRole(roles, prepared.subgroupColumn)
+    : legacyAutoIdRole(model, textCols, roles, selectedRole);
+  const affected = legacyRole && legacyMergedStackedShape(legacyRole) ? legacyRole : null;
+  if (!affected) return prepared;
+  const notice = subgroupRuleChangeNotice(affected);
+  return prepared.error
+    ? { ...prepared, error: `${prepared.error}（${notice}）` }
+    : { ...prepared, note: prepared.note ? `${prepared.note}；${notice}` : notice };
+}
+
+function prepareSpcDataInner(model: VarModel, textCols: TextColumn[], selection: SpcRoleSelection): SpcPreparedData {
   const roles = roleColumns(model, textCols);
   const selectedRole = resolveRole(roles, selection.subgroupColumn);
   const strong = roles.filter((r) => r.strongId);

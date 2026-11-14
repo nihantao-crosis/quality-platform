@@ -37,10 +37,10 @@ describe('描述性统计 · 1..10', () => {
     expect(d.variance).toBeCloseTo(9.16667, 4);
     expect(d.seMean).toBeCloseTo(3.02765 / Math.sqrt(10), 4);
   });
-  it('四分位与 IQR(线性插值)', () => {
-    expect(d.q1).toBeCloseTo(3.25, 10);
-    expect(d.q3).toBeCloseTo(7.75, 10);
-    expect(d.iqr).toBeCloseTo(4.5, 10);
+  it('四分位与 IQR(Minitab (n+1)p 口径,双审 P1 整改)', () => {
+    expect(d.q1).toBeCloseTo(2.75, 10);
+    expect(d.q3).toBeCloseTo(8.25, 10);
+    expect(d.iqr).toBeCloseTo(5.5, 10);
   });
   it('对称数据偏度≈0', () => {
     expect(Math.abs(d.skewness)).toBeLessThan(1e-9);

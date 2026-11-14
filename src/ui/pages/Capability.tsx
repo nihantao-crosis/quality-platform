@@ -1,40 +1,117 @@
 /** 过程能力分析 ★深度实现 — 可编辑规格限实时重算 + 直方图 + PPM 性能表。 */
 import type React from 'react';
-import { useState } from 'react';
+import { memo, useMemo } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { useApp } from '../../store/appStore';
-import { useData, suggestedSpec, rememberSpecForCapabilityMeasurement, resolveCapabilityMeasurementData, syncSpecForCapabilityMeasurement, capabilitySpecKey } from '../../store/dataStore';
-import { nf, fmtCap, capabilityInputError, computeCapability, andersonDarling, bestLambda, transformWithSpec, stdev, countCapabilityViolations, spcMeasurementColumnNames } from '../../core';
+import { suggestedSpec, rememberSpecForCapabilityMeasurement, syncSpecForCapabilityMeasurement, capabilitySpecKey, capabilitySubgroupSemantics } from '../../store/dataStore';
+import {
+  nf, fmtCap, capabilityInputError, capabilitySpecDistanceWarning, capabilityWarningFingerprint,
+  computeCapability, andersonDarling, bestLambda, transformWithSpec, stdev, countCapabilityViolations, withSigmaMethod,
+  spcMeasurementColumnNames, spcChartFamilyFor, capabilityStabilityCaliber, spcStabilityViewFromRoles,
+} from '../../core';
 import { ReportCard } from '../ReportCard';
 import { capabilityReport } from '../reportData';
-import type { ChartTokens } from '../tokens';
+import { sameChartTokens, type ChartTokens } from '../tokens';
+import { useCapabilityPrepared } from '../useCapabilityPrepared';
+import { CAPABILITY_TERMS, reportNum, specLimitText } from '../../platform/reportLabels';
+import { StrictNumberInput } from '../StrictNumberInput';
 import { Card, CardHeader, KvRows, numInput, Badge } from '../common';
 import { Histogram } from '../charts/Histogram';
 import { NormalProbPlot } from '../charts/NormalProbPlot';
 
-/** 子组大小输入:文本态 + 失焦/回车提交(受控即时校验会让 "10" 的首键 '1' 被拒,永远打不出两位数)。 */
+/** 子组大小输入:失焦/回车提交(受控即时校验会让 "10" 的首键 '1' 被拒,永远打不出两位数)。
+ * fix2609l G22a:type=text + parseStrictInteger(2–10)——此前 Math.round 把「3.6」静默改成 4、
+ * 非法值不声不响回弹;现在非法时保留原串并就地显示原因,子组大小不变。 */
 function SubgroupSizeInput({ value, onCommit }: { value: number; onCommit: (z: number) => void }) {
-  const [text, setText] = useState(String(value));
-  const commit = () => {
-    const v = Math.round(Number(text.trim()));
-    if (text.trim() !== '' && Number.isFinite(v) && v >= 2 && v <= 10) onCommit(v);
-    setText(String(useApp.getState().capSubgroupSize));
-  };
   return (
-    <input type="number" min={2} max={10} step={1} value={text} className="mono" aria-label="子组大小"
-      onChange={(e) => setText(e.target.value)}
-      onBlur={commit}
-      onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+    <StrictNumberInput
+      label="子组大小" value={value} commitOn="blur" integer={{ min: 2, max: 10 }} className="mono"
+      onCommit={(z) => { if (z != null) onCommit(z); }}
       style={{ width: 58, padding: '4px 8px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12.5 }} />
   );
 }
 
-export function Capability({ T }: { T: ChartTokens }) {
-  const { lsl, usl, tgt, lslOn, uslOn, toggleSide, setSpec: setSpecRaw, spcRules, spcRuleK, goTo, capabilityBins: bins, setCapabilityBins: setBins,
-    capSubgroupMode, capSubgroupSize, capValueCol, capSubgroupIdCol, setCapabilitySubgroup, showToast } = useApp();
-  const rawModel = useData((s) => s.model);
-  const textCols = useData((s) => s.textCols);
-  const prepared = resolveCapabilityMeasurementData(rawModel, textCols);
+function CapabilityView({ T }: { T: ChartTokens }) {
+  // fix2609i G14:按字段订阅(useShallow),toast/openMenu/varOpen 等纯 UI 字段不触发本页重渲染;
+  // 文件末尾 React.memo 再挡住 App 父级因这些字段重渲染时的连带重算(与 Dashboard/Spc 同法)。
+  // 这里逐一列出本页实际读取的 store 字段;resolver 读取的角色字段由 useCapabilityPrepared 订阅。
+  const {
+    lsl, usl, tgt, lslOn, uslOn, toggleSide, setSpec: setSpecRaw, spcRules, spcRuleK, spcType, spcSigmaMethod, spcStageCol, goTo,
+    capabilityBins: bins, setCapabilityBins: setBins, capSubgroupMode, capSubgroupSize, capValueCol, capSubgroupIdCol,
+    setCapabilitySubgroup, showToast, capabilityWarningAcknowledgement, acknowledgeCapabilityWarning,
+  } = useApp(useShallow((s) => ({
+    lsl: s.lsl, usl: s.usl, tgt: s.tgt, lslOn: s.lslOn, uslOn: s.uslOn, toggleSide: s.toggleSide, setSpec: s.setSpec,
+    spcRules: s.spcRules, spcRuleK: s.spcRuleK, spcType: s.spcType, spcSigmaMethod: s.spcSigmaMethod, spcStageCol: s.spcStageCol,
+    goTo: s.goTo, capabilityBins: s.capabilityBins, setCapabilityBins: s.setCapabilityBins,
+    capSubgroupMode: s.capSubgroupMode, capSubgroupSize: s.capSubgroupSize, capValueCol: s.capValueCol, capSubgroupIdCol: s.capSubgroupIdCol,
+    setCapabilitySubgroup: s.setCapabilitySubgroup, showToast: s.showToast,
+    capabilityWarningAcknowledgement: s.capabilityWarningAcknowledgement, acknowledgeCapabilityWarning: s.acknowledgeCapabilityWarning,
+  })));
+  // fix2609i G14:prepared 与壳层/总览共用 useCapabilityPrepared(依赖清单唯一:能力子组口径 +
+  // SPC 数据角色 + pendingCells)。此前本页漏了 spcDataLayout/spcValueCol/spcSubgroupCol/pendingCells,
+  // 「重置界面偏好」等不经 SPC 页的角色写入后页面沿用旧测量列,与状态栏不同源。
+  const { prepared, model: rawModel, textCols, pendingCells, roles } = useCapabilityPrepared();
   const M = prepared.model;
+  // fix2609i G14:O(N) 的输入闸门、确认指纹、能力计算、AD 检验与 Box-Cox 链路整体记忆化,
+  // 只随数据/口径(prepared 已随全部口径字段失效)、规格与确认值变化重算;toast/菜单/组数滑块不触发。
+  // Hooks 必须在下方各提前 return 之前调用,因此按页面状态分支返回结果对象。
+  const analysis = useMemo(() => {
+    if (!M) return null;
+    // 单侧规格：关闭的一侧传 null
+    const spec = { lsl: lslOn ? lsl : null, tgt, usl: uslOn ? usl : null };
+    // 1000σ 是可确认的强警告，不与真正的数学非法输入混在一起。确认字串绑定
+    // 数据集+测量/子组角色+规格+有序观测 hash；任一项变化后旧确认自动失效。
+    const inputError = capabilityInputError(M.all, M.sigmaWithin, spec, { allowDistantSpec: true });
+    if (inputError) return { kind: 'input-error', inputError } as const;
+    const specWarning = capabilitySpecDistanceWarning(M.all, M.sigmaWithin, spec);
+    const warningFingerprint = capabilityWarningFingerprint(
+      capabilitySpecKey(rawModel, textCols) ?? `${rawModel.name}:${prepared.variableName}`,
+      M.all,
+      M.sigmaWithin,
+      spec,
+      capabilitySubgroupSemantics(rawModel, textCols) ?? '',
+    );
+    const warningAcknowledged = specWarning != null && warningFingerprint != null
+      && capabilityWarningAcknowledgement === warningFingerprint;
+    if (specWarning && !warningAcknowledged) return { kind: 'awaiting-ack', specWarning, warningFingerprint } as const;
+    const cap = computeCapability(M.all, M.sigmaWithin, spec, { allowDistantSpec: warningAcknowledged });
+    // 正态性检验 + 非正态时的 Box-Cox 备选（需双侧规格）
+    const ad = M.all.length >= 8 ? andersonDarling(M.all) : null;
+    let boxcox: { lambda: number; ppk: number; adAfter: number } | null = null;
+    if (ad && !ad.normal && lslOn && uslOn) {
+      const bl = bestLambda(M.all);
+      if (!('error' in bl)) {
+        const tr = transformWithSpec(M.all, lsl, usl, bl.lambda);
+        if (!('error' in tr)) {
+          const tSd = stdev(tr.data, true);
+          const tSpec = { lsl: tr.lsl, usl: tr.usl, tgt: (tr.lsl + tr.usl) / 2 };
+          // 变换域也要先过输入闸门:负 λ 会把近零规格映射成巨值,量纲哨兵在变换域触发时
+          // 只应跳过 Box-Cox 补充卡,不能让 computeCapability 抛异常炸掉整页(含规格编辑器)。
+          if (capabilityInputError(tr.data, tSd, tSpec, { allowDistantSpec: warningAcknowledged }) === null) {
+            const tCap = computeCapability(tr.data, tSd, tSpec, { allowDistantSpec: warningAcknowledged });
+            boxcox = { lambda: bl.lambda, ppk: tCap.ppk, adAfter: andersonDarling(tr.data).p };
+          }
+        }
+      }
+    }
+    return { kind: 'ok', specWarning, warningAcknowledged, cap, ad, boxcox } as const;
+  }, [M, rawModel, textCols, prepared, lsl, usl, tgt, lslOn, uslOn, capabilityWarningAcknowledgement]);
+  // 能力结论必须先同时检查位置图与离散图;计数逻辑收敛在 countCapabilityViolations(与保存记录/专项报告共用)。
+  // 能力指标仍使用 M.sigmaWithin（classic R̄/d₂）；只有控制图稳定性跟随用户选定 σ̂。
+  const stability = useMemo(() => {
+    if (!M || analysis?.kind !== 'ok') return null;
+    const capSpcModel = withSigmaMethod(M, spcSigmaMethod);
+    const capabilityFamily = spcChartFamilyFor(capSpcModel, spcType);
+    const spcViol = countCapabilityViolations(capSpcModel, spcRules, spcRuleK, capabilityFamily);
+    // CORE-09/UI-12:能力稳定性有意不分阶段、按子组图评估;SPC 页视图不同(分阶段/I-MR 等)时写明口径。
+    // fix2609k G20:视图/阶段取 SPC 页实际生效口径(与看板/记录/专项报告/Modals 同源)。
+    const { spcViewType, spcStage } = spcStabilityViewFromRoles(rawModel, textCols, {
+      layout: roles.spcDataLayout, valueColumn: roles.spcValueCol, subgroupColumn: roles.spcSubgroupCol, pendingCells,
+    }, spcType, spcStageCol);
+    const stabilityCaliber = capabilityStabilityCaliber({ capabilityFamily, spcViewType, spcStage });
+    return { spcViol, stabilityCaliber };
+  }, [M, analysis, spcSigmaMethod, spcType, spcRules, spcRuleK, spcStageCol, rawModel, textCols, pendingCells,
+    roles.spcDataLayout, roles.spcValueCol, roles.spcSubgroupCol]);
   // 批次716-R2 P0:子组口径(模式/测量列/ID 列)变化 = 测量特性可能变化,规格必须跟随切换,
   // 否则沿用旧量纲规格会产出虚假 Cpk。有该特性的记忆规格用记忆,否则按新口径 μ±4σ 重建议。
   const updateSubgroup = (patch: Parameters<typeof setCapabilitySubgroup>[0]) => {
@@ -81,7 +158,7 @@ export function Capability({ T }: { T: ChartTokens }) {
       {capSubgroupMode === 'const' && (
         <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12.5, color: '#5b6472' }}>
           子组大小
-          <SubgroupSizeInput key={capSubgroupSize} value={capSubgroupSize} onCommit={(z) => updateSubgroup({ capSubgroupSize: z })} />
+          <SubgroupSizeInput value={capSubgroupSize} onCommit={(z) => updateSubgroup({ capSubgroupSize: z })} />
           <span style={{ fontSize: 11, color: '#9aa2ad' }}>(2–10,按行序分组;末尾不足一组不参与)</span>
         </label>
       )}
@@ -143,8 +220,11 @@ export function Capability({ T }: { T: ChartTokens }) {
     { label: '目标 Target', value: tgt, key: 'tgt', on: true },
     { label: 'USL 上限', value: usl, key: 'usl', on: uslOn, side: 'uslOn' },
   ];
+  // fix2609m G23c 尾巴:三个分析分支(输入错误/等待确认/正常)把规格编辑区放在根 div 的不同位置,
+  // 逐键输入途中若前缀触发分支切换(如小 σ 数据打出「2」进入「规格超 1000σ」确认),React 按位置对账会
+  // 卸载重挂输入框——焦点与 StrictNumberInput 的编辑会话(回退快照)一起丢失。固定 key 让三处按 key 对账。
   const specEditor = (
-    <Card style={{ padding: '11px 16px', display: 'flex', alignItems: 'center', gap: 18, flexWrap: 'wrap' }}>
+    <Card key="spec-editor" style={{ padding: '11px 16px', display: 'flex', alignItems: 'center', gap: 18, flexWrap: 'wrap' }}>
       <span style={{ fontSize: 12, color: '#8a929d', fontWeight: 600 }}>规格限 (可编辑，实时重算)</span>
       {inputs.map((i) => (
         <label key={i.key} style={{ display: 'inline-flex', alignItems: 'center', gap: 7, fontSize: 12.5, color: i.on ? '#5b6472' : '#b6bdc6' }}>
@@ -157,22 +237,36 @@ export function Capability({ T }: { T: ChartTokens }) {
             />
           )}
           {i.label}
-          <input
-            type="number"
-            step="0.01"
+          {/* fix2609l G22a:type=text + 严格解析(GAP-8-4 同族)。parseFloat 会把「24.9mm」截成 24.9;
+              严格解析同样拒绝 1e999(超出双精度范围 → Infinity 落盘会让 prefs 被判「损坏」,双审 P2)。
+              非法时保留原串、就地显示原因;终串非法则回退到编辑前的值(fix2609m G23c C1)。
+              fix2609n G24b B3(第 7 批复审 P3):setSpec 每次写入都清空 1000σ 强警告确认,回退若只写回规格,
+              用户已作出的确认会随一次打错字丢失、页面重新要求确认,与「未修改」不符。会话快照连同确认一起取,
+              回退时写回本框的规格(只写本框:其余两框本会话未动,不去覆盖别处可能的写入)并恢复确认——确认串
+              绑定数据/角色/规格指纹,恢复后只在规格与数据都回到快照时才生效。readValue 供回退前核对 store 实时值。 */}
+          <StrictNumberInput
+            label={i.label}
             value={i.value}
             disabled={!i.on}
-            onChange={(e) => {
-              const v = parseFloat(e.target.value);
-              if (!isNaN(v)) setSpec({ [i.key]: v });
+            onCommit={(v) => { if (v != null) setSpec({ [i.key]: v }); }}
+            captureRevert={() => {
+              const snapshot = useApp.getState();
+              const origin = snapshot[i.key];
+              const acknowledgement = snapshot.capabilityWarningAcknowledgement;
+              return () => {
+                setSpec({ [i.key]: origin });
+                acknowledgeCapabilityWarning(acknowledgement);
+              };
             }}
+            readValue={() => useApp.getState()[i.key]}
+            messageWidth={220}
             style={{ ...numInput, ...(i.on ? {} : { background: '#f4f6f8', color: '#b6bdc6' }) }}
           />
         </label>
       ))}
       {!(lslOn && uslOn) && (
         <span style={{ fontSize: 11.5, color: '#d98324', fontWeight: 600 }}>
-          单侧规格：Cpk = {lslOn ? 'CPL' : 'CPU'},双侧指标（Cp/Pp/Cpm）不适用
+          单侧规格：Cpk = {lslOn ? 'CPL' : 'CPU'},Cp/Pp 不适用;Cpm 按启用侧距离(Minitab 单侧式)计算
         </span>
       )}
       <button type="button"
@@ -184,8 +278,7 @@ export function Capability({ T }: { T: ChartTokens }) {
       </button>
     </Card>
   );
-  const inputError = capabilityInputError(M.all, M.sigmaWithin, { lsl: effLsl, tgt, usl: effUsl });
-  if (inputError) {
+  if (analysis?.kind === 'input-error') {
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
         {subgroupEditor}
@@ -194,12 +287,43 @@ export function Capability({ T }: { T: ChartTokens }) {
         </Card>
         {specEditor}
         <Card style={{ padding: '18px 20px', color: '#a62b2b', background: '#fff5f5', borderColor: '#f0caca', lineHeight: 1.7 }}>
-          <b>过程能力分析未运行：</b>{inputError}。请修正规格限或补充有变异的实测数据；系统不会输出负能力指数、无穷 Cpk 或超过 100% 的预测缺陷率。
+          <b>过程能力分析未运行：</b>{analysis.inputError}。请修正规格限或补充有变异的实测数据；系统不会输出负能力指数、无穷 Cpk 或超过 100% 的预测缺陷率。
         </Card>
       </div>
     );
   }
-  const cap = computeCapability(M.all, M.sigmaWithin, { lsl: effLsl, tgt, usl: effUsl });
+  if (analysis?.kind === 'awaiting-ack') {
+    const { specWarning, warningFingerprint } = analysis;
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        {subgroupEditor}
+        <Card style={{ padding: '10px 16px', color: '#5b6472', fontSize: 12.5, lineHeight: 1.6 }}>
+          <b style={{ color: '#33404f' }}>能力数据口径：</b>{prepared.note}；变量：{prepared.variableName}；实际观测 N={M.all.length}。
+        </Card>
+        {specEditor}
+        <Card style={{ padding: '18px 20px', color: '#8a4f08', background: '#fff8e8', border: '1px solid #efc56f', lineHeight: 1.7 }}>
+          <b>过程能力分析未运行（等待确认）：强警告——规格与当前测量数据的量纲可能不一致。</b><br />
+          {specWarning.message}。系统在你确认前不会显示 Cpk/PPM，也不会把该结论导出到能力报告。
+          <div style={{ marginTop: 12, display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+            <button type="button" onClick={() => setSpec(suggestedSpec(M))}
+              style={{ padding: '6px 12px', border: '1px solid #d7a54e', borderRadius: 4, background: '#fff', color: '#8a4f08', cursor: 'pointer', fontWeight: 600 }}>
+              按当前数据重新建议规格
+            </button>
+            <button type="button" onClick={() => acknowledgeCapabilityWarning(warningFingerprint)}
+              style={{ padding: '6px 12px', border: 0, borderRadius: 4, background: '#b0620f', color: '#fff', cursor: 'pointer', fontWeight: 700 }}>
+              我已核对测量角色与规格，继续计算
+            </button>
+          </div>
+          <div style={{ marginTop: 9, fontSize: 11.5, color: '#9b6a2a' }}>
+            此确认只对当前数据集、测量口径和 LSL/Target/USL 有效；改列、改规格或数据变化都会要求重新确认。
+          </div>
+        </Card>
+      </div>
+    );
+  }
+  if (analysis?.kind !== 'ok' || !stability) return null; // 不可达:M 存在时 analysis 必为上述三态之一
+  const { specWarning, warningAcknowledged, cap, ad, boxcox } = analysis;
+  const { spcViol, stabilityCaliber } = stability;
   const good = cap.verdict === 'sufficient';
   const marginal = cap.verdict === 'marginal';
 
@@ -220,36 +344,15 @@ export function Capability({ T }: { T: ChartTokens }) {
     { k: 'CPL', v: fmtCap(cap.cpl) },
     { k: 'Cpm (望目)', v: fmtCap(cap.cpm) },
     { k: 'Z.bench', v: nf(cap.zBench, 2) },
-    { k: '西格玛水平', v: nf(cap.sigmaLevel, 2) + 'σ' },
+    { k: CAPABILITY_TERMS.sigmaLevel, v: nf(cap.sigmaLevel, 2) + 'σ' },
   ];
 
-  // 正态性检验 + 非正态时的 Box-Cox 备选（需双侧规格）
-  const ad = M.all.length >= 8 ? andersonDarling(M.all) : null;
-  let boxcox: { lambda: number; ppk: number; adAfter: number } | null = null;
-  if (ad && !ad.normal && lslOn && uslOn) {
-    const bl = bestLambda(M.all);
-    if (!('error' in bl)) {
-      const tr = transformWithSpec(M.all, lsl, usl, bl.lambda);
-      if (!('error' in tr)) {
-        const tSd = stdev(tr.data, true);
-        const tSpec = { lsl: tr.lsl, usl: tr.usl, tgt: (tr.lsl + tr.usl) / 2 };
-        // 变换域也要先过输入闸门:负 λ 会把近零规格映射成巨值,量纲哨兵在变换域触发时
-        // 只应跳过 Box-Cox 补充卡,不能让 computeCapability 抛异常炸掉整页(含规格编辑器)。
-        if (capabilityInputError(tr.data, tSd, tSpec) === null) {
-          const tCap = computeCapability(tr.data, tSd, tSpec);
-          boxcox = { lambda: bl.lambda, ppk: tCap.ppk, adAfter: andersonDarling(tr.data).p };
-        }
-      }
-    }
-  }
   const perf = [
     { k: '实测 (观测)', lsl: '—', usl: '—', ppm: Math.round(cap.ppm.observed).toLocaleString() },
     { k: '组内 (潜在)', lsl: cap.ppm.within.belowLsl == null ? '—' : Math.round(cap.ppm.within.belowLsl).toLocaleString(), usl: cap.ppm.within.aboveUsl == null ? '—' : Math.round(cap.ppm.within.aboveUsl).toLocaleString(), ppm: Math.round(cap.ppm.within.total).toLocaleString() },
     { k: '整体 (实际)', lsl: cap.ppm.overall.belowLsl == null ? '—' : Math.round(cap.ppm.overall.belowLsl).toLocaleString(), usl: cap.ppm.overall.aboveUsl == null ? '—' : Math.round(cap.ppm.overall.aboveUsl).toLocaleString(), ppm: Math.round(cap.ppm.overall.total).toLocaleString() },
   ];
 
-  // 能力结论必须先同时检查位置图与离散图;计数逻辑收敛在 countCapabilityViolations(与保存记录/专项报告共用)。
-  const spcViol = countCapabilityViolations(M, spcRules, spcRuleK);
   const report = capabilityReport({
     cpk: cap.cpk, verdict: cap.verdict,
     adP: ad ? ad.p : null, n: M.all.length, spcViolations: spcViol,
@@ -261,10 +364,24 @@ export function Capability({ T }: { T: ChartTokens }) {
       <ReportCard data={report} />
       <Card style={{ padding: '10px 16px', color: '#5b6472', fontSize: 12.5, lineHeight: 1.6 }}>
         <b style={{ color: '#33404f' }}>能力数据口径：</b>{prepared.note}；变量：{prepared.variableName}；实际观测 N={M.all.length}。
+        {stabilityCaliber && (
+          <div style={{ marginTop: 4, color: '#8a4f08' }}>
+            <b>稳定性口径：</b>{stabilityCaliber.text}（本页失控点 {spcViol} 个按此口径计数）。
+          </div>
+        )}
       </Card>
       {specEditor}
+      {specWarning && warningAcknowledged && (
+        <Card style={{ padding: '10px 16px', color: '#8a4f08', background: '#fff8e8', border: '1px solid #efc56f', fontSize: 12, lineHeight: 1.6 }}>
+          <b>已显式确认超 1000σ 规格：</b>{specWarning.message}。本页和能力专项报告会保留该披露；任一规格或测量口径变化后确认自动失效。
+          <button type="button" onClick={() => acknowledgeCapabilityWarning(null)}
+            style={{ marginLeft: 10, padding: '3px 9px', border: '1px solid #d7a54e', borderRadius: 4, background: '#fff', color: '#8a4f08', cursor: 'pointer' }}>
+            撤回确认
+          </button>
+        </Card>
+      )}
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 16 }}>
+      <div className="responsive-grid-2" style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 16 }}>
         <Card>
           <div style={{ display: 'flex', alignItems: 'center', padding: '11px 16px', borderBottom: '1px solid #edf0f3' }}>
             <div style={{ fontWeight: 600, color: '#33404f' }}>过程能力直方图 · {M.isDemo ? '直径 (mm)' : prepared.variableName}</div>
@@ -295,7 +412,7 @@ export function Capability({ T }: { T: ChartTokens }) {
                 {good ? '能力充足' : marginal ? '能力临界' : '能力不足'}
               </div>
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+            <div className="responsive-grid-2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
               {big.map((c) => (
                 <div key={c.k} style={{ background: '#f7f9fb', border: '1px solid #eaeef2', borderRadius: 4, padding: '10px 12px' }}>
                   <div style={{ fontSize: 11.5, color: '#8a929d' }}>{c.k}</div>
@@ -303,7 +420,7 @@ export function Capability({ T }: { T: ChartTokens }) {
                 </div>
               ))}
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 10 }}>
+            <div className="responsive-grid-2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 10 }}>
               {big2.map((c) => (
                 <div key={c.k} style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 10px', background: '#f7f9fb', border: '1px solid #eef1f4', borderRadius: 4, fontSize: 12.5 }}>
                   <span style={{ color: '#8a929d' }}>{c.k}</span>
@@ -317,18 +434,19 @@ export function Capability({ T }: { T: ChartTokens }) {
             <KvRows
               valueWeight={500}
               rows={[
-                { k: '样本均值 X̄', v: nf(cap.mean, 4) },
+                { k: '样本均值 X̄', v: reportNum(cap.mean, 4) },
                 { k: '样本量 N', v: String(cap.n) },
-                { k: M.hasSubgroups ? 'σ 组内 (R̄/d₂)' : 'σ 组内 (MR̄/d₂)', v: nf(cap.sigmaWithin, 4) },
-                { k: 'σ 整体', v: nf(cap.sigmaOverall, 4) },
-                { k: '规格 LSL / 目标 / USL', v: (lslOn ? nf(lsl, 2) : '—') + ' / ' + nf(tgt, 2) + ' / ' + (uslOn ? nf(usl, 2) : '—') },
+                { k: M.hasSubgroups ? 'σ 组内 (R̄/d₂)' : 'σ 组内 (MR̄/d₂)', v: reportNum(cap.sigmaWithin, 4) },
+                { k: 'σ 整体', v: reportNum(cap.sigmaOverall, 4) },
+                // fix2609k PLATFORM-07:规格与五种报告同源(specLimitText),9.995 / 0.002 不再被 toFixed(2) 改写
+                { k: '规格 LSL / 目标 / USL', v: (lslOn ? specLimitText(lsl) : '—') + ' / ' + specLimitText(tgt) + ' / ' + (uslOn ? specLimitText(usl) : '—') },
               ]}
             />
           </Card>
         </div>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 16 }}>
+      <div className="responsive-grid-2" style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 16 }}>
         <Card>
           <div style={{ display: 'flex', alignItems: 'center', padding: '11px 16px', borderBottom: '1px solid #edf0f3' }}>
             <div style={{ fontWeight: 600, color: '#33404f' }}>正态概率图</div>
@@ -413,3 +531,6 @@ export function Capability({ T }: { T: ChartTokens }) {
     </div>
   );
 }
+
+/** fix2609i G14:与 Dashboard/Spc 同法,主题 tokens 按值比较,挡住 toast/菜单开合引起的父级重渲染。 */
+export const Capability = memo(CapabilityView, (previous, next) => sameChartTokens(previous.T, next.T));

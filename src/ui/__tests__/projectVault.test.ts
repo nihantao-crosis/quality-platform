@@ -14,6 +14,8 @@ function fakeDb() {
     async get(name) { return store.get(name) ?? null; },
     async list() { return [...store.entries()].map(([name, json]) => ({ name, saved_at: 't', bytes: json.length })); },
     async remove(name) { return store.delete(name); },
+    async clear(opId) { const removed = store.size; store.clear(); return { opId, committed: true, removed }; },
+    async clearStatus() { return null; },
     async stats() { return { count: store.size, total_bytes: 0, path: ':memory:' }; },
   };
   return { db, store };
@@ -52,7 +54,7 @@ describe('.qproj × 数据集库', () => {
     const file = JSON.parse(await buildProjectJsonFull('9.9.9'));
     expect(file.vault).toBeDefined();
     expect(Object.keys(file.vault)).toEqual(['超大集']);
-    expect(file.formatVersion).toBe(4); // 旧读取器必须明确拒绝，不能静默忽略 vault/AQL 或 v7 快照新语义
+    expect(file.formatVersion).toBe(5); // 旧读取器必须明确拒绝，不能静默忽略 vault/AQL 或 v7 快照新语义
   });
 
   it('多个本机归档在元数据预判已超过可再导入上限时，拒绝读入大字符串且不创建导出任务', async () => {
@@ -120,10 +122,10 @@ describe('.qproj × 数据集库', () => {
     expect(fake.store.has('坏')).toBe(false);
   });
 
-  it('旧 v1 格式(无 vault)照常导入；当前导出明确使用 v4', async () => {
+  it('旧 v1 格式(无 vault)照常导入；当前导出明确使用 v5', async () => {
     localStorage.setItem('qp-specs-v1', '{}');
     const legacy = buildProjectJson('1.0.0');
-    expect(JSON.parse(legacy).formatVersion).toBe(4);
+    expect(JSON.parse(legacy).formatVersion).toBe(5);
     const r = await applyProjectText(legacy);
     expect(r.error).toBeNull();
     expect(r.note).toBeUndefined();

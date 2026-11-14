@@ -5,7 +5,7 @@
  * v1.40（MSA 工厂案例验收批次）：
  * - 支持单操作员研究（操作员数=1 退化为单因子随机效应 ANOVA，GRR=重复性，无再现性分量）；
  * - 组件表增加 SD / 研究变异(6×SD) 字段与「操作员」「部件×操作员」分行，行结构与 Minitab 会话窗口同构；
- * - 新增可区分的类别数 ndc = floor(√(2σ²部件/σ²GRR))（下限 1）；
+ * - 新增可区分的类别数 ndc = floor(1.41×σ部件/σGRR(AIAG 常数))（下限 1）；
  * - 公差升级为 {mode, value}：双侧宽度 %Tol=6·SD/宽度；单侧限 %Tol=3·SD/|限值−总均值|
  *   （与 Minitab 单边规格公式一致），总均值已达/越过限值时拒绝计算并给出说明。
  */
@@ -57,7 +57,7 @@ export interface GageResult {
     pValue: number;
     retained: boolean;
   } | null;
-  /** 可区分的类别数 floor(√(2σ²部件/σ²GRR))，下限 1；σ²GRR=0 时为 Infinity。 */
+  /** 可区分的类别数 floor(1.41×σ部件/σGRR(AIAG 常数))，下限 1；σ²GRR=0 时为 Infinity。 */
   ndc: number;
   /** 全部观测的总均值（原始单位；单侧 %公差的分母基准）。 */
   grandMean: number;
@@ -181,13 +181,37 @@ export function computeGageRR(data: GageObservation[], tolerance: GageToleranceS
   if (observations.every((observation) => observation.value === observations[0].value)) {
     throw new Error('量具 R&R 合计变异为 0，无法计算变异占比');
   }
-  // ANOVA 只依赖差值。先平移并按数据自身尺度归一化，避免大基值
-  // 测量的平方和严重抵消，同时保持 F/p 对单位缩放不变。
-  const origin = observations[0].value;
-  const centered = observations.map((observation) => observation.value - origin);
-  const scale = centered.reduce((maximum, value) => Math.max(maximum, Math.abs(value)), 0);
-  if (!Number.isFinite(scale)) throw new Error('量具 R&R 测量值范围过大，无法得到有限的方差');
-  const normalized = scale === 0 ? centered : centered.map((value) => value / scale);
+  // ndc=∞ 是结构结论：同一部件在所有操作员/重复下的原始读数相同。
+  // 不能用 uGRR/uTotal 的 epsilon 阈值推测，因为大部件跨度会让真实的
+  // 重复/交互方差比例落到 epsilon 附近。
+  const partReference = new Array<number>(p);
+  const structurallyZeroGrr = observations.every((observation) => {
+    const reference = partReference[observation.part];
+    if (reference === undefined) {
+      partReference[observation.part] = observation.value;
+      return true;
+    }
+    return observation.value === reference;
+  });
+  // ANOVA 只依赖差值。必须先在全局坐标上缩放，再中心化：直接构造
+  // value-origin 会让 [-MAX, +MAX] 这类端点全部有限的研究先产生 Infinity，
+  // 从而丢失本来完全可计算的 F/p、%SV、%Contribution 和 ndc。坐标尺度取
+  // 2 的整次幂，指数缩放不会平白丢掉大基值旁的有效尾数。
+  const rawCoordinateScale = observations.reduce(
+    (maximum, observation) => Math.max(maximum, Math.abs(observation.value)),
+    0,
+  );
+  const coordinateScale = rawCoordinateScale === 0
+    ? 1
+    : 2 ** Math.min(1023, Math.floor(Math.log2(rawCoordinateScale)));
+  const coordinates = observations.map((observation) => observation.value / coordinateScale);
+  const origin = coordinates[0];
+  const centered = coordinates.map((value) => value - origin);
+  const localScale = centered.reduce((maximum, value) => Math.max(maximum, Math.abs(value)), 0);
+  if (!(localScale > 0) || !Number.isFinite(localScale)) {
+    throw new Error('量具 R&R 合计变异为 0，无法计算变异占比');
+  }
+  const normalized = centered.map((value) => value / localScale);
   // 主 ANOVA 的归一化方差路径保持原口径；仅对外展示/单侧公差共用稳定总均值。
   const grand = normalized.reduce((sum, value) => sum + value, 0) / N;
   const grandMean = mean(observations.map((observation) => observation.value));
@@ -204,13 +228,27 @@ export function computeGageRR(data: GageObservation[], tolerance: GageToleranceS
 
   const ssPart = o * r * partMean.reduce((a, m) => a + (m - grand) ** 2, 0);
   const msPart = ssPart / (p - 1);
-  const varianceScale = scale * scale;
-  const restoreVariance = (value: number) => value === 0 ? 0 : value * varianceScale;
+  // 量纲量只用于展示；无量纲判定始终使用上面的 u 分量。真实 SD/方差
+  // 超过 Number 值域时饱和到最大有限数，不让 Infinity 污染会话表/导出。
+  const finiteMagnitudeProduct = (left: number, right: number): number => {
+    if (left === 0 || right === 0) return 0;
+    const product = left * right;
+    return Number.isFinite(product) ? product : Number.MAX_VALUE;
+  };
+  const restoreMagnitude = (value: number): number => finiteMagnitudeProduct(
+    finiteMagnitudeProduct(value, localScale),
+    coordinateScale,
+  );
+  const restoreVariance = (value: number): number => {
+    if (value === 0) return 0;
+    const sd = restoreMagnitude(Math.sqrt(value));
+    return sd <= Math.sqrt(Number.MAX_VALUE) ? sd * sd : Number.MAX_VALUE;
+  };
 
-  let vRepeat: number;
-  let vOper: number;
-  let vInter: number;
-  let vPart: number;
+  let uRepeat: number;
+  let uOper: number;
+  let uInter: number;
+  let uPart: number;
   let interaction: GageResult['interaction'];
 
   if (o === 1) {
@@ -220,10 +258,10 @@ export function computeGageRR(data: GageObservation[], tolerance: GageToleranceS
     ), 0);
     const dfError = p * (r - 1);
     const msError = ssError / dfError;
-    vRepeat = restoreVariance(Math.max(0, msError));
-    vOper = 0;
-    vInter = 0;
-    vPart = restoreVariance(Math.max(0, (msPart - msError) / r));
+    uRepeat = Math.max(0, msError);
+    uOper = 0;
+    uInter = 0;
+    uPart = Math.max(0, (msPart - msError) / r);
     interaction = null;
   } else {
     const ssOper = p * r * operMean.reduce((a, m) => a + (m - grand) ** 2, 0);
@@ -245,9 +283,27 @@ export function computeGageRR(data: GageObservation[], tolerance: GageToleranceS
 
     let interactionF: number;
     let interactionP: number;
-    if (msError === 0) {
-      interactionF = msInter === 0 ? 0 : Infinity;
-      interactionP = msInter === 0 ? 1 : 0;
+    // 复审 P2:精确零判定拦不住浮点残渣——完全无测量变异的数据里 ssError/ssInter
+    // 都是 1e-31 量级而非精确 0,于是判出「显著的部件×操作员交互」(F=33.33,p=0)。
+    // 两者都必须按「相对于本研究的均方量级」判定。注意此处均方是**归一化后**的
+    // (normalized = (全局缩放后坐标-原点)/localScale,见上方),量纲已被除掉,故 max(..., 1) 的兜底
+    // 不影响单位不变性——与下方 ndc 判据所处的量纲不同,不要照搬。
+    // 蜂群 P2-06:近零判断必须用**每个统计量自身的**浮点误差界,不能用「全体 MS 的最大值」——
+    // 部件间效应通常比误差大 4~6 个数量级,用它当尺度会把真实的微小交互与误差一起抹成零
+    // (复现:理论 F=20000、p≈3.4e-12 的显著交互被判成 F=0、p=1、retained=false、ndc=∞)。
+    // 均值坐标误差是 O(N·epsilon)，但 SS/MS 累加的是**平方后**的离差，
+    // 因而 SS 残渣界必须是 O(N·(N·epsilon)²)。直接用 N·epsilon 会吞掉
+    // 相对 4e4 部件量程仅 1e-3 的真实交互以及 4e-4 的重复效应。
+    const coordinateRoundoff = Number.EPSILON * N * 16;
+    const ssNoiseBound = N * coordinateRoundoff * coordinateRoundoff;
+    const errorNegligible = msError <= ssNoiseBound / Math.max(1, dfError);
+    const interNegligible = msInter <= ssNoiseBound / Math.max(1, dfInter);
+    if (structurallyZeroGrr) {
+      interactionF = 0;
+      interactionP = 1;
+    } else if (errorNegligible) {
+      interactionF = interNegligible ? 0 : Infinity;
+      interactionP = interNegligible ? 1 : 0;
     } else {
       interactionF = msInter / msError;
       interactionP = interactionF === Infinity
@@ -262,12 +318,12 @@ export function computeGageRR(data: GageObservation[], tolerance: GageToleranceS
     const reducedErrorMs = (ssInter + ssError) / (dfInter + dfError);
     const modelErrorMs = retainInteraction ? msError : reducedErrorMs;
     const modelDenominatorMs = retainInteraction ? msInter : reducedErrorMs;
-    vRepeat = restoreVariance(Math.max(0, modelErrorMs));
-    vInter = retainInteraction
-      ? restoreVariance(Math.max(0, (msInter - msError) / r))
+    uRepeat = Math.max(0, modelErrorMs);
+    uInter = retainInteraction
+      ? Math.max(0, (msInter - msError) / r)
       : 0;
-    vOper = restoreVariance(Math.max(0, (msOper - modelDenominatorMs) / (p * r)));
-    vPart = restoreVariance(Math.max(0, (msPart - modelDenominatorMs) / (o * r)));
+    uOper = Math.max(0, (msOper - modelDenominatorMs) / (p * r));
+    uPart = Math.max(0, (msPart - modelDenominatorMs) / (o * r));
     interaction = {
       alpha: interactionAlpha,
       fStat: interactionF,
@@ -276,67 +332,135 @@ export function computeGageRR(data: GageObservation[], tolerance: GageToleranceS
     };
   }
 
-  const vReprod = vOper + vInter;
-  const vGRR = vRepeat + vReprod;
-  const vTotal = vGRR + vPart;
-  if (!Number.isFinite(vTotal)) throw new Error('量具 R&R 无法得到有限的合计变异');
-  if (vTotal <= 0) throw new Error('量具 R&R 合计变异为 0，无法计算变异占比');
+  // 原始单元格已证明 GRR 结构为零时，求均/相减留下的 1e-31 级均方
+  // 只是浮点残渣。精确归零让组件表、交互检验与 ndc 表达同一结论。
+  if (structurallyZeroGrr) {
+    uRepeat = 0;
+    uOper = 0;
+    uInter = 0;
+  }
+
+  const uReprod = uOper + uInter;
+  const uGRR = uRepeat + uReprod;
+  const uTotal = uGRR + uPart;
+  if (!Number.isFinite(uTotal)) throw new Error('量具 R&R 无法得到有限的合计变异');
+  if (uTotal <= 0) throw new Error('量具 R&R 合计变异为 0，无法计算变异占比');
+  const sTotalNormalized = Math.sqrt(uTotal);
 
   // 公差分母：双侧为宽度(系数 6)；单侧为限值到总均值的距离(系数 3,Minitab 单边公式)。
   // 守卫：总均值已达到或越过单侧限时距离非正，%公差无意义，明确拒绝而不是输出负值/无穷。
-  let tolDenominator: number | null = null;
+  // 公差分母也换算到与 ANOVA 相同的无量纲坐标，%Tolerance 因而不依赖
+  // 可能上/下溢的原量纲 SD。
+  const differenceOverScale = (a: number, b: number): number => (
+    (a / coordinateScale - b / coordinateScale) / localScale
+  );
+  const magnitudeOverScale = (value: number): number => {
+    const candidates = [
+      (value / coordinateScale) / localScale,
+      (value / localScale) / coordinateScale,
+    ];
+    return candidates.find((candidate) => Number.isFinite(candidate) && candidate > 0)
+      ?? candidates.find((candidate) => candidate > 0)
+      ?? 0;
+  };
+  let tolDenominatorNormalized: number | null = null;
   let tolFactor = 6;
   let toleranceNote: string | null = null;
   if (tolerance != null) {
     if (tolerance.mode === 'width') {
-      tolDenominator = tolerance.value;
+      const widthNormalized = magnitudeOverScale(tolerance.value);
+      if (!(widthNormalized > 0)) {
+        toleranceNote = `公差宽度 ${tolerance.value} 相对当前测量量程过小，换算后下溢为 0，% 公差无意义，未计算`;
+      } else {
+        tolDenominatorNormalized = widthNormalized;
+      }
     } else {
-      const distance = tolerance.mode === 'upper' ? tolerance.value - grandMean : grandMean - tolerance.value;
+      const distanceNormalized = tolerance.mode === 'upper'
+        ? tolerance.value / coordinateScale - grandMean / coordinateScale
+        : grandMean / coordinateScale - tolerance.value / coordinateScale;
       const limitLabel = tolerance.mode === 'upper' ? '上限' : '下限';
       // 守卫阈值必须是纯相对量:带绝对下限(如 1)会按量纲误伤大基值(GHz 级)与小基值(nF/ppb 级)
       // 的真实可测距离;这里只拦真实为 0/负的距离和双精度抵消噪声(≈32 ulp)。
-      const noise = 32 * Number.EPSILON * Math.max(Math.abs(tolerance.value), Math.abs(grandMean));
-      if (!(distance > noise)) {
-        toleranceNote = distance > 0
+      const noise = 32 * Number.EPSILON * Math.max(
+        Math.abs(tolerance.value / coordinateScale),
+        Math.abs(grandMean / coordinateScale),
+      );
+      if (!(distanceNormalized > noise)) {
+        toleranceNote = distanceNormalized > 0
           ? `公差${limitLabel} ${tolerance.value} 与数据总均值 ${grandMean} 的距离已在浮点噪声量级，单侧 %公差无意义，未计算`
           : `数据总均值 ${grandMean} 已达到或越过公差${limitLabel} ${tolerance.value}，单侧 %公差无意义，未计算`;
       } else {
-        tolDenominator = distance;
+        tolDenominatorNormalized = tolerance.mode === 'upper'
+          ? differenceOverScale(tolerance.value, grandMean)
+          : differenceOverScale(grandMean, tolerance.value);
         tolFactor = 3;
       }
     }
   }
 
-  const sTotal = Math.sqrt(vTotal);
-  const mk = (key: GageComponentKey, source: string, depth: 0 | 1 | 2, v: number): GageComponent => {
-    const sd = Math.sqrt(v);
+  // 公差本身是有限正数仍不足以保证百分比可表示：
+  // Number.MIN_VALUE 之类宽度可使真实 %Tol 超出 Number 值域。工程上这不是
+  // 可供判级的有限结果，因此整个 %Tol 列 fail-closed 为 null，而不输出 Infinity/NaN。
+  if (tolDenominatorNormalized != null) {
+    const maximumPctTolerance = (sTotalNormalized / tolDenominatorNormalized) * tolFactor * 100;
+    if (!Number.isFinite(maximumPctTolerance)) {
+      const toleranceLabel = tolerance?.mode === 'width'
+        ? `公差宽度 ${tolerance.value}`
+        : `公差${tolerance?.mode === 'upper' ? '上限' : '下限'} ${tolerance?.value}`;
+      toleranceNote = `${toleranceLabel} 相对测量变异过小，% 公差将超出有限数值范围，未计算`;
+      tolDenominatorNormalized = null;
+    }
+  }
+
+  const mk = (key: GageComponentKey, source: string, depth: 0 | 1 | 2, u: number): GageComponent => {
+    const sdNormalized = Math.sqrt(u);
+    const sd = restoreMagnitude(sdNormalized);
     return {
       key,
       source,
       depth,
-      variance: v,
+      variance: restoreVariance(u),
       sd,
-      studyVar: 6 * sd,
-      pctContribution: (v / vTotal) * 100,
-      pctStudyVar: (sd / sTotal) * 100,
-      pctTolerance: tolDenominator == null ? null : ((tolFactor * sd) / tolDenominator) * 100,
+      studyVar: finiteMagnitudeProduct(6, sd),
+      pctContribution: (u / uTotal) * 100,
+      pctStudyVar: (sdNormalized / sTotalNormalized) * 100,
+      pctTolerance: tolDenominatorNormalized == null
+        ? null
+        : sdNormalized === 0
+          ? 0
+          : ((tolFactor * sdNormalized) / tolDenominatorNormalized) * 100,
     };
   };
 
   const components: GageComponent[] = [
-    mk('grr', '合计量具 R&R', 0, vGRR),
-    mk('repeatability', '  重复性', 1, vRepeat),
+    mk('grr', '合计量具 R&R', 0, uGRR),
+    mk('repeatability', '  重复性', 1, uRepeat),
     ...(o > 1 ? [
-      mk('reproducibility', '  再现性', 1, vReprod),
-      mk('operator', '    操作员', 2, vOper),
-      ...(interaction?.retained ? [mk('interaction', '    部件×操作员', 2, vInter)] : []),
+      mk('reproducibility', '  再现性', 1, uReprod),
+      mk('operator', '    操作员', 2, uOper),
+      ...(interaction?.retained ? [mk('interaction', '    部件×操作员', 2, uInter)] : []),
     ] : []),
-    mk('part', '部件间', 0, vPart),
-    mk('total', '合计变异', 0, vTotal),
+    mk('part', '部件间', 0, uPart),
+    mk('total', '合计变异', 0, uTotal),
   ];
 
-  const totalGageRR = (Math.sqrt(vGRR) / sTotal) * 100;
-  const ndc = vGRR > 0 ? Math.max(1, Math.floor(Math.sqrt((2 * vPart) / vGRR))) : Infinity;
+  const totalGageRR = (Math.sqrt(uGRR) / sTotalNormalized) * 100;
+  // AIAG/Minitab 公布口径用 1.41(而非精确 √2):验收线上的 ndc 取整可能因此差一档
+  // 复审 P2:uGRR 的浮点残渣(1e-31 量级)会让「σGRR=0 → ∞」这条分支在真实数据上永不可达,
+  // 转而向用户呈现 2.4e15 这样的 16 位整数。改按相对量级判定。
+  // 自审 P2:判据必须是**纯相对**的，现在直接使用归一化的 uGRR/uTotal；
+  // 加 Math.max(uTotal, 1) 兜底会退化成绝对阈值，量纲不变性丢失:
+  // 同一份研究以「米」记录 ndc=∞、以「毫米」记录 ndc=22。上方已有 uTotal<=0 的 throw,
+  // 不需要下限兜底;真零变异数据的残渣距该阈值有 15 个数量级余量。
+  // 蜂群 P2-06:只有**被证明为零**的 GRR 才返回 ∞。相对阈值仍取 uTotal(量纲不变),
+  // 但收紧到机器精度量级——1e-12 会把「极小但真实」的 GRR 也抹掉。
+  if (!structurallyZeroGrr && !(uGRR > 0)) {
+    throw new Error('量具 R&R 检测到非零的组内测量差异，但方差分量下溢为 0，请先缩放数据单位');
+  }
+  // ∞ 只能由原始单元格的结构零产生；对非零研究不再用 epsilon×合计变异阈值。
+  const ndc = structurallyZeroGrr
+    ? Infinity
+    : Math.max(1, Math.floor(1.41 * Math.sqrt(uPart / uGRR)));
   return {
     totalGageRR,
     components,
@@ -446,6 +570,36 @@ export interface GagePanelData {
   xbarLimits: { cl: number; ucl: number; lcl: number } | null;
 }
 
+const GAGE_PANEL_EXTREME_THRESHOLD = Number.MAX_VALUE / 16;
+
+function gagePanelCoordinateScale(data: readonly GageObservation[]): number {
+  let maximum = 0;
+  for (const observation of data) {
+    const magnitude = Math.abs(observation.value);
+    if (magnitude > maximum) maximum = magnitude;
+  }
+  if (maximum <= GAGE_PANEL_EXTREME_THRESHOLD) return 1;
+  return 2 ** Math.min(1023, Math.floor(Math.log2(maximum)));
+}
+
+function restoreGagePanelCoordinate(value: number, scale: number): number {
+  if (Number.isNaN(value)) return Number.NaN;
+  if (value === 0) return value;
+  const restored = value * scale;
+  if (Number.isFinite(restored)) return restored;
+  return value < 0 ? -Number.MAX_VALUE : Number.MAX_VALUE;
+}
+
+function gagePanelRange(values: readonly number[]): number {
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const value of values) {
+    if (value < lo) lo = value;
+    if (value > hi) hi = value;
+  }
+  return hi - lo;
+}
+
 /** 供 4/6 联图使用的胞均值/极差与 R̄/A2/D3/D4 控制限。constants 传 CONTROL_CONSTANTS[trialCount]。 */
 export function computeGagePanelData(
   data: GageObservation[],
@@ -460,24 +614,47 @@ export function computeGagePanelData(
   for (const observation of validated.data) {
     values[observation.operator][observation.part][observation.trial] = observation.value;
   }
-  const cellMeans = values.map((byPart) => byPart.map((trials) => mean(trials)));
+  // 极差、R̄ 和控制限在同一缩放域内聚合：单个 [-MAX,+MAX]
+  // 胞极差可饱和展示，但不能先饱和再与其他胞求平均。
+  const coordinateScale = gagePanelCoordinateScale(validated.data);
+  const coordinateValues = coordinateScale === 1
+    ? values
+    : values.map((byPart) => byPart.map((trials) => (
+        trials.map((value) => value / coordinateScale)
+      )));
+  const cellMeansCoordinate = coordinateValues.map((byPart) => byPart.map((trials) => mean(trials)));
   // 不用 Math.max(...展开):重复次数极大时展开会栈溢出(本库既有教训),循环求极差
-  const cellRanges = values.map((byPart) => byPart.map((trials) => {
-    let lo = Infinity;
-    let hi = -Infinity;
-    for (const value of trials) {
-      if (value < lo) lo = value;
-      if (value > hi) hi = value;
-    }
-    return hi - lo;
-  }));
-  const partMeans = Array.from({ length: p }, (_, part) => mean(cellMeans.map((byPart) => byPart[part])));
-  const operatorMeans = cellMeans.map((byPart) => mean(byPart));
-  const grandMean = mean(validated.data.map((observation) => observation.value));
-  const rBar = mean(cellRanges.flat());
-  const rLimits = constants ? { cl: rBar, ucl: constants.D4 * rBar, lcl: constants.D3 * rBar } : null;
+  const cellRangesCoordinate = coordinateValues.map((byPart) => byPart.map(gagePanelRange));
+  const cellMeans = cellMeansCoordinate.map((byPart) => byPart.map((value) => (
+    restoreGagePanelCoordinate(value, coordinateScale)
+  )));
+  const cellRanges = cellRangesCoordinate.map((byPart) => byPart.map((value) => (
+    restoreGagePanelCoordinate(value, coordinateScale)
+  )));
+  const partMeansCoordinate = Array.from(
+    { length: p },
+    (_, part) => mean(cellMeansCoordinate.map((byPart) => byPart[part])),
+  );
+  const operatorMeansCoordinate = cellMeansCoordinate.map((byPart) => mean(byPart));
+  const grandMeanCoordinate = mean(
+    validated.data.map((observation) => observation.value / coordinateScale),
+  );
+  const rBarCoordinate = mean(cellRangesCoordinate.flat());
+  const partMeans = partMeansCoordinate.map((value) => restoreGagePanelCoordinate(value, coordinateScale));
+  const operatorMeans = operatorMeansCoordinate.map((value) => restoreGagePanelCoordinate(value, coordinateScale));
+  const grandMean = restoreGagePanelCoordinate(grandMeanCoordinate, coordinateScale);
+  const rBar = restoreGagePanelCoordinate(rBarCoordinate, coordinateScale);
+  const rLimits = constants ? {
+    cl: rBar,
+    ucl: restoreGagePanelCoordinate(constants.D4 * rBarCoordinate, coordinateScale),
+    lcl: restoreGagePanelCoordinate(constants.D3 * rBarCoordinate, coordinateScale),
+  } : null;
   const xbarLimits = constants
-    ? { cl: grandMean, ucl: grandMean + constants.A2 * rBar, lcl: grandMean - constants.A2 * rBar }
+    ? {
+        cl: grandMean,
+        ucl: restoreGagePanelCoordinate(grandMeanCoordinate + constants.A2 * rBarCoordinate, coordinateScale),
+        lcl: restoreGagePanelCoordinate(grandMeanCoordinate - constants.A2 * rBarCoordinate, coordinateScale),
+      }
     : null;
   return {
     partCount: p,

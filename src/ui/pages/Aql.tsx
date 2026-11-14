@@ -1,16 +1,19 @@
 /** 抽样检验 AQL—正式主表、实际批判定、责任追溯与第 9.3/9.4 条转移规则。 */
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useApp } from '../../store/appStore';
 import {
   rqlForResult, producerRiskPct, masterPlanByState, CODE_LETTER_TABLE, MAX_LOT_SIZE, TABLE_BY_STATE,
   AQL_PERCENT_COLS, AQL_PER100_COLS, maxNonconforming,
   decideLot, recordInspection, plansByState, normalizeSwitchStatus,
   AQL_TRACE_LIMITS,
-  restoreNormalInspection, resumeTightenedInspection, setSwitchConditions,
-  type InspectionLevel, type InspState, type NonconformingDisposition,
+  restoreNormalInspection, resumeTightenedInspection, setSwitchConditions, switchConditionsTransition,
+  isAqlTransitionRecord, aqlTransitionActionLabel, aqlTransitionConditionText, auditAqlLedger,
+  type InspectionLevel, type InspState, type NonconformingDisposition, type SwitchStatus,
 } from '../../core';
+import { parseStrictInteger } from '../../core/numberInput';
 import type { ChartTokens } from '../tokens';
 import { Card, CardHeader, KvRows, tabStyle } from '../common';
+import { StrictNumberInput } from '../StrictNumberInput';
 import { OcCurveChart } from '../charts/OcCurveChart';
 import { OcCurvePer100 } from '../charts/OcCurvePer100';
 
@@ -27,6 +30,16 @@ const DISPOSITION_LABEL: Record<NonconformingDisposition, string> = {
   replaced: '已替换不合格品', scrapped: '已报废不合格品', concession: '已取得让步接收批准',
 };
 type PositiveDisposition = Exclude<NonconformingDisposition, 'none' | 'unrecorded'>;
+type SwitchConditions = Pick<SwitchStatus, 'productionSteady' | 'reducedApproved'>;
+/**
+ * fix2609n G24b B2(第 7 批复审 P2):本版记录链核对已知会隔离的三类真实历史账本。是否按 legacy 兼容由负责人
+ * 拍板,本批只把形态、后果与不丢账本的做法写清楚;README「AQL 责任账本记录链核对」小节原样引用同一段文字。
+ */
+export const AQL_LEDGER_KNOWN_LEGACY_LOCKS = '已知会被本版隔离的旧版本账本（兼容口径待定，暂按损坏处理）：'
+  + '① v1.32/v1.33 时期在放宽检验下、落在旧表 2-C 后来按国标更正的 42 格上登记的批次（如放宽检验 F 字码 / AQL 6.5，旧表为 n=8、Ac=1，国标为 Ac=2）；'
+  + '② 同一时期 100% 全检批发现不合格品却未记录处置状态的批次；'
+  + '③ v1.36–v1.42.4 在 AQL 0.025 档、批量大到方案用到样本字码 S 时，旧版会自行丢掉这类批次记录，留下的账本记录链断开（可能位于已结束的检验序列内）；这类批次记录在旧版写入时就已丢失，任何备份里都没有，须按纸质记录补登。'
+  + '含这类账本的项目备份（包括升级前留的 .qproj）在本版导入时同样会被拒绝，但备份里的账本原文逐字未改，请妥善保留，待兼容口径确定后再导入。';
 const fmtLot = (lo: number, hi: number) => (hi === Infinity ? `${lo.toLocaleString()}+` : `${lo.toLocaleString()}–${hi.toLocaleString()}`);
 
 /** 按表 1 + 选定的正式主表生成批量范围 → 最终执行方案。 */
@@ -41,10 +54,12 @@ function planTableRows(level: InspectionLevel, aqlPct: number, lot: number, stat
 }
 
 export function Aql({ T }: { T: ChartTokens }) {
-  const { aqlLot, aqlLevel, aqlAQL, aqlRegime: regime, aqlSwitch: storedSwitch, setAql, setAqlSwitch: setSw } = useApp();
+  const { aqlLot, aqlLevel, aqlAQL, aqlRegime: regime, aqlSwitch: storedSwitch, aqlLedgerFault, setAql, setAqlSwitch: setSw } = useApp();
+  // STORE-09:账本损坏期间登记/转移只能进内存且无法导出，整页停写并常驻恢复指引。
+  const ledgerLocked = aqlLedgerFault !== null;
   const sw = normalizeSwitchStatus(storedSwitch);
-  const [lotDraft, setLotDraft] = useState<string | null>(null);
-  const [lotError, setLotError] = useState<string | null>(null);
+  // G19 尾巴:记录链审计为 legacy(旧账本按兼容规则推定)时，页面与专项报告同样提示 notes。
+  const ledgerAudit = useMemo(() => auditAqlLedger(storedSwitch), [storedSwitch]);
   const [nonconformingDraft, setNonconformingDraft] = useState('0');
   const [batchId, setBatchId] = useState('');
   const [inspector, setInspector] = useState('');
@@ -52,6 +67,9 @@ export function Aql({ T }: { T: ChartTokens }) {
   const [nonconformingDisposition, setNonconformingDisposition] = useState<PositiveDisposition | ''>('');
   const [batchError, setBatchError] = useState<string | null>(null);
   const [referenceState, setReferenceState] = useState<InspState>('normal');
+  // S-2:勾选管理条件会使正常→放宽时先武装,再次点击确认才写入(复用项目的二次点击确认模式)。
+  const [relaxArmed, setRelaxArmed] = useState<SwitchConditions | null>(null);
+  const [switchError, setSwitchError] = useState<string | null>(null);
   const statePlans = plansByState(aqlLot, aqlLevel, aqlAQL);
   const plan = statePlans[sw.state];
   const per100 = regime === 'per100';
@@ -60,19 +78,24 @@ export function Aql({ T }: { T: ChartTokens }) {
   const rqlP = rql.status === 'found' ? rql.p : undefined;
   const prodRisk = producerRiskPct(plan, aqlAQL, regime);
   const meta = STATE_META[sw.state];
-  const nonconforming = Number(nonconformingDraft);
-  const hasNonconforming = nonconformingDraft.trim() !== '';
   // per100 体系录入上限放宽到 n×100(计点,d 可大于样本量);percent 仍以 n 为上限
   const dMax = maxNonconforming(plan, regime);
-  const batchValid = hasNonconforming
-    && Number.isSafeInteger(nonconforming) && nonconforming >= 0 && nonconforming <= dMax;
+  // 手工数值统一严格解析(type=text):「1,000」「3件」「0x1」给出可见原因，不再被 type=number 静默清空/截断。
+  const nonconformingParsed = parseStrictInteger(nonconformingDraft, { min: 0, max: dMax });
+  const batchValid = nonconformingParsed.ok;
+  const nonconforming = nonconformingParsed.ok ? nonconformingParsed.value : Number.NaN;
+  const nonconformingReason = !nonconformingParsed.ok && !nonconformingParsed.empty ? nonconformingParsed.reason : null;
   const decision = batchValid ? decideLot(plan, nonconforming, regime) : null;
   const dispositionRequired = plan.fullInspect && batchValid && nonconforming > 0;
   const batchReady = batchValid && batchId.trim().length > 0 && inspector.trim().length > 0
-    && (!dispositionRequired || nonconformingDisposition !== '') && !sw.suspended;
+    && (!dispositionRequired || nonconformingDisposition !== '') && !sw.suspended && !ledgerLocked;
   const schemeLocked = sw.state !== 'normal';
 
   const submitInspection = () => {
+    if (ledgerLocked) {
+      setBatchError('AQL 责任账本已损坏，批次登记已暂停；请按页首提示恢复账本');
+      return;
+    }
     if (!batchValid) {
       setBatchError(per100
         ? `不合格数必须是 0–${dMax} 的整数(每百单位体系允许大于样本量 n=${plan.n})`
@@ -112,40 +135,90 @@ export function Aql({ T }: { T: ChartTokens }) {
     }
   };
 
+  // 人工状态转移的操作人沿用「检验人」字段;转移记录由 core 写入责任账本。
+  const operator = inspector.trim();
+  // 武装态只在「按当前账本仍会转放宽」时有效(另一窗口/批次登记已改变状态时自动失效)。
+  const relaxPending = relaxArmed !== null && switchConditionsTransition(sw, relaxArmed) === 'conditions-met'
+    ? relaxArmed : null;
+  const applySwitch = (make: () => SwitchStatus) => {
+    try {
+      setSw(make());
+      setSwitchError(null);
+    } catch (error) {
+      setSwitchError(error instanceof Error ? error.message : '无法更新检验状态');
+    }
+  };
+  const changeCondition = (key: keyof SwitchConditions, checked: boolean) => {
+    const base: SwitchConditions = relaxPending ?? { productionSteady: sw.productionSteady, reducedApproved: sw.reducedApproved };
+    const candidate: SwitchConditions = { ...base, [key]: checked };
+    setSwitchError(null);
+    if (switchConditionsTransition(sw, candidate) === 'conditions-met') {
+      setRelaxArmed(candidate);
+      return;
+    }
+    setRelaxArmed(null);
+    applySwitch(() => setSwitchConditions(sw, candidate, { operator }));
+  };
+  const confirmRelax = () => {
+    if (!relaxPending) return;
+    if (!operator) {
+      setSwitchError('请先填写检验人（作为本次转入放宽检验的操作人），再确认');
+      return;
+    }
+    setRelaxArmed(null);
+    applySwitch(() => setSwitchConditions(sw, relaxPending, { operator }));
+  };
+
   const aqlOptions = per100 ? AQL_PER100_COLS : AQL_PERCENT_COLS;
   const fmtAql = (a: number) => 'AQL ' + (a >= 15 ? String(a) : a < 0.1 ? String(a) : a.toFixed(2).replace(/0$/, '').replace(/\.$/, '.0'));
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      {ledgerLocked && (
+        <div role="alert" style={{ padding: '11px 14px', background: '#fdecec', border: '1px solid #f1b8b8', borderRadius: 6, fontSize: 12.5, color: '#8f2323', lineHeight: 1.7 }}>
+          <b>AQL 责任账本已损坏，批次登记已暂停。</b>
+          {aqlLedgerFault === 'quarantined'
+            ? '本机的连续检验账本未通过校验（常见于新旧版本混用或写入中断），原文已复制到隔离区且未被覆盖。'
+            : '本机的连续检验账本未通过校验，且隔离区写入失败，原文只保留在原位置。'}
+          此期间登记的批次、检验状态转移都无法落盘，刷新即丢失，也无法随项目备份导出，因此已停止记录；方案参数可临时查表，但同样不会保存。
+          <br />
+          {/* fix2609n G24b B2:点名已知会被隔离的旧版本形态,与 README 同源 */}
+          {AQL_LEDGER_KNOWN_LEGACY_LOCKS}
+          <br />
+          {aqlLedgerFault === 'quarantined'
+            ? <>恢复方法：①「文件 → 打开…」导入一份有效的项目备份（.qproj，会覆盖当前本地数据）；②或「工具 → 选项 / 本地数据 → 清除数据并恢复演示」清除全部业务数据后，按纸质记录重新登记批次、重建账本（隔离区原文会一并清除；属于上述已知形态时，请先确认升级前的备份或纸质记录在手）。在恢复前，工作表与分析结论可先用「导出报表」留底。</>
+            : <>恢复方法：「文件 → 打开…」导入一份有效的项目备份（.qproj）。请勿清除数据——那会销毁账本仅存的原文。在恢复前，工作表与分析结论可先用「导出报表」留底。</>}
+          {/* M5:AQL 专项报表在账本损坏期间会被拒绝生成(否则是一份伪造的空追溯账本);受限状态按隔离语义不原地解除。 */}
+          AQL 报表不在留底范围内：账本损坏期间它无法反映历史批次记录，导出会被拒绝。若已在其他窗口完成恢复，请刷新本窗口。
+        </div>
+      )}
+      {/* fix2609m B3:legacy 推定把加严/暂停重置为正常检验——旧版本确会如此，但也可能是篡改，必须醒目、独立于兼容说明。 */}
+      {!ledgerLocked && ledgerAudit.alerts.length > 0 && (
+        <div role="alert" aria-label="责任账本警示" style={{ padding: '11px 14px', background: '#fdecec', border: '1px solid #f1b8b8', borderRadius: 6, fontSize: 12.5, color: '#8f2323', lineHeight: 1.7 }}>
+          <b>责任账本警示：当前检验状态无法由记录链核对。</b>
+          {ledgerAudit.alerts.map((alert) => <div key={alert}>{alert}。</div>)}
+          专项报告与四种导出格式会在警示首行带上同一提示。
+        </div>
+      )}
       <Card style={{ padding: '11px 16px', display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
         <div>
           <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 12.5, color: '#5b6472' }}>
             批量 N
-            <input
-              type="number"
-              min={2}
-              max={MAX_LOT_SIZE}
-              step={1}
-              value={lotDraft ?? aqlLot}
-              onFocus={() => { setLotDraft(String(aqlLot)); setLotError(null); }}
-              onBlur={() => { if (!lotError) setLotDraft(null); }}
-              onChange={(e) => {
-                const raw = e.target.value;
-                setLotDraft(raw);
-                const v = Number(raw);
-                if (raw.trim() === '' || !Number.isSafeInteger(v) || v < 2 || v > MAX_LOT_SIZE) {
-                  setLotError(`请输入 2–${MAX_LOT_SIZE.toLocaleString()} 的整数（当前仍使用 ${aqlLot.toLocaleString()}）`);
-                  return;
-                }
-                setLotError(null);
-                setAql({ aqlLot: v });
-              }}
-              aria-invalid={lotError != null}
+            {/* fix2609n G24b B1(第 7 批复审 P2):此前自写输入框逐键合法即 setAql,打「12,000」「250件」「3,5」
+                途经的前缀 12/250/3 会留在 store、持久化并被下一批登记写进责任账本。改用 StrictNumberInput:
+                合法整串实时重查方案,当前串一旦非法立即回退到编辑前的批量,框内保留原串并沿用既有提示口径。 */}
+            <StrictNumberInput
+              label="批量 N"
+              value={aqlLot}
+              integer={{ min: 2, max: MAX_LOT_SIZE }}
+              onCommit={(v) => { if (v != null) setAql({ aqlLot: v }); }}
+              readValue={() => useApp.getState().aqlLot}
+              formatProblem={({ reason, empty, current }) => `批量 N ${empty ? '未填写' : `无效：${reason}`}；请输入 2–${MAX_LOT_SIZE.toLocaleString()} 的整数（未修改，当前仍使用 ${current == null ? '—' : current.toLocaleString()}）`}
               className="mono"
-              style={{ width: 132, padding: '6px 9px', border: `1px solid ${lotError ? '#c22f2f' : '#cfd5dd'}`, borderRadius: 4, fontSize: 12.5, color: '#2a333f' }}
+              messageWidth={360}
+              style={{ width: 132, padding: '6px 9px', border: '1px solid #cfd5dd', borderRadius: 4, fontSize: 12.5, color: '#2a333f' }}
             />
           </label>
-          {lotError && <div role="alert" style={{ maxWidth: 360, marginTop: 4, fontSize: 11, color: '#c22f2f' }}>{lotError}</div>}
         </div>
         <span style={{ width: 1, height: 22, background: '#e5e9ee' }} />
         <span style={{ fontSize: 12, color: '#8a929d', fontWeight: 600 }}>质量表示</span>
@@ -223,7 +296,7 @@ export function Aql({ T }: { T: ChartTokens }) {
         )}
       </Card>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 12 }}>
+      <div className="responsive-grid-4" style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 12 }}>
         {[
           { k: plan.fullInspect ? '参考字码' : '样本字码', v: plan.code },
           { k: plan.fullInspect ? '全检数量 N' : '样本量 n', v: String(plan.n) },
@@ -245,7 +318,7 @@ export function Aql({ T }: { T: ChartTokens }) {
       )}
 
       {!plan.fullInspect && (
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 16 }}>
+        <div className="responsive-grid-2" style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 16 }}>
           <Card>
             <CardHeader title={per100 ? 'OC 特性曲线 · 接收概率 vs 每百单位不合格数 λ' : 'OC 特性曲线 · 接收概率 vs 批质量'} />
             <div style={{ padding: '14px 16px 6px' }}>
@@ -281,7 +354,7 @@ export function Aql({ T }: { T: ChartTokens }) {
         </div>
       )}
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+      <div className="responsive-grid-2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
         <Card>
           <div style={{ display: 'flex', alignItems: 'center', padding: '11px 16px', borderBottom: '1px solid #edf0f3' }}>
             <div style={{ fontWeight: 600, color: '#33404f' }}>批次判定与正式转移规则</div>
@@ -295,7 +368,12 @@ export function Aql({ T }: { T: ChartTokens }) {
             {sw.suspended ? (
               <div role="alert" style={{ padding: 12, background: '#fff6e6', border: '1px solid #f0d69a', borderRadius: 5, fontSize: 12.5, color: '#8a6414', lineHeight: 1.65 }}>
                 加严检验已累计 5 批不接收。按 GB/T 2828.1 第 9.4 条，只有供方完成纠正且负责部门确认有效后，才能以加严检验重新开始。
-                <button type="button" onClick={() => setSw(resumeTightenedInspection(sw))} style={{ display: 'block', marginTop: 10, padding: '6px 12px', border: 0, borderRadius: 4, background: '#8a6414', color: '#fff', cursor: 'pointer' }}>
+                <label style={{ display: 'block', marginTop: 10, fontSize: 11.5, color: '#6b7480' }}>
+                  确认人（检验人）
+                  <input aria-label="恢复加严确认人" maxLength={AQL_TRACE_LIMITS.inspector} value={inspector} onChange={(e) => { setInspector(e.target.value); setSwitchError(null); }} placeholder="姓名 / 工号，写入责任账本" style={{ display: 'block', width: '100%', maxWidth: 260, boxSizing: 'border-box', marginTop: 4, padding: '6px 8px', border: '1px solid #cfd5dd', borderRadius: 4 }} />
+                </label>
+                {/* 解除暂停是人工责任决定：与其他人工转移一样写入 resume-tightened 转移记录(操作人未填写时如实记「未填写」)。 */}
+                <button type="button" disabled={ledgerLocked} onClick={() => applySwitch(() => resumeTightenedInspection(sw, { operator }))} style={{ display: 'block', marginTop: 10, padding: '6px 12px', border: 0, borderRadius: 4, background: '#8a6414', color: '#fff', cursor: ledgerLocked ? 'not-allowed' : 'pointer', opacity: ledgerLocked ? 0.55 : 1 }}>
                   已确认纠正有效，恢复加严检验
                 </button>
               </div>
@@ -313,7 +391,8 @@ export function Aql({ T }: { T: ChartTokens }) {
                   <label style={{ fontSize: 11.5, color: '#6b7480' }}>
                     {/* per100 体系录入的是「不合格数」(计点),可大于样本量;max 相应放宽到 dMax */}
                     {plan.fullInspect ? (per100 ? '全检不合格数(计点)' : '全检不合格品数') : per100 ? '样本中不合格数(计点,可大于 n)' : '样本中不合格品数'} *
-                    <input aria-label="实际不合格品数" type="number" min={0} max={dMax} step={1} value={nonconformingDraft} onChange={(e) => { setNonconformingDraft(e.target.value); setNonconformingDisposition(''); setBatchError(null); }} className="mono" style={{ display: 'block', width: '100%', boxSizing: 'border-box', marginTop: 4, padding: '6px 8px', border: `1px solid ${batchValid ? '#cfd5dd' : '#c22f2f'}`, borderRadius: 4 }} />
+                    <input aria-label="实际不合格品数" type="text" inputMode="numeric" autoComplete="off" spellCheck={false} aria-invalid={!batchValid} aria-describedby={nonconformingReason ? 'aql-nonconforming-reason' : undefined} value={nonconformingDraft} onChange={(e) => { setNonconformingDraft(e.target.value); setNonconformingDisposition(''); setBatchError(null); }} className="mono" style={{ display: 'block', width: '100%', boxSizing: 'border-box', marginTop: 4, padding: '6px 8px', border: `1px solid ${batchValid ? '#cfd5dd' : '#c22f2f'}`, borderRadius: 4 }} />
+                    {nonconformingReason && <span id="aql-nonconforming-reason" role="alert" style={{ display: 'block', marginTop: 3, fontSize: 11, color: '#c22f2f' }}>{nonconformingReason}</span>}
                   </label>
                   <div style={{ padding: '7px 10px', alignSelf: 'end', borderRadius: 4, background: decision === 'accepted' ? '#e8f4ea' : decision === 'rejected' ? '#fdecec' : '#f7f9fb', color: decision === 'accepted' ? '#2c8a45' : decision === 'rejected' ? '#c22f2f' : '#8a929d', fontWeight: 700, fontSize: 12.5 }}>
                     自动判定：{decision === 'accepted' ? `接收（d=${nonconforming} ≤ Ac=${plan.ac}）` : decision === 'rejected' ? `不接收（d=${nonconforming} ≥ Re=${plan.re}）` : '请输入有效整数'}
@@ -345,7 +424,7 @@ export function Aql({ T }: { T: ChartTokens }) {
                     记录本批并执行转移判定
                   </button>
                   {sw.state === 'reduced' && (
-                    <button type="button" onClick={() => setSw(restoreNormalInspection(sw, '负责部门因其他条件决定恢复正常检验'))} style={{ padding: '6px 12px', border: '1px solid #cfd5dd', background: '#fff', color: '#5b6472', borderRadius: 5, cursor: 'pointer' }}>
+                    <button type="button" disabled={ledgerLocked} onClick={() => applySwitch(() => restoreNormalInspection(sw, '负责部门因其他条件决定恢复正常检验', { operator }))} style={{ padding: '6px 12px', border: '1px solid #cfd5dd', background: '#fff', color: '#5b6472', borderRadius: 5, cursor: ledgerLocked ? 'not-allowed' : 'pointer' }}>
                       因其他条件恢复正常检验
                     </button>
                   )}
@@ -353,20 +432,35 @@ export function Aql({ T }: { T: ChartTokens }) {
               </>
             )}
 
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 14 }}>
+            <div className="responsive-grid-2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 14 }}>
               <div style={{ padding: '8px 10px', border: '1px solid #edf0f3', borderRadius: 4, fontSize: 11.5, color: '#6b7480' }}>转移得分 <b className="mono" style={{ float: 'right', color: '#33404f' }}>{sw.switchingScore}/30</b></div>
               <div style={{ padding: '8px 10px', border: '1px solid #edf0f3', borderRadius: 4, fontSize: 11.5, color: '#6b7480' }}>加严不接收 <b className="mono" style={{ float: 'right', color: '#33404f' }}>{sw.tightenedRejections}/5</b></div>
             </div>
             <div style={{ display: 'flex', gap: 16, marginTop: 10, flexWrap: 'wrap' }}>
               <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11.5, color: '#5b6472' }}>
-                <input type="checkbox" checked={sw.productionSteady} onChange={(e) => setSw(setSwitchConditions(sw, { productionSteady: e.target.checked }))} />
+                <input type="checkbox" disabled={ledgerLocked} checked={relaxPending?.productionSteady ?? sw.productionSteady} onChange={(e) => changeCondition('productionSteady', e.target.checked)} />
                 生产稳定
               </label>
               <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11.5, color: '#5b6472' }}>
-                <input type="checkbox" checked={sw.reducedApproved} onChange={(e) => setSw(setSwitchConditions(sw, { reducedApproved: e.target.checked }))} />
+                <input type="checkbox" disabled={ledgerLocked} checked={relaxPending?.reducedApproved ?? sw.reducedApproved} onChange={(e) => changeCondition('reducedApproved', e.target.checked)} />
                 负责部门同意放宽
               </label>
             </div>
+            {relaxPending && (
+              <div role="alert" style={{ marginTop: 10, padding: '9px 11px', background: '#e8f4ea', border: '1px solid #b9dcc2', borderRadius: 5, fontSize: 11.5, color: '#245f33', lineHeight: 1.65 }}>
+                转移得分 {sw.switchingScore} ≥ 30，且「生产稳定」「负责部门同意放宽」均已勾选：确认后立即转入放宽检验（表 2-C），并以检验人「{operator || '未填写'}」作为操作人写入责任账本。
+                {!operator && <div style={{ color: '#c22f2f' }}>请先在上方填写检验人，作为本次转移的操作人。</div>}
+                <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+                  <button type="button" disabled={!operator || ledgerLocked} onClick={confirmRelax} style={{ padding: '5px 12px', border: 0, borderRadius: 4, background: !operator || ledgerLocked ? '#c7ccd2' : '#2c8a45', color: '#fff', cursor: !operator || ledgerLocked ? 'not-allowed' : 'pointer' }}>
+                    再次点击确认转入放宽检验
+                  </button>
+                  <button type="button" onClick={() => { setRelaxArmed(null); setSwitchError(null); }} style={{ padding: '5px 12px', border: '1px solid #cfd5dd', borderRadius: 4, background: '#fff', color: '#5b6472', cursor: 'pointer' }}>
+                    取消
+                  </button>
+                </div>
+              </div>
+            )}
+            {switchError && <div role="alert" style={{ marginTop: 8, fontSize: 11.5, color: '#c22f2f' }}>{switchError}</div>}
             <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', minHeight: 18, marginTop: 12 }}>
               {sw.history.slice(-30).map((result, i) => (
                 <span key={`${i}-${result}`} title={result === 'A' ? '初次检验批接收' : '初次检验批不接收'} style={{ width: 14, height: 14, borderRadius: 3, background: result === 'A' ? '#2c8a45' : '#c22f2f', display: 'inline-block' }} />
@@ -380,14 +474,31 @@ export function Aql({ T }: { T: ChartTokens }) {
               放宽→正常：任一批不接收、生产不稳定/延误，或其他条件需要。复验批只留痕，不计入以上转移计数。
             </div>
 
+            {ledgerAudit.status === 'legacy' && ledgerAudit.notes.length > 0 && (
+              <div role="note" aria-label="责任账本记录链核对" style={{ marginTop: 14, padding: '7px 10px', background: '#fff6e6', border: '1px solid #f0d69a', borderRadius: 4, fontSize: 11.5, color: '#8a6414', lineHeight: 1.6 }}>
+                <b>记录链核对：旧账本按兼容规则接受（一致性核对，不是防篡改签名）。</b>
+                {ledgerAudit.notes.map((note) => <div key={note}>· {note}</div>)}
+              </div>
+            )}
             {sw.records.length > 0 && (
               <div style={{ marginTop: 14, overflowX: 'auto' }}>
-                <div style={{ marginBottom: 6, fontSize: 12, fontWeight: 600, color: '#33404f' }}>最近批次追溯记录</div>
+                <div style={{ marginBottom: 6, fontSize: 12, fontWeight: 600, color: '#33404f' }}>最近批次与状态转移追溯记录</div>
                 <table style={{ width: '100%', minWidth: 900, borderCollapse: 'collapse', fontSize: 11 }}>
                   <thead><tr style={{ color: '#8a929d', textAlign: 'left' }}>
                     <th style={{ padding: '5px 4px' }}>批次</th><th style={{ padding: '5px 4px' }}>N/水平/AQL/表示</th><th style={{ padding: '5px 4px' }}>类型</th><th style={{ padding: '5px 4px' }}>方案</th><th style={{ padding: '5px 4px' }}>d</th><th style={{ padding: '5px 4px' }}>判定</th><th style={{ padding: '5px 4px' }}>不合格品处置</th><th style={{ padding: '5px 4px' }}>检验人</th>
                   </tr></thead>
-                  <tbody>{sw.records.slice(-8).reverse().map((record) => (
+                  <tbody>{sw.records.slice(-8).reverse().map((record) => isAqlTransitionRecord(record) ? (
+                    <tr key={record.id} style={{ borderTop: '1px solid #f0f2f5', background: '#f7f9fb' }}>
+                      <td style={{ padding: '5px 4px', color: '#33404f' }}>状态转移</td>
+                      <td style={{ padding: '5px 4px', color: '#6b7480' }}>{STATE_META[record.stateBefore].label}→{STATE_META[record.stateAfter].label}</td>
+                      <td style={{ padding: '5px 4px', color: '#6b7480' }}>人工转移</td>
+                      <td style={{ padding: '5px 4px', color: '#6b7480' }}>{aqlTransitionActionLabel(record.action)}</td>
+                      <td className="mono" style={{ padding: '5px 4px' }}>—</td>
+                      <td className="mono" style={{ padding: '5px 4px', color: '#6b7480' }}>得分 {record.switchingScoreBefore}→{record.switchingScoreAfter}</td>
+                      <td style={{ padding: '5px 4px', color: '#6b7480' }}>{aqlTransitionConditionText(record)}</td>
+                      <td style={{ padding: '5px 4px', color: '#6b7480' }}>{record.inspector}</td>
+                    </tr>
+                  ) : (
                     <tr key={record.id} style={{ borderTop: '1px solid #f0f2f5' }}>
                       <td style={{ padding: '5px 4px', color: '#33404f' }}>{record.batchId}</td>
                       <td className="mono" style={{ padding: '5px 4px', color: '#6b7480' }}>{record.lot}/{record.level}/{record.aql}/{record.regime === 'per100' ? '计点' : '百分'}</td>

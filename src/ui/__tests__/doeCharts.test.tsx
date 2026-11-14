@@ -14,6 +14,10 @@ describe('DOE 常数图形', () => {
       factors: [{ name: 'A', lo: 0, hi: 0 }, { name: 'B', lo: 0, hi: 0 }],
     }));
     expect(svg).not.toContain('NaN');
+    expect(svg).toContain('role="img"');
+    expect(svg).toContain('aria-label="DOE 主效应图');
+    expect(svg).toContain('<title>DOE 主效应图</title>');
+    expect(svg).toContain('<desc>A：低水平均值 0.000000，高水平均值 0.000000；B：');
   });
 
   it('四个交互单元均值相同时不产生 NaN 坐标', () => {
@@ -21,6 +25,10 @@ describe('DOE 常数图形', () => {
       T, c00: 0, c10: 0, c01: 0, c11: 0, labelA: 'A', labelB: 'B',
     }));
     expect(svg).not.toContain('NaN');
+    expect(svg).toContain('role="img"');
+    expect(svg).toContain('aria-label="DOE 交互作用图：A 与 B');
+    expect(svg).toContain('<title>DOE 交互作用图：A 与 B</title>');
+    expect(svg).toContain('<desc>A低×B低 0.000000；A高×B低 0.000000；A低×B高 0.000000；A高×B高 0.000000</desc>');
   });
 
   it('效应与参考线全为 0 时帕累托图仍为有限坐标', () => {

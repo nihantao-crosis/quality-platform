@@ -3,6 +3,7 @@
  * 这是「积累分析」的兑现:一份可交付的质量汇总,而非单次分析。
  */
 import type { SavedAnalysis } from '../store/analyses';
+import { timestampTextOf, escapeHtml, timestampText, appVersionText } from './reportLabels';
 
 const CSS = `
   body { font-family: "IBM Plex Sans", "PingFang SC", "Microsoft YaHei", sans-serif; color: #2a333f; margin: 0; padding: 32px 40px; }
@@ -21,13 +22,14 @@ const CSS = `
   @media print { body { padding: 0; } tr { break-inside: avoid; } }
 `;
 
-const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+const esc = escapeHtml;
 /** P1-3:颜色只放行严格 hex;其余一律回退中性色,杜绝 style 属性注入。 */
 const safeColor = (s: string, fallback: string) => /^#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(s) ? s : fallback;
 
 const KIND_LABEL: Record<string, string> = {
   spc: 'SPC 控制图', capability: '过程能力', gagerr: '测量系统', anova: '假设检验',
   pareto: '帕累托/因果', doe: '实验设计', aql: '抽样检验',
+  summary: '描述性统计', // AnalysisKind 仅这些值可达;t1/t2/reg 统一归入 anova(假设检验)
 };
 
 export function buildProjectSummary(projectName: string, saved: SavedAnalysis[]): string {
@@ -37,7 +39,7 @@ export function buildProjectSummary(projectName: string, saved: SavedAnalysis[])
     byKind.set(a.kind, (byKind.get(a.kind) ?? 0) + 1);
     datasets.add(a.datasetName);
   });
-  const fmt = (t: number) => new Date(t).toLocaleString('zh-CN');
+  const fmt = timestampTextOf;
 
   const cards = [
     ['分析总数', String(saved.length)],
@@ -75,7 +77,7 @@ export function buildProjectSummary(projectName: string, saved: SavedAnalysis[])
 </head>
 <body>
 <h1>项目分析汇总 · ${esc(projectName)}</h1>
-<div class="sub">生成于 ${new Date().toLocaleString('zh-CN')} · 质量分析平台</div>
+<div class="sub">生成于 ${timestampText()} · 质量分析平台 v${appVersionText()}</div>
 <div class="cards">
   ${cards.map(([l, n]) => `<div class="card"><div class="n">${n}</div><div class="l">${l}</div></div>`).join('')}
 </div>

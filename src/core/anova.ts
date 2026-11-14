@@ -2,7 +2,7 @@
  * 单因子方差分析 — F 统计量 + P 值（F 分布 CDF）。
  * 补齐交接文档 core-skeleton/statistics.ts §7 的签名。
  */
-import { mean, fCdf } from './basicMath';
+import { mean, fCdf, stdev } from './basicMath';
 import { tInv } from './ttest';
 import { isDoeAnalysisColumn } from './doe';
 
@@ -115,6 +115,17 @@ export interface AnovaGroupSummary {
   ciHigh: number;
 }
 
+/**
+ * 分组标准差的位置/尺度病态阈值(附录 F.2-8)。
+ *
+ * 历史写法 Σ(x−m)² 中 m 的舍入误差 δ ≤ |m|·2⁻⁵³,使平方和多出约 n·δ²,
+ * 标准差的相对误差约 (|m|/σ·1.11e-16)²/2。|m|/σ ≤ 1e8 时该误差 < 1e-16,
+ * 低于一个 ulp,常规量级继续走历史公式、逐位不变;同一组数据加 1e16 这类
+ * 大基准时误差可达 10%,此时改用 basicMath.stdev(以样本值为原点的偏移坐标 +
+ * 补偿求和,平移不变)。阈值只影响分组 σ 显示,F 检验/置信区间不消费它。
+ */
+const ANOVA_ILL_CONDITIONED_LOCATION_RATIO = 1e8;
+
 /** 单因子 ANOVA 的分组描述统计及合并误差置信区间。 */
 export function anovaGroupSummaries(
   groups: AnovaGroup[],
@@ -125,7 +136,11 @@ export function anovaGroupSummaries(
   const critical = tInv(0.5 + confidence / 2, result.errorDf);
   return groups.map((group) => {
     const m = mean(group.vals);
-    const stDev = Math.sqrt(group.vals.reduce((sum, value) => sum + (value - m) ** 2, 0) / (group.vals.length - 1));
+    const naiveStDev = Math.sqrt(group.vals.reduce((sum, value) => sum + (value - m) ** 2, 0) / (group.vals.length - 1));
+    // 常规量级沿用历史平方和(逐位不变);位置/尺度比病态时改用 basicMath.stdev 的相对中心化。
+    const stDev = naiveStDev > 0 && Math.abs(m) > ANOVA_ILL_CONDITIONED_LOCATION_RATIO * naiveStDev
+      ? stdev(group.vals, true)
+      : naiveStDev;
     const margin = critical * Math.sqrt(result.errorMS / group.vals.length);
     return {
       name: group.name,
@@ -281,6 +296,36 @@ export function countAnovaPendingCells(
   return pendingCells.filter((cell) => cell.row >= 0 && cell.row < rows.length && relevant.has(cell.col)).length;
 }
 
+export interface AnovaRoles extends AnovaNumericRoles {
+  /** 在排除 DOE 元数据后的文本候选列中的索引。 */
+  factorTextIdx: number;
+  responseName: string;
+  factorName: string;
+}
+
+/** 解析实际角色；跨模式残留的列名只能作为选择提示，不能直接成为结果标签。 */
+export function resolveAnovaRoles(
+  mode: AnovaMode,
+  colNames: string[],
+  rows: number[][],
+  textCols: { name: string; values: string[] }[],
+  respName: string | null,
+  factorName: string | null,
+): AnovaRoles {
+  const numeric = resolveAnovaNumericRoles(colNames, rows, respName, factorName);
+  const eligibleText = textCols.filter((column) => isDoeAnalysisColumn(column.name));
+  const namedTextIdx = eligibleText.findIndex((column) => column.name === factorName);
+  const factorTextIdx = namedTextIdx >= 0 ? namedTextIdx : eligibleText.length ? 0 : -1;
+  return {
+    ...numeric,
+    factorTextIdx,
+    responseName: mode === 'wide' ? '测量值' : colNames[numeric.respIdx] ?? '响应',
+    factorName: mode === 'wide' ? '测量列'
+      : mode === 'stacked' ? eligibleText[factorTextIdx]?.name ?? '分组'
+        : colNames[numeric.factorIdx] ?? '因子',
+  };
+}
+
 /** 按模式从数据集构造 ANOVA 分组——页面与项目汇总共用同一逻辑,保证界面与卡片一致。
  *  - stacked  : factorName 为文本分组列,respName 为数值响应列;按标签分组。
  *  - numfactor: factorName 为数值因子列(按其取值分组),respName 为数值响应列。
@@ -294,12 +339,30 @@ export function buildAnovaGroups(
   respName: string | null,
   factorName: string | null,
 ): AnovaGroup[] | null {
-  const roles = resolveAnovaNumericRoles(colNames, rows, respName, factorName);
+  return buildAnovaInput(mode, colNames, rows, textCols, respName, factorName).groups;
+}
+
+/** 实际列角色、名称和观测分组一次解析，所有展示/导出消费者共用此输入。 */
+export function buildAnovaInput(
+  mode: AnovaMode,
+  colNames: string[],
+  rows: number[][],
+  textCols: { name: string; values: string[] }[],
+  respName: string | null,
+  factorName: string | null,
+): { roles: AnovaRoles; groups: AnovaGroup[] | null } {
+  const roles = resolveAnovaRoles(mode, colNames, rows, textCols, respName, factorName);
+  return { roles, groups: groupsForAnovaRoles(mode, colNames, rows, textCols, roles) };
+}
+
+function groupsForAnovaRoles(
+  mode: AnovaMode,
+  colNames: string[],
+  rows: number[][],
+  textCols: { name: string; values: string[] }[],
+  roles: AnovaRoles,
+): AnovaGroup[] | null {
   const nCol = roles.eligibleIdx.length;
-  const idxOf = (name: string | null, fallback: number) => {
-    const i = name ? colNames.indexOf(name) : -1;
-    return i >= 0 ? i : fallback;
-  };
   if (mode === 'wide') {
     if (nCol < 2) return null;
     return roles.eligibleIdx.map((j) => ({
@@ -310,9 +373,9 @@ export function buildAnovaGroups(
   }
   if (mode === 'stacked') {
     const eligibleTextCols = textCols.filter((column) => isDoeAnalysisColumn(column.name));
-    const tc = (factorName ? eligibleTextCols.find((t) => t.name === factorName) : eligibleTextCols[0]) ?? eligibleTextCols[0];
+    const tc = eligibleTextCols[roles.factorTextIdx];
     if (!tc || nCol < 1) return null;
-    const rIdx = roles.respIdx >= 0 ? roles.respIdx : idxOf(respName, 0);
+    const rIdx = roles.respIdx;
     const byLabel = new Map<string, { vals: number[]; rowIndices: number[] }>();
     tc.values.forEach((l, i) => {
       if (!byLabel.has(l)) byLabel.set(l, { vals: [], rowIndices: [] });

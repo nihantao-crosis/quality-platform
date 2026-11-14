@@ -5,6 +5,7 @@
 import { memo, Fragment } from 'react';
 import { nf } from '../../core';
 import type { ChartTokens } from '../tokens';
+import { tickFormatter } from '../tokens';
 import { Svg, Ln, Txt } from './primitives';
 
 // ---------- 主效应图 ----------
@@ -32,8 +33,13 @@ function MainEffectsImpl({ T, factors }: { T: ChartTokens; factors: { name: stri
   const ph = H - m.t - m.b;
   const grand = allMeans.reduce((a, b) => a + b, 0) / allMeans.length;
   const Y = (v: number) => m.t + (1 - (v - lo) / (hi - lo)) * ph;
+  const accessibleSummary = factors
+    .map((factor) => `${factor.name}：低水平均值 ${nf(factor.lo, 6)}，高水平均值 ${nf(factor.hi, 6)}`)
+    .join('；');
   return (
-    <Svg w={W} h={H}>
+    <Svg w={W} h={H} label={`DOE 主效应图。${accessibleSummary}`}>
+      <title>DOE 主效应图</title>
+      <desc>{accessibleSummary}</desc>
       <rect x={0} y={0} width={W} height={H} fill={T.bg} />
       {factors.map((f, i) => {
         const x0 = pad + i * (panelW + gap);
@@ -84,15 +90,24 @@ function InteractionPlotImpl({ T, c00, c10, c01, c11, labelA = 'A', labelB = 'B'
   const dots: Array<[number, number, string]> = [
     [xL, c00, T.point], [xH, c10, T.point], [xL, c01, T.curve2], [xH, c11, T.curve2],
   ];
+  const accessibleSummary = [
+    `${labelA}低×${labelB}低 ${nf(c00, 6)}`,
+    `${labelA}高×${labelB}低 ${nf(c10, 6)}`,
+    `${labelA}低×${labelB}高 ${nf(c01, 6)}`,
+    `${labelA}高×${labelB}高 ${nf(c11, 6)}`,
+  ].join('；');
+  const chartTitle = `DOE 交互作用图：${labelA} 与 ${labelB}`;
   return (
-    <Svg w={W} h={H}>
+    <Svg w={W} h={H} label={`${chartTitle}。${accessibleSummary}`}>
+      <title>{chartTitle}</title>
+      <desc>{accessibleSummary}</desc>
       <rect x={0} y={0} width={W} height={H} fill={T.bg} />
       {Array.from({ length: 5 }, (_, g) => {
         const yy = m.t + (g / 4) * ph;
         return (
           <Fragment key={'g' + g}>
             <Ln x1={m.l} y1={yy} x2={m.l + pw} y2={yy} stroke={T.grid} sw={1} />
-            <Txt x={m.l - 8} y={yy} s={nf(hi - ((hi - lo) * g) / 4, 1)} fill={T.axis} size={10} anchor="end" />
+            <Txt x={m.l - 8} y={yy} s={tickFormatter(Array.from({ length: 5 }, (_, gg) => hi - ((hi - lo) * gg) / 4))(hi - ((hi - lo) * g) / 4)} fill={T.axis} size={10} anchor="end" />
           </Fragment>
         );
       })}
@@ -122,8 +137,13 @@ function EffectsBarImpl({ T, terms, refLine }: { T: ChartTokens; terms: { name: 
   const maxv = (rawMax > 0 ? rawMax : 1) * 1.12;
   const X = (v: number) => m.l + (v / maxv) * pw;
   const bh = (ph / Math.max(1, terms.length)) * 0.6;
+  const sigNames = terms
+    .filter((t) => t.sig ?? (refLine > 0 ? t.abs >= refLine : t.abs > 0))
+    .map((t) => t.name);
+  const sigText = sigNames.length === 0 ? '无'
+    : sigNames.length > 8 ? `${sigNames.slice(0, 8).join('、')} 等 ${sigNames.length} 项` : sigNames.join('、');
   return (
-    <Svg w={W} h={H}>
+    <Svg w={W} h={H} readable label={`效应帕累托图 · ${terms.length} 项，显著界限 ${nf(refLine, 2)}，显著项：${sigText}`}>
       <rect x={0} y={0} width={W} height={H} fill={T.bg} />
       {terms.map((t, i) => {
         const y = m.t + ((i + 0.5) * ph) / terms.length;
@@ -170,7 +190,7 @@ function CubePlotImpl({ T, y, labels = ['A 温度', 'B 压力', 'C 时间'] }: {
     for (let b = 0; b < 2; b++)
       for (let a = 0; a < 2; a++) verts.push({ p: P(a, b, c), val: y(a, b, c) });
   return (
-    <Svg w={W} h={H}>
+    <Svg w={W} h={H} readable label={`立方图 · ${labels.join(' × ')}`}>
       <rect x={0} y={0} width={W} height={H} fill={T.bg} />
       {edges.map((e, i) => (
         <Ln key={i} x1={e.p[0]} y1={e.p[1]} x2={e.q[0]} y2={e.q[1]} stroke={e.front ? T.text : T.axis} sw={1.4} dash={e.front ? undefined : '3 3'} />

@@ -7,7 +7,7 @@
 import { memo, Fragment } from 'react';
 import { nf, invNorm } from '../../core';
 import type { ChartTokens } from '../tokens';
-import { niceTicks, tickDecimals } from '../tokens';
+import { tickFormatter, niceTicks } from '../tokens';
 import { Svg, Ln, Txt } from './primitives';
 
 export interface EffectsNormalPlotTerm {
@@ -33,9 +33,10 @@ function EffectsNormalPlotImpl({ T, terms, pse, half = false, h }: {
   const pw = W - m.l - m.r;
   const ph = H - m.t - m.b;
   const finite = terms.filter((term) => Number.isFinite(term.effect));
+  const chartName = half ? '效应半正态概率图' : '效应正态概率图';
   if (!finite.length) {
     return (
-      <Svg w={W} h={H}>
+      <Svg w={W} h={H} readable label={`${chartName}（无可估计效应）`}>
         <rect x={0} y={0} width={W} height={H} fill={T.bg} />
         <Txt x={W / 2} y={H / 2} s="无可估计效应,无法绘制效应概率图" fill={T.axis} size={12} anchor="middle" />
       </Svg>
@@ -46,7 +47,7 @@ function EffectsNormalPlotImpl({ T, terms, pse, half = false, h }: {
     .map((term) => ({ ...term, x: half ? Math.abs(term.effect) : term.effect }))
     .sort((a, b) => a.x - b.x)
     .map((term, i) => {
-      const pp = (i + 1 - 0.375) / (n + 0.25); // 中位秩(Benard),与正态概率图同口径
+      const pp = (i + 1 - 0.3) / (n + 0.4); // 中位秩(Benard (i−0.3)/(n+0.4)),与正态概率图同口径(第三轮:两处同批从 Blom 改正)
       return { ...term, z: half ? invNorm(0.5 + pp / 2) : invNorm(pp) };
     });
   const zTop = Math.max(2.2, ...pts.map((p) => Math.abs(p.z))) * 1.1;
@@ -71,8 +72,10 @@ function EffectsNormalPlotImpl({ T, terms, pse, half = false, h }: {
   const pctTicks = (half ? HALF_PCT_TICKS : FULL_PCT_TICKS)
     .map((p) => ({ p, z: half ? invNorm(0.5 + p / 200) : invNorm(p / 100) }))
     .filter(({ z }) => z >= zlo - 1e-9 && z <= zhi + 1e-9);
+  const sigNames = finite.filter((term) => term.sig).map((term) => term.name);
+  const chartLabel = `${chartName} · ${n} 个效应项，显著：${sigNames.length ? sigNames.slice(0, 8).join('、') + (sigNames.length > 8 ? ` 等 ${sigNames.length} 项` : '') : '无'}`;
   return (
-    <Svg w={W} h={H}>
+    <Svg w={W} h={H} readable label={chartLabel}>
       <rect x={0} y={0} width={W} height={H} fill={T.bg} />
       {pctTicks.map(({ p, z }) => (
         <Fragment key={p}>
@@ -84,8 +87,8 @@ function EffectsNormalPlotImpl({ T, terms, pse, half = false, h }: {
       ))}
       {(() => {
         const tks = niceTicks(xlo, xhi, 6);
-        const d = tickDecimals(tks);
-        return tks.map((v, i) => <Txt key={'x' + i} x={X(v)} y={H - 12} s={nf(v, d)} fill={T.axis} size={10} anchor="middle" />);
+        const fmt = tickFormatter(tks);
+        return tks.map((v, i) => <Txt key={'x' + i} x={X(v)} y={H - 12} s={fmt(v)} fill={T.axis} size={10} anchor="middle" />);
       })()}
       {!half && xlo < 0 && xhi > 0 && (
         <Ln x1={X(0)} y1={m.t} x2={X(0)} y2={m.t + ph} stroke={T.classic ? '#ccd2d9' : T.grid} sw={1} dash="3 3" />

@@ -8,6 +8,11 @@ export interface AnalysisReportTable {
   title: string;
   headers: string[];
   rows: Array<Array<string | number>>;
+  /**
+   * 逻辑明细总行数。当上游为安全只物化 rows 的有界前缀时，
+   * 四种导出格式仍据此如实声明总数和截断数。
+   */
+  totalRows?: number;
   note?: string;
 }
 
@@ -39,6 +44,12 @@ export function safeSheetName(raw: string, fallback = '当前分析'): string {
   return (cleaned || fallback).slice(0, 31);
 }
 
+export function analysisTableTotalRows(table: AnalysisReportTable): number {
+  return Number.isSafeInteger(table.totalRows) && (table.totalRows ?? 0) >= table.rows.length
+    ? table.totalRows!
+    : table.rows.length;
+}
+
 /** 该专项分析是否直接消费连续型活动工作表。P/C、AQL、帕累托使用独立数据源。 */
 export function analysisUsesWorksheet(analysis: AnalysisReportPayload): boolean {
   if (analysis.usesWorksheet !== undefined) return analysis.usesWorksheet;
@@ -46,6 +57,7 @@ export function analysisUsesWorksheet(analysis: AnalysisReportPayload): boolean 
     || analysis.kind === 'doe'
     || analysis.kind === 'capability'
     || analysis.kind === 't1'
+    || analysis.kind === 't2'
     || analysis.kind === 'reg'
     || (analysis.kind === 'spc' && !/^[PC] 控制图/.test(analysis.title));
 }

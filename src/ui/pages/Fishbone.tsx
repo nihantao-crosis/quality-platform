@@ -7,12 +7,14 @@ import type { CSSProperties } from 'react';
 import { useApp } from '../../store/appStore';
 import {
   FISHBONE_DEFAULT,
+  fishboneWriteValidationError,
   loadFishboneState,
   saveFishboneState,
   type FishboneData,
 } from '../../store/fishboneStore';
 import type { ChartTokens } from '../tokens';
 import { Card, DemoBadge, tabStyle } from '../common';
+import { isImeComposing } from '../imeGuard';
 import { Svg, Ln, Txt } from '../charts/primitives';
 
 export { FISHBONE_DEFAULT, loadFishbone } from '../../store/fishboneStore';
@@ -58,7 +60,7 @@ function FishboneChartImpl({ T, data }: { T: ChartTokens; data: FishboneData }) 
   };
 
   return (
-    <Svg w={W} h={H}>
+    <Svg w={W} h={H} readable label={`鱼骨图（6M 因果图）· 问题：${data.problem.trim() || '未填写'}`}>
       <rect x={0} y={0} width={W} height={H} fill={T.bg} />
       {/* 脊骨与头部问题框 */}
       <Ln x1={spineX0} y1={spineY} x2={spineX1} y2={spineY} stroke={T.text} sw={2.4} />
@@ -92,20 +94,26 @@ export function Fishbone({ T }: { T: ChartTokens }) {
   const [catIdx, setCatIdx] = useState(0);
   const [draft, setDraft] = useState('');
 
-  const update = (next: FishboneData, nextIsDemo = false) => {
+  const update = (next: FishboneData, nextIsDemo = false): boolean => {
+    const validationError = fishboneWriteValidationError(next, nextIsDemo);
+    if (validationError) {
+      showToast(`鱼骨图更新失败：${validationError}`);
+      return false;
+    }
     setState({ data: next, isDemo: nextIsDemo });
     try {
       saveFishboneState(next, nextIsDemo);
-    } catch {
-      showToast('鱼骨图未能保存到本机，请检查本地存储空间');
+    } catch (error) {
+      const detail = error instanceof Error && error.message ? `：${error.message}` : '';
+      showToast(`鱼骨图未能保存到本机${detail}；请检查本地存储空间`);
     }
+    return true;
   };
   const addCause = () => {
     const cause = draft.trim();
     if (!cause) return;
     const categories = data.categories.map((c, i) => (i === catIdx ? { ...c, causes: [...c.causes, cause] } : c));
-    update({ ...data, categories });
-    setDraft('');
+    if (update({ ...data, categories })) setDraft('');
   };
   const removeCause = (ci: number) => {
     const categories = data.categories.map((c, i) => (i === catIdx ? { ...c, causes: c.causes.filter((_, j) => j !== ci) } : c));
@@ -114,7 +122,7 @@ export function Fishbone({ T }: { T: ChartTokens }) {
   const cat = data.categories[catIdx];
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '1fr 300px', gap: 16 }}>
+    <div className="responsive-grid-2" style={{ display: 'grid', gridTemplateColumns: '1fr 300px', gap: 16 }}>
       <Card>
         <div style={{ display: 'flex', alignItems: 'center', padding: '11px 16px', borderBottom: '1px solid #edf0f3' }}>
           <div style={{ fontWeight: 600, color: '#33404f' }}>因果图（鱼骨图）· 6M 分析</div>
@@ -161,7 +169,7 @@ export function Fishbone({ T }: { T: ChartTokens }) {
             <input
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && addCause()}
+              onKeyDown={(e) => { if (!isImeComposing(e) && e.key === 'Enter') addCause(); }}
               style={{ ...inputStyle, flex: 1 }}
               placeholder={`添加「${cat.name.split(' ')[0]}」类原因…`}
             />

@@ -35,12 +35,16 @@ describe('项目文件', () => {
     localStorage.setItem('qp-dataset-v1', JSON.stringify(storedDataset('t')));
     localStorage.setItem('qp-specs-v1', JSON.stringify({ t: { lsl: 1, tgt: 2, usl: 3 } }));
     localStorage.setItem('qp-fishbone-v1', JSON.stringify(fishbone));
+    localStorage.setItem('qp-analyses-v1', JSON.stringify([{
+      id: 'a1', kind: 'summary', title: '历史摘要', datasetName: '历史数据', metric: 'N=2', status: '已完成',
+      statusColor: '#000', statusBg: '#fff', createdAt: 1, snapshot: { sourceDataKey: 'd1' },
+    }]));
     localStorage.setItem('qp-analysis-data-v1', JSON.stringify({ d1: analysisSource('历史数据') }));
     localStorage.setItem('qp-aql-state-v1', JSON.stringify(aqlState()));
     const json = buildProjectJson('9.9.9');
     const file = JSON.parse(json);
     expect(file.format).toBe('quality-platform-project');
-    expect(file.formatVersion).toBe(4);
+    expect(file.formatVersion).toBe(5);
     expect(file.appVersion).toBe('9.9.9');
     expect(Object.keys(file.stores)).toContain('qp-dataset-v1');
 
@@ -98,7 +102,7 @@ describe('项目文件', () => {
     localStorage.setItem('qp-prefs-v1', JSON.stringify(prefs));
     localStorage.setItem('qp-analyses-v1', JSON.stringify([analysis]));
     const project = buildProjectJson('1.41.0');
-    expect(JSON.parse(project).formatVersion).toBe(4);
+    expect(JSON.parse(project).formatVersion).toBe(5);
 
     localStorage.clear();
     expect(applyProjectJson(project)).toBeNull();
@@ -264,7 +268,7 @@ describe('项目文件', () => {
 
     expect(applyProjectJson(project())).toContain('未包含在项目文件中');
     expect(localStorage.getItem('qp-pareto-v1')).toBe(marker);
-    expect(applyProjectJson(project({ 'd-missing': analysisSource('历史数据') }))).toBeNull();
+    expect(applyProjectJson(project({ 'd-missing': analysisSource('d') }))).toBeNull();
   });
 
   it('写入前拒绝同版本 .qproj 中非法 AQL 状态和损坏责任记录', () => {

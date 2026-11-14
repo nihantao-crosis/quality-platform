@@ -7,6 +7,39 @@ mod db;
 const MAX_XLSX_IMPORT_BYTES: u64 = 20 * 1024 * 1024;
 const MAX_TEXT_DATA_IMPORT_BYTES: u64 = 20 * 1024 * 1024;
 const MAX_QPROJ_IMPORT_BYTES: u64 = 64 * 1024 * 1024;
+/// 桌面端单个导出文件的写入硬上限（fix2611a G25a，附录 F.3-21）。
+/// 前端 assertExportJobSize 只约束 .qproj（64 MB）；报表 / xlsx / CSV 导出此前在 Rust 侧
+/// 没有任何上限。取 256 MB：不小于项目文件 64 MB、CSV/TXT 与 xlsx 20 MB 导入上限，
+/// 以及前端 xlsx 解压总量上限 192 MB，合法导出不会被误拒，只拦截失控的超大写入。
+const MAX_DESKTOP_EXPORT_BYTES: u64 = 256 * 1024 * 1024;
+
+/// 超限提示。超出不足 0.1 MB 时按 MB 一位小数会显示成「256.0 MB，超过 256 MB」，
+/// 因此改按字节说明超出量（fix2611b G26a A5）；`approximate` 为真表示体积是解码前估算值，文案标「约」。
+fn export_size_error(byte_len: u64, limit: u64, approximate: bool) -> String {
+    const MEGABYTE: u64 = 1024 * 1024;
+    let about = if approximate { "约" } else { "" };
+    let excess = byte_len.saturating_sub(limit);
+    if excess.saturating_mul(10) < MEGABYTE {
+        format!(
+            "导出文件超出桌面端 {} MB 写入上限{about} {excess} 字节，已取消写入；请缩小导出范围后重试",
+            limit / MEGABYTE
+        )
+    } else {
+        format!(
+            "导出文件{about}为 {:.1} MB，超过桌面端 {} MB 写入上限，已取消写入；请缩小导出范围后重试",
+            byte_len as f64 / MEGABYTE as f64,
+            limit / MEGABYTE
+        )
+    }
+}
+
+fn export_size_check(byte_len: u64, limit: u64) -> Result<(), String> {
+    if byte_len <= limit {
+        Ok(())
+    } else {
+        Err(export_size_error(byte_len, limit, false))
+    }
+}
 
 fn text_import_limit(path: &Path) -> (u64, &'static str) {
     let is_project = path
@@ -41,10 +74,15 @@ fn read_file_bounded(path: &Path, limit: u64, limit_error: &str) -> Result<Vec<u
     Ok(bytes)
 }
 
+/// 原子写的结果：`Ok(None)` 完全成功；`Ok(Some(warning))` 表示文件已完整写入并改名到位，
+/// 仅父目录 fsync 未能确认（断电持久性打了折扣，但文件对后续读取已可见）。
+/// 只有「未写入 / 未改名到位」才是 Err——不得把已落盘的导出报成失败。
+type AtomicWriteOutcome = io::Result<Option<String>>;
+
 /// Write a complete replacement beside the destination, make its bytes durable,
 /// and only then atomically swap it into place. `NamedTempFile::persist` uses the
 /// platform replacement primitive, including overwrite-safe behavior on Windows.
-fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
+fn atomic_write(path: &Path, contents: &[u8]) -> AtomicWriteOutcome {
     let parent = match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
@@ -72,7 +110,16 @@ fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
 
     // On Unix, syncing the directory also makes the rename durable across a
     // sudden power loss. Opening directories as files is not portable to Windows.
-    sync_parent_directory(parent)
+    // 此时目标文件已完整就位：目录 fsync 失败（如「可写可遍历不可读」的投递目录）
+    // 只降级为警告，不能让调用方把已落盘的写报成失败。
+    Ok(sync_parent_directory(parent).err().map(|error| {
+        let warning = format!(
+            "文件已完整写入 {}，但未能确认所在目录的磁盘同步（{error}）；突然断电时该次保存可能丢失",
+            path.to_string_lossy()
+        );
+        eprintln!("[atomic_write] {warning}");
+        warning
+    }))
 }
 
 #[cfg(unix)]
@@ -87,18 +134,51 @@ fn sync_parent_directory(_parent: &Path) -> io::Result<()> {
 
 /// 桌面端文件写入 — 由前端 PlatformAdapter 的导出报表调用。
 /// 路径来自原生保存对话框，无需 fs 插件的 scope 白名单。
+/// 返回 `null` 表示完全成功；返回字符串表示文件已写入但目录同步未确认（警告，非失败）。
 #[tauri::command]
-fn save_text_file(path: String, contents: String) -> Result<(), String> {
-    atomic_write(Path::new(&path), contents.as_bytes()).map_err(|e| e.to_string())
+fn save_text_file(path: String, contents: String) -> Result<Option<String>, String> {
+    save_text_file_bounded(Path::new(&path), &contents, MAX_DESKTOP_EXPORT_BYTES)
+}
+
+/// 超限在打开 / 创建任何文件之前拒绝，目标位置的旧文件保持原样。
+fn save_text_file_bounded(
+    path: &Path,
+    contents: &str,
+    limit: u64,
+) -> Result<Option<String>, String> {
+    export_size_check(contents.len() as u64, limit)?;
+    atomic_write(path, contents.as_bytes()).map_err(|e| e.to_string())
 }
 
 /// 读取文本文件（导入数据用，路径来自原生打开对话框）。
+/// 编码回退（双审 P1）：中文 Windows Excel「另存为 CSV」默认 GBK/GB18030，
+/// 此前 UTF-8 硬校验直接报「invalid utf-8 sequence」拒导且无指引；
+/// 现按 GB18030 解码兜底，与 Web 端 TextDecoder 回退同口径。
 #[tauri::command]
 fn read_text_file(path: String) -> Result<String, String> {
     let path = Path::new(&path);
     let (limit, limit_error) = text_import_limit(path);
     let bytes = read_file_bounded(path, limit, limit_error)?;
-    String::from_utf8(bytes).map_err(|e| e.to_string())
+    // UTF-8 BOM 权威且剥离(第三轮:与 Web 端 decodeTextFileBytes 逐字同口径,
+    // 否则桌面端「菜单导入」与「拖入窗口」两条路径对同一文件产出不同文本)
+    if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        // BOM 权威：后续内容必须是严格 UTF-8，坏字节不得用替换字符静默污染数据，
+        // 也不得回退 GB18030——与 Web 端 decodeTextFileBytes 同口径。
+        return String::from_utf8(bytes[3..].to_vec())
+            .map_err(|_| "文件带 UTF-8 BOM，但内容包含非法 UTF-8 字节，已拒绝导入".to_string());
+    }
+    match String::from_utf8(bytes) {
+        Ok(text) => Ok(text),
+        Err(err) => {
+            let bytes = err.into_bytes();
+            let (text, _, had_errors) = encoding_rs::GB18030.decode(&bytes);
+            if had_errors {
+                Err("文件既不是 UTF-8 也不是 GB18030 编码；请在 Excel 中另存为「CSV UTF-8（逗号分隔）」后重试".to_string())
+            } else {
+                Ok(text.into_owned())
+            }
+        }
+    }
 }
 
 /// 二进制文件读取（.xlsx 导入用，返回 base64）。
@@ -115,29 +195,107 @@ fn read_binary_file(path: String) -> Result<String, String> {
 
 /// 二进制文件写入（.xlsx 导出用，前端传 base64）。
 #[tauri::command]
-fn save_binary_file(path: String, data_b64: String) -> Result<(), String> {
+fn save_binary_file(path: String, data_b64: String) -> Result<Option<String>, String> {
+    save_binary_file_bounded(Path::new(&path), &data_b64, MAX_DESKTOP_EXPORT_BYTES)
+}
+
+fn save_binary_file_bounded(
+    path: &Path,
+    data_b64: &str,
+    limit: u64,
+) -> Result<Option<String>, String> {
     use base64::Engine;
+    // 解码前预检：解码结果不超过 limit 的标准 base64 最多 4*ceil(limit/3) 个字符，
+    // 超出即拒绝，不为失控 payload 再分配一份解码缓冲。
+    let max_encoded = limit.div_ceil(3).saturating_mul(4);
+    if data_b64.len() as u64 > max_encoded {
+        let estimated = (data_b64.len() as u64 / 4).saturating_mul(3);
+        return Err(export_size_error(estimated.max(limit + 1), limit, true));
+    }
     let bytes = base64::engine::general_purpose::STANDARD
-        .decode(&data_b64)
+        .decode(data_b64)
         .map_err(|e| e.to_string())?;
-    atomic_write(Path::new(&path), &bytes).map_err(|e| e.to_string())
+    export_size_check(bytes.len() as u64, limit)?;
+    atomic_write(path, &bytes).map_err(|e| e.to_string())
+}
+
+/// 启动期需要告知用户的一次性提示（如损坏库已隔离保全的备份路径）。
+struct StartupNotice(std::sync::Mutex<Option<String>>);
+
+/// 前端启动后取走启动提示；取走即清空，WebView 重载不会重复弹出。
+#[tauri::command]
+fn desktop_take_startup_notice(notice: tauri::State<StartupNotice>) -> Option<String> {
+    notice.0.lock().ok().and_then(|mut slot| slot.take())
+}
+
+/// macOS 的默认「退出」菜单项（Cmd+Q）直接调用 NSApp terminate:，不经过窗口
+/// CloseRequested，前端的未持久化拦截会被整个绕过。这里把它换成普通菜单项：
+/// 触发时对每个窗口发起 close()，走与点击关闭按钮完全相同的拦截路径。
+#[cfg(target_os = "macos")]
+const GUARDED_QUIT_MENU_ID: &str = "qp-guarded-quit";
+
+#[cfg(target_os = "macos")]
+fn guarded_app_menu<R: tauri::Runtime>(
+    handle: &tauri::AppHandle<R>,
+) -> tauri::Result<tauri::menu::Menu<R>> {
+    use tauri::menu::{Menu, MenuItem, MenuItemKind};
+    let menu = Menu::default(handle)?;
+    if let Some(MenuItemKind::Submenu(app_menu)) = menu.items()?.into_iter().next() {
+        let items = app_menu.items()?;
+        // Menu::default 的应用子菜单以预定义「Quit」收尾（muda 文本含助记符，如 "&Quit"）；
+        // 文本识别不到时按「最后一个预定义项」兜底。
+        let is_predefined = |item: &MenuItemKind<R>| matches!(item, MenuItemKind::Predefined(_));
+        let quit_position = items
+            .iter()
+            .position(|item| {
+                matches!(item, MenuItemKind::Predefined(predefined)
+                    if predefined.text().map(|text| text.contains("Quit")).unwrap_or(false))
+            })
+            .or_else(|| items.iter().rposition(is_predefined));
+        if let Some(position) = quit_position {
+            app_menu.remove_at(position)?;
+            let quit = MenuItem::with_id(
+                handle,
+                GUARDED_QUIT_MENU_ID,
+                format!("退出 {}", handle.package_info().name),
+                true,
+                Some("CmdOrCtrl+Q"),
+            )?;
+            app_menu.insert(&quit, position)?;
+        }
+    }
+    Ok(menu)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(target_os = "macos")]
+    let builder = builder.menu(guarded_app_menu).on_menu_event(|app, event| {
+        use tauri::Manager;
+        if event.id() == GUARDED_QUIT_MENU_ID {
+            for window in app.webview_windows().values() {
+                // close() 发出 CloseRequested：前端有监听时由它决定是否 destroy。
+                let _ = window.close();
+            }
+        }
+    });
+    builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
-            // 本机数据集库:SQLite 落在应用数据目录,启动即建库建表
+            // 本机数据集库:SQLite 落在应用数据目录,启动即建库建表。
+            // 任何库错误都不得从 setup 冒泡：tauri 会在窗口已创建后直接 panic，
+            // 用户只看到窗口一闪即退且没有任何恢复入口。
             use tauri::Manager;
-            let dir = app.path().app_data_dir()?;
-            fs::create_dir_all(&dir)?;
-            let db_path = dir.join("datasets.db");
-            let conn = rusqlite::Connection::open(&db_path)?;
-            db::init_schema(&conn)?;
-            app.manage(db::Db(std::sync::Mutex::new(conn)));
-            app.manage(db::DbPath(db_path.to_string_lossy().to_string()));
+            let data_dir = app.path().app_data_dir().map_err(|e| e.to_string());
+            let startup = db::open_dataset_db(data_dir, db::DB_BUSY_TIMEOUT);
+            if let Some(notice) = &startup.notice {
+                eprintln!("[datasets.db] {notice}");
+            }
+            app.manage(startup.db);
+            app.manage(db::DbPath(startup.path));
+            app.manage(StartupNotice(std::sync::Mutex::new(startup.notice)));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -145,11 +303,20 @@ pub fn run() {
             read_text_file,
             read_binary_file,
             save_binary_file,
+            desktop_take_startup_notice,
             db::db_put_dataset,
+            db::db_insert_dataset,
             db::db_get_dataset,
             db::db_list_datasets,
             db::db_delete_dataset,
-            db::db_stats
+            db::db_clear_all_datasets,
+            db::db_get_clear_status,
+            db::db_stats,
+            db::db_read_snapshot,
+            db::db_begin_project_import,
+            db::db_commit_project_import,
+            db::db_rollback_project_import,
+            db::db_pending_project_import
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -283,8 +450,246 @@ mod tests {
         assert_eq!(entries, vec![std::ffi::OsString::from("destination.txt")]);
     }
 
+    /// fix2609j GAP-5-1：目录「可写可遍历不可读」（投递目录 0300）时，persist 已把文件完整改名到位，
+    /// 仅目录 fsync 的 open(parent) 失败。修复前 save_text_file 返回 Err("Permission denied")，
+    /// 前端弹「导出失败」；修复后返回 Ok(Some(警告))，且文件内容完整。
+    #[cfg(unix)]
+    #[test]
+    fn gap_5_1_directory_fsync_failure_after_persist_is_a_warning_not_a_failure() {
+        use std::os::unix::fs::PermissionsExt;
+        struct RestorePerms<'a>(&'a Path);
+        impl Drop for RestorePerms<'_> {
+            fn drop(&mut self) {
+                let _ = fs::set_permissions(self.0, fs::Permissions::from_mode(0o755));
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let drop_box = root.path().join("收集箱");
+        fs::create_dir(&drop_box).unwrap();
+        fs::set_permissions(&drop_box, fs::Permissions::from_mode(0o300)).unwrap();
+        let _restore = RestorePerms(&drop_box);
+        if fs::File::open(&drop_box).is_ok() {
+            // 以 root 运行时权限位不生效，无法构造该场景。
+            return;
+        }
+        let target = drop_box.join("质检项目.qproj");
+        let text_result = save_text_file(
+            target.to_string_lossy().to_string(),
+            "{\"version\":9}".into(),
+        );
+        let binary_target = drop_box.join("报表.xlsx");
+        let binary_result = {
+            use base64::Engine;
+            save_binary_file(
+                binary_target.to_string_lossy().to_string(),
+                base64::engine::general_purpose::STANDARD.encode(b"PK\x03\x04"),
+            )
+        };
+        fs::set_permissions(&drop_box, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let warning = text_result
+            .expect("已落盘的写不得报为失败")
+            .expect("目录同步未确认须以警告返回，而不是静默吞掉");
+        assert!(warning.contains("文件已完整写入"), "{warning}");
+        assert_eq!(fs::read_to_string(&target).unwrap(), "{\"version\":9}");
+        assert!(binary_result.expect("二进制导出同样不得报失败").is_some());
+        assert_eq!(fs::read(&binary_target).unwrap(), b"PK\x03\x04");
+        // 不残留临时文件。
+        let mut names: Vec<_> = fs::read_dir(&drop_box)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["报表.xlsx".to_string(), "质检项目.qproj".to_string()]
+        );
+    }
+
+    #[test]
+    fn gap_5_1_normal_directory_returns_no_warning() {
+        let (_dir, path) = temp_path("正常.txt");
+        assert_eq!(
+            save_text_file(path.to_string_lossy().to_string(), "ok".into()).unwrap(),
+            None
+        );
+    }
+
     #[test]
     fn read_missing_file_errors() {
         assert!(read_text_file("/nonexistent/没有这个文件.csv".into()).is_err());
+    }
+    #[test]
+    fn read_gbk_file_falls_back_to_gb18030() {
+        // 第三轮审计:编码回退零测试覆盖——「中文,1」的 GBK 字节
+        let (_dir, path) = temp_path("gbk.csv");
+        fs::write(&path, [0xD6u8, 0xD0, 0xCE, 0xC4, 0x2C, 0x31]).unwrap();
+        assert_eq!(
+            read_text_file(path.to_string_lossy().to_string()).unwrap(),
+            "中文,1"
+        );
+    }
+
+    #[test]
+    fn read_utf8_bom_is_authoritative() {
+        // BOM 文件按 UTF-8 解;不落 GB18030 回退(与 Web 端 decodeTextFileBytes 同口径)
+        let (_dir, path) = temp_path("bom.csv");
+        let mut bytes = vec![0xEFu8, 0xBB, 0xBF];
+        bytes.extend_from_slice("直径,25.1".as_bytes());
+        fs::write(&path, bytes).unwrap();
+        assert_eq!(
+            read_text_file(path.to_string_lossy().to_string()).unwrap(),
+            "直径,25.1"
+        );
+    }
+
+    #[test]
+    fn read_utf8_bom_rejects_invalid_utf8_without_replacement_or_gb18030_fallback() {
+        let (_dir, path) = temp_path("bom-invalid.csv");
+        fs::write(&path, [0xEFu8, 0xBB, 0xBF, 0xFF, 0x0A, 0x31, 0x0A, 0x32]).unwrap();
+
+        assert_eq!(
+            read_text_file(path.to_string_lossy().to_string()).unwrap_err(),
+            "文件带 UTF-8 BOM，但内容包含非法 UTF-8 字节，已拒绝导入"
+        );
+    }
+
+    /// fix2611a G25a A3:桌面写文件此前没有任何体积上限,前端 assertExportJobSize 只管 .qproj。
+    #[test]
+    fn fix2611a_desktop_export_limit_is_not_below_any_import_or_project_limit() {
+        // 合法导出必须都能写:不得小于项目文件、CSV/TXT 与 xlsx 的既有上限。
+        let floors = [
+            MAX_QPROJ_IMPORT_BYTES,
+            MAX_TEXT_DATA_IMPORT_BYTES,
+            MAX_XLSX_IMPORT_BYTES,
+            192 * 1024 * 1024, // 前端 MAX_XLSX_TOTAL_BYTES(src/platform/adapter.ts)
+        ];
+        for floor in floors {
+            assert!(MAX_DESKTOP_EXPORT_BYTES >= floor);
+        }
+        assert!(export_size_check(MAX_DESKTOP_EXPORT_BYTES, MAX_DESKTOP_EXPORT_BYTES).is_ok());
+        let error =
+            export_size_check(MAX_DESKTOP_EXPORT_BYTES + 1, MAX_DESKTOP_EXPORT_BYTES).unwrap_err();
+        assert!(
+            error.contains("超出桌面端 256 MB 写入上限 1 字节"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn fix2611a_oversize_text_export_is_rejected_without_touching_destination() {
+        let (dir, path) = temp_path("报表.html");
+        fs::write(&path, b"previous complete report").unwrap();
+        let limit = 8;
+
+        let error = save_text_file_bounded(&path, "123456789", limit).unwrap_err();
+
+        assert!(error.contains("写入上限"), "{error}");
+        assert!(error.contains("已取消写入"), "{error}");
+        assert_eq!(fs::read(&path).unwrap(), b"previous complete report");
+        let names: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("报表.html")]);
+        // 恰好等于上限仍可写。
+        assert_eq!(
+            save_text_file_bounded(&path, "12345678", limit).unwrap(),
+            None
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"12345678");
+    }
+
+    #[test]
+    fn fix2611a_oversize_binary_export_is_rejected_before_and_after_decoding() {
+        use base64::Engine;
+        let engine = base64::engine::general_purpose::STANDARD;
+        let (_dir, path) = temp_path("报表.xlsx");
+        let limit = 6;
+
+        // 上限 6 字节时 base64 预检界为 4*ceil(6/3)=8 个字符:7 字节的编码有 12 个字符,
+        // 解码前即拒绝,不为超大 payload 分配解码缓冲,也不创建目标文件。
+        let error =
+            save_binary_file_bounded(&path, &engine.encode(b"PK\x03\x04abc"), limit).unwrap_err();
+        assert!(error.contains("写入上限"), "{error}");
+        assert!(!path.exists());
+
+        // 预检估算值恰好落在上限上的长度(9 个字符 → 估算 6 字节)也必须拒绝,不得静默返回成功。
+        assert!(save_binary_file_bounded(&path, "UEsDBGFiY", limit)
+            .unwrap_err()
+            .contains("写入上限"));
+        assert!(!path.exists());
+
+        // 恰好 6 字节(8 个字符)允许写入。
+        assert_eq!(
+            save_binary_file_bounded(&path, &engine.encode(b"PK\x03\x04ab"), limit).unwrap(),
+            None
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"PK\x03\x04ab");
+        // 上限 5 时预检界仍是 8 个字符,同样 8 字符的 payload 通过预检;解码后 6 字节必须复核拒绝,
+        // 且不改动已有文件。
+        let error =
+            save_binary_file_bounded(&path, &engine.encode(b"PK\x03\x04zz"), 5).unwrap_err();
+        assert!(error.contains("写入上限"), "{error}");
+        assert_eq!(fs::read(&path).unwrap(), b"PK\x03\x04ab");
+    }
+
+    /// fix2611b G26a A5:超出不足 0.1 MB 时按 MB 一位小数显示会得到「256.0 MB，超过 256 MB」的自相矛盾文案;
+    /// 改按字节说明超出量。二进制预检只能估算解码后体积,文案必须注明「约」。
+    #[test]
+    fn fix2611b_export_size_error_is_not_self_contradictory_at_boundary() {
+        let limit = MAX_DESKTOP_EXPORT_BYTES;
+        for over in [1_u64, 2, 3, 104_857] {
+            let error = export_size_check(limit + over, limit).unwrap_err();
+            assert!(!error.contains("256.0 MB"), "{error}");
+            assert!(
+                error.contains(&format!("超出桌面端 256 MB 写入上限 {over} 字节")),
+                "{error}"
+            );
+            assert!(error.contains("已取消写入"), "{error}");
+            assert!(!error.contains('约'), "精确字节数不得标「约」:{error}");
+        }
+        // 超出达到 0.1 MB 起按 MB 显示,一位小数已与上限可区分。
+        let error = export_size_check(limit + 104_858, limit).unwrap_err();
+        assert!(
+            error.contains("导出文件为 256.1 MB，超过桌面端 256 MB 写入上限"),
+            "{error}"
+        );
+
+        // 二进制预检:12 个字符估算 9 字节,上限 6 → 约超出 3 字节;9 个字符估算 6 字节按上限 +1 处理。
+        let (_dir, path) = temp_path("报表.xlsx");
+        let error = save_binary_file_bounded(&path, "UEsDBGFiYw==", 6).unwrap_err();
+        assert!(error.contains("写入上限约 3 字节"), "{error}");
+        let error = save_binary_file_bounded(&path, "UEsDBGFiY", 6).unwrap_err();
+        assert!(error.contains("写入上限约 1 字节"), "{error}");
+        // 预检估算超出达到 0.1 MB:约为 X MB。
+        let megabyte = 1024 * 1024;
+        let payload = "A".repeat(1_600_000); // 估算 1_200_000 字节,超出 1 MB 上限 151_424 字节
+        let error = save_binary_file_bounded(&path, &payload, megabyte).unwrap_err();
+        assert!(
+            error.contains("导出文件约为 1.1 MB，超过桌面端 1 MB 写入上限"),
+            "{error}"
+        );
+        assert!(!path.exists());
+        // 解码后复核得到的是精确字节数,不标「约」。
+        let error = save_binary_file_bounded(&path, "UEsDBHp6", 5).unwrap_err();
+        assert!(error.contains("写入上限 1 字节"), "{error}");
+        assert!(!error.contains('约'), "{error}");
+    }
+
+    /// fix2611a G25a A4:既非 UTF-8 也非 GB18030 的字节(0xFF 在两种编码里都非法)
+    /// 必须返回中文指引错误,而不是把替换字符或乱码当成数据导入。
+    #[test]
+    fn fix2611a_read_text_rejects_bytes_that_are_neither_utf8_nor_gb18030() {
+        let bytes = [0x41u8, 0x2C, 0xFF, 0x0A, 0x31, 0x2C, 0x32];
+        // 0xFF 不是合法的 UTF-8 起始字节(UTF-8 分支必失败);GB18030 解码同样报错:
+        assert!(encoding_rs::GB18030.decode(&bytes).2);
+        let (_dir, path) = temp_path("unknown-encoding.csv");
+        fs::write(&path, bytes).unwrap();
+
+        assert_eq!(
+            read_text_file(path.to_string_lossy().to_string()).unwrap_err(),
+            "文件既不是 UTF-8 也不是 GB18030 编码；请在 Excel 中另存为「CSV UTF-8（逗号分隔）」后重试"
+        );
     }
 }

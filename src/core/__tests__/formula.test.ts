@@ -161,3 +161,21 @@ describe('错误处理', () => {
   it('多余内容报错', () => { expect(bad('C1 C2')).toContain('多余'); });
   it('未知名称(无括号函数)报错', () => { expect(bad('mean')).toContain('未知名称'); });
 });
+
+describe('一元负号与 ^ 的优先级(v1.43.0 双审整改:与 Minitab 计算器一致)', () => {
+  it('-C1^2 = -(C1²),不再解析成 (−C1)²', () => {
+    expect(ev('-C1^2')).toEqual([-1, -4, -9, -16]);
+  });
+  it('-C1^0.5 在正数列上等于 −√C1(旧解析会得 NaN 被拒)', () => {
+    const out = ev('-C1^0.5');
+    expect(out[0]).toBeCloseTo(-1, 12);
+    expect(out[3]).toBeCloseTo(-2, 12);
+  });
+  it('指数位置的一元符号仍可用:2^-2、C1^-1', () => {
+    expect(ev('2^-2')).toEqual([0.25, 0.25, 0.25, 0.25]);
+    expect(ev('C1^-1')).toEqual([1, 0.5, 1 / 3, 0.25]);
+  });
+  it('括号仍然优先:(-C1)^2 = C1²', () => {
+    expect(ev('(-C1)^2')).toEqual([1, 4, 9, 16]);
+  });
+});

@@ -64,7 +64,7 @@ describe('当前分析专项导出', () => {
       title: 'P 控制图专项报告',
       subtitle: '属性数据',
     };
-    const wb = XLSX.read(buildXlsx(M, SPEC, assessSpcCharts(M, DEFAULT_SPC_RULES, DEFAULT_RULE_K), report), { type: 'array' });
+    const wb = XLSX.read(buildXlsx(M, SPEC, assessSpcCharts(M, DEFAULT_SPC_RULES, DEFAULT_RULE_K, 'xbar-r'), report), { type: 'array' });
     expect(wb.SheetNames).toEqual(['spc-当前分析']);
     expect(wb.SheetNames).not.toContain('数据');
     expect(wb.SheetNames).not.toContain('统计摘要');
@@ -82,7 +82,7 @@ describe('当前分析专项导出', () => {
         rows: [[1, 'A', 10], [2, 'A', 11], [3, 'B', 20], [4, 'B', 21]],
       }],
     };
-    const wb = XLSX.read(buildXlsx(M, SPEC, assessSpcCharts(M, DEFAULT_SPC_RULES, DEFAULT_RULE_K), report), { type: 'array' });
+    const wb = XLSX.read(buildXlsx(M, SPEC, assessSpcCharts(M, DEFAULT_SPC_RULES, DEFAULT_RULE_K, 'xbar-r'), report), { type: 'array' });
     expect(wb.SheetNames).toEqual(['anova-当前分析']);
     const rows = XLSX.utils.sheet_to_json<string[]>(wb.Sheets['anova-当前分析'], { header: 1 });
     expect(rows.flat().join('|')).toContain('工作表行|设备|压入力');

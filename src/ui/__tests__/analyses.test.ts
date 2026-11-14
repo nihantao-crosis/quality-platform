@@ -256,6 +256,31 @@ describe('保存分析', () => {
     expect(saved.snapshot.gageBatchCols).toHaveLength(64);
   });
 
+  it('MSA 快照回放安全保留 __proto__/constructor 列名', () => {
+    useData.getState().importMatrix('MSA-special.csv', ['__proto__', 'constructor', '部件'], [
+      [10, 20, 1], [10.1, 20.1, 1], [11, 21, 2], [11.1, 21.1, 2],
+    ]);
+    const memory = Object.fromEntries([
+      ['__proto__', { mode: 'width' as const, value: 1 }],
+      ['constructor', { mode: 'upper' as const, value: 100 }],
+    ]);
+    useApp.setState({
+      page: 'gagerr', gageUseReal: true,
+      gageValueName: '__proto__', gagePartName: '部件', gageOperatorName: null,
+      gageTolMode: 'width', gageTolValue: 1,
+      gageBatchCols: ['__proto__', 'constructor'], gageTolByCol: memory,
+    });
+    const saved = useAnalyses.getState().saveCurrent()!;
+    useApp.setState({ gageTolByCol: {}, gageValueName: null, gageBatchCols: null });
+    useAnalyses.getState().restore(saved.id);
+
+    const restored = useApp.getState().gageTolByCol;
+    expect(Object.getPrototypeOf(restored)).toBeNull();
+    expect(Object.prototype.hasOwnProperty.call(restored, '__proto__')).toBe(true);
+    expect(restored['__proto__']).toEqual({ mode: 'width', value: 1 });
+    expect(restored.constructor).toEqual({ mode: 'upper', value: 100 });
+  });
+
   it('导入新工作表清除 MSA 批量选择与逐列公差，禁止同名列跨数据集串用', () => {
     useData.getState().importMatrix('数据集A.csv', ['测量值', '部件'], [[1, 1], [2, 2]]);
     useApp.setState({
@@ -994,6 +1019,8 @@ describe('回看分析', () => {
     const previousDb = platform.datasetDb;
     platform.datasetDb = {
       put: async () => {}, get: async () => null, list: async () => [], remove: async () => false,
+      clear: async (opId) => ({ opId, committed: true, removed: 0 }),
+      clearStatus: async () => null,
       stats: async () => ({ count: 0, total_bytes: 0, path: ':memory:' }),
     };
     try {

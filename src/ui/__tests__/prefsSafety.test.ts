@@ -217,6 +217,27 @@ describe('偏好持久化安全', () => {
     });
   });
 
+  it('MSA 公差记忆把 __proto__ 当作普通列名，不改变映射原型', async () => {
+    localStorage.setItem('qp-prefs-v1', JSON.stringify({
+      version: 3,
+      state: {
+        gageValueName: '__proto__',
+        gageTolByCol: {
+          ['__proto__']: { mode: 'width', value: 1 },
+          constructor: { mode: 'upper', value: 2 },
+        },
+      },
+    }));
+    await useApp.persist.rehydrate();
+
+    const memory = useApp.getState().gageTolByCol;
+    expect(Object.getPrototypeOf(memory)).toBeNull();
+    expect(Object.prototype.hasOwnProperty.call(memory, '__proto__')).toBe(true);
+    expect(memory['__proto__']).toEqual({ mode: 'width', value: 1 });
+    expect(memory.constructor).toEqual({ mode: 'upper', value: 2 });
+    expect(memory.mode).toBeUndefined();
+  });
+
   it('批次720 SPC σ 估计方法/区带开关持久化往返;非法值回落', async () => {
     useApp.setState({ spcSigmaMethod: 'pooled', spcShowZones: true });
     localStorage.setItem('qp-prefs-v1', JSON.stringify({

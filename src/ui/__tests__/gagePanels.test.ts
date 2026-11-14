@@ -4,7 +4,12 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { GagePanelData } from '../../core';
 import { mean } from '../../core';
-import { boxplotStats, GageByOperatorPanel } from '../charts/gagePanels';
+import {
+  boxplotStats,
+  GageByOperatorPanel,
+  GageInteractionPanel,
+  gageInteractionSeriesStyle,
+} from '../charts/gagePanels';
 import { chartTokens } from '../tokens';
 
 describe('boxplotStats — Minitab 1.5×IQR 箱线规则(Codex 复审 P1)', () => {
@@ -80,5 +85,53 @@ describe('Gage 操作员均值标记', () => {
       T: chartTokens('经典', false), panel: panel(values), partLabels: ['1'], operatorLabels: ['甲'],
     }));
     expect(render(blocked)).toBe(render([...blocked].reverse()));
+  });
+});
+
+describe('Gage 交互图操作员编码', () => {
+  it('至少 4 名操作员拥有各自唯一的颜色、形状和线型', () => {
+    const styles = Array.from({ length: 4 }, (_, operator) => gageInteractionSeriesStyle(operator));
+    expect(new Set(styles.map((style) => style.color)).size).toBe(4);
+    expect(new Set(styles.map((style) => style.marker)).size).toBe(4);
+    expect(new Set(styles.map((style) => style.dash ?? 'solid')).size).toBe(4);
+  });
+
+  it('数据线与图例复用同一组颜色/线型/标记', () => {
+    const panel: GagePanelData = {
+      partCount: 2,
+      operatorCount: 4,
+      trialCount: 2,
+      cellMeans: [[1, 2], [1.2, 2.1], [0.9, 2.2], [1.1, 1.8]],
+      cellRanges: [[0.1, 0.1], [0.1, 0.1], [0.1, 0.1], [0.1, 0.1]],
+      partMeans: [1.05, 2.025],
+      operatorMeans: [1.5, 1.65, 1.55, 1.45],
+      values: [
+        [[0.95, 1.05], [1.95, 2.05]],
+        [[1.15, 1.25], [2.05, 2.15]],
+        [[0.85, 0.95], [2.15, 2.25]],
+        [[1.05, 1.15], [1.75, 1.85]],
+      ],
+      grandMean: 1.55625,
+      rBar: 0.1,
+      rLimits: null,
+      xbarLimits: null,
+    };
+    const markup = renderToStaticMarkup(createElement(GageInteractionPanel, {
+      T: chartTokens('经典', false),
+      panel,
+      partLabels: ['1', '2'],
+      operatorLabels: ['甲', '乙', '丙', '丁'],
+    }));
+    for (let operator = 0; operator < 4; operator++) {
+      const style = gageInteractionSeriesStyle(operator);
+      expect(markup.split(style.color).length - 1, `操作员 ${operator + 1} 颜色未同时出现在数据与图例`).toBeGreaterThanOrEqual(4);
+      if (style.dash) {
+        expect(markup.split(`stroke-dasharray="${style.dash}"`).length - 1).toBeGreaterThanOrEqual(2);
+      }
+    }
+    expect(markup).toContain('甲');
+    expect(markup).toContain('乙');
+    expect(markup).toContain('丙');
+    expect(markup).toContain('丁');
   });
 });

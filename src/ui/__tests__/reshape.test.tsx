@@ -9,6 +9,8 @@ import { prepareSpcData } from '../../core';
 beforeEach(() => {
   localStorage.clear();
   useData.getState().resetDemo();
+  // 各用例彼此独立：不让前序用例填满最近列表(Web 端满列表时新建类写入会先要求确认挤出)
+  useData.setState({ recents: [] });
 });
 
 describe('转置列', () => {

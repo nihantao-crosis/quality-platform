@@ -1,4 +1,132 @@
-import { nf, type SpecLimits, type VarModel } from '../core';
+import { cappedTermList, nf, type CapabilityInputOptions, type FactorialAlias, type SpcChartContext, type SpecLimits, type VarModel } from '../core';
+
+/**
+ * 通用报告控制图的限值绘制：分阶段(assessSpcCharts 第 5 参 active)时按段内步进限值画线，
+ * 与红点所依据的段内判异同一口径；未分阶段返回空对象(全局限值)。
+ */
+export function stagedChartProps(chart: SpcChartContext): {
+  clSeries?: number[]; uclSeries?: number[]; lclSeries?: number[]; stepSeries?: boolean; stageBoundaries?: number[];
+} {
+  return chart.clSeries && chart.uclSeries && chart.lclSeries
+    ? { clSeries: chart.clSeries, uclSeries: chart.uclSeries, lclSeries: chart.lclSeries, stepSeries: true, stageBoundaries: chart.stageBoundaries }
+    : {};
+}
+
+/**
+ * 通用报告能力段选项：能力输入选项 + 稳定性口径披露(CORE-09/UI-12)。
+ * stabilityCaliberText 取 capabilityStabilityCaliber(...).text——能力稳定性有意按全局控制限/子组图
+ * 评估,与 SPC 段(分阶段或 I-MR 视图)口径不同时,四种格式的能力段都必须写明,否则两段计数无从对账。
+ */
+export interface ReportCapabilityOptions extends CapabilityInputOptions {
+  stabilityCaliberText?: string | null;
+  /**
+   * 能力数据来源(fix2611a G25c C1):能力子组口径与 SPC 角色不同(capSubgroupMode≠'spc')时,
+   * 由 buildActiveAnalysisExport 从 resolveCapabilityMeasurementData 取出(与能力页同一 prepared)。
+   * 缺省时按能力模型自身列名/数据结构推导。
+   */
+  capabilitySource?: CapabilitySource | null;
+}
+
+/** 能力页「能力数据口径」行的两项来源字段(SpcPreparedData.note / variableName)。 */
+export interface CapabilitySource {
+  variableName: string;
+  note: string;
+}
+
+/**
+ * 能力变量与数据口径的唯一文案(fix2611a G25c C1):与能力页「能力数据口径：…；变量：…；实际观测 N=…」
+ * 逐字同源(页面另以「。」收尾)。SPC 与能力用同一模型时返回 null——此时各格式输出与旧版逐字相同。
+ * HTML/Word/PPT/Excel/纯文本五种出口只调用本函数。
+ */
+export function capabilitySourceLine(
+  spcModel: VarModel,
+  capabilityModel: VarModel,
+  source?: CapabilitySource | null,
+): string | null {
+  if (spcModel === capabilityModel) return null;
+  const note = source?.note || reportShapeText(capabilityModel);
+  const variable = source?.variableName || capabilityModel.colNames.join(' / ');
+  return `能力数据口径：${note}；变量：${variable}；实际观测 N=${capabilityModel.all.length}`;
+}
+
+/**
+ * 能力指标表的术语唯一来源(fix2611a G25c C3):HTML/Word/PPT/Excel/纯文本与能力页同一写法,
+ * 此前 Word/PPT 写「σ 水平」「PPM(整体)」,与其余格式的「西格玛水平」「PPM 合计（整体）」不一致。
+ */
+export const CAPABILITY_TERMS = {
+  sigmaLevel: '西格玛水平',
+  ppmOverall: 'PPM 合计（整体）',
+} as const;
+
+/**
+ * fix2611b B5:DOE 别名/可估计性文字的单一来源(DOE 页「别名/可估计性」行与「无可估计项」卡片、
+ * 专项报告的剔除提示/未运行说明/别名表关系列都走这里,四种导出共用同一载荷)。
+ * 列项按 core/doe 的 cappedTermList 封顶并写明总数;建议按 relation/confoundedWithBlocks 分类,
+ * 与结论里的 confoundedInteractionNote 同口径:
+ *   · 与区组混杂 → 减少区组数或增加仿行;
+ *   · 生成元别名(same/opposite)→ 提高设计分辨率或折叠设计;
+ *   · 其余线性相关 → 增加运行或减少模型项。
+ */
+type DoeAliasKind = 'block' | 'generator' | 'dependent';
+
+function doeAliasKind(alias: FactorialAlias): DoeAliasKind {
+  if (alias.relation === 'same' || alias.relation === 'opposite') return 'generator';
+  return alias.confoundedWithBlocks === true ? 'block' : 'dependent';
+}
+
+const DOE_ALIAS_ADVICE: Record<DoeAliasKind, string> = {
+  block: '可减少区组数或增加仿行',
+  generator: '可提高设计分辨率或折叠设计',
+  dependent: '可增加运行或减少模型项',
+};
+
+/** 别名表「关系」列:相同 / 相反 / 线性相关 / 与区组混杂(不写引擎英文原值)。 */
+export function doeAliasRelationText(alias: FactorialAlias): string {
+  if (alias.relation === 'same') return '相同';
+  if (alias.relation === 'opposite') return '相反';
+  return alias.confoundedWithBlocks === true ? '与区组混杂' : '线性相关';
+}
+
+/** 逐项列示沿用此前页面/报告的写法(A×B = D、A 与 已保留模型项的线性组合 线性相关);类别由随后的建议句点明。 */
+function doeAliasLabel(alias: FactorialAlias): string {
+  return doeAliasKind(alias) === 'generator'
+    ? `${alias.term} = ${alias.relation === 'opposite' ? '−' : ''}${alias.with}`
+    : `${alias.term} 与 ${alias.with} 线性相关`;
+}
+
+/** 封顶列项 + 分类建议;只有一类时合并成一句,多类时逐类点名。 */
+function doeAliasDiagnosis(aliases: readonly FactorialAlias[]): { list: string; advice: string } {
+  const list = cappedTermList(aliases.map(doeAliasLabel));
+  const kinds = (['block', 'generator', 'dependent'] as const).filter((kind) => aliases.some((alias) => doeAliasKind(alias) === kind));
+  const describe: Record<DoeAliasKind, string> = {
+    block: '与区组混杂', generator: '与已保留的项互为别名（分式设计的生成元结构）', dependent: '与已保留模型项线性相关',
+  };
+  const advice = kinds.length === 1
+    ? `以上均${describe[kinds[0]]}，${DOE_ALIAS_ADVICE[kinds[0]]}。`
+    : `${kinds.map((kind) => `其中 ${cappedTermList(aliases.filter((alias) => doeAliasKind(alias) === kind).map((alias) => alias.term))} ${describe[kind]}，${DOE_ALIAS_ADVICE[kind]}`).join('；')}。`;
+  return { list, advice };
+}
+
+/** 部分模型项被剔除时的「别名/可估计性」说明(页面行与专项报告提示同源)。 */
+export function doeDroppedTermsText(aliases: readonly FactorialAlias[] | undefined, droppedTerms: readonly string[]): string {
+  if (aliases?.length) {
+    const { list, advice } = doeAliasDiagnosis(aliases);
+    return `${list}。这些项无法单独估计，已从模型剔除；${advice}`;
+  }
+  return `${cappedTermList(droppedTerms)}。这些项无法单独估计，已从模型剔除；${DOE_ALIAS_ADVICE.dependent}。`;
+}
+
+/** 所选模型项全部不可独立估计时的诊断与建议(页面卡片与专项报告未运行说明同源)。 */
+export function doeInestimableModelText(aliases: readonly FactorialAlias[] | undefined): string {
+  const diagnosis = aliases?.length ? doeAliasDiagnosis(aliases) : null;
+  return `${diagnosis ? `可估计性诊断：${diagnosis.list}。${diagnosis.advice}` : ''}请解除完全混杂、增加能区分这些效应的运行，或改选可估计模型项。`;
+}
+
+/** 能力段口径披露行;口径与 SPC 段一致(无披露文本)时返回 null。 */
+export function capabilityCaliberLine(options: ReportCapabilityOptions, capabilitySpcViolations: number): string | null {
+  const text = options.stabilityCaliberText;
+  return text ? `能力稳定性口径：${text}（能力口径控制图累计 ${capabilitySpcViolations} 个失控点）` : null;
+}
 
 /** 通用报告的数据结构说明：单值 I-MR 不得被误写成“n=1 的子组”。 */
 export function reportShapeText(M: VarModel): string {
@@ -19,22 +147,230 @@ export function withinSigmaLabel(M: VarModel): string {
   return M.hasSubgroups ? 'σ 组内 (R̄/d₂)' : 'σ 组内 (MR̄/d₂(2))';
 }
 
-export function formatSpecLimit(value: number | null, missingLabel: string, digits?: number): string {
-  if (value == null) return missingLabel;
-  return digits == null ? String(value) : nf(value, digits);
+/**
+ * 规格限数值的唯一显示口径(PLATFORM-07):按用户输入原值展示,绝不定点四舍五入。
+ * 此前 HTML/Word/PPT/文本报告用 toFixed(2),把 9.995/10.005 印成 9.99/10.01、
+ * 平面度 USL=0.002 印成 0.00,与同一次导出的 Excel 和实际参与 Cp/Cpk 计算的规格不一致。
+ * - 仅当输入确属浮点残差(与 12 位有效数字的差不超过 4 ulp,如 0.1+0.2)时才按 12 位去残差,
+ *   否则保留 String(value) 的最短表示——13 位以上有效数字的录入(99.9999999999999)不被改写;
+ * - 不足 2 位小数时补到 2 位(沿用报告既有形制「25.00 / 25.20」),多于 2 位时原样保留;
+ * - 极小/极大值按 JS 最短表示走科学计数,不截断。
+ * 五种出口(HTML/Word/PPT/文本/Excel)、能力专项报告(reportSpecDetailText)与能力页/页头
+ * 副标题共用本函数,同一份规格只有一组数字(报告数值与页面同源)。 */
+export function specLimitText(value: number): string {
+  if (!Number.isFinite(value)) return String(value);
+  const rounded = Number(value.toPrecision(12));
+  const cleaned = Math.abs(value - rounded) <= 4 * Math.abs(value) * Number.EPSILON ? rounded : value;
+  const text = String(cleaned);
+  if (/e/i.test(text)) return text;
+  const dot = text.indexOf('.');
+  const decimals = dot < 0 ? 0 : text.length - dot - 1;
+  return decimals >= 2 ? text : cleaned.toFixed(2);
 }
 
-/** 关闭的一侧明确显示为“—”，不能把 store 中暂存的数值冒充启用规格。 */
-export function reportSpecText(spec: SpecLimits, digits?: number): string {
-  return `${formatSpecLimit(spec.lsl, '无下限', digits)} / ${formatSpecLimit(spec.tgt, '—', digits)} / ${formatSpecLimit(spec.usl, '无上限', digits)}`;
+export function formatSpecLimit(value: number | null, missingLabel: string): string {
+  return value == null ? missingLabel : specLimitText(value);
+}
+
+/** 关闭的一侧明确显示为“—”，不能把 store 中暂存的数值冒充启用规格。
+ * 不接受位数参数:规格是用户录入的图纸值,任何出口都不得另按定点位数改写(PLATFORM-07)。 */
+export function reportSpecText(spec: SpecLimits): string {
+  return `${formatSpecLimit(spec.lsl, '无下限')} / ${formatSpecLimit(spec.tgt, '—')} / ${formatSpecLimit(spec.usl, '无上限')}`;
+}
+
+/** 定点文本里的有效数字位数(去掉符号、小数点与前导零;尾随 0 计入)。 */
+function fixedSignificantDigits(text: string): number {
+  return text.replace(/^-/, '').replace('.', '').replace(/^0+/, '').length;
+}
+
+/**
+ * 报告层统计量的显示口径(PLATFORM-14):常规量级沿用固定 digits 位小数(与页面 nf 同形制);
+ * 当 toFixed(digits) 只剩不到 3 位有效数字时,改按有效数字输出(位数 = clamp(digits, 3, 6))——
+ * 此前 SI 单位记录的小量级数据(电容 4.7e-9 F、形位误差 1e-5 m)的均值/σ/控制限被印成 0.0000,
+ * 与同表 Cpk=28.66 自相矛盾;fix2609k 复审:旧阈值只保证 2 位有效数字,4.7e-7 数据的描述统计仍被
+ * 截成 "0.00000047",与同一份报告的 4.70262e-7 对不上,故阈值提到 3 位。
+ * - digits ≤ 2 的调用(α、百分比、df)只在定点结果为 0 时才切换:fmt(0.05,2) 仍是 "0.05";
+ * - scale(可选,数据尺度如响应列 max|y|):|v| ≤ scale×1e-12 视为浮点噪声按 0 输出——常规量级数据的
+ *   DOE 效应/系数不能把 3.331e-16 当有效值印成科学计数(页面同一格显示 0.000);
+ * - 0、非有限值与有效数字足够的常规量级输出与 nf 逐字相同(既有报告形制不变)。
+ * 原始观测不走本函数的定点口径,见 reportRawFormatter(全精度)。
+ */
+export function reportNum(value: number, digits: number, scale?: number): string {
+  if (!Number.isFinite(value) || value === 0) return nf(value, digits);
+  if (scale != null && Number.isFinite(scale) && scale > 0 && Math.abs(value) <= scale * 1e-12) return nf(0, digits);
+  const fixed = nf(value, digits);
+  const minSignificant = digits <= 2 ? 1 : 3;
+  if (fixedSignificantDigits(fixed) >= minSignificant) return fixed;
+  return value.toPrecision(Math.max(3, Math.min(digits, 6)));
+}
+
+/** 原始观测的定点显示至少保留的有效数字位数(远超任何量测分辨率;demo 的随机双精度数据按此仍走定点)。 */
+const RAW_FIXED_MIN_SIGNIFICANT = 10;
+
+/**
+ * 原始观测表的格式化器(fix2609k PLATFORM-14 残余):原始观测是用户录入/导入的数据,报告不能按
+ * 统计量的定点位数截断(4.703e-7 在 toFixed(8) 下成了 "0.00000047",同表控制限却是 4.703e-7)。
+ * 按整张表一次性决定形制,同表不混用:
+ * - 表内每个有限值的 digits 位定点文本都「无损」(与其 15 位有效数字的值相等)或至少保留
+ *   10 位有效数字 → 沿用定点 digits 位(常规量级数据与既有报告逐字相同,Excel 数字格式不变);
+ * - 否则整表改为全精度最短表示 String(Number(v.toPrecision(15)))(去浮点残差,不截断),
+ *   专项 Excel 经 xlsxTableCell 回读即原始 double。
+ * 扫描遇到第一个需要切换的值即停止;非有限值由调用方处理。
+ */
+export function reportRawFormatter(values: Iterable<number>, digits = 8): (value: number) => string {
+  let fixedIsFaithful = true;
+  for (const value of values) {
+    if (!Number.isFinite(value)) continue;
+    const fixed = nf(value, digits);
+    if (Number(fixed) === Number(value.toPrecision(15))) continue;
+    if (fixedSignificantDigits(fixed) >= RAW_FIXED_MIN_SIGNIFICANT) continue;
+    fixedIsFaithful = false;
+    break;
+  }
+  return fixedIsFaithful
+    ? (value) => nf(value, digits)
+    : (value) => (Number.isFinite(value) ? String(Number(value.toPrecision(15))) : String(value));
 }
 
 /** 判异明细行硬上限(v1.42.4 审计 P2):Excel/HTML 是"完整明细"格式,但对抗性数据
  * (全准则 + 13 万行)可产出 50 万+事件,无上限会长时间冻结 UI 甚至内存耗尽。
  * 上限远超真实量测数据可能出现的事件数;截断时必须写明总数,与 Word/PPT 的截断同一形制。 */
-export const MAX_XLSX_VIOLATION_ROWS = 20000;
+/** SPC 专项报告在格式化前物化的「点×准则」明细硬上限。 */
+export const MAX_SPC_REPORT_DETAIL_ROWS = 20000;
+export const MAX_XLSX_VIOLATION_ROWS = MAX_SPC_REPORT_DETAIL_ROWS;
+/**
+ * 通用报告(四种导出)在源头物化的判异明细上限(fix2611a G25c C2):取各格式既有上限的最大者
+ * (Excel 2 万 ≥ HTML 2000 ≥ Word 12 / PPT 每图 8),各格式在此前缀上再按自身上限截断;
+ * 计数与截断说明恒用完整命中数(SpcAssessment.eventTotal)。
+ */
+export const GENERIC_REPORT_EVENT_DETAIL_LIMIT = MAX_XLSX_VIOLATION_ROWS;
+/** ECMA-376 / Excel 工作表的硬行数上限（包含标题行）。 */
+export const MAX_XLSX_SHEET_ROWS = 1_048_576;
+/** 专项报告明细表(HTML/Word)的共用行上限:观测级大表在 Word 会抛 RangeError、
+ * 在 HTML 会产出数十 MB 文件并冻结浏览器。若上游已有界收集，各格式都必须如实标注。 */
+export const MAX_REPORT_TABLE_ROWS = 2000;
+
+export function tableTruncationNote(total: number, shown: number, format: string, excelHasCompleteRows = true): string {
+  const nextStep = excelHasCompleteRows
+    ? '完整明细请导出 Excel'
+    : '为保证导出安全，未导出的明细请缩小数据范围或减少启用的判异准则';
+  return `表格共 ${total} 行，${format}仅列前 ${shown} 行；${nextStep}`;
+}
 export const MAX_HTML_VIOLATION_ROWS = 2000;
+if (MAX_HTML_VIOLATION_ROWS > GENERIC_REPORT_EVENT_DETAIL_LIMIT) {
+  throw new Error('通用报告判异明细源头上限必须不小于 HTML 明细上限');
+}
 
 export function violationTruncationNote(total: number, shown: number): string {
   return `已截断：共 ${total} 条判异事件，此处仅列前 ${shown} 条（计数汇总见「过程稳定性」；如需完整明细请缩小数据范围或减少启用的判异准则）`;
+}
+
+/** 软件版本标签(第三轮 P3:同一表达式曾在 4 文件重复 8 处)。 */
+export function appVersionText(): string {
+  return typeof __APP_VERSION__ === 'undefined' ? '开发版' : __APP_VERSION__;
+}
+
+/** 报告生成时间戳(统一 24 小时制;曾有 3 处各写一遍且 hour12 口径不一)。 */
+export function timestampText(): string {
+  return new Date().toLocaleString('zh-CN', { hour12: false });
+}
+
+/** Windows 保留设备名:即使带扩展名也无法创建(盲审 P3)。 */
+const WINDOWS_RESERVED_NAMES = /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\.|$)/i;
+/** 导出文件名字节上限(多数文件系统按 255 字节;中文按 UTF-8 每字 3 字节保守折算)。 */
+const MAX_FILE_NAME_CHARS = 80;
+
+/**
+ * 导出文件名清洗(曾有 3 处各写一遍同一正则)。
+ * 盲审 P3:此前只挡 9 个 Windows 非法字符,控制字符/NUL/超长/保留设备名全放行——
+ * 数据集名直接来自用户或拖入的文件名,这些都是可达输入。
+ */
+export function sanitizeFileName(raw: string): string {
+  // PLATFORM-06:先限长再清洗——此前在完整原串上跑 /[. ]+$/,「长串点/空格 + 普通字符结尾」
+  // 触发二次方回溯(8 万字符 ≈2.5s),而项目名/数据集名不限长,可卡死主线程。
+  // PLATFORM-18:只在码点边界截断——按 UTF-16 码元硬切会把 emoji/CJK 扩展 B 的代理对切成孤立高代理,
+  // 桌面端 Tauri IPC(serde_json)拒收整个请求,保存对话框打不开。
+  let out = clipFileNameUnits(raw)
+    // 非法字符 + 全部 C0/C1 控制字符(含 NUL)
+    .replace(/[\\/:*?"<>|]/g, '_')
+    // eslint-disable-next-line no-control-regex -- 目标正是剥掉控制字符
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, '_');
+  // 原串自带的孤立代理项(畸形文件名)同样不能进 IPC
+  out = replaceLoneSurrogates(out);
+  // Windows 不允许文件名以点或空格结尾(线性扫描,不用回溯正则)
+  out = trimTrailingDotsAndSpaces(out);
+  if (WINDOWS_RESERVED_NAMES.test(out)) out = trimTrailingDotsAndSpaces(clipFileNameUnits(`_${out}`));
+  return out || '未命名';
+}
+
+/** 截到 ≤ MAX_FILE_NAME_CHARS 个 UTF-16 码元,只在码点边界处切(不拆代理对);只看前缀,与原串长度无关。
+ * 预算仍按码元计:星平面字符 2 码元 = UTF-8 4 字节,80 码元 ≤ 240 字节,不放宽文件系统字节上限。 */
+function clipFileNameUnits(text: string): string {
+  if (text.length <= MAX_FILE_NAME_CHARS) return text;
+  let end = MAX_FILE_NAME_CHARS;
+  const last = text.charCodeAt(end - 1);
+  const next = text.charCodeAt(end);
+  if (last >= 0xd800 && last <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) end -= 1;
+  return text.slice(0, end);
+}
+
+/**
+ * 孤立代理项替换为「_」,合法代理对原样保留(按码元线性扫描)。
+ * fix2609m G23c C2:此前用含后行断言的正则;vite 默认 target(safari14)下 esbuild 把它降级成运行时
+ * new RegExp,WebKit 16.4 以前(macOS 10.15 WKWebView、iOS/iPadOS 15.4–16.3 PWA)每次调用都抛
+ * SyntaxError,保存项目/项目汇总/全部报表导出的文件名全部失败。与 trimTrailingDotsAndSpaces 同写法。
+ */
+export function replaceLoneSurrogates(text: string, replacement = '_'): string {
+  let out = '';
+  let start = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    const code = text.charCodeAt(i);
+    if (code < 0xd800 || code > 0xdfff) continue;
+    if (code <= 0xdbff) {
+      const next = text.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        i += 1; // 合法代理对:整对保留
+        continue;
+      }
+    }
+    out += text.slice(start, i) + replacement;
+    start = i + 1;
+  }
+  return start === 0 ? text : out + text.slice(start);
+}
+
+function trimTrailingDotsAndSpaces(text: string): string {
+  let end = text.length;
+  while (end > 0) {
+    const code = text.charCodeAt(end - 1);
+    if (code !== 0x2e && code !== 0x20) break;
+    end -= 1;
+  }
+  return text.slice(0, end);
+}
+
+/** HTML 转义唯一实现(曾在 htmlReport 与 projectSummary 各有一份,覆盖字符还不一致)。 */
+export function escapeHtml(raw: string): string {
+  return raw.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+/** 带标签的规格明细文本(LSL=… / Target=… / USL=…;单侧写「无下限/无上限」)。
+ * fix2609k:数值与 reportSpecText 同源(specLimitText),不再接受位数参数——此前能力专项报告按
+ * toFixed(6) 把 4.5e-9 F 的规格印成「LSL=0.000000」,与通用报告的 4.5e-9 不一致。 */
+export function reportSpecDetailText(spec: SpecLimits): string {
+  const part = (label: string, value: number | null) => (value == null ? `无${label === 'LSL' ? '下限' : '上限'}` : `${label}=${specLimitText(value)}`);
+  return `${part('LSL', spec.lsl)} / Target=${specLimitText(spec.tgt)} / ${part('USL', spec.usl)}`;
+}
+
+/** 导出文件名的本地日期戳(闭环审核 P3:UTC 与正文本地时间在时区边界跨日不一致;
+ * 报表/项目文件/项目汇总三处此前各写各的)。 */
+export function localDateStamp(): string {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+}
+
+/** 指定时刻的时间戳文本(与 timestampText 同口径:24 小时制,复审 P3:
+ * projectSummary 曾另写一份 toLocaleString,同一文档内页眉与逐行时间格式不一致)。 */
+export function timestampTextOf(t: number): string {
+  return new Date(t).toLocaleString('zh-CN', { hour12: false });
 }

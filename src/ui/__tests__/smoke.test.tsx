@@ -3,16 +3,24 @@
  * @vitest-environment jsdom
  */
 import { describe, it, expect, beforeEach } from 'vitest';
-import { render, screen, fireEvent, cleanup, act } from '@testing-library/react';
+import { render, screen, fireEvent, cleanup, act, waitFor } from '@testing-library/react';
 import App from '../../App';
 import { useApp } from '../../store/appStore';
-import { useData } from '../../store/dataStore';
+import { cancelPendingDatasetWork, useData } from '../../store/dataStore';
 
 beforeEach(() => {
   cleanup();
   localStorage.clear();
-  useApp.setState({ page: 'dashboard', modal: null, openMenu: null, toast: null, spcType: 'xbar-r', selSub: null, lsl: 24.9, tgt: 25.0, usl: 25.1 });
+  // fix2609 TESTS-02 同类残留:t 检验用例改 hypoTab/t 列、P 图剪贴板用例改 importKind、
+  // 主题用例改 chartStyle,不复位则乱序时 ANOVA 页找不到「方差分析表」、剪贴板按 P 图口径导入失败。
+  useApp.setState({
+    page: 'dashboard', modal: null, openMenu: null, toast: null, spcType: 'xbar-r', selSub: null, lsl: 24.9, tgt: 25.0, usl: 25.1,
+    hypoTab: 'anova', t1ColName: null, t1Mu0: null, t2ColAName: null, t2ColBName: null,
+    importTab: 'csv', importKind: 'var', chartStyle: '经典',
+  });
+  cancelPendingDatasetWork();
   useData.getState().resetDemo();
+  useData.setState({ recents: [] });
 });
 
 describe('九页渲染冒烟', () => {
@@ -40,7 +48,7 @@ describe('九页渲染冒烟', () => {
 });
 
 describe('数据流冒烟', () => {
-  it('剪贴板导入成功后自动关闭弹窗并显示新工作表', () => {
+  it('剪贴板导入成功后自动关闭弹窗并显示新工作表', async () => {
     render(<App />);
     fireEvent.click(screen.getByText('导入 CSV/Excel'));
     fireEvent.click(screen.getByText('剪贴板粘贴'));
@@ -48,6 +56,7 @@ describe('数据流冒烟', () => {
       target: { value: '子组,测量1,测量2\n1,10,11\n2,12,13\n3,14,15' },
     });
     fireEvent.click(screen.getByText('导入', { exact: true }));
+    await waitFor(() => expect(useApp.getState().modal).toBeNull());
     expect(useApp.getState()).toMatchObject({ modal: null, page: 'worksheet' });
     expect(useData.getState().model.name).toBe('剪贴板数据');
     expect(screen.queryByText('导入数据')).toBeNull();
@@ -79,15 +88,17 @@ describe('数据流冒烟', () => {
       counts: [1, 2, 3], sampleSizes: [10, 20, 30],
     });
   });
-  it('P 图剪贴板两列导入按“不良数,每批样本量”解释', () => {
+  it('P 图剪贴板两列导入按“不良数,每批样本量”解释', async () => {
     render(<App />);
     fireEvent.click(screen.getByText('导入 CSV/Excel'));
     fireEvent.click(screen.getByText('剪贴板粘贴'));
     fireEvent.click(screen.getByText('不良数（P 图）'));
-    fireEvent.change(screen.getByRole('textbox'), {
+    // G13:P 图默认 n 改为 type=text 后也是 textbox,按占位符定位粘贴框
+    fireEvent.change(screen.getByPlaceholderText(/将数据粘贴到此处/), {
       target: { value: '不良数,每批样本量\n1,10\n4,40\n2,20' },
     });
     fireEvent.click(screen.getByText('导入', { exact: true }));
+    await waitFor(() => expect(useApp.getState().modal).toBeNull());
     expect(useApp.getState()).toMatchObject({ modal: null, page: 'spc', spcType: 'p' });
     expect(useData.getState().pModel.pdef).toEqual([1, 4, 2]);
     expect(useData.getState().pModel.pNs).toEqual([10, 40, 20]);

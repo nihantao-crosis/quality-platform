@@ -17,14 +17,43 @@ export interface AdEvaluation {
   unavailableReason: string | null;
 }
 
-export function andersonDarling(xs: number[]): AdResult {
+/**
+ * 位置/尺度病态阈值(附录 F.2-4:AD 平移不变性)。
+ *
+ * 历史公式 z=(x−m)/s 中 m 只能取最接近的 double,舍入误差 ≤ |m|·2⁻⁵³,
+ * 等于给全部 z 加上至多 (|m|/s)·1.11e-16 的共同偏移。|m|/s ≤ 1e8 时该偏移
+ * ≤ 1.1e-8,远低于 P 值显示精度,常规量级(含 25.4000±0.0001 mm 这类精密量具,
+ * |m|/s≈2.5e5)继续走历史路径、结果逐位不变;超过阈值(如同一组离差整体加 1e12/1e16)
+ * 时偏移会达到 1e-4~1e-1 量级并翻转正态判定,此时改走中心化路径。
+ */
+const AD_ILL_CONDITIONED_LOCATION_RATIO = 1e8;
+
+/**
+ * 以最小观测为原点,在离差坐标内中心化后再除以 s。病态区间内全部观测与 m 的相对差
+ * ≤ (n−1)/√n · s/|m| < (n−1)/√n · 1e-8,n 不超过 10¹⁵ 时彼此相差不到 2 倍,
+ * x−origin 由 Sterbenz 引理精确成立;因此
+ * 同一组离差加任何可精确表示的常数后,偏移量、中心与 z 逐位相同。
+ */
+function centeredStandardScores(sorted: readonly number[], s: number): number[] {
+  const origin = sorted[0];
+  const offsets = sorted.map((x) => x - origin);
+  const center = mean(offsets);
+  return offsets.map((offset) => (offset - center) / s);
+}
+
+export function andersonDarling(xs: number[], presorted = false): AdResult {
   const n = xs.length;
   if (n < 8) throw new Error('Anderson-Darling 检验至少需要 8 个观测');
   if (xs.some((value) => !Number.isFinite(value))) throw new Error('Anderson-Darling 检验只接受有限数值');
   const m = mean(xs);
   const s = stdev(xs, true);
   if (!(s > 0) || !Number.isFinite(s)) throw new Error('Anderson-Darling 检验要求数据具有正的有限标准差');
-  const z = [...xs].sort((a, b) => a - b).map((x) => (x - m) / s);
+  // presorted:调用方(computeDescriptive)已排序时跳过重复排序
+  const sorted = presorted ? xs : [...xs].sort((a, b) => a - b);
+  // 常规量级沿用历史公式 (x−m)/s(逐位不变);只有位置/尺度比病态时才在离差坐标内标准化。
+  const z = Math.abs(m) > AD_ILL_CONDITIONED_LOCATION_RATIO * s
+    ? centeredStandardScores(sorted, s)
+    : sorted.map((x) => (x - m) / s);
   const EPS = 1e-12;
   let sum = 0;
   for (let i = 0; i < n; i++) {
@@ -73,9 +102,10 @@ export function evaluateAndersonDarling(xs: number[]): AdEvaluation {
 export function probPlotPoints(xs: number[]): Array<{ x: number; z: number }> {
   const n = xs.length;
   const sorted = [...xs].sort((a, b) => a - b);
-  // 中位秩（Benard 近似）
+  // 中位秩(Benard 近似 (i−0.3)/(n+0.4),与 Minitab 概率图默认一致)。
+  // 第三轮 P3:此前公式实为 Blom (i−3/8)/(n+1/4),与注释/图注「中位秩」不符
   return sorted.map((x, i) => {
-    const pp = (i + 1 - 0.375) / (n + 0.25);
+    const pp = (i + 1 - 0.3) / (n + 0.4);
     return { x, z: invNorm(pp) };
   });
 }

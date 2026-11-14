@@ -15,8 +15,13 @@ export async function svgElementToPng(svg: SVGSVGElement, scale = 2): Promise<Ui
   return svgMarkupToPng(src, w, h, scale);
 }
 
+/* eslint-disable no-control-regex -- 目标正是剥离 XML 非法控制字符 */
+const CONTROL_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\uFFFE\uFFFF]/g;
+
 export async function svgMarkupToPng(markup: string, w: number, h: number, scale = 2): Promise<Uint8Array> {
-  let src = markup;
+  // 单一咽喉清洗(第三轮 P3 收口):列名/类别名里的控制字符会让严格 XML 解析失败,
+  // 位图化整体报错——所有 SVG→PNG 路径(Office 嵌图/图表 PNG 下载)都经此函数
+  let src = markup.replace(CONTROL_CHARS, '');
   if (!src.includes('xmlns=')) src = src.replace('<svg', '<svg xmlns="http://www.w3.org/2000/svg"');
   if (!/<svg[^>]*\swidth=/.test(src)) src = src.replace('<svg', `<svg width="${w}" height="${h}"`);
   const url = URL.createObjectURL(new Blob([src], { type: 'image/svg+xml;charset=utf-8' }));

@@ -1,7 +1,9 @@
 /** 菜单栏 — 10 个菜单 + 下拉，行为（导航/弹窗/通知/图表风格）与原型一致。 */
-import { useApp, type Page, type Modal, type ChartStyle } from '../../store/appStore';
-import { useData } from '../../store/dataStore';
-import { platform } from '../../platform/adapter';
+import { isProjectExportInFlight, useApp, type Page, type Modal, type ChartStyle } from '../../store/appStore';
+import { appVersionText, localDateStamp, sanitizeFileName } from '../../platform/reportLabels';
+import { PROJECT_BACKUP_HINT, datasetWriteNotes, useData, type PersistOutcome } from '../../store/dataStore';
+import { errText, platform } from '../../platform/adapter';
+import { recoverDemoDataset } from '../ErrorBoundary';
 
 /** 桌面端经 tauri-plugin-updater 检查 GitHub Releases；Web 端不适用。 */
 async function checkForUpdate(toast: (m: string) => void) {
@@ -162,21 +164,64 @@ const MENUS: { name: string; items: Item[] }[] = [
     { label: '关于本软件', act: mdl('about') } ] },
 ];
 
+/**
+ * 撤销/重做结果提示(菜单与 Ctrl+Z/Ctrl+Y 快捷键共用)。fix2609m A2:项目备份快照期间撤销/重做
+ * 被拒绝、不排队(排队重放会与其后按显示布局暂存的单格编辑错位)——不能提示「已撤销」，也不能说「没有可撤销」。
+ * 须在 undoEdit()/redoEdit() 返回后立即调用。
+ */
+export function undoRedoToast(action: 'undo' | 'redo', ok: boolean): string {
+  const label = action === 'undo' ? '撤销' : '重做';
+  if (!ok && isProjectExportInFlight()) return `项目备份正在生成一致性快照，本次${label}未执行；请稍后重试（通常数秒内）`;
+  if (!ok) return `没有可${label}的编辑`;
+  return action === 'undo' ? '已撤销上一次数据编辑' : '已重做数据编辑';
+}
+
+/**
+ * 菜单「文件 → 新建工作表」与 Ctrl+N 的共用入口(fix2609n C2)。newWorksheet 过数据集替换闸门，项目导出一致性快照
+ * 期间会抛「项目正在生成一致性快照…」；事件处理器里抛出会成为未捕获异常、界面毫无反应。这里接住并如实提示原因，
+ * 不跳页、不改表。
+ */
+export function runNewWorksheet(goTo: (page: Page) => void, toast: (message: string) => void): void {
+  let outcome: PersistOutcome;
+  try {
+    outcome = useData.getState().newWorksheet();
+  } catch (error) {
+    toast(`未能新建工作表：${errText(error)}`);
+    return;
+  }
+  goTo('worksheet');
+  toast(`已新建空白工作表（双击单元格录入数据）${datasetWriteNotes(outcome.name ?? '', outcome).map((text) => ` · ${text}`).join('')}`);
+}
+
 export function MenuBar({ wsName }: { wsName: string }) {
   const { openMenu, setOpenMenu, goTo, openModal, showToast, setChartStyle, toggleGrid } = useApp();
+  // GAP-10-25:菜单如实反映可撤销/可重做层数；大表上撤销栈被字节预算压缩时标明原因。
+  const undoDepth = useData((s) => s.undoStack.length);
+  const redoDepth = useData((s) => s.redoStack.length);
+  const undoBudgetLimited = useData((s) => s.undoBudgetLimited);
+  const historyItem = (it: { label?: string; act?: Act }): { label?: string; empty: boolean } => {
+    if (it.act?.undo) {
+      if (undoDepth === 0) return { label: `${it.label}（无可撤销）`, empty: true };
+      return { label: `${it.label}（可撤销 ${undoDepth} 步${undoBudgetLimited ? ' · 大表内存预算' : ''}）`, empty: false };
+    }
+    if (it.act?.redo) {
+      return redoDepth === 0
+        ? { label: `${it.label}（无可重做）`, empty: true }
+        : { label: `${it.label}（可重做 ${redoDepth} 步）`, empty: false };
+    }
+    return { label: it.label, empty: false };
+  };
 
   const runCmd = (act?: Act) => {
     if (!act) return setOpenMenu(null);
     if (act.hypo) useApp.getState().setHypoTab(act.hypo);
     if (act.undo || act.redo) {
       const ok = act.undo ? useData.getState().undoEdit() : useData.getState().redoEdit();
-      showToast(ok ? (act.undo ? '已撤销上一次数据编辑' : '已重做数据编辑') : (act.undo ? '没有可撤销的编辑' : '没有可重做的编辑'));
+      showToast(undoRedoToast(act.undo ? 'undo' : 'redo', ok));
       return;
     }
     if (act.newSheet) {
-      useData.getState().newWorksheet();
-      goTo('worksheet');
-      showToast('已新建空白工作表（双击单元格录入数据）');
+      runNewWorksheet(goTo, showToast);
       return;
     }
     if (act.summary) {
@@ -184,26 +229,48 @@ export function MenuBar({ wsName }: { wsName: string }) {
       Promise.all([import('../../platform/projectSummary'), import('../../platform/adapter'), import('../../store/analyses')]).then(([sum, ad, an]) => {
         const app = useApp.getState();
         const html = sum.buildProjectSummary(app.projectName, an.useAnalyses.getState().saved);
-        const stamp = new Date().toISOString().slice(0, 10);
-        const safe = app.projectName.replace(/[\\/:*?"<>|]/g, '_').trim() || '项目';
+        const stamp = localDateStamp();
+        const safe = sanitizeFileName(app.projectName).trim() || '项目';
         return ad.platform.exportFile({ defaultName: `${safe}_汇总_${stamp}`, ext: 'html', filterLabel: '项目汇总报告 (打开后打印为 PDF)', text: html });
       }).then((dest) => {
         if (dest) showToast('项目汇总已导出: ' + dest);
-      }).catch((error) => showToast(`项目汇总导出失败：${(error as Error).message}`));
+      }).catch((error) => showToast(`项目汇总导出失败：${errText(error)}`));
       return;
     }
     if (act.saveProject) {
       setOpenMenu(null);
       import('../../platform/project').then((m) =>
-        m.exportProject(__APP_VERSION__, useApp.getState().projectName).then((dest) => {
+        m.exportProject(appVersionText(), useApp.getState().projectName).then((dest) => {
           if (dest) showToast('项目已保存: ' + dest);
         }),
-      ).catch((error) => showToast(`项目保存失败：${(error as Error).message}`));
+      ).catch((error) => showToast(`项目保存失败：${errText(error)}`));
       return;
     }
     if (act.saveAs) {
-      const name = useData.getState().saveAsCopy();
-      showToast('已另存为 ' + name);
+      // 蜂群 P1-01:未落盘不得声称「已另存」
+      // fix2609n C2:导出快照期间替换闸门会抛出，接住并如实提示，不成为未捕获异常
+      let copy: ReturnType<ReturnType<typeof useData.getState>['saveAsCopy']>;
+      try {
+        copy = useData.getState().saveAsCopy();
+      } catch (error) {
+        showToast(`另存失败：${errText(error)}`);
+        return;
+      }
+      const { outcome } = copy;
+      if (!outcome.persisted && !outcome.archiving) {
+        showToast(`另存失败（${outcome.rejected ?? '存储空间不足'}）：副本未能保存，请先${PROJECT_BACKUP_HINT}备份或清理存储`);
+      } else {
+        // 盲审 P3:archiving 只是「已提交异步归档」,失败时界面此前永远停在
+        // 「正在归档到本机库」而没有回执。落盘确认后补一条终态提示。
+        // fix2609d G4c:副本置顶挤出最旧数据集时，挤出说明必须并入本条提示(单槽 toast 会盖掉 store 层警告)
+        const notes = () => datasetWriteNotes(copy.name, outcome).map((text) => ` · ${text}`).join('');
+        showToast(outcome.archiving ? '正在安全创建副本，请等待本机库确认' : `已另存为 ${copy.name}${notes()}`);
+        if (outcome.archiving) {
+          void outcome.durability?.then(() => {
+            showToast(`「${copy.name}」已归档到本机数据集库${notes()}`);
+          }).catch((error: unknown) => showToast(`另存副本未完成：${errText(error)}`));
+        }
+      }
       return;
     }
     if (act.standardize) {
@@ -212,10 +279,13 @@ export function MenuBar({ wsName }: { wsName: string }) {
         showToast(`仍有 ${data.pendingCells.length} 个单元格待录入，完成后才能标准化`);
         return;
       }
-      const name = data.standardize();
-      if (name) {
+      // 有限性屏障可能抛出(闭环终审 P3:极值数据标准化时曾是未捕获异常)
+      let derived: ReturnType<typeof data.standardize>;
+      try { derived = data.standardize(); } catch (error) { showToast(errText(error)); return; }
+      if (derived) {
         goTo('worksheet');
-        showToast('已标准化为新数据集 ' + name);
+        const notes = datasetWriteNotes(derived.requested, derived.outcome).map((text) => ` · ${text}`).join('');
+        showToast(`已标准化为新数据集 ${derived.name}${notes}`);
       } else showToast('存在无变异列,无法标准化');
       return;
     }
@@ -236,7 +306,9 @@ export function MenuBar({ wsName }: { wsName: string }) {
         : s.showGrid ? '网格线已显示' : '网格线已隐藏');
     } else if (act.resetData) {
       import('../../platform/mes').then((m) => m.mesStop());
-      useData.getState().resetDemo();
+      // 替换闸门拒绝时给出原因,不抛出未捕获异常(与错误卡逃生口同一入口)
+      const recoverError = recoverDemoDataset();
+      if (recoverError) { setOpenMenu(null); showToast(recoverError); return; }
       goTo('worksheet');
       showToast('已恢复演示数据集 质检数据.mtw');
     } else if (act.print) {
@@ -249,12 +321,15 @@ export function MenuBar({ wsName }: { wsName: string }) {
     } else if (act.transpose || act.stack) {
       setOpenMenu(null);
       try {
-        if (act.transpose) useData.getState().transposeDataset();
-        else useData.getState().stackColumns();
+        const derived = act.transpose ? useData.getState().transposeDataset() : useData.getState().stackColumns();
         goTo('worksheet');
-        showToast(act.transpose ? '已生成转置数据集' : '已生成堆叠数据集（含「来源列」分组,可直接做 ANOVA）');
+        // STORE-04 P3:显示实际名称；同名改名时按原数据集实际位置说明其去向
+        const notes = datasetWriteNotes(derived.requested, derived.outcome).map((text) => ` · ${text}`).join('');
+        showToast(act.transpose
+          ? `已生成转置数据集「${derived.name}」${notes}`
+          : `已生成堆叠数据集「${derived.name}」（含「来源列」分组,可直接做 ANOVA）${notes}`);
       } catch (e) {
-        showToast('操作失败：' + (e as Error).message);
+        showToast('操作失败：' + errText(e));
       }
     } else if (act.session) {
       setOpenMenu(null);
@@ -268,16 +343,20 @@ export function MenuBar({ wsName }: { wsName: string }) {
   };
 
   return (
-    <div style={{ display: 'flex', alignItems: 'center', height: 30, background: 'linear-gradient(#ffffff,#f6f7f9)', borderBottom: '1px solid #dadee4', padding: '0 10px', flex: 'none', userSelect: 'none', position: 'relative', zIndex: 60 }}>
+    <div className="menu-bar" style={{ display: 'flex', alignItems: 'center', height: 30, background: 'linear-gradient(#ffffff,#f6f7f9)', borderBottom: '1px solid #dadee4', padding: '0 10px', flex: 'none', userSelect: 'none', position: 'relative', zIndex: 60 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 2, fontSize: 12.5 }}>
-        {MENUS.map((mu) => {
+        {MENUS.map((mu, menuIndex) => {
           const open = openMenu === mu.name;
+          const alignRight = menuIndex >= MENUS.length - 2;
           return (
             <div key={mu.name} style={{ position: 'relative' }}>
               <button
                 type="button"
                 className={open ? undefined : 'hov-menu-title'}
-                aria-haspopup="menu"
+                // 蜂群 P3-02:曾声明 menu/menuitem 复合控件角色,但没有实现 ARIA 要求的
+                // 键盘模型(打开后聚焦、Arrow/Home/End/Escape、roving focus),
+                // 屏幕阅读器会按 menu 语义给出错误的操作预期。改用 disclosure:
+                // aria-expanded + 普通 button,与 Tab/Enter 的真实行为一致。
                 aria-expanded={open}
                 onClick={() => setOpenMenu(open ? null : mu.name)}
                 onMouseEnter={() => { if (openMenu && openMenu !== mu.name) setOpenMenu(mu.name); }}
@@ -286,14 +365,22 @@ export function MenuBar({ wsName }: { wsName: string }) {
                 {mu.name}
               </button>
               {open && (
-                <div role="menu" style={{ position: 'absolute', top: 'calc(100% + 3px)', left: 0, minWidth: 236, background: '#fff', border: '1px solid #d7dbe1', borderRadius: 6, boxShadow: '0 12px 32px rgba(20,30,50,0.17)', padding: 5, zIndex: 200 }}>
-                  {mu.items.map((it, i) =>
-                    it.sep ? (
-                      <div role="separator" key={i} style={{ height: 1, background: '#eef0f3', margin: '5px 8px' }} />
-                    ) : (
+                <div
+                  className="menu-popup"
+                  style={{
+                    position: 'absolute', top: 'calc(100% + 3px)',
+                    left: alignRight ? 'auto' : 0, right: alignRight ? 0 : 'auto',
+                    width: 236, maxWidth: 'calc(100vw - 16px)',
+                    background: '#fff', border: '1px solid #d7dbe1', borderRadius: 6,
+                    boxShadow: '0 12px 32px rgba(20,30,50,0.17)', padding: 5, zIndex: 200,
+                  }}
+                >
+                  {mu.items.map((it, i) => {
+                    if (it.sep) return <div role="separator" key={i} style={{ height: 1, background: '#eef0f3', margin: '5px 8px' }} />;
+                    const history = historyItem(it);
+                    return (
                       <button
                         type="button"
-                        role="menuitem"
                         key={i}
                         className={it.unavailable ? undefined : 'hov-menu-item'}
                         onClick={() => {
@@ -302,15 +389,15 @@ export function MenuBar({ wsName }: { wsName: string }) {
                             showToast(it.unavailable);
                           } else runCmd(it.act);
                         }}
-                        aria-disabled={it.unavailable ? true : undefined}
+                        aria-disabled={it.unavailable || history.empty ? true : undefined}
                         title={it.unavailable}
-                        style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 20, padding: '7px 12px', border: 0, background: 'transparent', borderRadius: 4, cursor: it.unavailable ? 'not-allowed' : 'pointer', fontFamily: 'inherit', textAlign: 'left', fontSize: 12.5, color: it.unavailable ? '#a8afb8' : '#3a4350' }}
+                        style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 20, padding: '7px 12px', border: 0, background: 'transparent', borderRadius: 4, cursor: it.unavailable ? 'not-allowed' : 'pointer', fontFamily: 'inherit', textAlign: 'left', fontSize: 12.5, color: it.unavailable || history.empty ? '#a8afb8' : '#3a4350' }}
                       >
-                        <span style={{ flex: 1 }}>{it.label}</span>
+                        <span style={{ flex: 1 }}>{history.label}</span>
                         <span className="mono" style={{ fontSize: 11, color: '#a3abb5' }}>{it.unavailable ? '暂不可用' : it.kbd || ''}</span>
                       </button>
-                    ),
-                  )}
+                    );
+                  })}
                 </div>
               )}
             </div>
