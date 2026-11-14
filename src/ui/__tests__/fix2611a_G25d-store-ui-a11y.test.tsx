@@ -125,13 +125,13 @@ describe('D5 图表具体无障碍名称', () => {
     });
   }
 
-  it('源码守卫：src/ui 非测试源码的每个 <Svg> 都传 label(gagePanels.tsx 由 G25c 负责，暂排除)', () => {
+  it('源码守卫：src/ui 非测试源码的每个 <Svg> 都传 label(含 gagePanels.tsx)', () => {
     const walk = (dir: string): string[] => readdirSync(dir).flatMap((entry) => {
       const path = join(dir, entry);
       if (statSync(path).isDirectory()) return entry === '__tests__' ? [] : walk(path);
       return path.endsWith('.tsx') ? [path] : [];
     });
-    const files = walk('src/ui').filter((path) => !path.replace(/\\/g, '/').endsWith('charts/gagePanels.tsx'));
+    const files = walk('src/ui');
     const missing: string[] = [];
     for (const path of files) {
       const source = readFileSync(path, 'utf8');
@@ -157,8 +157,7 @@ describe('D5 图表具体无障碍名称', () => {
   });
 
   it('渲染主要页面后，每张图都有具体名称(不存在无名或通用「统计图表」的图)', () => {
-    // 测量系统分析页的 gagePanels 归 G25c，此处不渲染该页
-    const pages = ['质量总览', '描述性统计', '控制图 (SPC)', '过程能力分析', '假设检验 / ANOVA', '帕累托图', '实验设计 (DOE)', '抽样检验 (AQL)'];
+    const pages = ['质量总览', '描述性统计', '控制图 (SPC)', '过程能力分析', '测量系统分析', '假设检验 / ANOVA', '帕累托图', '实验设计 (DOE)', '抽样检验 (AQL)'];
     const offenders: string[] = [];
     let checked = 0;
     for (const nav of pages) {
