@@ -147,7 +147,7 @@ function ParetoChartImpl(p: {
     { label: '累积%', value: (i) => String(cumPts[i][2]) },
   ];
   return (
-    <Svg w={W} h={H}>
+    <Svg w={W} h={H} readable label={`${p.title?.trim() || '帕累托图'}${foldNote ? `；${foldNote}` : ''}`}>
       <rect x={0} y={0} width={W} height={H} fill="#FFFFFF" />
       {classic && p.title && (
         <Txt x={m.l + pw / 2} y={15} s={p.title} fill="#111111" size={14} anchor="middle" weight={700} />
@@ -246,7 +246,7 @@ function GroupedBarsImpl({ T, cats }: { T: ChartTokens; cats: GageBarCat[] }) {
     );
   });
   return (
-    <Svg w={W} h={H}>
+    <Svg w={W} h={H} readable label={`量具 R&R 变异分量图 · ${cats.length} 个分量（%贡献 / %研究变异 / %公差）`}>
       <rect x={0} y={0} width={W} height={H} fill={T.bg} />
       {Array.from({ length: 5 }, (_, g) => {
         const yy = m.t + (g / 4) * ph;
@@ -275,6 +275,13 @@ function GroupedBarsImpl({ T, cats }: { T: ChartTokens; cats: GageBarCat[] }) {
       <Ln x1={m.l} y1={m.t + ph} x2={m.l + pw} y2={m.t + ph} stroke={T.axis} sw={1} />
     </Svg>
   );
+}
+
+/** 分组图的无障碍名称里列出的组名(至多 6 个，其余以「等 N 组」收尾)。 */
+function groupNamesText(groups: ReadonlyArray<{ name: string }>): string {
+  if (groups.length === 0) return '无分组';
+  const shown = groups.slice(0, 6).map((group) => group.name).join('、');
+  return groups.length > 6 ? `${shown} 等 ${groups.length} 组` : shown;
 }
 
 // ---------- 箱线图 ----------
@@ -321,7 +328,13 @@ function BoxPlotImpl({ T, groups: allGroups, groupStart }: {
   const Y = (coordinate: number) => projectCoordinate(coordinate, domain, m.t, ph, true);
   const gw = pw / Math.max(1, groups.length);
   return (
-    <Svg w={W} h={H} label={[truncatedNote, window.note].filter(Boolean).join('；') || undefined}>
+    <Svg
+      w={W}
+      h={H}
+      // 有截断/窗口说明(实质补充信息)时沿用 role="img"；否则以具名 group 呈现，刻度文字仍可读(fix2611a D5)。
+      label={[truncatedNote, window.note].filter(Boolean).join('；') || `箱线图 · ${groupNamesText(groups)}`}
+      readable={!truncatedNote && !window.note}
+    >
       <rect x={0} y={0} width={W} height={H} fill={T.bg} />
       {window.note && <Txt x={m.l} y={16} s={window.note} fill={T.text} size={10.5} />}
       {yTicks.map((tick, index) => (
@@ -426,7 +439,7 @@ function IndividualValuePlotImpl({ T, groups: allGroups, h, groupStart }: {
       : null))
     .filter((s): s is string => s != null);
   return (
-    <Svg w={W} h={H} label={window.note ? `个体值图；${window.note}` : undefined}>
+    <Svg w={W} h={H} label={window.note ? `个体值图；${window.note}` : `个体值图 · ${groupNamesText(groups)}`} readable={!window.note}>
       <rect x={0} y={0} width={W} height={H} fill={T.bg} />
       {window.note && <Txt x={m.l} y={32} s={window.note} fill={T.text} size={10.5} />}
       {yTicks.map((tick, index) => (
@@ -515,7 +528,7 @@ function IntervalPlotImpl({ T, groups: allGroups, h, pooledError, groupStart }: 
   const gw = pw / Math.max(1, stats.length);
   const drawableStats = stats.filter((stat) => [stat.mu, stat.lo, stat.hi].every(Number.isFinite));
   return (
-    <Svg w={W} h={H} label={window.note ? `均值与 95% 置信区间；${window.note}` : undefined}>
+    <Svg w={W} h={H} label={window.note ? `均值与 95% 置信区间；${window.note}` : `均值与 95% 置信区间 · ${groupNamesText(groups)}`} readable={!window.note}>
       <rect x={0} y={0} width={W} height={H} fill={T.bg} />
       {window.note && <Txt x={m.l} y={32} s={window.note} fill={T.text} size={10.5} />}
       {yTicks.map((tick, index) => (
@@ -581,7 +594,7 @@ function MiniHistImpl({ T, data, h, title, xLabel, xDomain, xTicks }: {
   const finiteData = data.filter(Number.isFinite);
   if (finiteData.length === 0) {
     return (
-      <Svg w={W} h={H}>
+      <Svg w={W} h={H} readable label={`直方图 · ${title ?? xLabel ?? '残差'}（无有效数据）`}>
         <rect x={0} y={0} width={W} height={H} fill={T.bg} />
         <Txt x={W / 2} y={H / 2} s="无有效数据，无法绘制直方图" fill={T.axis} size={12} anchor="middle" />
       </Svg>
@@ -640,7 +653,7 @@ function MiniHistImpl({ T, data, h, title, xLabel, xDomain, xTicks }: {
   const legacyAxisLabel = (xLabel ?? '残差').replace(/分布$/, '');
   const chartTitle = title ?? ((xLabel ?? '残差').endsWith('分布') ? xLabel! : `${xLabel ?? '残差'}分布`);
   return (
-    <Svg w={W} h={H}>
+    <Svg w={W} h={H} readable label={`直方图 · ${chartTitle}`}>
       <rect x={0} y={0} width={W} height={H} fill={T.bg} />
       {yTicks.map((c) => (
         <Fragment key={'y' + c}>

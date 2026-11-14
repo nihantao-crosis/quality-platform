@@ -12,7 +12,7 @@ import { exportProject } from './platform/project';
 import { useAnalyses } from './store/analyses';
 import { chartTokens } from './ui/tokens';
 import { useCapabilityPrepared } from './ui/useCapabilityPrepared';
-import { specLimitText } from './platform/reportLabels';
+import { appVersionText, specLimitText } from './platform/reportLabels';
 import { PAGES } from './ui/pagesMeta';
 import { MenuBar, runNewWorksheet, undoRedoToast } from './ui/shell/MenuBar';
 import { Toolbar } from './ui/shell/Toolbar';
@@ -65,7 +65,7 @@ function ShellCrashCard({ error, reset }: { error: Error; reset: () => void }) {
           </button>
           <button type="button"
             onClick={() => {
-              exportProject(__APP_VERSION__, useApp.getState().projectName)
+              exportProject(appVersionText(), useApp.getState().projectName)
                 .then((dest) => setExportNote(dest ? `项目已保存: ${dest}` : ''))
                 .catch((exportError) => setExportNote(`项目保存失败：${errText(exportError)}`));
             }}
@@ -224,7 +224,7 @@ function AppShell() {
       const k = key;
       if (k === 's') {
         e.preventDefault();
-        exportProject(__APP_VERSION__, s.projectName).then((dest) => {
+        exportProject(appVersionText(), s.projectName).then((dest) => {
           if (dest) s.showToast('项目已保存: ' + dest);
         }).catch((error) => s.showToast(`项目保存失败：${errText(error)}`));
       } else if (k === 'o') {

@@ -1304,16 +1304,42 @@ function pendingFromStored(data: StoredDataset): PendingCell[] {
   return source.map(({ row, col }) => ({ row, col }));
 }
 
+/**
+ * 启动恢复：已通过结构校验、但重建模型时仍失败的本地数据(fix2611a D1)。此前三处 catch 静默回落演示数据，
+ * 用户看到的是「示例数据」而不知道自己的表没恢复。改为与 loadValidatedStoreJson 同一隔离口径：
+ * 原文复制进隔离区(失败则 quarantineCorruptStore 登记写保护，禁止后续保存覆盖原值)、写会话日志(含原因)、
+ * 与「数据已损坏并隔离」同源的一次性提示。live 原文不删除，启动不因此崩溃。
+ */
+function quarantineStartupRebuildFailure(key: string, what: string, error: unknown): void {
+  const detail = `${what}无法重建，已回退为演示数据：${errText(error)}`;
+  let raw: string | null = null;
+  try { raw = localStorage.getItem(key); } catch { /* 读不到原文时只能记日志 */ }
+  if (raw == null) {
+    sessionLog(`启动恢复失败：${detail}；本地原文已不可读，未能复制到隔离区`);
+    return;
+  }
+  const preserved = quarantineCorruptStore(key, raw, detail);
+  sessionLog(`启动恢复失败：${detail}；${preserved
+    ? '原始文本已复制到隔离区，可在「工具 → 选项」找回'
+    : '隔离失败（可能空间不足），已禁止覆盖原值'}`);
+}
+
 let initModel = demo.model;
 let initText: TextColumn[] = [];
 let initPending: PendingCell[] = [];
 if (stored) {
   try {
-    initModel = modelFromStored(stored);
+    const model = modelFromStored(stored);
+    const pending = pendingFromStored(stored);
+    initModel = model;
     initText = stored.textCols ?? [];
-    initPending = pendingFromStored(stored);
-  } catch {
+    initPending = pending;
+  } catch (error) {
+    // 三者必须一起回落：只回落模型会让演示矩阵配上已存表的文本列/待录入坐标。
     initModel = demo.model;
+    initText = [];
+    initPending = [];
+    quarantineStartupRebuildFailure(LS_DATASET, `活动数据集「${stored.name}」`, error);
   }
 }
 let initP = demo.p;
@@ -1323,12 +1349,16 @@ if (storedAttr?.p) {
     const sampleSize = storedAttr.p.sampleSizes ?? storedAttr.p.sampleSize;
     if (sampleSize == null) throw new Error('P 图样本量缺失');
     initP = computePChart(storedAttr.p.counts, sampleSize, storedAttr.p.name);
-  } catch { /* 保留演示 */ }
+  } catch (error) {
+    quarantineStartupRebuildFailure(LS_ATTR, `P 图数据「${storedAttr.p.name}」`, error);
+  }
 }
 if (storedAttr?.c) {
   try {
     initC = computeCChart(storedAttr.c.counts, storedAttr.c.name);
-  } catch { /* 保留演示 */ }
+  } catch (error) {
+    quarantineStartupRebuildFailure(LS_ATTR, `C 图数据「${storedAttr.c.name}」`, error);
+  }
 }
 
 function persistAttr(p: PChartModel, c: CChartModel): boolean {
@@ -3661,7 +3691,6 @@ export const useData = create<DataState>((set, get) => ({
   },
 
   appendSubgroup: (vals) => {
-    beginDatasetIntent();
     const m = get().model;
     // 双审 P1 配套:列数不匹配或目标表带文本分组列时拒绝追加(MES 流数据集永远无文本列),
     // 防止把模拟子组塞进结构不同的真实工作表造成行列错位
@@ -3675,6 +3704,10 @@ export const useData = create<DataState>((set, get) => ({
     }
     const rows = [...m.subs.map((s) => s.vals), vals];
     const model = computeVarModel(m.name, m.colNames, rows);
+    // fix2611a D2:意图版本在全部校验(含模型重建)通过之后才推进，与 importMatrix/importCounts
+    // 「闸门在校验之后」一致；被拒的追加不得把在途的 loadRecent/vault 水合静默作废。
+    // 导出快照期间 beginDatasetIntent 仍按原口径抛错拒绝。
+    beginDatasetIntent();
     const data: StoredDataset = {
       name: model.name, colNames: [...model.colNames], rows, textCols: [], pendingCells: [], savedAt: new Date().toISOString(),
     };

@@ -2,6 +2,7 @@
 import { useMemo, useState } from 'react';
 import { useApp } from '../../store/appStore';
 import { errText } from '../../platform/adapter';
+import { appVersionText } from '../../platform/reportLabels';
 import { useData } from '../../store/dataStore';
 import { resolveNumericColumn } from '../../core';
 import { Icon, type IconName } from '../icons';
@@ -25,7 +26,7 @@ export function Toolbar() {
     { label: '导入 CSV/Excel', icon: 'grid', onClick: () => openModal('import') },
     { label: '保存', icon: 'check', onClick: () => {
       import('../../platform/project')
-        .then((m) => m.exportProject(__APP_VERSION__, useApp.getState().projectName))
+        .then((m) => m.exportProject(appVersionText(), useApp.getState().projectName))
         .then((dest) => { if (dest) showToast('项目已保存: ' + dest); })
         .catch((error) => showToast(`项目保存失败：${errText(error)}`));
     } },

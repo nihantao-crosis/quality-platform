@@ -1,7 +1,14 @@
 /** SVG 基元 — 对应原型 svg/line/txt 辅助函数。 */
 import type { ReactNode } from 'react';
 
-export function Svg({ w, h, children, label, interactive }: { w: number; h: number; children: ReactNode; label?: string; interactive?: boolean }) {
+export function Svg({ w, h, children, label, interactive, readable }: {
+  w: number; h: number; children: ReactNode; label?: string; interactive?: boolean;
+  /**
+   * fix2611a D5:具名但图内文字(刻度/数值/项名)本身就是读数依据的图用 role="group" + 名称，
+   * 既给出具体图名，又不把子树压成 presentational(role="img" 会让图内文字对辅助技术消失)。
+   */
+  readable?: boolean;
+}) {
   // 无障碍(双审 P3):有具名 label 的图作为单一图像呈现(role="img" + 名称)。
   // interactive:图内含 role="button" 的可点击元素时必须用 role="group" —— role="img"
   // 会把整棵子树压成 presentational,可点击点对辅助技术直接消失(自审 P2)。
@@ -11,7 +18,8 @@ export function Svg({ w, h, children, label, interactive }: { w: number; h: numb
   return (
     <svg
       viewBox={`0 0 ${w} ${h}`}
-      {...(label ? { role: interactive ? 'group' : 'img', 'aria-label': label } : {})}
+      {...(label ? { role: interactive || readable ? 'group' : 'img', 'aria-label': label } : {})}
+      data-qp-chart=""
       style={{ width: '100%', height: 'auto', display: 'block' }}
     >
       {children}

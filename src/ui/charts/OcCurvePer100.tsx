@@ -41,7 +41,7 @@ export function OcCurvePer100({
   };
 
   return (
-    <Svg w={W} h={H}>
+    <Svg w={W} h={H} readable label={`OC 特性曲线（每百单位不合格数，泊松）· n=${plan.n}，Ac=${plan.ac}`}>
       <rect x={0} y={0} width={W} height={H} fill={T.bg} />
       {Array.from({ length: 6 }, (_, index) => {
         const y = m.t + (index / 5) * ph;

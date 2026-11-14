@@ -60,7 +60,7 @@ function FishboneChartImpl({ T, data }: { T: ChartTokens; data: FishboneData }) 
   };
 
   return (
-    <Svg w={W} h={H}>
+    <Svg w={W} h={H} readable label={`鱼骨图（6M 因果图）· 问题：${data.problem.trim() || '未填写'}`}>
       <rect x={0} y={0} width={W} height={H} fill={T.bg} />
       {/* 脊骨与头部问题框 */}
       <Ln x1={spineX0} y1={spineY} x2={spineX1} y2={spineY} stroke={T.text} sw={2.4} />

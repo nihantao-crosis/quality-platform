@@ -27,9 +27,10 @@ function ScatterPlotImpl({ T, xs, ys, slope, intercept, xLabel, yLabel, h }: {
   const points = Array.from({ length: Math.min(xs.length, ys.length) }, (_, index) => ({
     x: xs[index], y: ys[index], sourceIndex: index,
   })).filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y));
+  const chartLabel = `散点图 · ${yLabel} 对 ${xLabel}`;
   if (points.length === 0) {
     return (
-      <Svg w={W} h={H}>
+      <Svg w={W} h={H} readable label={`${chartLabel}（无有效数据）`}>
         <rect x={0} y={0} width={W} height={H} fill={T.bg} />
         <Txt x={W / 2} y={H / 2} s="无有效数据，无法绘制散点图" fill={T.axis} size={12} anchor="middle" />
       </Svg>
@@ -78,7 +79,7 @@ function ScatterPlotImpl({ T, xs, ys, slope, intercept, xLabel, yLabel, h }: {
     return { x1, x2, y1: clampY(yAt(x1)), y2: clampY(yAt(x2)) };
   })();
   return (
-    <Svg w={W} h={H}>
+    <Svg w={W} h={H} readable label={chartLabel}>
       <rect x={0} y={0} width={W} height={H} fill={T.bg} />
       {/* 批次720-C3:整洁刻度(1-2-5 阶梯)取代等分刻度。 */}
       {niceCoordinateTicks(yAxis, yDomain, 5).map((tick, index) => (

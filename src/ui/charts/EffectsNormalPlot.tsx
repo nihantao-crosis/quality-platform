@@ -33,9 +33,10 @@ function EffectsNormalPlotImpl({ T, terms, pse, half = false, h }: {
   const pw = W - m.l - m.r;
   const ph = H - m.t - m.b;
   const finite = terms.filter((term) => Number.isFinite(term.effect));
+  const chartName = half ? '效应半正态概率图' : '效应正态概率图';
   if (!finite.length) {
     return (
-      <Svg w={W} h={H}>
+      <Svg w={W} h={H} readable label={`${chartName}（无可估计效应）`}>
         <rect x={0} y={0} width={W} height={H} fill={T.bg} />
         <Txt x={W / 2} y={H / 2} s="无可估计效应,无法绘制效应概率图" fill={T.axis} size={12} anchor="middle" />
       </Svg>
@@ -71,8 +72,10 @@ function EffectsNormalPlotImpl({ T, terms, pse, half = false, h }: {
   const pctTicks = (half ? HALF_PCT_TICKS : FULL_PCT_TICKS)
     .map((p) => ({ p, z: half ? invNorm(0.5 + p / 200) : invNorm(p / 100) }))
     .filter(({ z }) => z >= zlo - 1e-9 && z <= zhi + 1e-9);
+  const sigNames = finite.filter((term) => term.sig).map((term) => term.name);
+  const chartLabel = `${chartName} · ${n} 个效应项，显著：${sigNames.length ? sigNames.slice(0, 8).join('、') + (sigNames.length > 8 ? ` 等 ${sigNames.length} 项` : '') : '无'}`;
   return (
-    <Svg w={W} h={H}>
+    <Svg w={W} h={H} readable label={chartLabel}>
       <rect x={0} y={0} width={W} height={H} fill={T.bg} />
       {pctTicks.map(({ p, z }) => (
         <Fragment key={p}>

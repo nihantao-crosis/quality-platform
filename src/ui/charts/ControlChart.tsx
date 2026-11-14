@@ -2,7 +2,7 @@
  * 控制图（交互点选）— 从原型 controlChart() 迁移。
  * 中心线/UCL/LCL/σ 分区/失控点高亮/选中描边圈/点击回调。
  */
-import { memo, Fragment } from 'react';
+import { memo, Fragment, useRef, useState, type KeyboardEvent } from 'react';
 import { decimateUniform, arrMin, arrMax, decimateMinMax } from '../../core';
 import type { ChartTokens } from '../tokens';
 import { tickFormatter, niceTicks } from '../tokens';
@@ -76,6 +76,10 @@ export interface ControlChartProps {
 
 function ControlChartImpl(cfg: ControlChartProps) {
   const T = cfg.T;
+  // fix2611a D4:可点击点采用 roving tabindex——整张图只占一个 Tab 停靠点(此前 SPC 页上千个点
+  // 每个都是 tabIndex=0,键盘用户无法跳过)。方向键/Home/End 在点之间移动，Enter/空格触发原 onPoint。
+  const [focusPoint, setFocusPoint] = useState<number | null>(null);
+  const pointsRef = useRef<SVGGElement>(null);
   const W = 960;
   const H = cfg.h ?? 260;
   const m = { t: 24, r: 104, b: cfg.hideXAxis ? 12 : cfg.xLabel ? 48 : 30, l: cfg.yLabel ? 78 : 60 };
@@ -137,6 +141,29 @@ function ControlChartImpl(cfg: ControlChartProps) {
   const keep = [...keptViol, ...(cfg.sel != null ? [cfg.sel] : []), ...(cfg.stageBoundaries ?? []).flatMap((b) => [b - 1, b])];
   const idx = decimateMinMax(data, MAX_RENDER_PTS, keep);
   const sampled = idx.length < data.length;
+  // 停靠点：上次键盘/焦点所在点 → 当前选中点 → 首个渲染点；均须仍在渲染集合内。
+  const rovingPoint = focusPoint != null && idx.includes(focusPoint)
+    ? focusPoint
+    : cfg.sel != null && idx.includes(cfg.sel) ? cfg.sel : idx[0];
+  const onPointKeyDown = (event: KeyboardEvent<SVGCircleElement>, position: number) => {
+    const i = idx[position];
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      cfg.onPoint?.(i);
+      return;
+    }
+    let next: number;
+    if (event.key === 'ArrowRight' || event.key === 'ArrowDown') next = Math.min(idx.length - 1, position + 1);
+    else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') next = Math.max(0, position - 1);
+    else if (event.key === 'Home') next = 0;
+    else if (event.key === 'End') next = idx.length - 1;
+    else return;
+    event.preventDefault();
+    const target = idx[next];
+    setFocusPoint(target);
+    const el = pointsRef.current?.querySelector<SVGCircleElement>(`[data-point="${target}"]`);
+    el?.focus();
+  };
   // 序列折线:step 模式在值跳变处插入垂直拐点(段边界中点)
   const seriesPts = (series: number[]) => {
     if (!cfg.stepSeries) return idx.map((i) => `${X(i)},${Y(series[i])}`).join(' ');
@@ -337,7 +364,8 @@ function ControlChartImpl(cfg: ControlChartProps) {
         </>
       )}
       <polyline points={idx.map((i) => `${X(i)},${Y(data[i])}`).join(' ')} fill="none" stroke={T.line} strokeWidth={T.sw} />
-      {idx.map((i) => {
+      <g ref={pointsRef}>
+      {idx.map((i, position) => {
         const v = data[i];
         const bad = viol.has(i);
         const sel = cfg.sel === i;
@@ -350,14 +378,11 @@ function ControlChartImpl(cfg: ControlChartProps) {
             {cfg.onPoint && (
               <circle
                 cx={X(i)} cy={Y(v)} r={11} fill="transparent" style={{ cursor: 'pointer' }}
-                role="button" tabIndex={0} aria-label={`${label(i)}，值 ${chartNum(v)}，查看明细`}
+                role="button" tabIndex={i === rovingPoint ? 0 : -1} data-point={i}
+                aria-label={`${label(i)}，值 ${chartNum(v)}，查看明细`}
                 onClick={() => cfg.onPoint!(i)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter' || event.key === ' ') {
-                    event.preventDefault();
-                    cfg.onPoint!(i);
-                  }
-                }}
+                onFocus={() => { if (focusPoint !== i) setFocusPoint(i); }}
+                onKeyDown={(event) => onPointKeyDown(event, position)}
               >
                 <title>{label(i) + ' = ' + chartNum(v)}</title>
               </circle>
@@ -365,6 +390,7 @@ function ControlChartImpl(cfg: ControlChartProps) {
           </Fragment>
         );
       })}
+      </g>
       {!cfg.hideXAxis && idx.map((i) =>
         i % lblStep === 0 || i === data.length - 1 ? (
           <Txt key={'x' + i} x={X(i)} y={H - (cfg.xLabel ? 25 : 10)} s={tickLabel(i)} fill={T.axis} size={10} anchor="middle" />
