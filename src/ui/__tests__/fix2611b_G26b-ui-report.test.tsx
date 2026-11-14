@@ -205,7 +205,7 @@ describe('B7 README「2026-11 遗留项整改要点」措辞与事实一致', ()
 
   it('小节开头如实说明本批处理范围,「仍未处理」指向附录 F', () => {
     expect(start).toBeGreaterThan(0);
-    expect(section).toContain('本批处理了其中的发版门禁、数值稳定、导出与界面类事项');
+    expect(section).toContain('本批处理了其中的发版门禁、数值稳定、导出、本地数据恢复与界面类事项');
     expect(section).not.toContain('本批修掉其中可由代码解决的部分');
     const pending = section.split('\n').find((line) => line.startsWith('- **仍未处理**'));
     expect(pending).toMatch(/附录 F/);
