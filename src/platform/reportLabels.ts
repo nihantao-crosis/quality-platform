@@ -19,7 +19,44 @@ export function stagedChartProps(chart: SpcChartContext): {
  */
 export interface ReportCapabilityOptions extends CapabilityInputOptions {
   stabilityCaliberText?: string | null;
+  /**
+   * 能力数据来源(fix2611a G25c C1):能力子组口径与 SPC 角色不同(capSubgroupMode≠'spc')时,
+   * 由 buildActiveAnalysisExport 从 resolveCapabilityMeasurementData 取出(与能力页同一 prepared)。
+   * 缺省时按能力模型自身列名/数据结构推导。
+   */
+  capabilitySource?: CapabilitySource | null;
 }
+
+/** 能力页「能力数据口径」行的两项来源字段(SpcPreparedData.note / variableName)。 */
+export interface CapabilitySource {
+  variableName: string;
+  note: string;
+}
+
+/**
+ * 能力变量与数据口径的唯一文案(fix2611a G25c C1):与能力页「能力数据口径：…；变量：…；实际观测 N=…」
+ * 逐字同源(页面另以「。」收尾)。SPC 与能力用同一模型时返回 null——此时各格式输出与旧版逐字相同。
+ * HTML/Word/PPT/Excel/纯文本五种出口只调用本函数。
+ */
+export function capabilitySourceLine(
+  spcModel: VarModel,
+  capabilityModel: VarModel,
+  source?: CapabilitySource | null,
+): string | null {
+  if (spcModel === capabilityModel) return null;
+  const note = source?.note || reportShapeText(capabilityModel);
+  const variable = source?.variableName || capabilityModel.colNames.join(' / ');
+  return `能力数据口径：${note}；变量：${variable}；实际观测 N=${capabilityModel.all.length}`;
+}
+
+/**
+ * 能力指标表的术语唯一来源(fix2611a G25c C3):HTML/Word/PPT/Excel/纯文本与能力页同一写法,
+ * 此前 Word/PPT 写「σ 水平」「PPM(整体)」,与其余格式的「西格玛水平」「PPM 合计（整体）」不一致。
+ */
+export const CAPABILITY_TERMS = {
+  sigmaLevel: '西格玛水平',
+  ppmOverall: 'PPM 合计（整体）',
+} as const;
 
 /** 能力段口径披露行;口径与 SPC 段一致(无披露文本)时返回 null。 */
 export function capabilityCaliberLine(options: ReportCapabilityOptions, capabilitySpcViolations: number): string | null {
@@ -137,6 +174,12 @@ export function reportRawFormatter(values: Iterable<number>, digits = 8): (value
 /** SPC 专项报告在格式化前物化的「点×准则」明细硬上限。 */
 export const MAX_SPC_REPORT_DETAIL_ROWS = 20000;
 export const MAX_XLSX_VIOLATION_ROWS = MAX_SPC_REPORT_DETAIL_ROWS;
+/**
+ * 通用报告(四种导出)在源头物化的判异明细上限(fix2611a G25c C2):取各格式既有上限的最大者
+ * (Excel 2 万 ≥ HTML 2000 ≥ Word 12 / PPT 每图 8),各格式在此前缀上再按自身上限截断;
+ * 计数与截断说明恒用完整命中数(SpcAssessment.eventTotal)。
+ */
+export const GENERIC_REPORT_EVENT_DETAIL_LIMIT = MAX_XLSX_VIOLATION_ROWS;
 /** ECMA-376 / Excel 工作表的硬行数上限（包含标题行）。 */
 export const MAX_XLSX_SHEET_ROWS = 1_048_576;
 /** 专项报告明细表(HTML/Word)的共用行上限:观测级大表在 Word 会抛 RangeError、
@@ -150,6 +193,9 @@ export function tableTruncationNote(total: number, shown: number, format: string
   return `表格共 ${total} 行，${format}仅列前 ${shown} 行；${nextStep}`;
 }
 export const MAX_HTML_VIOLATION_ROWS = 2000;
+if (MAX_HTML_VIOLATION_ROWS > GENERIC_REPORT_EVENT_DETAIL_LIMIT) {
+  throw new Error('通用报告判异明细源头上限必须不小于 HTML 明细上限');
+}
 
 export function violationTruncationNote(total: number, shown: number): string {
   return `已截断：共 ${total} 条判异事件，此处仅列前 ${shown} 条（计数汇总见「过程稳定性」；如需完整明细请缩小数据范围或减少启用的判异准则）`;

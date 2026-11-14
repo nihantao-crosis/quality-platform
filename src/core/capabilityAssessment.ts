@@ -3,7 +3,10 @@
  * 必须共用同一份评估结果——过程失控时,任何界面都不得以绿色「能力充足」作为总体状态。
  */
 import type { VarModel } from './model';
-import { evalRules, evalLimitedRules, expandSpcRuleItems, normalizeRuleK, type NelsonRules, type NelsonRuleK, type RuleViolation } from './spc';
+import {
+  evalRules, evalLimitedRules, expandSpcRuleItems, normalizeRuleK,
+  type NelsonRules, type NelsonRuleK, type PointRuleSummary, type RuleViolation,
+} from './spc';
 import { resolveSpcStage, stagedRange, stagedXbar, type SpcStageResolution } from './stages';
 import { prepareSpcData, type SpcRoleSelection } from './spcData';
 import type { TextColumn } from './csv';
@@ -37,6 +40,52 @@ export interface SpcChartEvent {
   rule: number;
   desc: string;
   chart: string;
+}
+
+/** 单张图的「点×准则」命中计数(完整统计,不受明细上限影响)。 */
+export interface SpcChartEventCounts {
+  total: number;
+  byRule: Partial<Record<number, number>>;
+}
+
+/** assessSpcCharts 的明细物化选项(fix2611a G25c C2)。 */
+export interface SpcAssessmentOptions {
+  /**
+   * 设置后只物化按 (分析单元号, 图, 准则) 排序的前 N 条明细(各图另各保留自身前 N 条),
+   * 引擎走 pointRuleDetailLimit 有界通道(1 byte/点 bit mask),不再展开全部滑窗明细;
+   * 计数、高亮索引与结论行与全量路径逐一相同。缺省=全量明细(历史行为)。
+   */
+  eventDetailLimit?: number;
+}
+
+/**
+ * 完整点×准则命中总数(有界明细时 events 只是前缀,截断说明与计数必须用本值)。
+ * 只有源头确实截断(eventsTruncated)时才取 eventTotal;未截断时 events 就是全集,
+ * 按 events.length 计——与旧形制逐字一致,也不会被调用方替换过 events 的对象带上陈旧总数。
+ */
+export function spcEventTotal(assessment: Pick<SpcAssessment, 'events' | 'eventTotal' | 'eventsTruncated'>): number {
+  return assessment.eventsTruncated && assessment.eventTotal != null
+    ? Math.max(assessment.eventTotal, assessment.events.length)
+    : assessment.events.length;
+}
+
+/** 某张图自身的明细前缀与该图完整命中数(PPT 逐图明细)。 */
+export function spcChartEvents(
+  assessment: Pick<SpcAssessment, 'events' | 'eventsTruncated' | 'locationLabel' | 'dispersionLabel' | 'locationEvents' | 'dispersionEvents' | 'locationEventCounts' | 'dispersionEventCounts'>,
+  chartLabel: string,
+): { events: SpcChartEvent[]; total: number } {
+  // 未截断时 events 即全集:按图过滤(旧行为);仅源头截断时改用各图自身前缀与完整计数
+  if (!assessment.eventsTruncated) {
+    const events = assessment.events.filter((event) => event.chart === chartLabel);
+    return { events, total: events.length };
+  }
+  const isLocation = chartLabel === assessment.locationLabel;
+  const isDispersion = !isLocation && chartLabel === assessment.dispersionLabel;
+  const own = isLocation ? assessment.locationEvents : isDispersion ? assessment.dispersionEvents : undefined;
+  const counts = isLocation ? assessment.locationEventCounts : isDispersion ? assessment.dispersionEventCounts : undefined;
+  if (own && counts) return { events: own, total: counts.total };
+  const events = assessment.events.filter((event) => event.chart === chartLabel);
+  return { events, total: events.length };
 }
 
 /** 通用报告的控制图族必须来自当前 SPC 配置，报告层不得按 VarModel 猜回 X̄-R。 */
@@ -214,10 +263,25 @@ export interface SpcAssessment {
   uniquePointCount: number;
   stable: boolean;
   /**
-   * 完整“图表点 × 准则”明细，而不是仅含每个窗口的触发终点。
+   * “图表点 × 准则”明细，而不是仅含每个窗口的触发终点。
    * 同一点命中两条准则时保留两行；已按映射后的分析单元号→图→准则排序。
+   * 全量模式为完整明细;eventDetailLimit 有界模式为完整明细的前缀(见 eventsTruncated)。
    */
   events: SpcChartEvent[];
+  /*
+   * fix2611a G25c C2 有界明细字段:assessSpcCharts 恒填写;可选仅为兼容手工构造的旧形制对象,
+   * 消费方一律经 spcEventTotal / spcChartEvents 读取(缺省时按 events 全量推导,与旧行为一致)。
+   */
+  /** 完整的点×准则命中总数(= 全量模式下 events.length);截断说明必须写这个数。 */
+  eventTotal?: number;
+  /** events 是否只是完整明细的前缀。 */
+  eventsTruncated?: boolean;
+  /** 位置图自身明细(按点号→准则排序;有界模式为该图前缀),供 PPT 逐图明细。 */
+  locationEvents?: SpcChartEvent[];
+  /** 离散图自身明细(点号已映射到分析单元空间;有界模式为该图前缀)。 */
+  dispersionEvents?: SpcChartEvent[];
+  locationEventCounts?: SpcChartEventCounts;
+  dispersionEventCounts?: SpcChartEventCounts;
   /** 位置图高亮索引(供图表 violations 使用,图表点 0 基)。
    * 注意:Set 不可 JSON 序列化——本对象仅限同步消费,勿放入持久化/快照/IPC 载荷。 */
   locationViolIndexes: Set<number>;
@@ -231,6 +295,8 @@ export interface SpcAssessment {
 interface RuleEvaluation {
   viol: Set<number>;
   list: RuleViolation[];
+  /** 仅 pointRuleDetailLimit 有界模式下存在。 */
+  pointRuleSummary?: PointRuleSummary;
 }
 
 /**
@@ -249,6 +315,8 @@ export function evaluateSpcChartRules(
   stage: SpcStageResolution | null = null,
   /** CORE-08 σ̂ 守卫；仅能力口径计数(countCapabilityViolations)关闭，保持能力判定口径不动。 */
   sigmaGuard = true,
+  /** 有界明细通道(见 RuleEvalOptions.pointRuleDetailLimit);缺省=历史形制。viol 集合不受影响。 */
+  pointRuleDetailLimit: number | null = null,
 ): {
   normalizedK: NelsonRuleK;
   location: RuleEvaluation;
@@ -259,7 +327,7 @@ export function evaluateSpcChartRules(
 } {
   if (ruleK == null) throw new TypeError('SPC 判异评估必须显式传入 ruleK，不允许回落默认 K 值');
   const normalizedK = normalizeRuleK(ruleK);
-  const options = { collectDetails };
+  const options = pointRuleDetailLimit == null ? { collectDetails } : { collectDetails, pointRuleDetailLimit };
   if (!M.hasSubgroups && family !== 'i-mr') {
     throw new Error(`SPC 图族 ${family} 与当前数据结构不兼容`);
   }
@@ -275,8 +343,8 @@ export function evaluateSpcChartRules(
   if (unavailableReason) {
     return {
       normalizedK,
-      location: { viol: new Set<number>(), list: [] },
-      dispersion: { viol: new Set<number>(), list: [] },
+      location: emptyRuleEvaluation(pointRuleDetailLimit),
+      dispersion: emptyRuleEvaluation(pointRuleDetailLimit),
       staged: null,
       unavailableReason,
     };
@@ -294,6 +362,34 @@ export function evaluateSpcChartRules(
   return { normalizedK, location, dispersion, staged: null, unavailableReason: null };
 }
 
+function emptyRuleEvaluation(pointRuleDetailLimit: number | null): RuleEvaluation {
+  return pointRuleDetailLimit == null
+    ? { viol: new Set<number>(), list: [] }
+    : { viol: new Set<number>(), list: [], pointRuleSummary: { items: [], total: 0, affectedCount: 0, byRule: {}, truncated: false } };
+}
+
+const compareSpcEvents = (a: SpcChartEvent, b: SpcChartEvent) =>
+  a.i - b.i || a.chart.localeCompare(b.chart) || a.rule - b.rule;
+
+function eventCountsOf(events: ReadonlyArray<SpcChartEvent>): SpcChartEventCounts {
+  const byRule: Partial<Record<number, number>> = {};
+  for (const event of events) byRule[event.rule] = (byRule[event.rule] ?? 0) + 1;
+  return { total: events.length, byRule };
+}
+
+function boundedChartEvents(
+  evaluation: RuleEvaluation,
+  chart: string,
+  offset: number,
+): { events: SpcChartEvent[]; counts: SpcChartEventCounts } {
+  const summary = evaluation.pointRuleSummary;
+  if (!summary) throw new Error('有界判异评估缺少 pointRuleSummary');
+  return {
+    events: summary.items.map((item) => ({ i: item.i + offset, rule: item.rule, desc: item.desc, chart })),
+    counts: { total: summary.total, byRule: { ...summary.byRule } },
+  };
+}
+
 /** 通用报告(四种导出格式)共用的 SPC 判异评估。rules/ruleK 必须来自用户当前设置——
  * 任何调用点不得回落 DEFAULT_RULES,否则导出与页面口径分裂。 */
 export function assessSpcCharts(
@@ -303,12 +399,19 @@ export function assessSpcCharts(
   family: SpcChartFamily,
   /** 当前 SPC 配置的阶段口径（resolveSpcStage）；缺省=不分阶段。invalid 时抛错拒绝评估。 */
   stage: SpcStageResolution | null = null,
+  /** fix2611a G25c C2:导出路径传 eventDetailLimit,明细在源头有界;计数不受影响。 */
+  assessmentOptions: SpcAssessmentOptions = {},
 ): SpcAssessment {
   // 公开 API 不允许静默回落标准 K：即使 JavaScript/反序列化调用绕过 TypeScript，
   // 漏传也必须立即暴露，而不是生成一份与用户当前设置不一致的报告。
   // evalRules 会自行规范化 K，明细展开也必须消费同一份规范化结果；
   // 否则 JS/旧快照传入空对象或非法字段时会出现“图 18 点、明细 10 行”。
-  const { normalizedK, location, dispersion, staged, unavailableReason } = evaluateSpcChartRules(M, rules, ruleK, family, true, stage);
+  const rawLimit = assessmentOptions.eventDetailLimit;
+  const detailLimit = rawLimit == null ? null : Number.isFinite(rawLimit) ? Math.max(0, Math.floor(rawLimit)) : 0;
+  const { normalizedK, location, dispersion, staged, unavailableReason } = detailLimit == null
+    ? evaluateSpcChartRules(M, rules, ruleK, family, true, stage)
+    // 有界通道:不构建滑窗触发 list,引擎按 bit mask 统计完整命中并只给出各图前 N 条
+    : evaluateSpcChartRules(M, rules, ruleK, family, false, stage, true, detailLimit);
   const isIndividual = family === 'i-mr';
   const locationLabel = isIndividual ? 'I' : 'X̄';
   const dispersionLabel = family === 'xbar-s' ? 'S' : isIndividual ? 'MR' : 'R';
@@ -317,13 +420,31 @@ export function assessSpcCharts(
   const dispersionPointSet = new Set([...dispersion.viol].map((i) => i + dispersionOffset));
   const unique = new Set([...location.viol, ...dispersionPointSet]);
   const chartPointCount = location.viol.size + dispersion.viol.size;
-  // 明细必须与 SPC 页面走同一展开器:窗口型准则展开成逐点命中,否则「结论 N 点、明细 M 行」自相矛盾
-  const events: SpcChartEvent[] = [
-    ...expandSpcRuleItems(location.viol, location.list, locationLabel, normalizedK)
-      .map((item) => ({ i: item.i, rule: item.rule, desc: item.desc, chart: locationLabel })),
-    ...expandSpcRuleItems(dispersion.viol, dispersion.list, dispersionLabel, normalizedK)
-      .map((item) => ({ i: item.i + dispersionOffset, rule: item.rule, desc: item.desc, chart: dispersionLabel })),
-  ].sort((a, b) => a.i - b.i || a.chart.localeCompare(b.chart) || a.rule - b.rule);
+  // 明细必须与 SPC 页面走同一展开器:窗口型准则展开成逐点命中,否则「结论 N 点、明细 M 行」自相矛盾。
+  // 有界通道的 bit mask 逐点记录的是同一「点×准则」集合(与 SPC 页 GAP-10-23 同源),
+  // 各图前 N 条合并排序后取前 N 条 = 全量明细的前 N 条。
+  let locationEvents: SpcChartEvent[];
+  let dispersionEvents: SpcChartEvent[];
+  let locationEventCounts: SpcChartEventCounts;
+  let dispersionEventCounts: SpcChartEventCounts;
+  if (detailLimit == null) {
+    locationEvents = expandSpcRuleItems(location.viol, location.list, locationLabel, normalizedK)
+      .map((item) => ({ i: item.i, rule: item.rule, desc: item.desc, chart: locationLabel }));
+    dispersionEvents = expandSpcRuleItems(dispersion.viol, dispersion.list, dispersionLabel, normalizedK)
+      .map((item) => ({ i: item.i + dispersionOffset, rule: item.rule, desc: item.desc, chart: dispersionLabel }));
+    locationEventCounts = eventCountsOf(locationEvents);
+    dispersionEventCounts = eventCountsOf(dispersionEvents);
+  } else {
+    const boundedLocation = boundedChartEvents(location, locationLabel, 0);
+    const boundedDispersion = boundedChartEvents(dispersion, dispersionLabel, dispersionOffset);
+    locationEvents = boundedLocation.events;
+    dispersionEvents = boundedDispersion.events;
+    locationEventCounts = boundedLocation.counts;
+    dispersionEventCounts = boundedDispersion.counts;
+  }
+  const merged: SpcChartEvent[] = [...locationEvents, ...dispersionEvents].sort(compareSpcEvents);
+  const events = detailLimit != null && merged.length > detailLimit ? merged.slice(0, detailLimit) : merged;
+  const eventTotal = locationEventCounts.total + dispersionEventCounts.total;
   // σ̂ 不可判定时不得声称「受控」。
   const stable = unique.size === 0 && unavailableReason == null;
   const stageSummary: SpcStageSummary | null = staged
@@ -369,6 +490,12 @@ export function assessSpcCharts(
     uniquePointCount: unique.size,
     stable,
     events,
+    eventTotal,
+    eventsTruncated: eventTotal > events.length,
+    locationEvents,
+    dispersionEvents,
+    locationEventCounts,
+    dispersionEventCounts,
     locationViolIndexes: location.viol,
     dispersionViolIndexes: dispersion.viol,
     verdictLine,

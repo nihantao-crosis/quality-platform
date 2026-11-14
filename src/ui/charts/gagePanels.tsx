@@ -667,6 +667,18 @@ const HEADER_H = 92;
 const CELL_GAP = 8;
 const FIG_M = 14;
 
+/**
+ * 整图画布尺寸的唯一来源(fix2611a G25c C4):GageReportFigure 的 SVG viewBox 与报告层声明的
+ * 位图尺寸(activeAnalysisReport → Word/PPT 位图化)都由这组常量推导,单操作员 2×2、多操作员 2×3。
+ */
+export function gageReportFigureSize(single: boolean): { width: number; height: number } {
+  const rows = single ? 2 : 3;
+  return {
+    width: FIG_M * 2 + PW * 2 + CELL_GAP,
+    height: HEADER_H + rows * (TITLE_H + PH + CELL_GAP) + FIG_M,
+  };
+}
+
 /** SVG 表头空间固定；完整追溯值保留在报告信息表，图内只做可读缩略。 */
 function compactHeaderText(value: string, maxCharacters = 36): string {
   const characters = Array.from(value.trim());
@@ -699,11 +711,9 @@ export function GageReportFigure({
       { title: `Xbar 控制图（按 ${operatorName}）`, body: groupedControlBody(T, panel, operatorLabels, panel.cellMeans, panel.xbarLimits, 'X̿', dataDp + 1, '样本均值', partName) },
       { title: `${partName} 乘 ${operatorName} 交互作用`, body: interactionBody(T, panel, partLabels, operatorLabels, partName) },
     ];
-  const rows = single ? 2 : 3;
-  const width = FIG_M * 2 + PW * 2 + CELL_GAP;
-  const height = HEADER_H + rows * (TITLE_H + PH + CELL_GAP) + FIG_M;
+  const { width, height } = gageReportFigureSize(single);
   return (
-    <Svg w={width} h={height}>
+    <Svg w={width} h={height} label={`量具研究 · ${valueName} 的量具 R&R（方差分析）报告`}>
       {/* Minitab 报告:白底纸面 + 细边框 */}
       <rect x={0} y={0} width={width} height={height} fill="#ffffff" stroke={T.axis} strokeWidth={1} />
       <Txt x={FIG_M + 4} y={22} s={`${valueName} 的量具 R&R (方差分析) 报告`} fill="#111820" size={15} weight={700} />
@@ -734,21 +744,21 @@ export function GageReportFigure({
 // ---------- 兼容导出:独立面板组件(测试与旧调用方使用) ----------
 
 export function GageRPanel({ T, panel, operatorLabels }: PanelProps) {
-  return <Svg w={PW} h={PH}>{groupedControlBody(T, panel, operatorLabels, panel.cellRanges, panel.rLimits, 'R̄', panelDataDecimals(panel))}</Svg>;
+  return <Svg w={PW} h={PH} label="量具研究 · 极差（R）控制图">{groupedControlBody(T, panel, operatorLabels, panel.cellRanges, panel.rLimits, 'R̄', panelDataDecimals(panel))}</Svg>;
 }
 
 export function GageXbarPanel({ T, panel, operatorLabels }: PanelProps) {
-  return <Svg w={PW} h={PH}>{groupedControlBody(T, panel, operatorLabels, panel.cellMeans, panel.xbarLimits, 'X̿', panelDataDecimals(panel) + 1)}</Svg>;
+  return <Svg w={PW} h={PH} label="量具研究 · 均值（X̄）控制图">{groupedControlBody(T, panel, operatorLabels, panel.cellMeans, panel.xbarLimits, 'X̿', panelDataDecimals(panel) + 1)}</Svg>;
 }
 
 export function GageByPartPanel({ T, panel, partLabels }: PanelProps) {
-  return <Svg w={PW} h={PH}>{byPartBody(T, panel, partLabels)}</Svg>;
+  return <Svg w={PW} h={PH} label="量具研究 · 按部件的测量值">{byPartBody(T, panel, partLabels)}</Svg>;
 }
 
 export function GageByOperatorPanel({ T, panel, operatorLabels }: PanelProps) {
-  return <Svg w={PW} h={PH}>{byOperatorBody(T, panel, operatorLabels)}</Svg>;
+  return <Svg w={PW} h={PH} label="量具研究 · 按操作员的测量值">{byOperatorBody(T, panel, operatorLabels)}</Svg>;
 }
 
 export function GageInteractionPanel({ T, panel, partLabels, operatorLabels }: PanelProps) {
-  return <Svg w={PW} h={PH}>{interactionBody(T, panel, partLabels, operatorLabels)}</Svg>;
+  return <Svg w={PW} h={PH} label="量具研究 · 部件 × 操作员交互作用">{interactionBody(T, panel, partLabels, operatorLabels)}</Svg>;
 }

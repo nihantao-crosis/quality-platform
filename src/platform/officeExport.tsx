@@ -9,7 +9,10 @@ import {
 } from 'docx';
 import PptxGenJS from 'pptxgenjs';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { nf, fmtCap, computeCapability, capabilityInputError, evaluateAndersonDarling, type VarModel, type SpcAssessment, assessCapability } from '../core';
+import {
+  nf, fmtCap, computeCapability, capabilityInputError, evaluateAndersonDarling, assessCapability, spcChartEvents, spcEventTotal,
+  type VarModel, type SpcAssessment,
+} from '../core';
 import { chartTokens } from '../ui/tokens';
 import { ControlChart } from '../ui/charts/ControlChart';
 import { Histogram } from '../ui/charts/Histogram';
@@ -17,7 +20,7 @@ import { NormalProbPlot } from '../ui/charts/NormalProbPlot';
 import type { ReportSpec } from './report';
 import { svgMarkupToPng } from './svgToPng';
 import { analysisTableTotalRows, analysisUsesWorksheet, type AnalysisReportPayload, type AnalysisReportTable } from './analysisReportModel';
-import { MAX_REPORT_TABLE_ROWS, MAX_XLSX_VIOLATION_ROWS, tableTruncationNote, timestampText, appVersionText, reportContextText, reportSpecText, reportNum, withinSigmaLabel, capabilityCaliberLine, stagedChartProps, replaceLoneSurrogates, type ReportCapabilityOptions } from './reportLabels';
+import { MAX_REPORT_TABLE_ROWS, MAX_XLSX_VIOLATION_ROWS, tableTruncationNote, timestampText, appVersionText, reportContextText, reportSpecText, reportNum, withinSigmaLabel, capabilityCaliberLine, capabilitySourceLine, stagedChartProps, replaceLoneSurrogates, CAPABILITY_TERMS, type ReportCapabilityOptions } from './reportLabels';
 
 /** OOXML 文本合法化(双审 P2):XML 1.0 禁止绝大多数控制字符,原样写入会产出
  * Word/PowerPoint 拒绝打开的损坏文件而界面仍提示导出成功。导入文本(粘贴/CSV)
@@ -44,6 +47,8 @@ interface ReportStats {
   cap: ReturnType<typeof computeCapability> | null;
   capError: string | null;
   viol: { i: number; rule: number; desc: string; chart: string }[];
+  /** 完整点×准则命中数(导出路径明细在源头有界,viol 只是前缀;fix2611a G25c C2)。 */
+  violTotal: number;
   verdictLine: string;
   /** 失控结论 + 三个计数各自标注口径(各图点数/去重分析单元数),与其余格式同一表述 */
   violSummary: string;
@@ -72,6 +77,7 @@ function collectStats(
     cap,
     capError,
     viol,
+    violTotal: spcEventTotal(assessment),
     verdictLine: assessment.verdictLine,
     violSummary,
     adText,
@@ -82,39 +88,41 @@ function collectStats(
 /** Word/PPT 是阅读摘要；逐行完整明细保留在 HTML/文本/Excel，避免演示文档因长游程无限膨胀。 */
 function officeViolationText(
   viol: ReportStats['viol'],
+  violTotal: number,
   verdictLine: string,
   violSummary: string,
   limit: number,
 ): string {
-  if (viol.length === 0) return verdictLine;
+  if (violTotal === 0) return verdictLine;
   const shown = viol.slice(0, limit)
     .map((item) => `${item.chart}图点${item.i + 1}(准则${item.rule}：${item.desc})`)
     .join('、');
-  const continuation = viol.length > MAX_XLSX_VIOLATION_ROWS
+  const continuation = violTotal > MAX_XLSX_VIOLATION_ROWS
     ? `Excel 同样最多列前 ${MAX_XLSX_VIOLATION_ROWS} 项；如需完整明细，请缩小数据范围或减少启用的判异准则`
     : '完整明细请导出 Excel';
-  return viol.length > limit
-    ? `${violSummary}：${shown}（摘要仅列前 ${limit} 项；共 ${viol.length} 项，${continuation}）`
+  return violTotal > limit
+    ? `${violSummary}：${shown}（摘要仅列前 ${limit} 项；共 ${violTotal} 项，${continuation}）`
     : `${violSummary}：${shown}`;
 }
 
 /** PPT 每张控制图只列自己的点×准则明细，避免把 R/MR 异常挂在 X̄/I 图下。 */
 function officeChartViolationText(
-  viol: ReportStats['viol'],
+  assessment: SpcAssessment,
   violSummary: string,
   chartLabel: string,
   limit: number,
 ): string {
-  const chartViol = viol.filter((item) => item.chart === chartLabel);
-  if (chartViol.length === 0) return `${violSummary}；${chartLabel} 图无逐点判异明细`;
+  // 各图自身明细前缀与该图完整命中数(全局前缀可能被另一张图占满,不能从 events 过滤)
+  const { events: chartViol, total: chartTotal } = spcChartEvents(assessment, chartLabel);
+  if (chartTotal === 0) return `${violSummary}；${chartLabel} 图无逐点判异明细`;
   const shown = chartViol.slice(0, limit)
     .map((item) => `${item.chart}图点${item.i + 1}(准则${item.rule}：${item.desc})`)
     .join('、');
-  const continuation = viol.length > MAX_XLSX_VIOLATION_ROWS
+  const continuation = spcEventTotal(assessment) > MAX_XLSX_VIOLATION_ROWS
     ? `Excel 同样最多列前 ${MAX_XLSX_VIOLATION_ROWS} 项；如需完整明细，请缩小数据范围或减少启用的判异准则`
     : '完整明细请导出 Excel';
-  return chartViol.length > limit
-    ? `${violSummary}；${chartLabel} 图明细：${shown}（摘要仅列前 ${limit} 项；该图共 ${chartViol.length} 项，${continuation}）`
+  return chartTotal > limit
+    ? `${violSummary}；${chartLabel} 图明细：${shown}（摘要仅列前 ${limit} 项；该图共 ${chartTotal} 项，${continuation}）`
     : `${violSummary}；${chartLabel} 图明细：${shown}`;
 }
 
@@ -175,8 +183,8 @@ export async function renderReportImages(
 const capPairs = (cap: NonNullable<ReportStats['cap']>): Array<[string, string]> => [
   ['Cp', fmtCap(cap.cp)], ['Cpk', nf(cap.cpk, 2)], ['Pp', fmtCap(cap.pp)], ['Ppk', nf(cap.ppk, 2)],
   ['Cpm', fmtCap(cap.cpm)], ['CPU', fmtCap(cap.cpu)], ['CPL', fmtCap(cap.cpl)],
-  ['Z.bench', nf(cap.zBench, 2)], ['σ 水平', nf(cap.sigmaLevel, 2)],
-  ['PPM(整体)', String(Math.round(cap.ppm.overall.total))],
+  ['Z.bench', nf(cap.zBench, 2)], [CAPABILITY_TERMS.sigmaLevel, nf(cap.sigmaLevel, 2)],
+  [CAPABILITY_TERMS.ppmOverall, String(Math.round(cap.ppm.overall.total))],
 ];
 
 // P0-4:判定消费唯一判定器,失控时不得写无警示的「能力充足」。
@@ -273,13 +281,15 @@ export async function buildDocx(
 
   const C = capabilityModel;
   const capSpcCount = capabilitySpcViolations ?? assessment.chartPointCount;
-  const { cap, capError, viol, verdictLine, violSummary, adText, capabilityOverrideAcknowledged } = collectStats(C, spec, assessment, capabilityOptions);
+  const { cap, capError, viol, violTotal, verdictLine, violSummary, adText, capabilityOverrideAcknowledged } = collectStats(C, spec, assessment, capabilityOptions);
   const docxCaliberLine = capabilityCaliberLine(capabilityOptions, capSpcCount);
+  const docxSourceLine = capabilitySourceLine(M, C, capabilityOptions.capabilitySource);
 
   const children: (Paragraph | Table)[] = [
-    new Paragraph({ heading: HeadingLevel.HEADING_1, children: [new TextRun({ text: cleanXml('质量分析报告'), size: 40, bold: true })] }),
+    new Paragraph({ heading: HeadingLevel.HEADING_1, children: [new TextRun({ text: '质量分析报告', size: 40, bold: true })] }),
     p(`工作表 ${M.name} · ${reportContextText(M, C)} · 生成于 ${timestampText()} · v${appVersionText()}`),
     h('1. 过程概览'),
+    ...(docxSourceLine ? [p(docxSourceLine)] : []),
     kvTable([
       ['能力口径均值', reportNum(C.oMean, 4)], [withinSigmaLabel(C), reportNum(C.sigmaWithin, 4)], ['σ 整体', reportNum(C.oSd, 4)],
       ['规格', reportSpecText(spec)], ['判定', cap ? `${capabilityVerdictText(C, cap, capSpcCount)} (Cpk ${nf(cap.cpk, 2)})` : '能力分析未运行'],
@@ -289,7 +299,7 @@ export async function buildDocx(
     ...img(images.xbar),
     p(`${assessment.dispersionLabel} 控制图（离散）`),
     ...img(images.dispersion),
-    p(officeViolationText(viol, verdictLine, violSummary, 12)),
+    p(officeViolationText(viol, violTotal, verdictLine, violSummary, 12)),
     h('3. 过程能力'),
     ...(capabilityOverrideAcknowledged ? [p('⚠ 用户已核对当前测量角色与规格，并显式确认继续计算远距离规格。')] : []),
     ...(docxCaliberLine ? [p(docxCaliberLine)] : []),
@@ -428,7 +438,7 @@ export async function buildPptx(
 
   const C = capabilityModel;
   const capSpcCount = capabilitySpcViolations ?? assessment.chartPointCount;
-  const { cap, capError, viol, verdictLine, violSummary, adText, capabilityOverrideAcknowledged } = collectStats(C, spec, assessment, capabilityOptions);
+  const { cap, capError, violTotal, verdictLine, violSummary, adText, capabilityOverrideAcknowledged } = collectStats(C, spec, assessment, capabilityOptions);
 
   // 封面
   const cover = pptx.addSlide();
@@ -470,11 +480,19 @@ export async function buildPptx(
       x: 0.6, y: capabilityOverrideAcknowledged ? 5.35 : 4.85, w: 12.1, h: 0.6, fontSize: 12, color: 'B0620F', fit: 'shrink',
     });
   }
+  // fix2611a G25c C1:能力与 SPC 用不同模型时写明能力变量与数据口径(排在既有提示行之后)
+  const pptxSourceLine = capabilitySourceLine(M, C, capabilityOptions.capabilitySource);
+  if (pptxSourceLine) {
+    const sourceY = 4.85 + (capabilityOverrideAcknowledged ? 0.5 : 0) + (pptxCaliberLine ? 0.6 : 0);
+    s2.addText(cleanXml(pptxSourceLine), {
+      x: 0.6, y: sourceY, w: 12.1, h: 0.6, fontSize: 12, color: GRAY, fit: 'shrink',
+    });
+  }
 
   chartSlide(`SPC 位置图（${assessment.locationLabel}）`, images.xbar, 250 / 960,
-    viol.length === 0 ? verdictLine : officeChartViolationText(viol, violSummary, assessment.locationLabel, 8));
+    violTotal === 0 ? verdictLine : officeChartViolationText(assessment, violSummary, assessment.locationLabel, 8));
   chartSlide(`SPC 离散图（${assessment.dispersionLabel}）`, images.dispersion, 250 / 960,
-    viol.length === 0 ? verdictLine : officeChartViolationText(viol, violSummary, assessment.dispersionLabel, 8));
+    violTotal === 0 ? verdictLine : officeChartViolationText(assessment, violSummary, assessment.dispersionLabel, 8));
   chartSlide('过程能力直方图', images.hist, 300 / 960);
   chartSlide('正态概率图', images.prob, 280 / 960, adText);
 

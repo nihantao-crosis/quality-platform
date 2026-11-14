@@ -5,14 +5,14 @@
 import * as XLSX from 'xlsx';
 import {
   nf, computeCapability, capabilityInputError, evaluateAndersonDarling, type VarModel, type SpcAssessment,
-  assessCapability,
+  assessCapability, spcEventTotal,
 } from '../core';
 import type { ReportSpec } from './report';
 import { analysisTableTotalRows, safeSheetName, type AnalysisReportPayload } from './analysisReportModel';
 import {
   timestampText, appVersionText, reportSpecText, withinSigmaLabel, reportNum,
   MAX_XLSX_SHEET_ROWS, MAX_XLSX_VIOLATION_ROWS, tableTruncationNote, violationTruncationNote,
-  capabilityCaliberLine, type ReportCapabilityOptions,
+  capabilityCaliberLine, capabilitySourceLine, CAPABILITY_TERMS, type ReportCapabilityOptions,
 } from './reportLabels';
 
 type XlsxCell = string | number | XLSX.CellObject;
@@ -120,6 +120,46 @@ export function buildAnalysisXlsxRows(
   return rows;
 }
 
+/**
+ * 「数据」页的行装配(表头 + 每子组/观测一行):SPC 数据页与能力源数据页共用同一形制。
+ * dispersion='s' 时第二派生列写子组标准差(X̄-S),否则写极差。
+ */
+function modelDataRows(model: VarModel, dispersion: 'range' | 's', dataRowLimit = Number.POSITIVE_INFINITY): XlsxCell[][] {
+  const showDerived = model.hasSubgroups;
+  const head = [model.hasSubgroups ? '子组' : '观测', ...model.colNames, ...(showDerived ? ['均值', dispersion === 's' ? '标准差' : '极差'] : [])];
+  const rows: XlsxCell[][] = [head];
+  const count = Math.min(model.subs.length, dataRowLimit);
+  for (let index = 0; index < count; index++) {
+    const s = model.subs[index];
+    rows.push([
+      s.i,
+      ...s.vals,
+      // PLATFORM-14:写原始 double,不得 Number(nf(·,4)) 预先四舍五入(小量级数据会被写成数值 0)
+      // 3b G21 尾巴:子组均值/极差(标准差)带数字格式(旧版 Number(nf(·,4)) 的 4 位小数形制)
+      ...(showDerived ? [
+        xlsxStatCell(s.mean, 4),
+        xlsxStatCell(dispersion === 's' ? model.svals[s.i - 1] : s.range, 4),
+      ] : []),
+    ]);
+  }
+  return rows;
+}
+
+/**
+ * 能力源数据页(fix2611a G25c C1):SPC 与能力用不同模型时附上能力实际使用的观测,
+ * 与「数据」页同一形制(能力 σ组内 恒按 R̄/d₂ 或 MR̄/d₂,派生列写极差)。
+ * 受 Excel 单工作表硬行数上限约束:超限时末行写截断说明(含总行数)。rowLimit 仅供边界测试注入。
+ */
+export function capabilityDataSheetRows(capabilityModel: VarModel, rowLimit = MAX_XLSX_SHEET_ROWS): XlsxCell[][] {
+  const limit = Number.isSafeInteger(rowLimit) && rowLimit >= 3 ? Math.min(rowLimit, MAX_XLSX_SHEET_ROWS) : 3;
+  const total = capabilityModel.subs.length;
+  // 表头 1 行;超限时再预留 1 行截断说明
+  const fits = total + 1 <= limit;
+  const rows = modelDataRows(capabilityModel, 'range', fits ? total : limit - 2);
+  if (!fits) rows.push([tableTruncationNote(total, rows.length - 1, 'Excel', false)]);
+  return rows;
+}
+
 export function buildXlsx(
   M: VarModel,
   spec: ReportSpec,
@@ -132,20 +172,11 @@ export function buildXlsx(
   const wb = XLSX.utils.book_new();
 
   const appendDataSheet = () => {
-    const showDerived = M.hasSubgroups;
-    const dispersionHeader = assessment?.family === 'xbar-s' ? '标准差' : '极差';
-    const head = [M.hasSubgroups ? '子组' : '观测', ...M.colNames, ...(showDerived ? ['均值', dispersionHeader] : [])];
-    const dataRows = M.subs.map((s) => [
-      s.i,
-      ...s.vals,
-      // PLATFORM-14:写原始 double,不得 Number(nf(·,4)) 预先四舍五入(小量级数据会被写成数值 0)
-      // 3b G21 尾巴:子组均值/极差(标准差)带数字格式(旧版 Number(nf(·,4)) 的 4 位小数形制)
-      ...(showDerived ? [
-        xlsxStatCell(s.mean, 4),
-        xlsxStatCell(assessment?.family === 'xbar-s' ? M.svals[s.i - 1] : s.range, 4),
-      ] : []),
-    ]);
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([head, ...dataRows]), '数据');
+    XLSX.utils.book_append_sheet(
+      wb,
+      XLSX.utils.aoa_to_sheet(modelDataRows(M, assessment?.family === 'xbar-s' ? 's' : 'range')),
+      '数据',
+    );
   };
 
   // 当前页面有专项分析时，Excel 只导出与该分析有关的数据与结果。
@@ -188,8 +219,8 @@ export function buildXlsx(
     ['CPU', index3(cap.cpu)],
     ['CPL', index3(cap.cpl)],
     ['Z.bench', index3(cap.zBench)],
-    ['西格玛水平', index3(cap.sigmaLevel)],
-    ['PPM 合计（整体）', Math.round(cap.ppm.overall.total)],
+    [CAPABILITY_TERMS.sigmaLevel, index3(cap.sigmaLevel)],
+    [CAPABILITY_TERMS.ppmOverall, Math.round(cap.ppm.overall.total)],
     ['判定', capAssessment.status],
   ] : [
     ['过程能力', `未运行: ${capError}`],
@@ -205,6 +236,7 @@ export function buildXlsx(
       : '控制图无失控信号',
   ];
   const xlsxCaliberLine = capabilityCaliberLine(capabilityOptions, capSpcCount);
+  const xlsxSourceLine = capabilitySourceLine(M, C, capabilityOptions.capabilitySource);
   const adEval = evaluateAndersonDarling(C.all);
   const adRow = adEval.result
     ? `A²*=${nf(adEval.result.a2star, 3)}, P ${adEval.result.p < 0.005 ? '< 0.005' : '= ' + nf(adEval.result.p, 3)} → ${adEval.result.normal ? '未拒绝正态假设' : '显著偏离正态'}`
@@ -222,6 +254,7 @@ export function buildXlsx(
       ...(C.hasSubgroups ? [['能力子组数 k', C.k], ['能力子组大小 n', C.n]] : []),
       ['SPC 观测数 N', M.all.length],
     ] : []),
+    ...(xlsxSourceLine ? [['能力数据口径', xlsxSourceLine]] : []),
     [C !== M ? '能力观测数 N' : '观测数 N', C.all.length],
     // PLATFORM-14:原始 double(小量级数据不再被 Number(nf(·,5)) 写成数值 0)
     // 3b G21 尾巴:数字格式沿用旧 nf(·,5) 的 5 位小数形制，小量级自动转指数格式
@@ -241,15 +274,22 @@ export function buildXlsx(
   // Sheet 3: 失控点(v1.42.3:位置+离散图统一判异,与统计摘要「过程稳定性」同源,不再自相矛盾)
   const violRows: (string | number)[][] = [['点号', '图', 'Nelson 准则', '描述']];
   // 行数硬上限(v1.42.4):对抗性数据可产出 50 万+事件,完整写入会冻结/OOM;截断行写明总数
+  // fix2611a G25c C2:导出路径的明细已在源头有界(events 为前缀),总数取完整命中数
+  const eventTotal = spcEventTotal(assessment);
   const shownEvents = assessment.events.length > MAX_XLSX_VIOLATION_ROWS
     ? assessment.events.slice(0, MAX_XLSX_VIOLATION_ROWS)
     : assessment.events;
   shownEvents.forEach((v) => violRows.push([v.i + 1, v.chart, v.rule, v.desc]));
-  if (assessment.events.length > shownEvents.length) {
-    violRows.push(['…', '', '', violationTruncationNote(assessment.events.length, shownEvents.length)]);
+  if (eventTotal > shownEvents.length) {
+    violRows.push(['…', '', '', violationTruncationNote(eventTotal, shownEvents.length)]);
   }
-  if (assessment.events.length === 0) violRows.push(['—', '—', '—', assessment.verdictLine]);
+  if (eventTotal === 0) violRows.push(['—', '—', '—', assessment.verdictLine]);
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(violRows), '失控点');
+
+  // fix2611a G25c C1:能力与 SPC 用不同模型时附能力源数据(C===M 时工作簿与旧版相同,不追加)
+  if (C !== M) {
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(capabilityDataSheetRows(C)), '能力数据');
+  }
 
   return new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer);
 }

@@ -4,7 +4,7 @@
  * 这里刻意复用页面相同的角色解析与 core 结构化报告，导出不得重新猜变量或回落演示。
  */
 import { renderToStaticMarkup } from 'react-dom/server';
-import { MAX_SPC_REPORT_DETAIL_ROWS, timestampText, reportSpecDetailText, reportNum, reportRawFormatter } from './reportLabels';
+import { MAX_SPC_REPORT_DETAIL_ROWS, timestampText, reportSpecDetailText, reportNum, reportRawFormatter, type CapabilitySource } from './reportLabels';
 import {
   analyzeFactorial,
   analyzeDoe,
@@ -70,7 +70,7 @@ import { chartTokens } from '../ui/tokens';
 import { ControlChart } from '../ui/charts/ControlChart';
 import { NormalProbPlot, residualAxisScale } from '../ui/charts/NormalProbPlot';
 import { BoxPlot, IndividualValuePlot, IntervalPlot, ParetoChart, MiniHist, groupedPlotWindow } from '../ui/charts/misc';
-import { GageReportFigure, gageBarCategories } from '../ui/charts/gagePanels';
+import { GageReportFigure, gageBarCategories, gageReportFigureSize } from '../ui/charts/gagePanels';
 import { ScatterPlot } from '../ui/charts/ScatterPlot';
 import { Histogram } from '../ui/charts/Histogram';
 import { EffectsBar, MainEffects } from '../ui/charts/doe';
@@ -1341,13 +1341,15 @@ function buildGagePayload(): AnalysisReportPayload {
             : '判定阈值按 AIAG：<10% 可接受 / 10–30% 临界 / >30% 不可接受。'),
       },
     ],
-    // 图形报告:与工厂 Minitab 17 图窗同布局的单张整图(单操作员 4 联/多操作员 6 联)
+    // 图形报告:与工厂 Minitab 17 图窗同布局的单张整图(单操作员 4 联/多操作员 6 联)。
+    // fix2611a G25c C4:声明画布尺寸与 GageReportFigure 的 SVG viewBox 同一组常量推导
+    // (此前硬写 1160×690/1030,实际 1156×762/1090,Word/PPT 位图化后缩小或变形 5–10%)。
     charts: [
       svgChart(
         `量具 R&R(ANOVA) 图形报告（${single ? '4 联' : '6 联'}）`,
         <GageReportFigure {...figureProps} />,
-        1160,
-        single ? 690 : 1030,
+        gageReportFigureSize(single).width,
+        gageReportFigureSize(single).height,
         gageBatchTable
           ? `本图仅对应当前测量响应“${realStudy?.valueName ?? '演示测量'}”；其他已选响应的独立结果见“批量 GRR 逐响应明细”。`
           : undefined,
@@ -1817,12 +1819,18 @@ export function buildActiveAnalysisExport(): {
   spcFamily: SpcChartFamily;
   /** 通用报告 SPC 段的阶段口径(CORE-09):调用方须原样传给 assessSpcCharts 第 5 参。 */
   spcStage: SpcStageResolution;
+  /**
+   * 能力数据来源(fix2611a G25c C1):能力子组口径独立于 SPC 角色时为能力页同一 prepared 的
+   * note/variableName,调用方原样放进 ReportCapabilityOptions.capabilitySource;其余情况为 null。
+   */
+  capabilitySource: CapabilitySource | null;
 } {
   const app = useApp.getState();
   const data = useData.getState();
   let model = data.model;
   let capabilityModel = data.model;
   let spcStage: SpcStageResolution = { state: 'off' };
+  let capabilitySource: CapabilitySource | null = null;
   if ((app.page === 'spc' && app.spcType !== 'p' && app.spcType !== 'c') || app.page === 'capability') {
     const prepared = app.page === 'capability'
       ? resolveCapabilityMeasurementData(data.model, data.textCols)
@@ -1836,7 +1844,7 @@ export function buildActiveAnalysisExport(): {
       // 专项页保持优雅降级(与 v1.42.3 基线一致):buildSpcPayload/buildCapabilityPayload 自会生成
       // 「未运行 + 原因」专项报告,四个构建器在 analysis 分支提前返回,raw model 仅提供工作表名,
       // 不会产出自相矛盾的通用 sheet。整体阻断仅适用于无专项载荷兜底的通用报告页(下方分支)。
-      return { report: buildActiveAnalysisReport(), model: data.model, capabilityModel: data.model, spcFamily: 'i-mr', spcStage: { state: 'off' } };
+      return { report: buildActiveAnalysisReport(), model: data.model, capabilityModel: data.model, spcFamily: 'i-mr', spcStage: { state: 'off' }, capabilitySource: null };
     }
     // SPC 与能力稳定性均跟随当前 σ̂ 方法；能力 Cpk 的 sigmaWithin 不受 withSigmaMethod 影响。
     model = app.page === 'spc' ? withSigmaMethod(prepared.model, app.spcSigmaMethod) : prepared.model;
@@ -1876,6 +1884,7 @@ export function buildActiveAnalysisExport(): {
       const capability = resolveCapabilityMeasurementData(data.model, data.textCols);
       if (!capability.model || capability.error) throw new Error(capability.error ?? '当前能力数据角色无效，无法导出');
       capabilityModel = withSigmaMethod(capability.model, app.spcSigmaMethod);
+      capabilitySource = { variableName: capability.variableName, note: capability.note };
     }
   }
   // UI-12 残余(fix2609k G20 方案 a):总览/工作表/助手页导出的通用报告 SPC 段与质量总览同一视图
@@ -1884,5 +1893,5 @@ export function buildActiveAnalysisExport(): {
   const spcFamily: SpcChartFamily = app.page === 'dashboard' || app.page === 'worksheet' || app.page === 'assistant'
     ? spcViewFamilyFor(model, app.spcType)
     : spcChartFamilyFor(model, app.spcType);
-  return { report: buildActiveAnalysisReport(), model, capabilityModel, spcFamily, spcStage };
+  return { report: buildActiveAnalysisReport(), model, capabilityModel, spcFamily, spcStage, capabilitySource };
 }

@@ -7,9 +7,13 @@ import {
   nf, fmtCap, computeCapability, capabilityInputError, oneWayAnova, computeGageRR,
   anovaGroups, gageStudyData, GAGE_TOLERANCE, type VarModel,
   assessCapability, evaluateAndersonDarling,
-  type SpcAssessment, type SpecLimits,
+  spcEventTotal, type SpcAssessment, type SpecLimits,
 } from '../core';
-import { localDateStamp, sanitizeFileName, timestampText, appVersionText, reportContextText, reportSpecText, reportNum, withinSigmaLabel, capabilityCaliberLine, type ReportCapabilityOptions } from './reportLabels';
+import {
+  localDateStamp, sanitizeFileName, timestampText, appVersionText, reportContextText, reportSpecText, reportNum,
+  withinSigmaLabel, capabilityCaliberLine, capabilitySourceLine, violationTruncationNote, CAPABILITY_TERMS,
+  type ReportCapabilityOptions,
+} from './reportLabels';
 
 const OPS = ['张伟', '李娜', '王强'];
 const SHIFTS = ['早班', '中班', '夜班'];
@@ -55,7 +59,8 @@ export function textReport(
   L.push('');
   L.push('【数据集】');
   L.push(`  ${reportContextText(M, C)} · SPC 列: ${M.colNames.join(' / ')}`);
-  if (C !== M) L.push(`  能力列: ${C.colNames.join(' / ')}`);
+  const sourceLine = capabilitySourceLine(M, C, capabilityOptions.capabilitySource);
+  if (sourceLine) L.push(`  ${sourceLine}`);
   L.push(`  能力口径均值 ${reportNum(C.oMean, 4)} · σ整体 ${reportNum(C.oSd, 4)} · ${withinSigmaLabel(C)} ${reportNum(C.sigmaWithin, 4)}`);
   L.push('');
   if (M.hasSubgroups) {
@@ -66,10 +71,13 @@ export function textReport(
     L.push(`  中心线 X̄ ${reportNum(M.indMean, 3)} · UCL ${reportNum(M.iUcl, 3)} · LCL ${reportNum(M.iLcl, 3)} · MR̄ ${reportNum(M.mrbar, 3)}`);
   }
   L.push('  ' + assessment.verdictLine);
-  if (violationEvents.length > 0) {
+  const violationTotal = spcEventTotal(assessment);
+  if (violationTotal > 0) {
     // 三个计数各自标注口径,避免「结论 N 点、明细 M 行」观感矛盾(明细行按 点×准则 展开,可多于点数)
     L.push(`  判异明细（各图累计 ${assessment.chartPointCount} 个失控点：${assessment.locationLabel} 图 ${assessment.locationPoints} 个 + ${assessment.dispersionLabel} 图 ${assessment.dispersionPoints} 个；去重${assessment.analysisUnitLabel} ${assessment.uniqueAnalysisUnitCount} 个）:`);
     violationEvents.forEach((v) => L.push(`    · ${v.chart} 图 · 点 ${v.i + 1} · 准则 ${v.rule} · ${v.desc}`));
+    // 有界明细(导出路径源头截断)时与 Excel/HTML 同一截断说明形制,写全量总数
+    if (violationTotal > violationEvents.length) L.push(`    ${violationTruncationNote(violationTotal, violationEvents.length)}`);
   }
   L.push('');
   L.push('【过程能力】规格 ' + reportSpecText(spec));
@@ -80,8 +88,8 @@ export function textReport(
     const caliberLine = capabilityCaliberLine(capabilityOptions, capabilitySpcViolations);
     if (caliberLine) L.push(`  ${caliberLine}`);
     L.push(`  Cp ${fmtCap(cap.cp)} · Cpk ${nf(cap.cpk, 2)} · Pp ${fmtCap(cap.pp)} · Ppk ${nf(cap.ppk, 2)}`);
-    L.push(`  CPU ${fmtCap(cap.cpu)} · CPL ${fmtCap(cap.cpl)} · Z.bench ${nf(cap.zBench, 2)} · 西格玛水平 ${nf(cap.sigmaLevel, 2)}σ`);
-    L.push(`  PPM 合计（整体）${Math.round(cap.ppm.overall.total).toLocaleString()}`);
+    L.push(`  CPU ${fmtCap(cap.cpu)} · CPL ${fmtCap(cap.cpl)} · Z.bench ${nf(cap.zBench, 2)} · ${CAPABILITY_TERMS.sigmaLevel} ${nf(cap.sigmaLevel, 2)}σ`);
+    L.push(`  ${CAPABILITY_TERMS.ppmOverall}${Math.round(cap.ppm.overall.total).toLocaleString()}`);
     // P0-4:判定必须消费唯一判定器——失控时不得写无警示的「能力充足」。
     const capAd = evaluateAndersonDarling(C.all).result;
     const capAssessment = assessCapability({

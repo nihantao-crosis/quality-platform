@@ -5,14 +5,14 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
   nf, fmtCap, computeCapability, capabilityInputError, evaluateAndersonDarling, type VarModel, type SpcAssessment,
-  assessCapability, } from '../core';
+  assessCapability, spcEventTotal, } from '../core';
 import { chartTokens } from '../ui/tokens';
 import { ControlChart } from '../ui/charts/ControlChart';
 import { Histogram } from '../ui/charts/Histogram';
 import { NormalProbPlot } from '../ui/charts/NormalProbPlot';
 import type { ReportSpec } from './report';
 import { analysisTableTotalRows, analysisUsesWorksheet, type AnalysisReportPayload } from './analysisReportModel';
-import { MAX_REPORT_TABLE_ROWS, tableTruncationNote, escapeHtml, timestampText, appVersionText, reportContextText, reportSpecText, reportNum, withinSigmaLabel, MAX_HTML_VIOLATION_ROWS, violationTruncationNote, capabilityCaliberLine, stagedChartProps, type ReportCapabilityOptions } from './reportLabels';
+import { MAX_REPORT_TABLE_ROWS, tableTruncationNote, escapeHtml, timestampText, appVersionText, reportContextText, reportSpecText, reportNum, withinSigmaLabel, MAX_HTML_VIOLATION_ROWS, violationTruncationNote, capabilityCaliberLine, capabilitySourceLine, stagedChartProps, CAPABILITY_TERMS, type ReportCapabilityOptions } from './reportLabels';
 
 const CSS = `
   body { font-family: "IBM Plex Sans", "PingFang SC", "Microsoft YaHei", sans-serif; color: #2a333f; margin: 0; padding: 32px 40px; }
@@ -95,6 +95,7 @@ export function buildHtmlReport(
   const C = capabilityModel;
   const capSpcCount = capabilitySpcViolations ?? assessment.chartPointCount;
   const caliberLine = capabilityCaliberLine(capabilityOptions, capSpcCount);
+  const sourceLine = capabilitySourceLine(M, C, capabilityOptions.capabilitySource);
   const T = chartTokens('经典', true);
   // 能力输入闸门:规格与数据量纲不匹配(1000σ 哨兵)等情况写「未运行」,其余章节照常导出
   const capError = capabilityInputError(C.all, C.sigmaWithin, spec, capabilityOptions);
@@ -141,8 +142,8 @@ export function buildHtmlReport(
   const capRows: Array<[string, string]> = cap ? [
     ['Cp', fmtCap(cap.cp)], ['Cpk', nf(cap.cpk, 2)], ['Pp', fmtCap(cap.pp)], ['Ppk', nf(cap.ppk, 2)],
     ['Cpm (望目)', fmtCap(cap.cpm)], ['CPU', fmtCap(cap.cpu)], ['CPL', fmtCap(cap.cpl)],
-    ['Z.bench', nf(cap.zBench, 2)], ['西格玛水平', nf(cap.sigmaLevel, 2) + 'σ'],
-    ['PPM 合计（整体）', Math.round(cap.ppm.overall.total).toLocaleString()],
+    ['Z.bench', nf(cap.zBench, 2)], [CAPABILITY_TERMS.sigmaLevel, nf(cap.sigmaLevel, 2) + 'σ'],
+    [CAPABILITY_TERMS.ppmOverall, Math.round(cap.ppm.overall.total).toLocaleString()],
   ] : [
     ['能力分析未运行', capError ?? ''],
   ];
@@ -150,15 +151,18 @@ export function buildHtmlReport(
   // 位置图+离散图统一判异明细(v1.42.3):结论行与明细同源,离散图失控不再与「受控」并存
   const countSummary = `各图累计 ${assessment.chartPointCount} 个失控点（${assessment.locationLabel} 图 ${assessment.locationPoints} 个 + ${assessment.dispersionLabel} 图 ${assessment.dispersionPoints} 个）；去重${assessment.analysisUnitLabel} ${assessment.uniqueAnalysisUnitCount} 个`;
   // CORE-08:σ̂ 不可判定时结论行不得套绿色「受控」样式。
-  const violHtml = assessment.events.length === 0
+  // fix2611a G25c C2:导出路径的明细在源头有界(events 为前缀),总数与截断判断一律用完整命中数
+  const eventTotal = spcEventTotal(assessment);
+  const shownEvents = Math.min(assessment.events.length, MAX_HTML_VIOLATION_ROWS);
+  const violHtml = eventTotal === 0
     ? `<p class="${assessment.unavailableReason ? 'verdict-warn' : 'verdict-ok'}">${esc(assessment.verdictLine)}</p>`
     : `<p class="verdict-bad">${esc(assessment.verdictLine)}（${esc(countSummary)}）</p>`
       + `<table><tr><th>点号</th><th>图</th><th>准则</th><th>描述</th></tr>${assessment.events
         // 行数硬上限(v1.42.4):对抗性数据可产出 50 万+事件,完整渲染会冻结浏览器;截断行写明总数
-        .slice(0, MAX_HTML_VIOLATION_ROWS)
+        .slice(0, shownEvents)
         .map((v) => `<tr><td class="num">${v.i + 1}</td><td>${esc(v.chart)}</td><td class="num">${v.rule}</td><td>${esc(v.desc)}</td></tr>`)
-        .join('')}${assessment.events.length > MAX_HTML_VIOLATION_ROWS
-        ? `<tr><td colspan="4">${esc(violationTruncationNote(assessment.events.length, MAX_HTML_VIOLATION_ROWS))}</td></tr>`
+        .join('')}${eventTotal > shownEvents
+        ? `<tr><td colspan="4">${esc(violationTruncationNote(eventTotal, shownEvents))}</td></tr>`
         : ''}</table>`;
 
   return `<!doctype html>
@@ -173,7 +177,8 @@ export function buildHtmlReport(
 <div class="sub">工作表 ${esc(M.name)} · ${reportContextText(M, C)} · 生成于 ${timestampText()} · 质量分析平台 v${appVersionText()}</div>
 
 <h2>1. 过程概览</h2>
-<table>
+${sourceLine ? `<p>${esc(sourceLine)}</p>
+` : ''}<table>
   <tr><th>能力口径均值</th><th>${withinSigmaLabel(C)}</th><th>σ 整体</th><th>规格 LSL / 目标 / USL</th><th>能力判定</th></tr>
   <tr>
     <td class="num">${reportNum(C.oMean, 4)}</td>

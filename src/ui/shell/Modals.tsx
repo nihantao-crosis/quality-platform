@@ -1,6 +1,6 @@
 /** 四个弹窗：导入 / 导出 / 计算器 / 关于 + Toast。 */
 import { useState, useEffect, useRef } from 'react';
-import { appVersionText } from '../../platform/reportLabels';
+import { appVersionText, GENERIC_REPORT_EVENT_DETAIL_LIMIT } from '../../platform/reportLabels';
 import { isProjectExportInFlight, toastSequence, useApp, type ImportTab, type ExportFmt } from '../../store/appStore';
 import { PROJECT_BACKUP_HINT, completeVaultDatasetRemoval, datasetWriteNotes, markActiveDataReplaced, prepareVaultDatasetRemoval, useData, isCapabilityWarningAcknowledged, type PersistOutcome } from '../../store/dataStore';
 import { parseMatrix, parseCategoryCounts, extractPChartColumns, evalFormula, truthy, arrMin, arrMax, mean, stdev, FormulaError, worksheetNumericColumnCodes, detectCsvBlocks, csvBlockLabel, assessSpcCharts, countCapabilityViolations, capabilityStabilityCaliber, spcChartFamilyFor, spcEffectiveViewType, withSigmaMethod, type CategoryCounts, type CsvBlock, type ParsedMatrix } from '../../core';
@@ -715,12 +715,15 @@ function ExportModal() {
       const appState = useApp.getState();
       const dataState = useData.getState();
       const { lsl, lslOn, tgt, usl, uslOn, spcRules, spcRuleK } = appState;
-      const { report: analysis, model, capabilityModel, spcFamily, spcStage } = buildActiveAnalysisExport();
+      const { report: analysis, model, capabilityModel, spcFamily, spcStage, capabilitySource } = buildActiveAnalysisExport();
       // v1.42.3(审计 P1):通用报告判异用「用户当前规则/K」评估一次,四种格式共用——
       // 不再让各导出器各自按 DEFAULT_RULES 只评位置图。
       // CORE-09:SPC 段与 SPC 页同一阶段口径(resolveSpcStage 结果原样传入第 5 参)。
       // 专项载荷自带完整统计与图表，不先构建一份随后会被丢弃的通用 SPC 明细。
-      const spcAssessment = analysis ? null : assessSpcCharts(model, spcRules, spcRuleK, spcFamily, spcStage);
+      // fix2611a G25c C2:明细走有界通道(只物化各格式上限内的前缀);计数/结论与全量评估逐一相同。
+      const spcAssessment = analysis
+        ? null
+        : assessSpcCharts(model, spcRules, spcRuleK, spcFamily, spcStage, { eventDetailLimit: GENERIC_REPORT_EVENT_DETAIL_LIMIT });
       // buildActiveAnalysisExport 已返回同口径模型；这里再显式收口，避免将来某专项
       // 返回原始 capabilityModel 时通用四格式悄然退回 classic 判异。
       const capabilitySpcModel = withSigmaMethod(capabilityModel, appState.spcSigmaMethod);
@@ -759,7 +762,11 @@ function ExportModal() {
         analysis,
         capabilityModel,
         capabilitySpcViolations,
-        { allowDistantSpec: capabilityWarningAcknowledged, stabilityCaliberText: stabilityCaliber?.text ?? null },
+        {
+          allowDistantSpec: capabilityWarningAcknowledged,
+          stabilityCaliberText: stabilityCaliber?.text ?? null,
+          capabilitySource,
+        },
       );
       const dest = await platform.exportFile(job);
       if (dest == null) return; // 用户取消

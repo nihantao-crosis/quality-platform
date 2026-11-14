@@ -38,7 +38,7 @@ function officeTextRuns(xml: string): string[] {
 
 function expectSingleSidedCapabilityRows(xml: string, namespace: 'word' | 'ppt', expectedCpm: number) {
   const runs = officeTextRuns(xml);
-  const labels = ['Cp', 'Cpk', 'Pp', 'Ppk', 'Cpm', 'CPU', 'CPL', 'Z.bench', 'σ 水平', 'PPM(整体)'];
+  const labels = ['Cp', 'Cpk', 'Pp', 'Ppk', 'Cpm', 'CPU', 'CPL', 'Z.bench', '西格玛水平', 'PPM 合计（整体）'];
   const start = runs.findIndex((value, index) => labels.every((label, offset) => runs[index + offset] === label));
   expect(start, `${namespace} 应包含完整能力指标表头`).toBeGreaterThanOrEqual(0);
   const values = runs.slice(start + labels.length, start + labels.length * 2);
