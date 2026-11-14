@@ -13,19 +13,31 @@ const MAX_QPROJ_IMPORT_BYTES: u64 = 64 * 1024 * 1024;
 /// 以及前端 xlsx 解压总量上限 192 MB，合法导出不会被误拒，只拦截失控的超大写入。
 const MAX_DESKTOP_EXPORT_BYTES: u64 = 256 * 1024 * 1024;
 
-fn export_size_error(byte_len: u64, limit: u64) -> String {
-    format!(
-        "导出文件为 {:.1} MB，超过桌面端 {} MB 写入上限，已取消写入；请缩小导出范围后重试",
-        byte_len as f64 / 1024.0 / 1024.0,
-        limit / 1024 / 1024
-    )
+/// 超限提示。超出不足 0.1 MB 时按 MB 一位小数会显示成「256.0 MB，超过 256 MB」，
+/// 因此改按字节说明超出量（fix2611b G26a A5）；`approximate` 为真表示体积是解码前估算值，文案标「约」。
+fn export_size_error(byte_len: u64, limit: u64, approximate: bool) -> String {
+    const MEGABYTE: u64 = 1024 * 1024;
+    let about = if approximate { "约" } else { "" };
+    let excess = byte_len.saturating_sub(limit);
+    if excess.saturating_mul(10) < MEGABYTE {
+        format!(
+            "导出文件超出桌面端 {} MB 写入上限{about} {excess} 字节，已取消写入；请缩小导出范围后重试",
+            limit / MEGABYTE
+        )
+    } else {
+        format!(
+            "导出文件{about}为 {:.1} MB，超过桌面端 {} MB 写入上限，已取消写入；请缩小导出范围后重试",
+            byte_len as f64 / MEGABYTE as f64,
+            limit / MEGABYTE
+        )
+    }
 }
 
 fn export_size_check(byte_len: u64, limit: u64) -> Result<(), String> {
     if byte_len <= limit {
         Ok(())
     } else {
-        Err(export_size_error(byte_len, limit))
+        Err(export_size_error(byte_len, limit, false))
     }
 }
 
@@ -198,7 +210,7 @@ fn save_binary_file_bounded(
     let max_encoded = limit.div_ceil(3).saturating_mul(4);
     if data_b64.len() as u64 > max_encoded {
         let estimated = (data_b64.len() as u64 / 4).saturating_mul(3);
-        return Err(export_size_error(estimated.max(limit + 1), limit));
+        return Err(export_size_error(estimated.max(limit + 1), limit, true));
     }
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(data_b64)
@@ -558,7 +570,10 @@ mod tests {
         assert!(export_size_check(MAX_DESKTOP_EXPORT_BYTES, MAX_DESKTOP_EXPORT_BYTES).is_ok());
         let error =
             export_size_check(MAX_DESKTOP_EXPORT_BYTES + 1, MAX_DESKTOP_EXPORT_BYTES).unwrap_err();
-        assert!(error.contains("超过桌面端 256 MB 写入上限"), "{error}");
+        assert!(
+            error.contains("超出桌面端 256 MB 写入上限 1 字节"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -617,6 +632,49 @@ mod tests {
             save_binary_file_bounded(&path, &engine.encode(b"PK\x03\x04zz"), 5).unwrap_err();
         assert!(error.contains("写入上限"), "{error}");
         assert_eq!(fs::read(&path).unwrap(), b"PK\x03\x04ab");
+    }
+
+    /// fix2611b G26a A5:超出不足 0.1 MB 时按 MB 一位小数显示会得到「256.0 MB，超过 256 MB」的自相矛盾文案;
+    /// 改按字节说明超出量。二进制预检只能估算解码后体积,文案必须注明「约」。
+    #[test]
+    fn fix2611b_export_size_error_is_not_self_contradictory_at_boundary() {
+        let limit = MAX_DESKTOP_EXPORT_BYTES;
+        for over in [1_u64, 2, 3, 104_857] {
+            let error = export_size_check(limit + over, limit).unwrap_err();
+            assert!(!error.contains("256.0 MB"), "{error}");
+            assert!(
+                error.contains(&format!("超出桌面端 256 MB 写入上限 {over} 字节")),
+                "{error}"
+            );
+            assert!(error.contains("已取消写入"), "{error}");
+            assert!(!error.contains('约'), "精确字节数不得标「约」:{error}");
+        }
+        // 超出达到 0.1 MB 起按 MB 显示,一位小数已与上限可区分。
+        let error = export_size_check(limit + 104_858, limit).unwrap_err();
+        assert!(
+            error.contains("导出文件为 256.1 MB，超过桌面端 256 MB 写入上限"),
+            "{error}"
+        );
+
+        // 二进制预检:12 个字符估算 9 字节,上限 6 → 约超出 3 字节;9 个字符估算 6 字节按上限 +1 处理。
+        let (_dir, path) = temp_path("报表.xlsx");
+        let error = save_binary_file_bounded(&path, "UEsDBGFiYw==", 6).unwrap_err();
+        assert!(error.contains("写入上限约 3 字节"), "{error}");
+        let error = save_binary_file_bounded(&path, "UEsDBGFiY", 6).unwrap_err();
+        assert!(error.contains("写入上限约 1 字节"), "{error}");
+        // 预检估算超出达到 0.1 MB:约为 X MB。
+        let megabyte = 1024 * 1024;
+        let payload = "A".repeat(1_600_000); // 估算 1_200_000 字节,超出 1 MB 上限 151_424 字节
+        let error = save_binary_file_bounded(&path, &payload, megabyte).unwrap_err();
+        assert!(
+            error.contains("导出文件约为 1.1 MB，超过桌面端 1 MB 写入上限"),
+            "{error}"
+        );
+        assert!(!path.exists());
+        // 解码后复核得到的是精确字节数,不标「约」。
+        let error = save_binary_file_bounded(&path, "UEsDBHp6", 5).unwrap_err();
+        assert!(error.contains("写入上限 1 字节"), "{error}");
+        assert!(!error.contains('约'), "{error}");
     }
 
     /// fix2611a G25a A4:既非 UTF-8 也非 GB18030 的字节(0xFF 在两种编码里都非法)

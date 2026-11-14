@@ -156,7 +156,15 @@ const RUBY_YAML_AVAILABLE = (() => {
 const RELEASE_STRUCTURE_TITLE = '解析 YAML 后确认验签和全资产字节绑定都是 draft 转正的前置步骤'
   + (RUBY_YAML_AVAILABLE ? '' : '(跳过:未检测到可用的 ruby,无法解析工作流 YAML)');
 
+// fix2611b G26a A3:本地开发缺 ruby 时仍跳过;CI 上必须真跑,缺 ruby 直接失败而不是静默 skipped。
+const CI_VALUE = process.env.CI?.trim() ?? '';
+const IN_CI = CI_VALUE !== '' && !/^(0|false)$/i.test(CI_VALUE);
+
 describe('发布工作流结构', () => {
+  it('CI 环境必须提供 ruby 以解析工作流 YAML(本地开发缺 ruby 时只跳过结构用例)', () => {
+    if (IN_CI) expect(RUBY_YAML_AVAILABLE, 'CI 环境必须提供 ruby 以解析工作流 YAML').toBe(true);
+  });
+
   it.skipIf(!RUBY_YAML_AVAILABLE)(RELEASE_STRUCTURE_TITLE, () => {
     const yaml = readFileSync('.github/workflows/release.yml', 'utf8');
     const ruby = spawnSync('ruby', ['-ryaml', '-rjson', '-e', [
