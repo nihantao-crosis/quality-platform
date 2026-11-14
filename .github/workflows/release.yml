@@ -130,6 +130,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable action; Rust 1.88.0 below
         with:
           toolchain: 1.88.0
+          components: rustfmt, clippy
       - uses: swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
         with:
           workspaces: src-tauri
@@ -151,9 +152,21 @@ jobs:
             echo 'TAURI_SIGNING_PRIVATE_KEY is empty' >&2
             exit 1
           }
+      # 质量门与 ci.yml 完全同源(fix2611a G25a 守护逐条比对):打 v* 标签发版时
+      # lint / 类型 / fmt / clippy 也必须在构建与签名之前执行,不能只跑测试。
+      # 前端 `npm run build` 由下方 tauri-action 经 tauri.conf.json 的 beforeBuildCommand 执行。
       - run: npm ci
+      - run: npm run lint
+      - run: npx tsc --noEmit
       - run: npm test
-      - run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+      - name: Rust format
+        shell: bash
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+      - name: Rust lint
+        shell: bash
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked -- -D warnings
+      - name: Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
       - uses: tauri-apps/tauri-action@42e9df6c59070d114bf90dcd3943a1b8f138b113 # v0.5.20
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

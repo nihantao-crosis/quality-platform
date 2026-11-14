@@ -147,8 +147,17 @@ describe('1000σ 强警告确认', () => {
   });
 });
 
+// 本用例借 ruby 自带的 Psych 解析 YAML(仓库没有被锁文件固定的直接 YAML 依赖)。
+// 未装 ruby 的环境显式跳过并在用例名写明原因,而不是直接变红(附录 F.3-20)。
+const RUBY_YAML_AVAILABLE = (() => {
+  const probe = spawnSync('ruby', ['-ryaml', '-rjson', '-e', 'exit 0'], { encoding: 'utf8' });
+  return !probe.error && probe.status === 0;
+})();
+const RELEASE_STRUCTURE_TITLE = '解析 YAML 后确认验签和全资产字节绑定都是 draft 转正的前置步骤'
+  + (RUBY_YAML_AVAILABLE ? '' : '(跳过:未检测到可用的 ruby,无法解析工作流 YAML)');
+
 describe('发布工作流结构', () => {
-  it('解析 YAML 后确认验签和全资产字节绑定都是 draft 转正的前置步骤', () => {
+  it.skipIf(!RUBY_YAML_AVAILABLE)(RELEASE_STRUCTURE_TITLE, () => {
     const yaml = readFileSync('.github/workflows/release.yml', 'utf8');
     const ruby = spawnSync('ruby', ['-ryaml', '-rjson', '-e', [
       "doc=YAML.safe_load(STDIN.read, permitted_classes: [], aliases: true)",

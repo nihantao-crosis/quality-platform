@@ -7,6 +7,27 @@ mod db;
 const MAX_XLSX_IMPORT_BYTES: u64 = 20 * 1024 * 1024;
 const MAX_TEXT_DATA_IMPORT_BYTES: u64 = 20 * 1024 * 1024;
 const MAX_QPROJ_IMPORT_BYTES: u64 = 64 * 1024 * 1024;
+/// 桌面端单个导出文件的写入硬上限（fix2611a G25a，附录 F.3-21）。
+/// 前端 assertExportJobSize 只约束 .qproj（64 MB）；报表 / xlsx / CSV 导出此前在 Rust 侧
+/// 没有任何上限。取 256 MB：不小于项目文件 64 MB、CSV/TXT 与 xlsx 20 MB 导入上限，
+/// 以及前端 xlsx 解压总量上限 192 MB，合法导出不会被误拒，只拦截失控的超大写入。
+const MAX_DESKTOP_EXPORT_BYTES: u64 = 256 * 1024 * 1024;
+
+fn export_size_error(byte_len: u64, limit: u64) -> String {
+    format!(
+        "导出文件为 {:.1} MB，超过桌面端 {} MB 写入上限，已取消写入；请缩小导出范围后重试",
+        byte_len as f64 / 1024.0 / 1024.0,
+        limit / 1024 / 1024
+    )
+}
+
+fn export_size_check(byte_len: u64, limit: u64) -> Result<(), String> {
+    if byte_len <= limit {
+        Ok(())
+    } else {
+        Err(export_size_error(byte_len, limit))
+    }
+}
 
 fn text_import_limit(path: &Path) -> (u64, &'static str) {
     let is_project = path
@@ -104,7 +125,17 @@ fn sync_parent_directory(_parent: &Path) -> io::Result<()> {
 /// 返回 `null` 表示完全成功；返回字符串表示文件已写入但目录同步未确认（警告，非失败）。
 #[tauri::command]
 fn save_text_file(path: String, contents: String) -> Result<Option<String>, String> {
-    atomic_write(Path::new(&path), contents.as_bytes()).map_err(|e| e.to_string())
+    save_text_file_bounded(Path::new(&path), &contents, MAX_DESKTOP_EXPORT_BYTES)
+}
+
+/// 超限在打开 / 创建任何文件之前拒绝，目标位置的旧文件保持原样。
+fn save_text_file_bounded(
+    path: &Path,
+    contents: &str,
+    limit: u64,
+) -> Result<Option<String>, String> {
+    export_size_check(contents.len() as u64, limit)?;
+    atomic_write(path, contents.as_bytes()).map_err(|e| e.to_string())
 }
 
 /// 读取文本文件（导入数据用，路径来自原生打开对话框）。
@@ -153,11 +184,27 @@ fn read_binary_file(path: String) -> Result<String, String> {
 /// 二进制文件写入（.xlsx 导出用，前端传 base64）。
 #[tauri::command]
 fn save_binary_file(path: String, data_b64: String) -> Result<Option<String>, String> {
+    save_binary_file_bounded(Path::new(&path), &data_b64, MAX_DESKTOP_EXPORT_BYTES)
+}
+
+fn save_binary_file_bounded(
+    path: &Path,
+    data_b64: &str,
+    limit: u64,
+) -> Result<Option<String>, String> {
     use base64::Engine;
+    // 解码前预检：解码结果不超过 limit 的标准 base64 最多 4*ceil(limit/3) 个字符，
+    // 超出即拒绝，不为失控 payload 再分配一份解码缓冲。
+    let max_encoded = limit.div_ceil(3).saturating_mul(4);
+    if data_b64.len() as u64 > max_encoded {
+        let estimated = (data_b64.len() as u64 / 4).saturating_mul(3);
+        return Err(export_size_error(estimated.max(limit + 1), limit));
+    }
     let bytes = base64::engine::general_purpose::STANDARD
-        .decode(&data_b64)
+        .decode(data_b64)
         .map_err(|e| e.to_string())?;
-    atomic_write(Path::new(&path), &bytes).map_err(|e| e.to_string())
+    export_size_check(bytes.len() as u64, limit)?;
+    atomic_write(path, &bytes).map_err(|e| e.to_string())
 }
 
 /// 启动期需要告知用户的一次性提示（如损坏库已隔离保全的备份路径）。
@@ -492,6 +539,99 @@ mod tests {
         assert_eq!(
             read_text_file(path.to_string_lossy().to_string()).unwrap_err(),
             "文件带 UTF-8 BOM，但内容包含非法 UTF-8 字节，已拒绝导入"
+        );
+    }
+
+    /// fix2611a G25a A3:桌面写文件此前没有任何体积上限,前端 assertExportJobSize 只管 .qproj。
+    #[test]
+    fn fix2611a_desktop_export_limit_is_not_below_any_import_or_project_limit() {
+        // 合法导出必须都能写:不得小于项目文件、CSV/TXT 与 xlsx 的既有上限。
+        let floors = [
+            MAX_QPROJ_IMPORT_BYTES,
+            MAX_TEXT_DATA_IMPORT_BYTES,
+            MAX_XLSX_IMPORT_BYTES,
+            192 * 1024 * 1024, // 前端 MAX_XLSX_TOTAL_BYTES(src/platform/adapter.ts)
+        ];
+        for floor in floors {
+            assert!(MAX_DESKTOP_EXPORT_BYTES >= floor);
+        }
+        assert!(export_size_check(MAX_DESKTOP_EXPORT_BYTES, MAX_DESKTOP_EXPORT_BYTES).is_ok());
+        let error =
+            export_size_check(MAX_DESKTOP_EXPORT_BYTES + 1, MAX_DESKTOP_EXPORT_BYTES).unwrap_err();
+        assert!(error.contains("超过桌面端 256 MB 写入上限"), "{error}");
+    }
+
+    #[test]
+    fn fix2611a_oversize_text_export_is_rejected_without_touching_destination() {
+        let (dir, path) = temp_path("报表.html");
+        fs::write(&path, b"previous complete report").unwrap();
+        let limit = 8;
+
+        let error = save_text_file_bounded(&path, "123456789", limit).unwrap_err();
+
+        assert!(error.contains("写入上限"), "{error}");
+        assert!(error.contains("已取消写入"), "{error}");
+        assert_eq!(fs::read(&path).unwrap(), b"previous complete report");
+        let names: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("报表.html")]);
+        // 恰好等于上限仍可写。
+        assert_eq!(
+            save_text_file_bounded(&path, "12345678", limit).unwrap(),
+            None
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"12345678");
+    }
+
+    #[test]
+    fn fix2611a_oversize_binary_export_is_rejected_before_and_after_decoding() {
+        use base64::Engine;
+        let engine = base64::engine::general_purpose::STANDARD;
+        let (_dir, path) = temp_path("报表.xlsx");
+        let limit = 6;
+
+        // 上限 6 字节时 base64 预检界为 4*ceil(6/3)=8 个字符:7 字节的编码有 12 个字符,
+        // 解码前即拒绝,不为超大 payload 分配解码缓冲,也不创建目标文件。
+        let error =
+            save_binary_file_bounded(&path, &engine.encode(b"PK\x03\x04abc"), limit).unwrap_err();
+        assert!(error.contains("写入上限"), "{error}");
+        assert!(!path.exists());
+
+        // 预检估算值恰好落在上限上的长度(9 个字符 → 估算 6 字节)也必须拒绝,不得静默返回成功。
+        assert!(save_binary_file_bounded(&path, "UEsDBGFiY", limit)
+            .unwrap_err()
+            .contains("写入上限"));
+        assert!(!path.exists());
+
+        // 恰好 6 字节(8 个字符)允许写入。
+        assert_eq!(
+            save_binary_file_bounded(&path, &engine.encode(b"PK\x03\x04ab"), limit).unwrap(),
+            None
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"PK\x03\x04ab");
+        // 上限 5 时预检界仍是 8 个字符,同样 8 字符的 payload 通过预检;解码后 6 字节必须复核拒绝,
+        // 且不改动已有文件。
+        let error =
+            save_binary_file_bounded(&path, &engine.encode(b"PK\x03\x04zz"), 5).unwrap_err();
+        assert!(error.contains("写入上限"), "{error}");
+        assert_eq!(fs::read(&path).unwrap(), b"PK\x03\x04ab");
+    }
+
+    /// fix2611a G25a A4:既非 UTF-8 也非 GB18030 的字节(0xFF 在两种编码里都非法)
+    /// 必须返回中文指引错误,而不是把替换字符或乱码当成数据导入。
+    #[test]
+    fn fix2611a_read_text_rejects_bytes_that_are_neither_utf8_nor_gb18030() {
+        let bytes = [0x41u8, 0x2C, 0xFF, 0x0A, 0x31, 0x2C, 0x32];
+        // 0xFF 不是合法的 UTF-8 起始字节(UTF-8 分支必失败);GB18030 解码同样报错:
+        assert!(encoding_rs::GB18030.decode(&bytes).2);
+        let (_dir, path) = temp_path("unknown-encoding.csv");
+        fs::write(&path, bytes).unwrap();
+
+        assert_eq!(
+            read_text_file(path.to_string_lossy().to_string()).unwrap_err(),
+            "文件既不是 UTF-8 也不是 GB18030 编码；请在 Excel 中另存为「CSV UTF-8（逗号分隔）」后重试"
         );
     }
 }
