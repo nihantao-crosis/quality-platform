@@ -59,7 +59,7 @@ import { MiniHist } from '../charts/misc';
 import { MainEffects, InteractionPlot, EffectsBar, CubePlot } from '../charts/doe';
 import { Svg, Ln, Txt } from '../charts/primitives';
 import { numericInputMode, parseStrictNumber } from '../../core/numberInput';
-import { reportNum } from '../../platform/reportLabels';
+import { doeDroppedTermsText, doeInestimableModelText, reportNum } from '../../platform/reportLabels';
 
 
 /** 两水平/分数因子的因子草稿:低/高水平保存原始串,生成时才严格解析(fix2609l G22a,GAP-8-4 同族)。 */
@@ -358,20 +358,14 @@ function AnalyzeDesign({ T }: { T: ChartTokens }) {
   // 因子项可能全部与区组/较低阶项混杂。此时只有截距能拟合，不能把“没有可估计项”
   // 写成“未发现显著效应”，否则会给退化设计一个看似完整的统计结论。
   if (!isDemo && real && real.terms.length === 0) {
-    const aliasText = real.aliases?.map((alias) =>
-      alias.relation === 'same'
-        ? `${alias.term} = ${alias.with}`
-        : alias.relation === 'opposite'
-          ? `${alias.term} = −${alias.with}`
-          : `${alias.term} 与 ${alias.with} 线性相关`).join('；');
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
         {picker}
         <Card style={{ padding: '18px 20px', fontSize: 13, color: '#8a6520', background: '#fffdf7', lineHeight: 1.7 }}>
           <b>当前模型没有可独立估计的因子效应，分析未运行。</b>
           <div style={{ fontSize: 12, color: '#7a8491', marginTop: 8 }}>
-            所选模型项：{real.requestedTerms.join('、')}。{aliasText ? `可估计性诊断：${aliasText}。` : ''}
-            请解除因子与区组/其他项的完全混杂，增加能区分这些效应的运行，或改选可估计模型项。
+            {/* fix2611b B5:与专项报告未运行说明同源(封顶 + 分类建议) */}
+            所选模型项：{real.requestedTerms.join('、')}。{doeInestimableModelText(real.aliases)}
           </div>
         </Card>
       </div>
@@ -614,13 +608,8 @@ function AnalyzeDesign({ T }: { T: ChartTokens }) {
           )}
           {!isDemo && res.droppedTerms && res.droppedTerms.length > 0 && (
             <div style={{ fontSize: 11.5, color: '#9aa2ad', lineHeight: 1.6, marginTop: 8 }}>
-              <b>别名/可估计性：</b>{res.aliases?.map((alias) =>
-                alias.relation === 'same'
-                  ? `${alias.term} = ${alias.with}`
-                  : alias.relation === 'opposite'
-                    ? `${alias.term} = −${alias.with}`
-                    : `${alias.term} 与 ${alias.with} 线性相关`,
-              ).join('；') ?? res.droppedTerms.join('、')}。这些项无法单独估计，已从模型剔除；可增加运行或减少模型项解除别名。
+              {/* fix2611b B5:封顶列项 + 与结论同类的建议;与专项报告剔除提示同源 */}
+              <b>别名/可估计性：</b>{doeDroppedTermsText(res.aliases, res.droppedTerms)}
             </div>
           )}
         </Card>

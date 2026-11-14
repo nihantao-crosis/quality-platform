@@ -13,7 +13,7 @@ import { ReportCard } from '../ReportCard';
 import { capabilityReport } from '../reportData';
 import { sameChartTokens, type ChartTokens } from '../tokens';
 import { useCapabilityPrepared } from '../useCapabilityPrepared';
-import { reportNum, specLimitText } from '../../platform/reportLabels';
+import { CAPABILITY_TERMS, reportNum, specLimitText } from '../../platform/reportLabels';
 import { StrictNumberInput } from '../StrictNumberInput';
 import { Card, CardHeader, KvRows, numInput, Badge } from '../common';
 import { Histogram } from '../charts/Histogram';
@@ -344,7 +344,7 @@ function CapabilityView({ T }: { T: ChartTokens }) {
     { k: 'CPL', v: fmtCap(cap.cpl) },
     { k: 'Cpm (望目)', v: fmtCap(cap.cpm) },
     { k: 'Z.bench', v: nf(cap.zBench, 2) },
-    { k: '西格玛水平', v: nf(cap.sigmaLevel, 2) + 'σ' },
+    { k: CAPABILITY_TERMS.sigmaLevel, v: nf(cap.sigmaLevel, 2) + 'σ' },
   ];
 
   const perf = [

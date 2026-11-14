@@ -4,7 +4,10 @@
  * 这里刻意复用页面相同的角色解析与 core 结构化报告，导出不得重新猜变量或回落演示。
  */
 import { renderToStaticMarkup } from 'react-dom/server';
-import { MAX_SPC_REPORT_DETAIL_ROWS, timestampText, reportSpecDetailText, reportNum, reportRawFormatter, type CapabilitySource } from './reportLabels';
+import {
+  MAX_SPC_REPORT_DETAIL_ROWS, timestampText, reportSpecDetailText, reportNum, reportRawFormatter, CAPABILITY_TERMS,
+  doeAliasRelationText, doeDroppedTermsText, doeInestimableModelText, type CapabilitySource,
+} from './reportLabels';
 import {
   analyzeFactorial,
   analyzeDoe,
@@ -881,15 +884,12 @@ function buildDoePayload(): AnalysisReportPayload {
   });
   const responseName = M.colNames[respIdx];
   if (result.terms.length === 0) {
-    const aliases = result.aliases?.map((alias) =>
-      alias.relation === 'same' ? `${alias.term} = ${alias.with}`
-        : alias.relation === 'opposite' ? `${alias.term} = −${alias.with}`
-          : `${alias.term} 与 ${alias.with} 线性相关`).join('；');
+    // fix2611b B5:与 DOE 页「无可估计项」卡片同源(封顶列项 + 按区组混杂/生成元别名/线性相关分类建议)。
     return unrunPayload(
       'doe',
       '因子试验设计（DOE）专项报告',
       `${responseName} · ${detected.design.factorNames.join(' / ')}`,
-      `所选模型项全部不可独立估计${aliases ? `：${aliases}` : ''}。请解除完全混杂、增加运行或改选可估计模型项。`,
+      `所选模型项全部不可独立估计（所选：${result.requestedTerms.join('、')}）。${doeInestimableModelText(result.aliases)}`,
     );
   }
   const report = buildDoeStructuredReport(detected.design, result, responseName, doeRunMetadata(M.colNames, rows, data.textCols));
@@ -951,7 +951,8 @@ function buildDoePayload(): AnalysisReportPayload {
       doeRandomizationAudit(M.name),
     ],
     warnings: [
-      report.model.droppedTerms.length ? `以下项因别名/秩亏不能单独估计并已剔除：${report.model.droppedTerms.join('、')}。` : '',
+      // fix2611b B5:与 DOE 页「别名/可估计性」行同源(封顶 + 分类建议)。
+      report.model.droppedTerms.length ? `别名/可估计性：${doeDroppedTermsText(report.model.aliases, report.model.droppedTerms)}` : '',
     ].filter(Boolean),
     tables: [
       {
@@ -972,7 +973,7 @@ function buildDoePayload(): AnalysisReportPayload {
       {
         title: '别名与可估计性',
         headers: ['被剔除项', '别名/依赖项', '关系'],
-        rows: report.model.aliases.map((alias) => [alias.term, alias.with, alias.relation]),
+        rows: report.model.aliases.map((alias) => [alias.term, alias.with, doeAliasRelationText(alias)]),
         note: report.model.aliases.length ? '别名项不能在当前设计中独立估计。' : '当前所选模型项均可估计。',
       },
     ],
@@ -1152,7 +1153,7 @@ function buildCapabilityPayload(): AnalysisReportPayload {
       sourceTable,
       {
         title: '能力与性能指标',
-        headers: ['N', '均值', 'σ组内', 'σ整体', 'Cp', 'Cpk', 'CPU', 'CPL', 'Pp', 'Ppk', 'Cpm', 'Z.bench', 'σ水平'],
+        headers: ['N', '均值', 'σ组内', 'σ整体', 'Cp', 'Cpk', 'CPU', 'CPL', 'Pp', 'Ppk', 'Cpm', 'Z.bench', CAPABILITY_TERMS.sigmaLevel],
         rows: [[
           cap.n, fmt(cap.mean), fmt(cap.sigmaWithin), fmt(cap.sigmaOverall), fmt(cap.cp), fmt(cap.cpk), fmt(cap.cpu), fmt(cap.cpl),
           fmt(cap.pp), fmt(cap.ppk), fmt(cap.cpm), fmt(cap.zBench), fmt(cap.sigmaLevel),

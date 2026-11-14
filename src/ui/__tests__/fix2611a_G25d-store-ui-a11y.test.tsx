@@ -166,11 +166,18 @@ describe('D5 图表具体无障碍名称', () => {
       fireEvent.click(screen.getAllByText(nav)[0]);
       const demo = screen.queryByText('查看示例数据');
       if (demo) fireEvent.click(demo);
-      const charts = [...container.querySelectorAll('svg[data-qp-chart]')];
+      // fix2611b B2:不只查 svg[data-qp-chart]——凡含图形标记、非图标尺寸(viewBox 宽 > 60)且未
+      // aria-hidden 的 svg 都算统计图(描述性统计页箱线图曾是裸 <svg>,旧守卫漏掉)。
+      const charts = [...container.querySelectorAll('svg')].filter((svg) => {
+        if (svg.closest('[aria-hidden="true"]')) return false;
+        if (!svg.querySelector('path, rect, circle, line, polyline, polygon')) return false;
+        const width = Number((svg.getAttribute('viewBox') ?? '').split(/\s+/)[2] ?? svg.getAttribute('width') ?? 0);
+        return width > 60;
+      });
       checked += charts.length;
       charts.forEach((svg, index) => {
         const label = svg.getAttribute('aria-label')?.trim();
-        if (!label || label === '统计图表') offenders.push(`${nav}#${index}`);
+        if (!label || label === '统计图表') offenders.push(`${nav}#${index}(viewBox ${svg.getAttribute('viewBox')})`);
       });
     }
     expect(checked, '页面上未找到任何统计图').toBeGreaterThan(5);

@@ -19,7 +19,7 @@ import { DEFAULT_SPC_RULES } from '../../store/appStore';
 const SPEC = { lsl: 24.5, tgt: 25, usl: 25.5 };
 const SIGMA_LEVEL = '西格玛水平';
 const PPM_OVERALL = 'PPM 合计（整体）';
-const LEGACY = ['σ 水平', 'PPM(整体)'];
+const LEGACY = ['σ 水平', 'σ水平', 'PPM(整体)'];
 
 function officeRuns(xml: string): string[] {
   return [...xml.matchAll(/<(?:w|a):t(?: [^>]*)?>(.*?)<\/(?:w|a):t>/g)].map((match) => match[1]);
@@ -60,7 +60,8 @@ describe('C3 · 能力表术语跨格式一致', () => {
   });
 
   it('源码守卫:导出模块不再各自硬写能力术语字面量', () => {
-    for (const file of ['htmlReport.tsx', 'officeExport.tsx', 'xlsxExport.ts', 'report.ts']) {
+    // fix2611b B4:能力专项报告(四格式同一载荷)与能力页也必须引用 CAPABILITY_TERMS;旧写法含无空格的「σ水平」。
+    for (const file of ['htmlReport.tsx', 'officeExport.tsx', 'xlsxExport.ts', 'report.ts', 'activeAnalysisReport.tsx', '../ui/pages/Capability.tsx']) {
       const source = readFileSync(resolve(__dirname, '../../platform', file), 'utf8');
       for (const literal of [SIGMA_LEVEL, PPM_OVERALL, ...LEGACY]) {
         expect(source.includes(`'${literal}'`) || source.includes(` ${literal} `), `${file}:${literal}`).toBe(false);

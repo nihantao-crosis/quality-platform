@@ -8,6 +8,7 @@ import type { ChartTokens } from '../tokens';
 import { reportNum } from '../../platform/reportLabels';
 import { Card, CardHeader, Badge } from '../common';
 import { Histogram } from '../charts/Histogram';
+import { Svg } from '../charts/primitives';
 import { coordinateDomain, createPowerOfTwoAxis, projectCoordinate } from '../charts/axisScale';
 
 export function Summary({ T }: { T: ChartTokens }) {
@@ -82,7 +83,7 @@ export function Summary({ T }: { T: ChartTokens }) {
             }
           />
           <Histogram T={T} data={selected.values} mu={d.mean} sigmaWithin={d.stdev} sigmaOverall={d.stdev} lsl={null} usl={null} tgt={d.mean} tgtLabel="均值" bins={bins} h={210} />
-          <BoxPlot T={T} data={selected.values} d={d} />
+          <BoxPlot T={T} data={selected.values} d={d} name={selected.name} />
           <div style={{ fontSize: 11.5, color: '#98a1ac', padding: '2px 4px 4px' }}>
             上:直方图叠正态曲线（μ={reportNum(d.mean, dp)}, σ={reportNum(d.stdev, dp)}）· 下:箱线图（Q1–中位–Q3,须及 1.5·IQR,○ 为离群点）
           </div>
@@ -139,7 +140,7 @@ function Row({ k, v }: { k: string; v: string }) {
 }
 
 /** 水平箱线图:Q1–中位–Q3 盒,须延伸到 1.5·IQR 内的极值,盒外点为离群。 */
-function BoxPlot({ T, data, d }: { T: ChartTokens; data: number[]; d: ReturnType<typeof computeDescriptive> }) {
+function BoxPlot({ T, data, d, name }: { T: ChartTokens; data: number[]; d: ReturnType<typeof computeDescriptive>; name: string }) {
   const W = 640, H = 74, padL = 14, padR = 14;
   const finiteData = data.filter(Number.isFinite);
   const axis = createPowerOfTwoAxis(finiteData);
@@ -164,11 +165,15 @@ function BoxPlot({ T, data, d }: { T: ChartTokens; data: number[]; d: ReturnType
   const cy = 34, bh = 26;
 
   return (
-    <svg
-      viewBox={`0 0 ${W} ${H}`}
-      {...(outlierTotal > outliers.length
-        ? { role: 'img' as const, 'aria-label': `箱线图（共 ${outlierTotal} 个离群观测，图上抽样显示 ${outliers.length} 个）` }
-        : {})}
+    // fix2611b B2:经 Svg 基元给出具体名称(此前常规情形是无 role、无名称的裸 <svg>)。
+    // 常规情形 role="group",刻度读数仍可读;离群抽样时名称带抽样说明,沿用 role="img"。
+    <Svg
+      w={W}
+      h={H}
+      label={outlierTotal > outliers.length
+        ? `箱线图 · ${name}；共 ${outlierTotal} 个离群观测，图上抽样显示 ${outliers.length} 个`
+        : `箱线图 · ${name}`}
+      readable={outlierTotal <= outliers.length}
     >
       {/* 须 */}
       <line x1={X(whiskLo)} y1={cy} x2={X(box.q1)} y2={cy} stroke={T.axis} strokeWidth={1.4} />
@@ -192,6 +197,6 @@ function BoxPlot({ T, data, d }: { T: ChartTokens; data: number[]; d: ReturnType
           {nf(axis.restore(coordinate as number), 2)}
         </text>
       ))}
-    </svg>
+    </Svg>
   );
 }

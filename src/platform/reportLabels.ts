@@ -1,4 +1,4 @@
-import { nf, type CapabilityInputOptions, type SpcChartContext, type SpecLimits, type VarModel } from '../core';
+import { cappedTermList, nf, type CapabilityInputOptions, type FactorialAlias, type SpcChartContext, type SpecLimits, type VarModel } from '../core';
 
 /**
  * 通用报告控制图的限值绘制：分阶段(assessSpcCharts 第 5 参 active)时按段内步进限值画线，
@@ -57,6 +57,70 @@ export const CAPABILITY_TERMS = {
   sigmaLevel: '西格玛水平',
   ppmOverall: 'PPM 合计（整体）',
 } as const;
+
+/**
+ * fix2611b B5:DOE 别名/可估计性文字的单一来源(DOE 页「别名/可估计性」行与「无可估计项」卡片、
+ * 专项报告的剔除提示/未运行说明/别名表关系列都走这里,四种导出共用同一载荷)。
+ * 列项按 core/doe 的 cappedTermList 封顶并写明总数;建议按 relation/confoundedWithBlocks 分类,
+ * 与结论里的 confoundedInteractionNote 同口径:
+ *   · 与区组混杂 → 减少区组数或增加仿行;
+ *   · 生成元别名(same/opposite)→ 提高设计分辨率或折叠设计;
+ *   · 其余线性相关 → 增加运行或减少模型项。
+ */
+type DoeAliasKind = 'block' | 'generator' | 'dependent';
+
+function doeAliasKind(alias: FactorialAlias): DoeAliasKind {
+  if (alias.relation === 'same' || alias.relation === 'opposite') return 'generator';
+  return alias.confoundedWithBlocks === true ? 'block' : 'dependent';
+}
+
+const DOE_ALIAS_ADVICE: Record<DoeAliasKind, string> = {
+  block: '可减少区组数或增加仿行',
+  generator: '可提高设计分辨率或折叠设计',
+  dependent: '可增加运行或减少模型项',
+};
+
+/** 别名表「关系」列:相同 / 相反 / 线性相关 / 与区组混杂(不写引擎英文原值)。 */
+export function doeAliasRelationText(alias: FactorialAlias): string {
+  if (alias.relation === 'same') return '相同';
+  if (alias.relation === 'opposite') return '相反';
+  return alias.confoundedWithBlocks === true ? '与区组混杂' : '线性相关';
+}
+
+/** 逐项列示沿用此前页面/报告的写法(A×B = D、A 与 已保留模型项的线性组合 线性相关);类别由随后的建议句点明。 */
+function doeAliasLabel(alias: FactorialAlias): string {
+  return doeAliasKind(alias) === 'generator'
+    ? `${alias.term} = ${alias.relation === 'opposite' ? '−' : ''}${alias.with}`
+    : `${alias.term} 与 ${alias.with} 线性相关`;
+}
+
+/** 封顶列项 + 分类建议;只有一类时合并成一句,多类时逐类点名。 */
+function doeAliasDiagnosis(aliases: readonly FactorialAlias[]): { list: string; advice: string } {
+  const list = cappedTermList(aliases.map(doeAliasLabel));
+  const kinds = (['block', 'generator', 'dependent'] as const).filter((kind) => aliases.some((alias) => doeAliasKind(alias) === kind));
+  const describe: Record<DoeAliasKind, string> = {
+    block: '与区组混杂', generator: '与已保留的项互为别名（分式设计的生成元结构）', dependent: '与已保留模型项线性相关',
+  };
+  const advice = kinds.length === 1
+    ? `以上均${describe[kinds[0]]}，${DOE_ALIAS_ADVICE[kinds[0]]}。`
+    : `${kinds.map((kind) => `其中 ${cappedTermList(aliases.filter((alias) => doeAliasKind(alias) === kind).map((alias) => alias.term))} ${describe[kind]}，${DOE_ALIAS_ADVICE[kind]}`).join('；')}。`;
+  return { list, advice };
+}
+
+/** 部分模型项被剔除时的「别名/可估计性」说明(页面行与专项报告提示同源)。 */
+export function doeDroppedTermsText(aliases: readonly FactorialAlias[] | undefined, droppedTerms: readonly string[]): string {
+  if (aliases?.length) {
+    const { list, advice } = doeAliasDiagnosis(aliases);
+    return `${list}。这些项无法单独估计，已从模型剔除；${advice}`;
+  }
+  return `${cappedTermList(droppedTerms)}。这些项无法单独估计，已从模型剔除；${DOE_ALIAS_ADVICE.dependent}。`;
+}
+
+/** 所选模型项全部不可独立估计时的诊断与建议(页面卡片与专项报告未运行说明同源)。 */
+export function doeInestimableModelText(aliases: readonly FactorialAlias[] | undefined): string {
+  const diagnosis = aliases?.length ? doeAliasDiagnosis(aliases) : null;
+  return `${diagnosis ? `可估计性诊断：${diagnosis.list}。${diagnosis.advice}` : ''}请解除完全混杂、增加能区分这些效应的运行，或改选可估计模型项。`;
+}
 
 /** 能力段口径披露行;口径与 SPC 段一致(无披露文本)时返回 null。 */
 export function capabilityCaliberLine(options: ReportCapabilityOptions, capabilitySpcViolations: number): string | null {

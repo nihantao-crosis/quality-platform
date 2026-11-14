@@ -318,7 +318,7 @@ function BoxPlotImpl({ T, groups: allGroups, groupStart }: {
     .map(({ g, sampled }) => sampled.total > sampled.shown.length
       ? `${g.name} 共 ${sampled.total} 个离群观测，图上抽样显示 ${sampled.shown.length} 个` : null)
     .filter(Boolean);
-  const truncatedNote = truncation.length ? `箱线图（${truncation.join('；')}）` : null;
+  const truncatedNote = truncation.length ? truncation.join('；') : null;
   const yTicks = linearCoordinateTicks(axis, domain, 5);
   // 左槽按最长刻度标签定宽。自审 P1:必须在 lo/hi 已知后**一次算定**——
   // 先定 m 再改写 m.l 会让 pw(const,早已求值)不跟着收窄,绘图区右界冲出 viewBox。
@@ -332,7 +332,10 @@ function BoxPlotImpl({ T, groups: allGroups, groupStart }: {
       w={W}
       h={H}
       // 有截断/窗口说明(实质补充信息)时沿用 role="img"；否则以具名 group 呈现，刻度文字仍可读(fix2611a D5)。
-      label={[truncatedNote, window.note].filter(Boolean).join('；') || `箱线图 · ${groupNamesText(groups)}`}
+      // fix2611b B3:与个体值图、区间图同形制——有说明时名称以「箱线图；」开头再接说明。
+      label={truncatedNote || window.note
+        ? `箱线图；${[truncatedNote, window.note].filter(Boolean).join('；')}`
+        : `箱线图 · ${groupNamesText(groups)}`}
       readable={!truncatedNote && !window.note}
     >
       <rect x={0} y={0} width={W} height={H} fill={T.bg} />

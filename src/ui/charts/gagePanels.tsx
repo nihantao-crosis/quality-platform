@@ -713,7 +713,7 @@ export function GageReportFigure({
     ];
   const { width, height } = gageReportFigureSize(single);
   return (
-    <Svg w={width} h={height} label={`量具研究 · ${valueName} 的量具 R&R（方差分析）报告`}>
+    <Svg w={width} h={height} readable label={`量具研究 · ${valueName} 的量具 R&R（方差分析）报告`}>
       {/* Minitab 报告:白底纸面 + 细边框 */}
       <rect x={0} y={0} width={width} height={height} fill="#ffffff" stroke={T.axis} strokeWidth={1} />
       <Txt x={FIG_M + 4} y={22} s={`${valueName} 的量具 R&R (方差分析) 报告`} fill="#111820" size={15} weight={700} />
@@ -744,21 +744,21 @@ export function GageReportFigure({
 // ---------- 兼容导出:独立面板组件(测试与旧调用方使用) ----------
 
 export function GageRPanel({ T, panel, operatorLabels }: PanelProps) {
-  return <Svg w={PW} h={PH} label="量具研究 · 极差（R）控制图">{groupedControlBody(T, panel, operatorLabels, panel.cellRanges, panel.rLimits, 'R̄', panelDataDecimals(panel))}</Svg>;
+  return <Svg w={PW} h={PH} readable label="量具研究 · 极差（R）控制图">{groupedControlBody(T, panel, operatorLabels, panel.cellRanges, panel.rLimits, 'R̄', panelDataDecimals(panel))}</Svg>;
 }
 
 export function GageXbarPanel({ T, panel, operatorLabels }: PanelProps) {
-  return <Svg w={PW} h={PH} label="量具研究 · 均值（X̄）控制图">{groupedControlBody(T, panel, operatorLabels, panel.cellMeans, panel.xbarLimits, 'X̿', panelDataDecimals(panel) + 1)}</Svg>;
+  return <Svg w={PW} h={PH} readable label="量具研究 · 均值（X̄）控制图">{groupedControlBody(T, panel, operatorLabels, panel.cellMeans, panel.xbarLimits, 'X̿', panelDataDecimals(panel) + 1)}</Svg>;
 }
 
 export function GageByPartPanel({ T, panel, partLabels }: PanelProps) {
-  return <Svg w={PW} h={PH} label="量具研究 · 按部件的测量值">{byPartBody(T, panel, partLabels)}</Svg>;
+  return <Svg w={PW} h={PH} readable label="量具研究 · 按部件的测量值">{byPartBody(T, panel, partLabels)}</Svg>;
 }
 
 export function GageByOperatorPanel({ T, panel, operatorLabels }: PanelProps) {
-  return <Svg w={PW} h={PH} label="量具研究 · 按操作员的测量值">{byOperatorBody(T, panel, operatorLabels)}</Svg>;
+  return <Svg w={PW} h={PH} readable label="量具研究 · 按操作员的测量值">{byOperatorBody(T, panel, operatorLabels)}</Svg>;
 }
 
 export function GageInteractionPanel({ T, panel, partLabels, operatorLabels }: PanelProps) {
-  return <Svg w={PW} h={PH} label="量具研究 · 部件 × 操作员交互作用">{interactionBody(T, panel, partLabels, operatorLabels)}</Svg>;
+  return <Svg w={PW} h={PH} readable label="量具研究 · 部件 × 操作员交互作用">{interactionBody(T, panel, partLabels, operatorLabels)}</Svg>;
 }

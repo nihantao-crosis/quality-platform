@@ -1310,8 +1310,10 @@ function pendingFromStored(data: StoredDataset): PendingCell[] {
  * 原文复制进隔离区(失败则 quarantineCorruptStore 登记写保护，禁止后续保存覆盖原值)、写会话日志(含原因)、
  * 与「数据已损坏并隔离」同源的一次性提示。live 原文不删除，启动不因此崩溃。
  */
-function quarantineStartupRebuildFailure(key: string, what: string, error: unknown): void {
-  const detail = `${what}无法重建，已回退为演示数据：${errText(error)}`;
+function quarantineStartupRebuildFailure(key: string, failures: ReadonlyArray<{ what: string; error: unknown }>): void {
+  // fix2611b B6:同一 key 的多处失败(P、C 同时)合并成一条 detail 只隔离一次——
+  // preserveCorruptStore 只保留首份记录,分两次隔离会让第二条原因只留在会话日志里。
+  const detail = failures.map(({ what, error }) => `${what}无法重建，已回退为演示数据：${errText(error)}`).join('；');
   let raw: string | null = null;
   try { raw = localStorage.getItem(key); } catch { /* 读不到原文时只能记日志 */ }
   if (raw == null) {
@@ -1339,27 +1341,29 @@ if (stored) {
     initModel = demo.model;
     initText = [];
     initPending = [];
-    quarantineStartupRebuildFailure(LS_DATASET, `活动数据集「${stored.name}」`, error);
+    quarantineStartupRebuildFailure(LS_DATASET, [{ what: `活动数据集「${stored.name}」`, error }]);
   }
 }
 let initP = demo.p;
 let initC = demo.c;
+const attrRebuildFailures: Array<{ what: string; error: unknown }> = [];
 if (storedAttr?.p) {
   try {
     const sampleSize = storedAttr.p.sampleSizes ?? storedAttr.p.sampleSize;
     if (sampleSize == null) throw new Error('P 图样本量缺失');
     initP = computePChart(storedAttr.p.counts, sampleSize, storedAttr.p.name);
   } catch (error) {
-    quarantineStartupRebuildFailure(LS_ATTR, `P 图数据「${storedAttr.p.name}」`, error);
+    attrRebuildFailures.push({ what: `P 图数据「${storedAttr.p.name}」`, error });
   }
 }
 if (storedAttr?.c) {
   try {
     initC = computeCChart(storedAttr.c.counts, storedAttr.c.name);
   } catch (error) {
-    quarantineStartupRebuildFailure(LS_ATTR, `C 图数据「${storedAttr.c.name}」`, error);
+    attrRebuildFailures.push({ what: `C 图数据「${storedAttr.c.name}」`, error });
   }
 }
+if (attrRebuildFailures.length) quarantineStartupRebuildFailure(LS_ATTR, attrRebuildFailures);
 
 function persistAttr(p: PChartModel, c: CChartModel): boolean {
   return saveJson(LS_ATTR, {

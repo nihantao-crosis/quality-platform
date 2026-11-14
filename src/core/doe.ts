@@ -241,7 +241,8 @@ export type FactorialAlias = {
 /** 混杂提示中每类最多列出的交互项数;总数如实给出(附录 F.2-7:此前不封顶,整串拼进结论)。 */
 export const CONFOUNDED_NOTE_TERM_CAP = 6;
 
-function cappedTermList(labels: readonly string[]): string {
+/** 封顶列项(导出供页面「别名/可估计性」行与专项报告复用同一封顶口径;fix2611b B5,纯文字,不涉计算)。 */
+export function cappedTermList(labels: readonly string[]): string {
   const shown = labels.slice(0, CONFOUNDED_NOTE_TERM_CAP).join('、');
   return labels.length > CONFOUNDED_NOTE_TERM_CAP ? `${shown} 等共 ${labels.length} 项` : shown;
 }
